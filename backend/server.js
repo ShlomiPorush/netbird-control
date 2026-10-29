@@ -3,6 +3,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { safeReturnTo, isPlausibleEmail } = require('./lib/pure');
 const { initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
@@ -348,10 +349,11 @@ if (AUTH_ENABLED) {
     }));
 
     app.get('/login', (req, res) => {
-        const rt = String(req.query.returnTo || '');
-        // Same-app absolute PATHS only - no scheme, no '//host', no backslash tricks.
-        // Anything else falls back to Home (open-redirect guard).
-        const returnTo = (rt.startsWith('/') && !rt.startsWith('//') && !rt.includes('\\')) ? rt : '/';
+        // Same-app PATHS only, checked against a fixed origin (BASE_URL's, never the Host or
+        // X-Forwarded-* headers). Anything else falls back to Home (open-redirect guard).
+        let origin = 'http://app.invalid';
+        try { origin = new URL(process.env.BASE_URL).origin; } catch { /* keep the placeholder */ }
+        const returnTo = safeReturnTo(req.query.returnTo, origin);
         // Already signed in (e.g. another tab finished logging in first)? Starting a NEW
         // OIDC transaction here would overwrite the auth_verification cookie of any login
         // still in flight elsewhere → PKCE mismatch (AADSTS501481) when it completes.
@@ -1832,8 +1834,10 @@ app.post('/api/internal-backup/upload', requireAdmin, express.raw({ type: 'appli
     if (rejectTenant(req, res)) return;
     try {
         const passphrase = String(req.headers['x-backup-passphrase'] || '');
-        const fileBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
-        if (!fileBuf.length) return res.status(400).json({ error: 'No file uploaded' });
+        // express.raw yields a Buffer only for an application/octet-stream body. Anything else is
+        // refused as-is (no conversion) before the file is read or anything changes.
+        const fileBuf = req.body;
+        if (typeof fileBuf !== 'object' || !Buffer.isBuffer(fileBuf) || !fileBuf.length) return res.status(400).json({ error: 'No file uploaded' });
         const result = await restoreInternalBackup(fileBuf, passphrase);
         audit(await getViewer(req), 'backup.restore', 'uploaded file', { settings: result.settings, tables: result.tables, skipped: result.skipped, source: 'upload' });
         res.json(result);
@@ -2823,7 +2827,7 @@ app.post('/api/users/invite', requireAdmin, async (req, res) => {
         const autoGroups = Array.isArray(b.autoGroups) ? b.autoGroups.map(g => String(g || '')).filter(Boolean) : [];
         // Validate here (400) so a bad form never reaches NetBird - real API failures stay 502.
         if (!name) return res.status(400).json({ error: 'A name is required' });
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'A valid e-mail address is required' });
+        if (!isPlausibleEmail(email)) return res.status(400).json({ error: 'A valid e-mail address is required' });
         if (!USER_ROLES.includes(role)) return res.status(400).json({ error: 'Unknown role' });
         if (b.autoGroups !== undefined && !Array.isArray(b.autoGroups)) return res.status(400).json({ error: 'Auto-assigned groups must be a list' });
         const user = await inviteUser({ name, email, role, autoGroups });
