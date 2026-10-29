@@ -10,6 +10,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The image runs on Node.js 24 (LTS).** Node.js 20 stopped receiving security fixes in April 2026.
+  The image is now based on `node:24-alpine`, and CI tests on Node.js 24.
+- **Dependency updates** since 1.0.0: `nodemailer`, `pg` and `dotenv` 18 in the backend, and
+  `vite`, TanStack Query and other minor updates in the frontend.
+
 ---
 
 ## [1.0.0] - 2026-10-29 - First public release
