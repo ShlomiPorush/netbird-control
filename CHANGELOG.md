@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.0.1] - 2026-10-30
+
 ### Changed
 - **The image runs on Node.js 24 (LTS).** Node.js 20 stopped receiving security fixes in April 2026.
   The image is now based on `node:24-alpine`, and CI tests on Node.js 24.
