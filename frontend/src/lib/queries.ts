@@ -395,6 +395,7 @@ export function useMspSwitcher(enabled = true) {
     queryFn: () => api.get<MspSwitcherItem[]>('/api/msp/switcher'),
     enabled,
     staleTime: 60_000,
+    refetchInterval: 60_000,
   });
 }
 // Settings Sync: a tenant's Event Filtering + Blocklist + Data Retention + webhook tokens

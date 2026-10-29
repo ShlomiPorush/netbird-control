@@ -51,61 +51,88 @@ async function handle<T>(res: Response): Promise<T> {
 // ─── MSP tenant mode ───
 // While "managing" an MSP tenant, EVERY api call carries X-Tenant-Account; the backend runs
 // the request in that tenant's context (only live-management routes are allowed there).
-// Persisted so a refresh stays in tenant mode; the Layout banner is the visible indicator.
-export interface TenantMode { id: string; name: string }
+// Only the tenant id is kept, in sessionStorage: it survives the switch's hard reload and the
+// OIDC login round trip, but it is scoped to ONE tab - a switch in one tab never redirects
+// another open tab's writes to a different account. The display name is resolved from the
+// tenant lists (see TopBar); the top-bar chip is the visible indicator.
+//
+// The account is fixed for the lifetime of the page: it is read once when the page loads, and every
+// request from this page uses it. Once a switch starts, this page sends nothing more, so a save that
+// fires while the reload is pending can never reach the account being switched to (or main).
+//
+// Older builds kept { id, name } in localStorage under the same key, shared by every tab. It is
+// ignored and deliberately left alone: deleting it would silently move a tab that still runs an
+// older build, and is managing a tenant, onto the main account.
+export interface TenantMode { id: string }
 const TENANT_KEY = 'msp-tenant';
-export function getTenantMode(): TenantMode | null {
+function readTenantMode(): TenantMode | null {
   try {
-    const raw = localStorage.getItem(TENANT_KEY);
-    if (!raw) return null;
-    const t = JSON.parse(raw);
-    return t && typeof t.id === 'string' && t.id ? { id: t.id, name: String(t.name || t.id) } : null;
+    const id = sessionStorage.getItem(TENANT_KEY);
+    return id ? { id } : null;
   } catch { return null; }
 }
-export function setTenantMode(t: TenantMode | null) {
-  if (t) localStorage.setItem(TENANT_KEY, JSON.stringify({ id: t.id, name: t.name }));
-  else localStorage.removeItem(TENANT_KEY);
+const PAGE_TENANT: TenantMode | null = readTenantMode();
+let switching = false;
+export function getTenantMode(): TenantMode | null {
+  return PAGE_TENANT;
+}
+function setTenantMode(t: TenantMode | null) {
+  if (t) sessionStorage.setItem(TENANT_KEY, t.id);
+  else sessionStorage.removeItem(TENANT_KEY);
 }
 // Switch the managed account and HARD-RELOAD into its home page. A soft navigate is not
 // enough: in-flight responses from the previous account can land after qc.clear() and
 // repopulate the cache under the same query keys, and components that read getTenantMode()
 // at render time keep stale flags unless remounted. A full reload makes the switch atomic.
 export function switchAccount(t: TenantMode | null) {
-  setTenantMode(t);
+  switching = true;
+  try {
+    setTenantMode(t);
+  } catch {
+    // Storage is blocked (for example site data disabled): the switch can't be remembered across
+    // the reload, so cancel it and keep this page working on its current account.
+    switching = false;
+    window.alert("Couldn't switch the account: this browser blocks site storage for this app. Allow it and try again.");
+    return;
+  }
   window.location.assign('/');
 }
 function baseHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { Accept: 'application/json', ...(extra || {}) };
-  const t = getTenantMode();
-  if (t) h['X-Tenant-Account'] = t.id;
+  if (PAGE_TENANT) h['X-Tenant-Account'] = PAGE_TENANT.id;
   return h;
+}
+// Every request goes through here: refused while an account switch is reloading the page.
+function send(input: string, init: RequestInit): Promise<Response> {
+  if (switching) return Promise.reject(new ApiError(409, 'Switching account - the page is reloading'));
+  return fetch(input, init);
 }
 
 export const api = {
   get<T>(path: string, query?: Query): Promise<T> {
-    return fetch(buildUrl(path, query), { headers: baseHeaders() }).then(handle<T>);
+    return send(buildUrl(path, query), { headers: baseHeaders() }).then(handle<T>);
   },
   post<T>(path: string, body?: unknown): Promise<T> {
-    return fetch(path, {
+    return send(path, {
       method: 'POST',
       headers: baseHeaders({ 'Content-Type': 'application/json' }),
       body: body === undefined ? undefined : JSON.stringify(body),
     }).then(handle<T>);
   },
   put<T>(path: string, body?: unknown): Promise<T> {
-    return fetch(path, {
+    return send(path, {
       method: 'PUT',
       headers: baseHeaders({ 'Content-Type': 'application/json' }),
       body: body === undefined ? undefined : JSON.stringify(body),
     }).then(handle<T>);
   },
   del<T>(path: string): Promise<T> {
-    return fetch(path, { method: 'DELETE', headers: baseHeaders() }).then(handle<T>);
+    return send(path, { method: 'DELETE', headers: baseHeaders() }).then(handle<T>);
   },
   // Raw binary POST (application/octet-stream) - the internal-backup upload sends encrypted file
   // bytes with the passphrase in a header, since a raw body can't carry JSON fields.
   postRaw<T>(path: string, body: ArrayBuffer | Uint8Array, extraHeaders?: Record<string, string>): Promise<T> {
-    return fetch(path, {
+    return send(path, {
       method: 'POST',
       headers: baseHeaders({ 'Content-Type': 'application/octet-stream', ...(extraHeaders || {}) }),
       body: body as BodyInit,
