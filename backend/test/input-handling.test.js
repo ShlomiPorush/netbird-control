@@ -97,6 +97,7 @@ test('tgFirstLine: empty input', () => {
     assert.equal(tgFirstLine(''), '');
     assert.equal(tgFirstLine(undefined), '');
     assert.equal(tgFirstLine('<b></b>'), '');
+    assert.equal(tgFirstLine({ length: 1e9 }), '');
 });
 
 // ── E-mail address check (invite form, MSP digest recipients) ──

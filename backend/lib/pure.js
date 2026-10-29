@@ -268,7 +268,8 @@ function safeReturnTo(rt, trustedOrigin) {
 // A linear scan, not a regex: text outside <...> is kept, and a '<' that is not closed on its line
 // drops the rest of that line, so no '<' ever reaches the output.
 function tgFirstLine(html) {
-    const s = String(html || '');
+    // A string only: a message object with a crafted .length must never drive the loop below.
+    const s = typeof html === 'string' ? html : '';
     let out = '', inTag = false;
     for (let i = 0; i < s.length; i++) {
         const ch = s[i];
