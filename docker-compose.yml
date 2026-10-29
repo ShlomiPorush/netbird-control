@@ -1,0 +1,49 @@
+services:
+  app:
+    image: ghcr.io/shlomiporush/nbcontrol:${TAG:-latest}
+    container_name: netbird-control
+    restart: unless-stopped
+    ports:
+      - "${PORT}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - netbird
+    env_file:
+      - .env
+    # PORT in .env is the host port only; inside the container the app always listens on 3000.
+    environment:
+      - PORT=3000
+    volumes:
+      - ./backups:/backup
+    healthcheck:
+      test: [ "CMD", "node", "healthcheck.js" ]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  db:
+    image: postgres:17-alpine
+    container_name: netbird-control-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - pgdata-netbird:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - netbird
+
+networks:
+  netbird:
+
+volumes:
+  pgdata-netbird:

@@ -1,0 +1,44 @@
+services:
+  netbird:
+    image: netbirdio/netbird:latest
+    container_name: netbird-exit-node
+    hostname: netbird-exit-node
+    restart: unless-stopped
+    volumes:
+      - ./data:/var/lib/netbird
+    # DELIBERATELY kept on a bridge network (do NOT switch to host mode): the LAN
+    # isolation below depends on the DOCKER-USER chain, which host networking would
+    # bypass entirely. Exit-node connections stay relayed - that is an accepted
+    # trade-off; the isolation matters more than browsing latency.
+    networks:
+      - netbird-exit-node
+    environment:
+      - NB_SETUP_KEY=${SETUP_KEY}
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+      - SYS_ADMIN
+
+networks:
+  netbird-exit-node:
+    name: netbird-exit-node
+    driver: bridge
+    ipam:
+      config:
+        # Pinned subnet ON PURPOSE - the host isolation rule below is keyed to it,
+        # so it survives container/network recreation. Do not change one without
+        # the other.
+        - subnet: 172.20.0.0/24
+
+# ─── REQUIRED companion rule on the VM (NOT enforced by this file!) ───
+# A user enabling this Exit Node routes 0.0.0.0/0 through a container that sits
+# inside your internal network - without the rule below they would implicitly reach
+# internal resources and bypass every NetBird policy:
+#
+#   iptables -I DOCKER-USER -s 172.20.0.0/24 -d 10.0.0.0/8 -j DROP
+#
+# (Internet egress keeps working - only traffic DESTINED to internal ranges is
+# dropped. Replace 10.0.0.0/8 with your internal ranges, one rule per range.)
+#
+# Manual iptables rules DO NOT survive a reboot - persist it (iptables-persistent /
+# a systemd unit), and after every VM reboot verify with:  iptables -S DOCKER-USER

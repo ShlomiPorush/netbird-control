@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/data
+temp
+.env
+*.md
+.gitignore
+netbird html
+dashboard
+backend/public
+frontend/dist
+backups

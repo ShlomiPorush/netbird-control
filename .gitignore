@@ -1,0 +1,20 @@
+node_modules/
+data/
+.env
+*.log
+.DS_Store
+temp/
+# Root-only: local helper scripts (local.sh) stay untracked, except release.sh, which prepares
+# release pull requests; backend/scripts IS tracked - the app serves Diagnose-NetBird.ps1 from there.
+/scripts/*
+!/scripts/release.sh
+docker-compose-dev.yml
+netbird html
+.claude
+dashboard
+reports
+trivy.yaml
+# Built React frontend (emitted by the Vite build into the backend's public dir)
+backend/public/
+frontend/dist/
+backups/

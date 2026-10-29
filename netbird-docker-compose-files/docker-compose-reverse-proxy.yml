@@ -1,0 +1,54 @@
+services:
+  proxy:
+    image: netbirdio/reverse-proxy:latest
+    container_name: netbird-proxy
+    hostname: netbird-proxy
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    # Bridge is correct here - the proxy connects OUTBOUND to NetBird Cloud over TCP
+    # and needs no P2P/hole punching; nothing to gain from host mode.
+    networks:
+      - netbird-proxy
+    environment:
+      NB_PROXY_CERTIFICATE_DIRECTORY: /certs
+      NB_PROXY_WILDCARD_CERT_DIR: /my-certs
+      NB_PROXY_GEO_DATA_DIR: /maxmind
+      # Needed only when targets are plain-HTTP / self-signed internal services -
+      # if all targets speak valid TLS, set to "false".
+      NB_PROXY_ALLOW_INSECURE: "true"
+      NB_PROXY_MANAGEMENT_ADDRESS: "https://api.netbird.io"
+      NB_PROXY_ACME_CERTIFICATES: "true"
+      NB_PROXY_DOMAIN: "${NB_PROXY_DOMAIN}"
+      # debug floods the logs (which the companion app also ingests every 5 minutes) -
+      # raise back to debug only while actively troubleshooting.
+      NB_PROXY_LOG_LEVEL: info
+      NB_PROXY_TOKEN: "${NB_PROXY_TOKEN}"
+      NB_PROXY_PRIVATE: "true"
+      NB_PROXY_ADDRESS: ":443"
+      # PROXY protocol headers are trusted from these ranges - anything inside them
+      # can SPOOF client IPs in the access logs. If the upstream that forwards
+      # 80/443 to this VM has a fixed address, narrow this to exactly that address.
+      NB_PROXY_TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      NB_PROXY_PROXY_PROTOCOL: "true"
+    volumes:
+      - ./certs:/certs
+      - ../../files/certs:/my-certs
+      - ../../files/maxmind:/maxmind
+    # Cap the container logs so a chatty ingress can never fill the VM disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+networks:
+  netbird-proxy:
+    name: netbird-proxy
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

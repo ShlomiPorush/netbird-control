@@ -1,0 +1,17 @@
+NetBird Control
+Copyright (c) 2026 Shlomi
+Licensed under the MIT License, see LICENSE.
+
+This project includes third-party material:
+
+- Country flags (SVG), frontend/public/flags/4x3/
+  flag-icons, https://github.com/lipis/flag-icons
+  Copyright (c) 2013 Panayiotis Lipiridis. MIT License; the full text is in
+  frontend/public/flags/LICENSE.
+
+- Country flags (PNG), frontend/public/images/flags/
+  Flagpedia, https://flagpedia.net. The flag images are in the public domain.
+
+- The look and feel of the UI is derived from the NetBird dashboard,
+  https://github.com/netbirdio/dashboard, licensed under AGPL-3.0.
+  See the License section of README.md.

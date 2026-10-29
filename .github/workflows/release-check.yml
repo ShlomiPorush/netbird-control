@@ -1,0 +1,58 @@
+name: Release Check
+
+# Runs on every pull request to main. A pull request that changes VERSION is a release pull
+# request (opened by scripts/release.sh) and must be releasable once merged; any other pull
+# request only runs the changelog helper tests. Read-only: no secrets, no publishing.
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  release-check:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to full commit SHAs (not mutable tags) so a repointed tag
+      # can't inject code into the build - the trailing comment tracks the version.
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Test the changelog helper
+        run: node --test .github/scripts/changelog.test.js
+
+      - name: Check the release version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          CL=.github/scripts/changelog.js
+          NEW=$(tr -d '[:space:]' < VERSION)
+          OLD=$(git show "$BASE_SHA:VERSION" | tr -d '[:space:]')
+          if [ "$NEW" = "$OLD" ]; then
+            echo "VERSION is unchanged ($NEW): not a release pull request."
+            exit 0
+          fi
+          echo "Release pull request: $OLD -> $NEW"
+          if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::VERSION can only change in a release branch of $GITHUB_REPOSITORY, not from $HEAD_REPO"
+            exit 1
+          fi
+          if [ "$HEAD_REF" != "release/v$NEW" ]; then
+            echo "::error::VERSION changed to $NEW, so the branch must be release/v$NEW (it is $HEAD_REF). Use scripts/release.sh."
+            exit 1
+          fi
+          node "$CL" check-version "$NEW"
+          node "$CL" gt "$NEW" "$OLD"
+          # A failed ls-remote fails the step (bash -e) instead of reading as "no tag".
+          REMOTE_TAG=$(git ls-remote --tags origin "refs/tags/v$NEW")
+          if [ -n "$REMOTE_TAG" ]; then
+            echo "::error::Tag v$NEW already exists"
+            exit 1
+          fi
+          node "$CL" section "$NEW" > /dev/null
+          echo "v$NEW is ready to release when this pull request is merged."

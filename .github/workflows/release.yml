@@ -1,0 +1,220 @@
+name: Release
+
+# Publishes a release when a release pull request (opened by scripts/release.sh) is merged:
+# tags the merge commit, builds and pushes the version image, creates the GitHub release from the
+# version's CHANGELOG section, then moves `latest` (the image tag and the GitHub marker) to the
+# highest published release. Each step checks what an earlier, failed run already did, so a failed
+# run is retried with "Re-run jobs" on the same commit. This is the only workflow that publishes.
+on:
+  push:
+    branches: [ main ]
+    paths: [ VERSION ]
+
+# One release at a time; queued runs wait their turn (up to 100) and are never cancelled.
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: write      # push the tag, create the release
+  packages: write      # push the image to GHCR
+  pull-requests: read  # find the pull request the commit came from
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CL: .github/scripts/changelog.js
+      # The published image is ghcr.io/<owner>/nbcontrol (not the repository name).
+      IMAGE_NAME: nbcontrol
+
+    steps:
+      # Actions are pinned to full commit SHAs (not mutable tags) so a repointed tag
+      # can't inject code into the build - the trailing comment tracks the version.
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Read the version
+        id: v
+        run: |
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          node "$CL" check-version "$VERSION"
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$IMAGE_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require a merged release pull request
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" > "$RUNNER_TEMP/pulls.json"
+          MATCHES=$(jq --arg sha "$GITHUB_SHA" --arg ref "release/$TAG" --arg repo "$GITHUB_REPOSITORY" \
+            '[.[] | select(.merged_at != null and .base.ref == "main" and .head.ref == $ref
+                    and .head.repo.full_name == $repo and .merge_commit_sha == $sha)] | length' \
+            "$RUNNER_TEMP/pulls.json")
+          if [ "$MATCHES" -lt 1 ]; then
+            echo "::error::$GITHUB_SHA is not the merge of a release/$TAG pull request in $GITHUB_REPOSITORY. Nothing was published - prepare releases with scripts/release.sh."
+            exit 1
+          fi
+
+      - name: Prepare the release notes
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          IMAGE: ${{ steps.v.outputs.image }}
+        run: |
+          {
+            node "$CL" section "$VERSION"
+            echo
+            echo '```'
+            echo "docker pull $IMAGE:$VERSION"
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+
+      # The tag is created before anything is built, so the image and the release always come
+      # from the commit the tag points to. An existing tag must already point to this commit;
+      # a tag is never moved or force-pushed. If pushing the tag is refused, push it to this exact
+      # commit by hand and re-run.
+      - name: Tag the release commit
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            git fetch --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG"
+            TARGET=$(git rev-parse "refs/tags/$TAG^{commit}")
+            if [ "$TARGET" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG points to $TARGET, not to $GITHUB_SHA. Nothing was published."
+              exit 1
+            fi
+            echo "Tag $TAG already points to $GITHUB_SHA."
+          elif [ "$RC" -eq 2 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" "$GITHUB_SHA" -m "Release $TAG"
+            git push origin "refs/tags/$TAG"
+          else
+            echo "::error::Could not read the tags on origin"
+            exit 1
+          fi
+
+      - name: Read the release state
+        id: state
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          # The whole paginated listing must succeed (drafts included) before "absent" is believed.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | {tag_name, draft, prerelease}' > "$RUNNER_TEMP/releases.jsonl"
+          STATE=$(jq -rs --arg tag "$TAG" \
+            'map(select(.tag_name == $tag)) | if length == 0 then "absent" elif any(.draft) then "draft"
+             elif any(.prerelease) then "prerelease" else "published" end' \
+            "$RUNNER_TEMP/releases.jsonl")
+          if [ "$STATE" = "draft" ]; then
+            echo "::error::A draft release for $TAG exists. Publish or delete it, then re-run."
+            exit 1
+          fi
+          # A pre-release can't be the latest release, and every version released here is stable.
+          if [ "$STATE" = "prerelease" ]; then
+            echo "::error::The release for $TAG is marked as a pre-release. Clear that flag, then re-run."
+            exit 1
+          fi
+          echo "Release $TAG: $STATE"
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A published release's image is never rebuilt, unless the registry says it is missing.
+      - name: Check the version image
+        id: image
+        env:
+          STATE: ${{ steps.state.outputs.state }}
+          VERSION: ${{ steps.v.outputs.version }}
+          IMAGE: ${{ steps.v.outputs.image }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          BUILD=true
+          if [ "$STATE" = "published" ]; then
+            set +e
+            OUT=$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1)
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              BUILD=false
+              echo "Release $TAG is published and $IMAGE:$VERSION exists; not rebuilding it."
+            elif printf '%s\n' "$OUT" | grep -qiE 'manifest unknown|: not found$'; then
+              echo "Release $TAG is published but $IMAGE:$VERSION is missing; building it from $GITHUB_SHA."
+            else
+              printf '%s\n' "$OUT"
+              echo "::error::Could not check whether $IMAGE:$VERSION exists"
+              exit 1
+            fi
+          fi
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata for Docker
+        if: steps.image.outputs.build == 'true'
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ steps.v.outputs.image }}
+          tags: type=raw,value=${{ steps.v.outputs.version }}
+          flavor: latest=false
+
+      - name: Build and push the version image
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create the GitHub release
+        if: steps.state.outputs.state == 'absent'
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" --latest=false
+
+      # Both `latest` markers follow the highest published release, read fresh here, so an older
+      # release (a late or re-run one) never takes them back, and a re-run repairs a failed move.
+      - name: Move latest to the highest published release
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          IMAGE: ${{ steps.v.outputs.image }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > "$RUNNER_TEMP/published.txt"
+          mapfile -t PUBLISHED < <(sed 's/^v//' "$RUNNER_TEMP/published.txt")
+          # This release is published by now, so it is always a candidate.
+          HIGHEST=$(node "$CL" max "$VERSION" "${PUBLISHED[@]}")
+          if [ "$HIGHEST" != "$VERSION" ]; then
+            echo "v$HIGHEST is a newer published release, so latest stays on it."
+            exit 0
+          fi
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f make_latest=true > /dev/null
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$VERSION"
+          echo "$TAG is the latest release (GitHub marker and $IMAGE:latest)."
