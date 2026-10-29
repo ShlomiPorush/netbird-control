@@ -1,0 +1,44 @@
+# Weekly version updates. Minor and patch updates are grouped into one pull request per
+# directory; each major update gets its own pull request. A new release is offered only after
+# 7 days (cooldown), which applies to version updates only: security updates are not delayed.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [ dependencies ]
+    groups:
+      backend:
+        patterns: [ "*" ]
+        update-types: [ minor, patch ]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [ dependencies ]
+    groups:
+      frontend:
+        patterns: [ "*" ]
+        update-types: [ minor, patch ]
+
+  # Updates the pinned commit SHAs and their version comments in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [ dependencies ]
+    groups:
+      actions:
+        patterns: [ "*" ]
+        update-types: [ minor, patch ]
