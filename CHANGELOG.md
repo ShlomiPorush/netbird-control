@@ -96,6 +96,10 @@ the changes since the last private version (2.1.2).
   joi 17.13.9, brace-expansion 5.0.12, vite 8.1.6, source-map-js 1.2.2 and postcss-selector-parser
   6.1.5. The `qs` npm override is removed, because express and body-parser now require a fixed `qs`
   themselves.
+- Hardened input handling flagged by code scanning: the `/login` return address is checked against
+  a fixed origin after URL normalization (paths such as `/a/..//evil.example` now go to Home), a
+  backup upload must be raw file bytes, and the e-mail, Telegram subject and routing peer name checks
+  run in linear time.
 
 ---
 
