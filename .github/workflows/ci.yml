@@ -1,6 +1,7 @@
 name: CI
 
-# Runs the backend test suite on every pull request to main and on every push to main.
+# Runs the backend tests, the frontend type check and build, and a build of the production
+# image on every pull request to main and on every push to main.
 # Read-only: no secrets, no publishing.
 on:
   pull_request:
@@ -11,12 +12,12 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to full commit SHAs (not mutable tags) so a repointed tag can't inject
+# code into the build - the trailing comment tracks the version.
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
     steps:
-      # Actions are pinned to full commit SHAs (not mutable tags) so a repointed tag
-      # can't inject code into the build - the trailing comment tracks the version.
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -35,3 +36,45 @@ jobs:
       - name: Run the backend tests
         working-directory: backend
         run: npm test
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # tsc --noEmit, then vite build (the image build skips the type check)
+      - name: Type-check and build the frontend
+        working-directory: frontend
+        run: npm run build
+
+  # The production image, built on Alpine like a release but never pushed. Uses the same
+  # Buildx and build-push actions (and pins) as release.yml, so an update to them is tested here.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Build the production image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
