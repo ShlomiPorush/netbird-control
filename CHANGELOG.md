@@ -53,8 +53,9 @@ the changes since the last private version (2.1.2).
 - **Tenant mode is per browser tab.** The managed MSP tenant was kept in `localStorage`, which all
   tabs share, so switching the tenant in one tab sent another open tab's next changes to a different
   account. The app now keeps only the tenant id in the tab's `sessionStorage`, reads the tenant name
-  from the tenant list, and removes the old shared value. A reload or a new sign-in in the same tab
-  keeps the tenant; a new tab starts in the main account. See
+  from the tenant list, and ignores the old shared value. A reload or a new sign-in in the same tab
+  keeps the tenant, and a page that is switching accounts sends no more requests. A new, empty tab
+  starts in the main account; some browsers copy the tenant into a tab opened from a link. See
   [MSP Tenants](docs/msp-tenants.md#managing-a-customers-network-tenant-mode).
 - **`docker-compose.yml` works with any `PORT`.** `PORT` in `.env` was also passed to the app, so any
   value other than 3000 made it listen on a port the mapping did not publish. The app now always

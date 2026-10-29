@@ -30,7 +30,7 @@ Click **Manage** on an active tenant. Technically this mirrors the official dash
 - **Tenant mode is per browser tab.** The browser keeps only the managed tenant's id, in the tab's session storage; the name shown in the chip comes from the tenant list. So:
   - Reloading the page, or signing out and back in, in the same tab keeps the tenant.
   - Two tabs can manage different tenants at the same time; switching in one tab never changes another.
-  - A new tab, or a URL typed into the address bar, starts in your main account. In Chromium-based browsers this also applies to a tab opened from a link in the app (for example, with a middle-click).
+  - A new, empty tab starts in your main account. In Chromium-based browsers this also applies to a tab opened from a link in the app (for example, with a middle-click). Typing a URL into a tab that already manages a tenant keeps that tenant.
   - Some browsers copy session storage into a tab opened from a link or with **Duplicate Tab**, so that tab starts in the same tenant. After it opens, it is independent.
   - If the tenant was removed or can no longer be managed, the tab returns to your main account.
 - **The rule: a tenant behaves exactly like the main account - same mechanism per feature.** The main account is simply tenant `''` internally.
