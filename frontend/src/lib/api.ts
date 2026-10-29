@@ -86,7 +86,15 @@ function setTenantMode(t: TenantMode | null) {
 // at render time keep stale flags unless remounted. A full reload makes the switch atomic.
 export function switchAccount(t: TenantMode | null) {
   switching = true;
-  setTenantMode(t);
+  try {
+    setTenantMode(t);
+  } catch {
+    // Storage is blocked (for example site data disabled): the switch can't be remembered across
+    // the reload, so cancel it and keep this page working on its current account.
+    switching = false;
+    window.alert("Couldn't switch the account: this browser blocks site storage for this app. Allow it and try again.");
+    return;
+  }
   window.location.assign('/');
 }
 function baseHeaders(extra?: Record<string, string>): Record<string, string> {
