@@ -3,6 +3,9 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
+const { auth, requiresAuth } = require('express-openid-connect');
+const { parseTrustProxy, limiterOptions } = require('./lib/rate-limit');
 const { safeReturnTo, isPlausibleEmail } = require('./lib/pure');
 const { initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
@@ -111,9 +114,11 @@ const AUTH_ENABLED = !!(
     process.env.BASE_URL
 );
 
-// Trust only the FIRST proxy hop (our own reverse proxy) - `true` would let any client
-// spoof req.ip / req.protocol via X-Forwarded-* headers.
-app.set('trust proxy', 1);
+// Which proxies may report the client address (X-Forwarded-*): TRUST_PROXY, in Express
+// 'trust proxy' syntax. Default: none, so req.ip is the TCP peer and a client can't spoof it
+// with a header (the per-IP rate limits and the failed-token throttle key on it). Behind a
+// reverse proxy, set it to that proxy's address or CIDR - see lib/rate-limit.js.
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 // 1mb is plenty for every route EXCEPT the settings restore, which also carries the app-config
 // TABLES (automations / blocklist could push past 1mb) and gets its own 10mb parser on the route.
 const jsonBody1mb = express.json({ limit: '1mb' });
@@ -315,12 +320,21 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
     res.status(200).json({ ok: true });
 });
 
-// ══════════════ AUTH GATE - everything below requires login (when configured) ══════════════
+// ══════════════ RATE LIMITS + AUTH GATE - everything below is rate limited and requires login (when configured) ══════════════
+// The routes above (webhook receivers, health probe, Telegram callback) are registered BEFORE
+// every limiter, so they are never rate limited: the receivers must accept NetBird's and
+// Telegram's event volume and are protected by their tokens plus the failed-token throttle.
+const authLimiter = rateLimit(limiterOptions('auth'));
+const apiLimiter = rateLimit(limiterOptions('api'));
+const spaLimiter = rateLimit(limiterOptions('spa', { assetsDir: path.join(__dirname, 'public', 'assets') }));
 
 if (AUTH_ENABLED) {
-    const { auth } = require('express-openid-connect');
+    // Per client IP, before the OIDC middleware below handles /callback and /logout itself.
+    app.use(['/login', '/callback', '/logout'], authLimiter);
     app.use(auth({
-        authRequired: true,
+        // Identity only here: login is enforced by requiresAuth() below, after the rate limiters
+        // (they key on the signed-in user, which this middleware resolves).
+        authRequired: false,
         idpLogout: true,
         auth0Logout: false,
         issuerBaseURL: process.env.OIDC_ISSUER_BASE_URL,
@@ -347,6 +361,18 @@ if (AUTH_ENABLED) {
         // a (strictly validated) ?returnTo= so the SPA sends users back where they were.
         routes: { login: false },
     }));
+}
+
+// Keyed by the signed-in user, else by client IP (always by IP without SSO).
+app.use('/api', apiLimiter);
+app.use(spaLimiter);
+
+if (AUTH_ENABLED) {
+    // Equivalent to auth()'s authRequired: true - every route below requires login. A visitor who is
+    // not signed in is sent to login (HTML) or refused, and draws from the per-IP auth budget, so
+    // these automatic login starts can't bypass the /login limit.
+    app.use(authLimiter);
+    app.use(requiresAuth());
 
     app.get('/login', (req, res) => {
         // Same-app PATHS only, checked against a fixed origin (BASE_URL's, never the Host or
@@ -4437,4 +4463,7 @@ async function start() {
     }
 }
 
-start();
+// Tests load the app without starting it (no database, schedulers or listener).
+if (require.main === module) start();
+
+module.exports = { app };
