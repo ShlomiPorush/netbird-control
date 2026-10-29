@@ -20,10 +20,17 @@ export function TopBar({ collapsed, onToggleCollapse, onOpenMobile }: { collapse
   const tenant = getTenantMode();
   const targets = useSwitchTargets(!!tenant);
   // The tab may hold the id of a tenant that was since removed or deactivated (the backend
-  // refuses it with 403). Once both lists have loaded without it, fall back to the main account.
+  // refuses it with 403). Once both lists have loaded without it, fall back to the main account -
+  // once per page: if the switch is cancelled (storage blocked), the list refreshes must not keep
+  // retrying it; Exit Tenant still works by hand.
   const tenantId = tenant?.id;
+  const fellBack = useRef(false);
   useEffect(() => {
-    if (tenantId && targets.ready && !targets.known.has(tenantId)) switchAccount(null);
+    if (fellBack.current) return;
+    if (tenantId && targets.ready && !targets.known.has(tenantId)) {
+      fellBack.current = true;
+      switchAccount(null);
+    }
   }, [tenantId, targets]);
 
   return (
