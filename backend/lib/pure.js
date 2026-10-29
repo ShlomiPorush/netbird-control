@@ -249,8 +249,84 @@ function inspectCaCertificates(pems) {
     });
 }
 
+// /login ?returnTo= → a same-app path, or '/' (open-redirect guard). The value is resolved against
+// a FIXED origin (never one derived from Host / X-Forwarded-* headers), so whatever the URL parser
+// does with tabs, backslashes, dot segments or percent-encoding, a different origin is refused.
+// The rebuilt path is checked again: '/a/..//evil' normalizes to '//evil', which a browser would
+// read as a host.
+function safeReturnTo(rt, trustedOrigin) {
+    if (typeof rt !== 'string' || rt.length > 2048) return '/';
+    let url;
+    try { url = new URL(rt, trustedOrigin); } catch { return '/'; }
+    if (url.origin !== trustedOrigin) return '/';
+    const target = url.pathname + url.search + url.hash;
+    if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\')) return '/';
+    return target;
+}
+
+// First meaningful line of a Telegram HTML message, tags stripped - the outbound log's "subject".
+// A linear scan, not a regex: text outside <...> is kept, and a '<' that is not closed on its line
+// drops the rest of that line, so no '<' ever reaches the output.
+function tgFirstLine(html) {
+    const s = String(html || '');
+    let out = '', inTag = false;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '\n') { inTag = false; out += ch; }
+        else if (inTag) { if (ch === '>') inTag = false; }
+        else if (ch === '<') inTag = true;
+        else out += ch;
+    }
+    const line = out.split('\n').map(l => l.trim()).find(Boolean);
+    return line || '';
+}
+
+// "local@domain.tld"-shaped address: no whitespace, exactly one '@', a non-empty local part and a
+// '.' inside the domain (not its first or last character). Same acceptance as the former
+// /^[^\s@]+@[^\s@]+\.[^\s@]+$/, checked in linear time; anything over 254 characters (the SMTP
+// path limit) is refused up front, never truncated into a different address.
+function isPlausibleEmail(s) {
+    if (typeof s !== 'string' || s.length > 254) return false;
+    if (/\s/.test(s)) return false;
+    const at = s.indexOf('@');
+    if (at < 1 || at !== s.lastIndexOf('@')) return false;
+    const domain = s.slice(at + 1);
+    const dot = domain.indexOf('.', 1);
+    return dot !== -1 && dot < domain.length - 1;
+}
+
+// The routing peer's name inside a NetBird notification ("Routing peer my-router has
+// disconnected..." / "Routing peer  was removed..." - the name can be empty on delete). Same result
+// as /^Routing peer\s+(.*?)\s+(?:has|was)\b/i with the capture trimmed, found by a linear scan over
+// at most the first 512 characters. '' when there is no name.
+function routingPeerName(message) {
+    const s = String(message || '').slice(0, 512);
+    const PREFIX_LEN = 'Routing peer'.length;
+    const isWs = (ch) => /\s/.test(ch);
+    const isLineEnd = (ch) => /[\n\r\u2028\u2029]/.test(ch);
+    // has|was followed by a word boundary, at index j.
+    const verbAt = (j) => /^(?:has|was)$/i.test(s.slice(j, j + 3)) && !/\w/.test(s[j + 3] || '');
+    if (!/^Routing peer/i.test(s)) return '';
+    let i = PREFIX_LEN;
+    if (!isWs(s[i])) return '';
+    while (i < s.length && isWs(s[i])) i++;
+    const start = i;
+    while (i < s.length) {
+        if (!isWs(s[i])) { i++; continue; }
+        const runStart = i;
+        let crossesLine = false;
+        while (i < s.length && isWs(s[i])) { if (isLineEnd(s[i])) crossesLine = true; i++; }
+        if (verbAt(i)) return s.slice(start, runStart).trim();
+        // The name itself is single-line ('.' in the old pattern); only the run before the verb may break.
+        if (crossesLine) return '';
+    }
+    // No verb, or only whitespace before it ("Routing peer  was removed"): no name.
+    return '';
+}
+
 module.exports = {
     inspectCaCertificates,
     splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, stableStringify, humanDuration,
     normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses,
+    safeReturnTo, tgFirstLine, isPlausibleEmail, routingPeerName,
 };
