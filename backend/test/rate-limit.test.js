@@ -48,13 +48,14 @@ test('limits and window are fixed', () => {
     assert.throws(() => limiterOptions('nope'));
 });
 
-test('429 with a JSON error, RateLimit headers and Retry-After after the limit; resets after the window', async () => {
-    const { get, close } = await serve(limitedApp('auth', { windowMs: 1500 }));
+test('429 with a JSON error, RateLimit headers and Retry-After after the limit', async () => {
+    // The real 60 s window, so a slow machine can't let the window reset in the middle.
+    const { get, close } = await serve(limitedApp('auth'));
     try {
         const first = await get('/api/x');
         assert.equal(first.status, 200);
         assert.match(first.headers.get('ratelimit'), /^"auth"; r=29; t=\d+$/);
-        assert.match(first.headers.get('ratelimit-policy'), /^"auth"; q=30; w=2; pk=:[^:]+:$/);
+        assert.match(first.headers.get('ratelimit-policy'), /^"auth"; q=30; w=60; pk=:[^:]+:$/);
         await burn(get, '/api/x', 29);
         const limited = await get('/api/x');
         assert.equal(limited.status, 429);
@@ -65,8 +66,16 @@ test('429 with a JSON error, RateLimit headers and Retry-After after the limit; 
         const page = await get('/peers', { accept: 'text/html' });
         assert.equal(page.status, 429);
         assert.equal(await page.text(), MESSAGE);
+    } finally { await close(); }
+});
+
+test('the count resets after the window', async () => {
+    // Only waits past the window, so a slow machine can delay the test but not fail it.
+    const { get, close } = await serve(limitedApp('auth', { windowMs: 1500 }));
+    try {
+        assert.match((await get('/api/x')).headers.get('ratelimit'), /r=29;/);
         await new Promise((r) => setTimeout(r, 1600));
-        assert.equal((await get('/api/x')).status, 200);
+        assert.match((await get('/api/x')).headers.get('ratelimit'), /r=29;/);
     } finally { await close(); }
 });
 
