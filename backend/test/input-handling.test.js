@@ -39,8 +39,12 @@ test('returnTo: other origins and host-looking paths fall back to Home', () => {
 });
 
 test('returnTo: encoded slashes and dot segments stay on this app', () => {
-    // %2F is not a separator, so this is a single same-origin path segment.
-    assert.equal(safeReturnTo('/%2F%2Fevil', PLACEHOLDER), '/%2F%2Fevil');
+    // An encoded slash or backslash in the path is refused: a hop that decodes it would make it a separator.
+    for (const rt of ['/%2F%2Fevil', '/%2f%2fevil', '/a/%2Fevil', '/%5C%5Cevil', '/%5cevil']) {
+        assert.equal(safeReturnTo(rt, PLACEHOLDER), '/', rt);
+    }
+    // In the query string it is ordinary data and stays.
+    assert.equal(safeReturnTo('/activity?search=a%2Fb', PLACEHOLDER), '/activity?search=a%2Fb');
     assert.equal(safeReturnTo('/a/%2e%2e/peers', PLACEHOLDER), '/peers');
 });
 

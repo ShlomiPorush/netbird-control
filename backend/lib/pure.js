@@ -253,7 +253,8 @@ function inspectCaCertificates(pems) {
 // a FIXED origin (never one derived from Host / X-Forwarded-* headers), so whatever the URL parser
 // does with tabs, backslashes, dot segments or percent-encoding, a different origin is refused.
 // The rebuilt path is checked again: '/a/..//evil' normalizes to '//evil', which a browser would
-// read as a host.
+// read as a host. An encoded slash or backslash in the path (%2F, %5C) is refused too: the app's own
+// paths never contain one, and a proxy or browser that decodes it would turn it into a separator.
 function safeReturnTo(rt, trustedOrigin) {
     if (typeof rt !== 'string' || rt.length > 2048) return '/';
     let url;
@@ -261,6 +262,7 @@ function safeReturnTo(rt, trustedOrigin) {
     if (url.origin !== trustedOrigin) return '/';
     const target = url.pathname + url.search + url.hash;
     if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\')) return '/';
+    if (/%(2f|5c)/i.test(url.pathname)) return '/';
     return target;
 }
 
