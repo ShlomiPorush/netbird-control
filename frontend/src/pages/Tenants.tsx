@@ -165,7 +165,7 @@ export default function Tenants() {
   // Enter tenant mode with a HARD reload into the tenant's home (see switchAccount) - the
   // atomic switch guarantees nothing from the previous account leaks into the views.
   const manage = (t: MspTenant) => {
-    switchAccount({ id: switchIdFor(t), name: t.name || t.domain });
+    switchAccount({ id: switchIdFor(t) });
   };
 
   const onDelete = async (t: MspTenant) => {

@@ -54,6 +54,13 @@ the changes since the last private version (2.1.2).
 - Third-party notices are in `NOTICE`, and the flag-icons MIT license ships with the flags.
 
 ### Fixed
+- **Tenant mode is per browser tab.** The managed MSP tenant was kept in `localStorage`, which all
+  tabs share, so switching the tenant in one tab sent another open tab's next changes to a different
+  account. The app now keeps only the tenant id in the tab's `sessionStorage`, reads the tenant name
+  from the tenant list, and ignores the old shared value. A reload or a new sign-in in the same tab
+  keeps the tenant, and a page that is switching accounts sends no more requests. A new, empty tab
+  starts in the main account; some browsers copy the tenant into a tab opened from a link. See
+  [MSP Tenants](docs/msp-tenants.md#managing-a-customers-network-tenant-mode).
 - **`docker-compose.yml` works with any `PORT`.** `PORT` in `.env` was also passed to the app, so any
   value other than 3000 made it listen on a port the mapping did not publish. The app now always
   listens on 3000 inside the container, and `PORT` sets only the host port.
@@ -86,11 +93,24 @@ the changes since the last private version (2.1.2).
   tenant (the server already allowed them).
 
 ### Security
+- **Rate limits.** Sign-in (`/login`, `/callback`, `/logout` and every automatic sign-in start) is
+  limited to 30 requests a minute per client address, the API to 600 and the pages to 300 a minute
+  per signed-in user (per client address without one). Over the limit the app answers 429 with
+  `Retry-After`. The webhook receivers, the Telegram callback and `/api/health` are not limited.
+- **The client address is no longer taken from `X-Forwarded-For` by default.** The app trusted one
+  proxy hop, so a client that reached the app port directly could choose its own address and get
+  around the per-address throttle on failed webhook tokens. The new `TRUST_PROXY` setting names the
+  proxy to trust. **Behind a reverse proxy, set `TRUST_PROXY`** to the proxy's address or CIDR, or
+  every visitor shares the proxy's address and its sign-in limit.
 - Closed the open Dependabot alerts: nodemailer 10.1.4 (a major upgrade; Node.js 20 or newer, which
   the image already uses), express 4.22.3 with body-parser 1.20.9, proxy-addr 2.0.8 and qs 6.16.2,
   joi 17.13.9, brace-expansion 5.0.12, vite 8.1.6, source-map-js 1.2.2 and postcss-selector-parser
   6.1.5. The `qs` npm override is removed, because express and body-parser now require a fixed `qs`
   themselves.
+- Hardened input handling flagged by code scanning: the `/login` return address is checked against
+  a fixed origin after URL normalization (paths such as `/a/..//evil.example` now go to Home), a
+  backup upload must be raw file bytes, and the e-mail, Telegram subject and routing peer name checks
+  run in linear time.
 
 ---
 

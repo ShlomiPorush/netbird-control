@@ -1,0 +1,37 @@
+name: CI
+
+# Runs the backend test suite on every pull request to main and on every push to main.
+# Read-only: no secrets, no publishing.
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to full commit SHAs (not mutable tags) so a repointed tag
+      # can't inject code into the build - the trailing comment tracks the version.
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Same major version as the image (Dockerfile: node:20-alpine)
+          node-version: '20'
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run the backend tests
+        working-directory: backend
+        run: npm test
