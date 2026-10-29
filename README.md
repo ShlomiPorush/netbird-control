@@ -87,6 +87,7 @@ covers the database, SSO and a few locked values:
 | `NETBIRD_API_URL`, `NETBIRD_API_TOKEN` | NetBird Management API (can also be set in the app) |
 | `NETBIRD_READONLY` | `true` blocks every write to NetBird |
 | `WEBHOOK_AUTH_TOKEN` | Bearer token for `POST /api/webhook` (can also be set in the app) |
+| `TRUST_PROXY` | The reverse proxy allowed to report the client address (`X-Forwarded-For`): its address or CIDR (comma-separated for several), or a hop count. Empty (default) uses the connecting address and ignores the header. Behind a proxy, set it to that proxy, and make sure the app port is not also reachable directly |
 | `TELEGRAM_BOT_TOKEN`, `SMTP_*` | Notifications (can also be set in the app) |
 | `EVENT_PURGE_ADMINS` | Emails allowed to delete stored events |
 
@@ -97,6 +98,10 @@ covers the database, SSO and a few locked values:
 - **SSO** - with the three `OIDC_*` variables and `BASE_URL` set, every page requires login. Admins are
   NetBird owners and admins, or members of `ADMIN_GROUP_ID`; everyone else sees only their own data
   and what they were granted.
+- **Rate limits** apply to everything except the webhook receivers (sign-in 30 requests a minute per
+  client address, the API 600 and pages 300 a minute per user). The receivers are not rate limited, so
+  any deployment that others can reach should set `WEBHOOK_AUTH_TOKEN` (and the notifications token
+  in **Settings → Webhook**) and register the Telegram webhook, which sets its secret.
 - **Secrets** are write-only: they are never sent back to the browser, and a value from the
   environment locks the field in the app.
 - **Destructive actions are gated** - with SSO on, deleting stored events needs an admin listed in

@@ -22,7 +22,7 @@ const {
 } = require('./lib/events');
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
-const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses } = require('./lib/pure');
+const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
 // notify*Email helpers stay in db.js and use the imported sendMail/mailLayout/mailRows/htmlEsc.
@@ -55,11 +55,6 @@ async function logOutbound({ channel, recipient, feature, subject, ok, error, bo
          // CLIP the body so a runaway template can never bloat the row.
          String(body || '').slice(0, 200_000)]
     ).catch(e => console.error('[Outbound] log write error:', e.message));
-}
-// First meaningful line of a Telegram HTML message, tags stripped - the log's "subject".
-function tgFirstLine(html) {
-    const line = String(html || '').replace(/<[^>]*>/g, '').split('\n').map(s => s.trim()).find(Boolean);
-    return line || '';
 }
 setMailObserver(({ to, subject, tag, ok, error, html, text }) =>
     logOutbound({ channel: 'email', recipient: to, feature: tag, subject, ok, error, body: html || text || '' }));
@@ -1855,7 +1850,7 @@ function normMspDigest(raw) {
     const day = Number.isFinite(+r.day) ? Math.min(6, Math.max(0, Math.trunc(+r.day))) : 1;
     const hour = Number.isFinite(+r.hour) ? Math.min(23, Math.max(0, Math.trunc(+r.hour))) : 8;
     const emails = Array.isArray(r.emails)
-        ? [...new Set(r.emails.map(e => String(e || '').trim()).filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)))]
+        ? [...new Set(r.emails.map(e => String(e || '').trim()).filter(isPlausibleEmail))]
         : [];
     return { enabled: !!r.enabled, day, hour, telegram: r.telegram !== false, emails };
 }
@@ -2543,7 +2538,7 @@ async function seedTenantDefaults(tenantId) {
             nbUnsupported = (await copyNbSettingsTo(id, nbSettingsFromProfile(profile.nb))).unsupported;
             nbSettings = true;
         } catch (e) {
-            console.error(`[MSP] seed NetBird settings -> ${id}:`, e.message);
+            console.error('[MSP] seed NetBird settings -> %s:', id, e.message);
         }
         // Cloud MFA is a dedicated per-account endpoint (not part of the settings blob) - its own
         // best-effort step in the tenant context. Failure marks mfa:false without breaking the rest.
@@ -2556,7 +2551,7 @@ async function seedTenantDefaults(tenantId) {
                 }));
                 mfa = !!r && r.status < 300;
             } catch (e) {
-                console.error(`[MSP] seed NetBird MFA -> ${id}:`, e.message);
+                console.error('[MSP] seed NetBird MFA -> %s:', id, e.message);
             }
         }
     }
@@ -2636,7 +2631,7 @@ async function computeTenantDrift(tenantId) {
         const nb = profile.nb;
         let tenS = null, tenReadOk = false;
         try { tenS = await runWithTenant(id, () => getAccountSettings()); tenReadOk = !!tenS; }
-        catch (e) { console.error(`[MSP] drift NetBird settings read -> ${id}:`, e.message); }
+        catch (e) { console.error('[MSP] drift NetBird settings read -> %s:', id, e.message); }
         if (!tenReadOk || !tenS) {
             items.push({ key: 'nb.settings', label: 'NetBird: Settings', match: false, main: '-', tenant: 'Unreadable' });
         } else {
@@ -2674,7 +2669,7 @@ async function computeTenantDrift(tenantId) {
             if (await mfaSupported()) {
                 let tenMfa = null;
                 try { tenMfa = await runWithTenant(id, () => netbirdGet('/api/service/mfa')); }
-                catch (e) { console.error(`[MSP] drift NetBird MFA read -> ${id}:`, e.message); }
+                catch (e) { console.error('[MSP] drift NetBird MFA read -> %s:', id, e.message); }
                 const mfaVal = (on, remember) => !on ? 'Off' : (remember ? 'On + Remember Browser' : 'On');
                 push('nb.mfa', 'Multi-Factor Authentication',
                     mfaVal(nb.mfa_enabled, nb.mfa_remember_browser),
@@ -7281,10 +7276,7 @@ async function ingestNbNotification(body) {
     // The routing peer's name lives only inside the message text ("Routing peer my-router
     // has disconnected..." / "Routing peer  was removed..." - name can be empty on delete).
     let peerName = txt(b.peer && b.peer.name) || txt(b.peer_name) || '';
-    if (!peerName) {
-        const m = /^Routing peer\s+(.*?)\s+(?:has|was)\b/i.exec(message);
-        if (m && m[1]) peerName = m[1].trim();
-    }
+    if (!peerName) peerName = routingPeerName(message);
     const blob = `${event} ${message}`.toLowerCase();
     const category = /^integration\.|idp|edr|sync token/.test(blob) ? 'integration'
         : /^(routing|peer)\./.test(event) || /routing peer/.test(blob) ? 'peer'
@@ -10519,6 +10511,9 @@ function encryptBackup(payloadObj, publicKeyPem, privKeyBlob) {
 function decryptBackup(fileBuf, passphrase, storedPrivBlob) {
     const CORRUPT = 'Wrong passphrase or corrupted file';
     try {
+        // Raw file bytes only: a string, array or Buffer-like object from a tampered request never
+        // reaches the parser below.
+        if (typeof fileBuf !== 'object' || !Buffer.isBuffer(fileBuf)) throw new Error(CORRUPT);
         if (fileBuf.length < 6 + 2 + 2 + 12 + 16 || !fileBuf.subarray(0, 6).equals(BACKUP_MAGIC)) throw new Error(CORRUPT);
         let off = 6;
         const privLen = fileBuf.readUInt16BE(off); off += 2;
@@ -11350,7 +11345,8 @@ module.exports = {
     isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation,
     // Pure helpers exposed ONLY for unit tests (backend/test) - not part of the app API.
     _internal: { comboKey, combosForResource, ALL_COMBO, splitPortTokens, mergeRulePorts, normSecurityConfig, humanDuration, stableStringify, normDelegates, normEdrAutoBypass, edrOsKey, ruleForPut, carryRuleExtras, ruleHasUnmodeled, policiesSourcingResources, editorProtocol,
-        normalizeTenantDefaults, nbShapeFromSettings, nbSettingsFromProfile, dropUnsupportedNbSettings, proxyAccessActionError },
+        normalizeTenantDefaults, nbShapeFromSettings, nbSettingsFromProfile, dropUnsupportedNbSettings, proxyAccessActionError,
+        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup },
     listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess,
     getSecurityConfig, setSecurityConfig,
     getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS,
