@@ -13,6 +13,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ### Changed
 - **The image runs on Node.js 24 (LTS).** Node.js 20 stopped receiving security fixes in April 2026.
   The image is now based on `node:24-alpine`, and CI tests on Node.js 24.
+  **Check before you upgrade:** Node.js 24 refuses TLS servers whose certificate uses an RSA key
+  shorter than 2048 bits, or Diffie-Hellman parameters shorter than 2048 bits. This applies to the
+  NetBird API, SMTP, the OIDC provider and PostgreSQL over TLS. Public certificate authorities
+  don't issue such keys; an old internal or self-signed certificate may use one and must be
+  replaced. The connection then fails with `EE certificate key too weak`.
 - **Dependency updates** since 1.0.0: `nodemailer`, `pg` and `dotenv` 18 in the backend, and
   `vite`, TanStack Query and other minor updates in the frontend.
 
