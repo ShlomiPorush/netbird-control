@@ -1,5 +1,5 @@
 # ── Web: build the React (Vite) frontend → /backend/public ──
-FROM node:20-alpine AS web
+FROM node:24-alpine AS web
 WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
@@ -12,7 +12,7 @@ COPY frontend/ ./
 RUN npm run build:only
 
 # ── Base: backend dependency layer ──
-FROM node:20-alpine AS base
+FROM node:24-alpine AS base
 WORKDIR /app
 COPY backend/package.json backend/package-lock.json* ./
 

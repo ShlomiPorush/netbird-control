@@ -113,8 +113,9 @@ More in [docs/permissions-and-security.md](docs/permissions-and-security.md).
 
 ## Development
 
-You need Node.js 20.19+ or 22.12+ and a PostgreSQL database the backend can reach. The backend reads
-`.env` from its working directory, so put the `DB_*` settings in `backend/.env` (or export them).
+You need Node.js 24 (the version the image uses; 22.12+ also works) and a PostgreSQL database the
+backend can reach. The backend reads `.env` from its working directory, so put the `DB_*` settings in
+`backend/.env` (or export them).
 
 ```bash
 cd frontend && npm install && npm run build   # Vite builds into backend/public

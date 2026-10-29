@@ -26,8 +26,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # Same major version as the image (Dockerfile: node:20-alpine)
-          node-version: '20'
+          # Same major version as the image (Dockerfile: node:24-alpine)
+          node-version: '24'
 
       - name: Install backend dependencies
         working-directory: backend
@@ -48,7 +48,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Install frontend dependencies
         working-directory: frontend
