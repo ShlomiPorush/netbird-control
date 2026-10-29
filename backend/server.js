@@ -1,4 +1,5 @@
-require('dotenv').config();
+// quiet: dotenv 17+ otherwise logs an "injecting env" line on every start.
+require('dotenv').config({ quiet: true });
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
