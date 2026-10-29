@@ -27,6 +27,12 @@ The Tenants page mirrors the official dashboard's MSP portal:
 Click **Manage** on an active tenant. Technically this mirrors the official dashboard: every management API call carries the same token plus `account=<tenantId>` - no re-authentication.
 
 - The top bar turns orange with a **"Managing Tenant: X"** chip (no extra banner, no lost screen space); its **X** exits back to your account.
+- **Tenant mode is per browser tab.** The browser keeps only the managed tenant's id, in the tab's session storage; the name shown in the chip comes from the tenant list. So:
+  - Reloading the page, or signing out and back in, in the same tab keeps the tenant.
+  - Two tabs can manage different tenants at the same time; switching in one tab never changes another.
+  - A new tab, or a URL typed into the address bar, starts in your main account. In Chromium-based browsers this also applies to a tab opened from a link in the app (for example, with a middle-click).
+  - Some browsers copy session storage into a tab opened from a link or with **Duplicate Tab**, so that tab starts in the same tenant. After it opens, it is independent.
+  - If the tenant was removed or can no longer be managed, the tab returns to your main account.
 - **The rule: a tenant behaves exactly like the main account - same mechanism per feature.** The main account is simply tenant `''` internally.
   - Pages that are API-direct for main (Networks, Policies, Groups, Posture, Access Profiles, Blocklist, Cleanup, Reverse Proxy services) are API-direct for the tenant too - read and write, fully isolated.
   - Data that main SYNCS into the database is synced per tenant the same way: the **peers/users mirrors** refresh for every account on the same schedule, and **Peers / Users / IP History / Dashboard / Activity / Admin** read tenant-scoped stored rows with the exact same pages - nothing is fetched "live on page view".

@@ -51,20 +51,23 @@ async function handle<T>(res: Response): Promise<T> {
 // ─── MSP tenant mode ───
 // While "managing" an MSP tenant, EVERY api call carries X-Tenant-Account; the backend runs
 // the request in that tenant's context (only live-management routes are allowed there).
-// Persisted so a refresh stays in tenant mode; the Layout banner is the visible indicator.
-export interface TenantMode { id: string; name: string }
+// Only the tenant id is kept, in sessionStorage: it survives the switch's hard reload and the
+// OIDC login round trip, but it is scoped to ONE tab - a switch in one tab never redirects
+// another open tab's writes to a different account. The display name is resolved from the
+// tenant lists (see TopBar); the top-bar chip is the visible indicator.
+export interface TenantMode { id: string }
 const TENANT_KEY = 'msp-tenant';
+// Older builds kept { id, name } in localStorage, shared by every tab. Drop it, never read it.
+try { localStorage.removeItem(TENANT_KEY); } catch { /* storage unavailable */ }
 export function getTenantMode(): TenantMode | null {
   try {
-    const raw = localStorage.getItem(TENANT_KEY);
-    if (!raw) return null;
-    const t = JSON.parse(raw);
-    return t && typeof t.id === 'string' && t.id ? { id: t.id, name: String(t.name || t.id) } : null;
+    const id = sessionStorage.getItem(TENANT_KEY);
+    return id ? { id } : null;
   } catch { return null; }
 }
 export function setTenantMode(t: TenantMode | null) {
-  if (t) localStorage.setItem(TENANT_KEY, JSON.stringify({ id: t.id, name: t.name }));
-  else localStorage.removeItem(TENANT_KEY);
+  if (t) sessionStorage.setItem(TENANT_KEY, t.id);
+  else sessionStorage.removeItem(TENANT_KEY);
 }
 // Switch the managed account and HARD-RELOAD into its home page. A soft navigate is not
 // enough: in-flight responses from the previous account can land after qc.clear() and

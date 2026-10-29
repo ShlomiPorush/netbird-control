@@ -18,6 +18,13 @@ export function TopBar({ collapsed, onToggleCollapse, onOpenMobile }: { collapse
   const name = viewer.name || viewer.email || 'User';
   const initial = (name.trim()[0] || 'U').toUpperCase();
   const tenant = getTenantMode();
+  const targets = useSwitchTargets(!!tenant);
+  // The tab may hold the id of a tenant that was since removed or deactivated (the backend
+  // refuses it with 403). Once both lists have loaded without it, fall back to the main account.
+  const tenantId = tenant?.id;
+  useEffect(() => {
+    if (tenantId && targets.ready && !targets.known.has(tenantId)) switchAccount(null);
+  }, [tenantId, targets]);
 
   return (
     <header className={cn(
@@ -48,7 +55,7 @@ export function TopBar({ collapsed, onToggleCollapse, onOpenMobile }: { collapse
         >
           {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
         </button>
-        {tenant && <TenantChip name={tenant.name} />}
+        {tenant && <TenantChip name={targets.nameOf(tenant.id)} />}
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
@@ -95,6 +102,38 @@ function TenantChip({ name }: { name: string }) {
   );
 }
 
+/* Every account the switcher can switch into: each non-invited tenant with its switch id
+ * resolved from the switcher list (its item id is what NetBird's account switch expects,
+ * falling back to the tenant id), plus any switcher-only account. Also resolves the managed
+ * tenant's display name, which is not stored with the tenant id. */
+function useSwitchTargets(enabled: boolean) {
+  const switcher = useMspSwitcher(enabled);
+  const tenants = useMspTenants(enabled);
+  return useMemo(() => {
+    const switcherItems = switcher.data || [];
+    const tenantRows = (tenants.data || []).filter((t) => String(t.status).toLowerCase() !== 'invited');
+    const rows = tenantRows.map((t) => {
+      const s = switcherItems.find((x) => x.id === t.id || x.accountId === t.id || (x.domain && x.domain === t.domain));
+      return { id: s ? s.id : t.id, name: t.name || t.domain, domain: t.domain };
+    });
+    for (const s of switcherItems) {
+      if (!rows.some((r) => r.id === s.id)) rows.push({ id: s.id, name: s.name || s.domain, domain: s.domain });
+    }
+    // The ids the backend accepts as X-Tenant-Account - the same set its tenant middleware checks.
+    const known = new Set<string>();
+    for (const s of switcherItems) { known.add(s.id); if (s.accountId) known.add(s.accountId); }
+    for (const t of tenantRows) known.add(t.id);
+    const loading = switcher.isLoading || tenants.isLoading;
+    const nameOf = (id: string) => {
+      const s = switcherItems.find((x) => x.accountId === id);
+      const t = tenantRows.find((x) => x.id === id);
+      return rows.find((r) => r.id === id)?.name || (s && (s.name || s.domain)) || (t && (t.name || t.domain))
+        || (loading ? 'Loading…' : id);
+    };
+    return { rows, known, nameOf, ready: switcher.isSuccess && tenants.isSuccess };
+  }, [switcher.data, tenants.data, switcher.isLoading, tenants.isLoading, switcher.isSuccess, tenants.isSuccess]);
+}
+
 /* ─── Tenant switcher (official-dashboard style) ───
  * Visible only for admins of an activated MSP account: the current context (MSP account
  * with an "MSP" badge, or the tenant being managed) + a searchable dropdown of tenants.
@@ -111,10 +150,8 @@ function TenantSwitcher() {
   // mode only ever exists on an MSP account, so it can't leak the switcher elsewhere.
   const show = mspEligible && (msp?.available === true || !!inTenant);
   // ALL linked tenants are listed (incl. pending-verification - NetBird allows managing them
-  // before the domain is verified); the SWITCHER list only supplies the correct switch id
-  // for each (its item id is what NetBird's account switch expects).
-  const switcherItems = useMspSwitcher(show).data || [];
-  const tenantRows = useMspTenants(show).data || [];
+  // before the domain is verified); the SWITCHER list only supplies the correct switch id.
+  const targets = useSwitchTargets(show);
 
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -130,31 +167,21 @@ function TenantSwitcher() {
   }, [open]);
 
   const q = search.toLowerCase().trim();
-  const manageable = useMemo(() => {
-    // Merge: every non-invited tenant, with its switch id resolved from the switcher list
-    // (fall back to the tenant id); plus any switcher-only account we didn't match.
-    const rows = tenantRows
-      .filter((t) => String(t.status).toLowerCase() !== 'invited')
-      .map((t) => {
-        const s = switcherItems.find((x) => x.id === t.id || x.accountId === t.id || (x.domain && x.domain === t.domain));
-        return { id: s ? s.id : t.id, name: t.name || t.domain, domain: t.domain };
-      });
-    for (const s of switcherItems) {
-      if (!rows.some((r) => r.id === s.id)) rows.push({ id: s.id, name: s.name || s.domain, domain: s.domain });
-    }
-    return rows.filter((t) => !q || t.name.toLowerCase().includes(q) || t.domain.toLowerCase().includes(q));
-  }, [tenantRows, switcherItems, q]);
+  const manageable = useMemo(
+    () => targets.rows.filter((t) => !q || t.name.toLowerCase().includes(q) || t.domain.toLowerCase().includes(q)),
+    [targets.rows, q],
+  );
 
   if (!show) return null;
 
   // Hard-reload into the account's home (see switchAccount) - a soft switch was unstable.
-  const switchTo = (t: { id: string; name: string } | null) => {
+  const switchTo = (t: { id: string } | null) => {
     setOpen(false);
     switchAccount(t);
   };
 
   const current = inTenant
-    ? { title: inTenant.name, sub: 'Tenant', msp: false }
+    ? { title: targets.nameOf(inTenant.id), sub: 'Tenant', msp: false }
     : { title: msp?.name || msp?.domain || 'MSP Account', sub: msp?.domain || '', msp: true };
   const initialOf = (s: string) => (s.trim()[0] || '?').toUpperCase();
 
@@ -205,7 +232,7 @@ function TenantSwitcher() {
               {!inTenant && <Check size={15} className="shrink-0 text-netbird" />}
             </button>
             {manageable.map((t) => (
-              <button key={t.id} type="button" onClick={() => switchTo({ id: t.id, name: t.name || t.domain })}
+              <button key={t.id} type="button" onClick={() => switchTo({ id: t.id })}
                 className="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-md text-left hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900 transition-colors">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[5px] border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-200/80 dark:bg-nb-gray-900 text-[0.82rem] font-semibold uppercase"
                   style={{ color: avatarColor(t.name || t.domain) }}>
