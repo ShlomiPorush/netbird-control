@@ -8,7 +8,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ---
 
-## [Unreleased] - First public release
+## [Unreleased]
+
+---
+
+## [1.0.0] - 2026-10-29 - First public release
 
 The first public version of NetBird Control. Versions before it were private; their history is
 summarized under [Before the public release](https://github.com/shlomiporush/netbird-control/blob/main/CHANGELOG.md#before-the-public-release). The entries below are
