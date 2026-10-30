@@ -10,6 +10,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The Inter font ships inside the image.** The web interface no longer loads it from Google
+  Fonts, so the app loads no assets from external services. The Content Security Policy no
+  longer allows the Google Fonts origins.
+
 ---
 
 ## [1.0.2] - 2026-10-30

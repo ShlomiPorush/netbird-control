@@ -138,13 +138,13 @@ app.use((req, res, next) => {
     if (HSTS_ON) res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
     if (!req.path.startsWith('/api-docs')) {
         // style-src allows inline because React components use style={} attributes.
-        // Google Fonts (Inter) is the one allowed external origin pair. connect-src also
+        // Every asset (scripts, styles, fonts, images) is served by the app itself. connect-src
         // allows the NetBird management + signal hosts so the Troubleshoot page's
         // browser-side reachability checks (no-cors fetch) aren't killed by our own CSP.
         const dh = diagHosts();
         res.setHeader('Content-Security-Policy',
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-            + `img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://${dh.management} https://${dh.signal}; `
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            + `img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${dh.management} https://${dh.signal}; `
             + "frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
     }
     next();
