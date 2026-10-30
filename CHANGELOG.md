@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.0.5] - 2026-10-30
+
 ### Changed
 - **The web interface is styled with Tailwind CSS 4.** Layout and spacing stay as they were.
   Some status colors, such as the red, green and amber badges, are a little more vivid.
