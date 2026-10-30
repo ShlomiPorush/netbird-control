@@ -22,7 +22,7 @@ const {
 } = require('./lib/events');
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
-const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
+const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
 // notify*Email helpers stay in db.js and use the imported sendMail/mailLayout/mailRows/htmlEsc.
@@ -9000,22 +9000,32 @@ async function createTemporaryAccessGrant(cfg, actor) {
             // ── Existing exposure per resource → combo buckets (pure logic: combosForResource) ──
             // Resource → groups lookup (one fetch per network; network targets were fetched above
             // but refetching here keeps this self-contained and cheap).
+            // An unreadable list stops the grant: treating it as empty would mirror no policy
+            // and no posture checks.
             const netResources = new Map();
             for (const rr of resourceRefs) {
                 if (netResources.has(rr.networkId)) continue;
                 const rs = await netbirdGet('/api/networks/' + encodeURIComponent(rr.networkId) + '/resources');
-                netResources.set(rr.networkId, Array.isArray(rs) ? rs : []);
+                if (!Array.isArray(rs)) throw new Error('could not read the resources of network ' + rr.networkId);
+                netResources.set(rr.networkId, rs);
             }
             // All enabled, non-temporary policies (other grants' temp policies must not leak
             // their 'all' back into new grants).
             const rawPolicies = await netbirdGet('/api/policies');
+            if (resourceRefs.length && !Array.isArray(rawPolicies)) throw new Error('could not read the existing policies');
             const polArr = (Array.isArray(rawPolicies) ? rawPolicies : [])
                 .filter(p => p && p.enabled !== false && !/^Temporary access #\d+/.test(p.name || ''));
             const combosFor = (rr) => {
-                if (rr.access) return accessSpecCombos(rr.access); // rule-pinned protocols/ports
                 const res = (netResources.get(rr.networkId) || []).find(x => x && x.id === rr.resourceId);
-                const rgroups = (res && Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
-                return combosForResource(polArr, rr.resourceId, rgroups);
+                if (!res) throw new Error('resource ' + rr.resourceId + ' was not found in network ' + rr.networkId);
+                const rgroups = (Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
+                const existing = combosForResource(polArr, rr.resourceId, rgroups);
+                if (!rr.access) return existing;
+                // Rule-pinned protocols/ports keep the posture checks of the exposure they overlap.
+                return accessSpecCombos(rr.access).map(c => {
+                    const pc = postureChecksFor(c, existing);
+                    return pc.length ? { ...c, postureChecks: pc } : c;
+                });
             };
 
             // bucket key → { combo, resources: [rr], profileGroups: [gid] }
@@ -9031,17 +9041,21 @@ async function createTemporaryAccessGrant(cfg, actor) {
             if (destGroupIds.size) {
                 const profByGid = new Map((await listAccessProfiles()).map(p => [p.groupId, p]));
                 for (const gid of destGroupIds) {
+                    const prof = profByGid.get(gid);
+                    if (!prof) throw new Error('access profile not found for group ' + gid);
+                    // The profile's posture checks gate the temp policy too.
+                    const pc = postureIds(prof.postureChecks);
+                    const gated = (c) => (pc.length ? { ...c, postureChecks: pc } : c);
                     const acc = destGroupAccess.get(gid);
                     if (acc) { // rule-pinned protocols/ports override the profile's definition
-                        for (const c of accessSpecCombos(acc)) bucketFor(c).profileGroups.push(gid);
+                        for (const c of accessSpecCombos(acc)) bucketFor(gated(c)).profileGroups.push(gid);
                         continue;
                     }
-                    const prof = profByGid.get(gid);
                     const ports = prof && (Array.isArray(prof.ports) ? prof.ports : String(prof.ports || '').split(',').map(s => s.trim()).filter(Boolean));
                     const c = prof && prof.protocol && prof.protocol !== 'all'
                         ? { protocol: prof.protocol, ...splitPortTokens(ports || []) }
                         : ALL_COMBO;
-                    bucketFor(c).profileGroups.push(gid);
+                    bucketFor(gated(c)).profileGroups.push(gid);
                 }
             }
 
@@ -9069,6 +9083,7 @@ async function createTemporaryAccessGrant(cfg, actor) {
                 if (b.combo.portRanges && b.combo.portRanges.length) rule.port_ranges = b.combo.portRanges;
                 const p = await netbirdPost('/api/policies', {
                     name: `Temporary access #${grantId}${suffix}`, description: `Auto-managed temporary access for ${label}`, enabled: true,
+                    source_posture_checks: b.combo.postureChecks || [],
                     rules: [rule],
                 });
                 if (p && p.status < 300 && p.body && p.body.id) policyIds.push(p.body.id);
