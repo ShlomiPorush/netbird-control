@@ -149,6 +149,7 @@ const PUBLIC_ROUTES = new Set([
     'POST /api/webhook',
     'POST /api/webhook/t/:acct',
     'GET /api/health',
+    'GET /login-wait.js',
     'POST /api/integrations/telegram/callback',
 ]);
 
@@ -399,7 +400,8 @@ test('a restart while signed in (another tab finished first) returns to the app 
 });
 
 // One login at a time per browser: a second login start waits for the one in flight.
-const waitsForOtherLogin = (r) => r.status === 200 && /another tab is already signing you in/.test(r.text) && /http-equiv="refresh"/.test(r.text);
+const waitsForOtherLogin = (r) => r.status === 200 && /another tab is already signing you in/.test(r.text) &&
+    /<script src="\/login-wait\.js"><\/script>/.test(r.text) && /<noscript><meta http-equiv="refresh" content="2"><\/noscript>/.test(r.text);
 const pendingCleared = (r) => /login_pending=;/.test(r.headers.getSetCookie().join('\n'));
 
 test('a second tab that needs to sign in while a login is in flight waits, then continues signed in', async () => {
@@ -460,7 +462,36 @@ test('"Sign in here instead" on the waiting page starts a login from this tab', 
     assert.equal(href, `/login?force=1&returnTo=${encodeURIComponent('/networks?x=1')}`);
     const forced = await call('GET', href, { cookie: pending });
     assert.ok(startsLogin(forced));
-    assert.doesNotMatch(forced.headers.getSetCookie().join('\n'), /login_pending=/, 'and leaves the in-flight mark alone');
+    assert.match(forced.headers.getSetCookie().join('\n'), /login_pending=/, 'and marks itself as the login in flight');
+});
+
+test('the waiting page reload script is public and stops on a link click', async () => {
+    const r = await call('GET', '/login-wait.js', { accept: '*/*' });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type'), /javascript/);
+    assert.match(r.text, /location\.replace\(location\.href\)/);
+    assert.match(r.text, /clearTimeout/);
+});
+
+test('a failed forced login ends its own mark, so its restart is not held up', async () => {
+    const ip = freshIp();
+    const abandoned = `login_pending=abandoned.${Date.now() - 60_000}`; // a login left at the provider, still in its window
+    const forced = await call('GET', '/login?force=1&returnTo=/peers', { ip, cookie: abandoned });
+    assert.ok(startsLogin(forced));
+    const authorize = new URL(forced.location);
+    // The browser's cookies after the forced start: its own mark replaces the abandoned one.
+    const jar = cookiesOf(forced).includes('login_pending=') ? cookiesOf(forced) : `${abandoned}; ${cookiesOf(forced)}`;
+    const r = await callback(ip, 'a-code-the-provider-rejects', authorize.searchParams.get('state'), jar);
+    assert.ok(restarts(r, 1), `got ${r.status} ${r.location}`);
+    const after = pendingCleared(r) ? jar.replace(/login_pending=[^;]+(; )?/, '') : jar;
+    const restart = await call('GET', r.location, { ip, cookie: after });
+    assert.ok(startsLogin(restart), `the restart starts a login instead of waiting, got ${restart.status}`);
+});
+
+test('a tab that reloads while a forced login is in flight waits for it', async () => {
+    const ip = freshIp();
+    const forced = await beginLogin(ip, '/login?force=1&returnTo=/peers');
+    assert.ok(waitsForOtherLogin(await call('GET', '/networks', { ip, cookie: forced.cookie })));
 });
 
 test('forced logins still count against the auth budget', async () => {

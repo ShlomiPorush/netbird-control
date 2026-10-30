@@ -301,6 +301,15 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// The "Signing in" page's script (see "One login at a time"), public because that page is shown
+// to signed-out visitors; the CSP allows only same-origin scripts. It reloads the page every 2 s
+// and stops once a link is clicked, so a reload can't abort "Sign in here instead".
+app.get('/login-wait.js', (req, res) => {
+    res.type('application/javascript').set('Cache-Control', 'public, max-age=86400').send(
+        "var t=setTimeout(function(){location.replace(location.href)},2000);" +
+        "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a'))clearTimeout(t)});");
+});
+
 // Telegram webhook - receives inline-button presses (callback_query). Public (Telegram can't
 // log in), but authenticated by the secret token Telegram echoes in a header, and each press is
 // re-checked against the approver allow-list inside handleTelegramCallback.
@@ -379,13 +388,15 @@ function startsLogin(req) {
     if (!req.oidc.isAuthenticated()) return !!req.accepts('html');
     return (req.method === 'GET' || req.method === 'HEAD') && isLoginPath(req) && !sessionPassesCaps(req);
 }
-// The "Signing in" page: reloads itself; "Sign in here instead" forces a login from this tab.
+// The "Signing in" page: reloads itself (/login-wait.js; a meta refresh without JavaScript);
+// "Sign in here instead" forces a login from this tab.
 function loginWaitPage(req) {
     const page = isLoginPath(req) ? String(req.query.returnTo || '/') : req.originalUrl;
     const force = `/login?force=1&returnTo=${encodeURIComponent(page.startsWith('/') ? page : '/')}`.replace(/&/g, '&amp;');
-    return '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2"><title>Signing in…</title>' +
+    return '<!doctype html><meta charset="utf-8"><title>Signing in…</title>' +
+        '<noscript><meta http-equiv="refresh" content="2"></noscript>' +
         '<p>Signing in - another tab is already signing you in. This page continues on its own.</p>' +
-        `<p><a href="${force}">Sign in here instead</a></p>`;
+        `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js"></script>`;
 }
 // The decoded OIDC state of a /callback request ({} when missing or not ours).
 function callbackState(req) {
@@ -466,10 +477,9 @@ if (AUTH_ENABLED) {
     // One login at a time per browser (see above), wherever a login would start.
     app.use((req, res, next) => {
         if (!startsLogin(req)) return next();
-        // A forced login leaves the mark alone: if the waiting page's own reload aborts it, the
-        // tab must not end up waiting on the login it just started.
-        if (forcedLogin(req)) return next();
-        if (loginInFlight(req)) {
+        // A forced login doesn't wait, but marks itself like any other: other tabs then wait for
+        // IT, and its own callback (or failure) ends the mark.
+        if (loginInFlight(req) && !forcedLogin(req)) {
             res.set('Cache-Control', 'no-store');
             return res.status(200).type('html').send(loginWaitPage(req));
         }
