@@ -12,6 +12,11 @@ This project includes third-party material:
 - Country flags (PNG), frontend/public/images/flags/
   Flagpedia, https://flagpedia.net. The flag images are in the public domain.
 
+- Inter font, bundled from the @fontsource/inter npm package,
+  https://github.com/rsms/inter
+  Copyright (c) 2016 The Inter Project Authors. SIL Open Font License 1.1;
+  the full text is in frontend/public/licenses/inter.txt.
+
 - The look and feel of the UI is derived from the NetBird dashboard,
   https://github.com/netbirdio/dashboard, licensed under AGPL-3.0.
   See the License section of README.md.

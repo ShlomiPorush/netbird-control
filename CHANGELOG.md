@@ -10,6 +10,16 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The Inter font ships inside the image.** The web interface no longer loads it from Google
+  Fonts, so the app loads no assets from external services. The Content Security Policy no
+  longer allows the Google Fonts origins.
+
+### Fixed
+- **No path is exempt from the Content Security Policy.** A leftover exemption skipped it for paths
+  under `/api-docs`, where the app page loaded without one. The API docs at `/api/docs` always
+  had the policy and work unchanged.
+
 ---
 
 ## [1.0.2] - 2026-10-30

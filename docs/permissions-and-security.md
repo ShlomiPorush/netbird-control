@@ -97,7 +97,7 @@ On top of the passive visibility, **background job alerts** (Settings → Securi
 
 ## HTTP hardening
 
-Every response carries security headers (hand-rolled, dependency-free): a **Content-Security-Policy** allowing only the app's own origin (plus Google Fonts), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, a restrictive `Permissions-Policy`, and **HSTS** when `BASE_URL` is https. Secret comparisons (webhook token, Telegram webhook secret) are **constant-time**, and repeated failed authentication attempts against the public endpoints are throttled per IP (legitimate traffic is never rate-limited - only failures count). The two log endpoints cap `per_page` at 200 like the rest of the API.
+Every response carries security headers (hand-rolled, dependency-free): a **Content-Security-Policy** that loads every script, style, font and image from the app's own origin only (the image bundles all of them, with no CDN or external fonts; the only other origins are the NetBird management and signal hosts, which the Troubleshoot page's reachability checks connect to), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, a restrictive `Permissions-Policy`, and **HSTS** when `BASE_URL` is https. Secret comparisons (webhook token, Telegram webhook secret) are **constant-time**, and repeated failed authentication attempts against the public endpoints are throttled per IP (legitimate traffic is never rate-limited - only failures count). The two log endpoints cap `per_page` at 200 like the rest of the API.
 
 ## Protecting NetBird & secrets
 
