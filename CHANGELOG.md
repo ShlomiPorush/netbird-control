@@ -10,6 +10,18 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- **Blocked resources and networks of a trusted auto-approval entry also cover related targets.**
+  A blocked resource also sends its network and any access profile whose group contains it to
+  review. A blocked network also sends its resources and the access profiles that contain them to
+  review.
+
+### Changed
+- **New requirement:** a trusted entry with blocked targets reads the current networks and
+  resources from NetBird when a request is submitted. If NetBird can't be read completely, that
+  entry sends network, resource and access-profile requests to review instead of auto-approving
+  them.
+
 ---
 
 ## [1.0.5] - 2026-10-30
