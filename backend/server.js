@@ -134,7 +134,7 @@ app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) ? next() : jsonBod
     next(err);
 })));
 
-// ─── Security headers (hand-rolled; no CSP on /api-docs - Swagger UI needs inline bits) ───
+// ─── Security headers (hand-rolled) ───
 const HSTS_ON = String(process.env.BASE_URL || '').startsWith('https://');
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -142,17 +142,17 @@ app.use((req, res, next) => {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     if (HSTS_ON) res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
-    if (!req.path.startsWith('/api-docs')) {
-        // style-src allows inline because React components use style={} attributes.
-        // Google Fonts (Inter) is the one allowed external origin pair. connect-src also
-        // allows the NetBird management + signal hosts so the Troubleshoot page's
-        // browser-side reachability checks (no-cors fetch) aren't killed by our own CSP.
-        const dh = diagHosts();
-        res.setHeader('Content-Security-Policy',
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-            + `img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://${dh.management} https://${dh.signal}; `
-            + "frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
-    }
+    // The CSP has no path exemptions, Swagger UI at /api/docs included: it loads only its own
+    // local scripts, and its inline <style> is allowed by style-src.
+    // style-src allows inline because React components use style={} attributes.
+    // Every asset (scripts, styles, fonts, images) is served by the app itself. connect-src
+    // allows the NetBird management + signal hosts so the Troubleshoot page's
+    // browser-side reachability checks (no-cors fetch) aren't killed by our own CSP.
+    const dh = diagHosts();
+    res.setHeader('Content-Security-Policy',
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        + `img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${dh.management} https://${dh.signal}; `
+        + "frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
     next();
 });
 
