@@ -12,7 +12,7 @@ const { initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEven
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
-const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS } = require('./db');
+const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
 
 // AD group whose members are treated as admins (in addition to NetBird owner/admin)
 const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID || '';
@@ -4002,6 +4002,8 @@ app.put('/api/networks/:id/resources/:rid', async (req, res) => {
         if (!canEditNetwork(viewer, req.params.id, grants)) return res.status(403).json({ error: 'Forbidden' });
         const { name, address, description, groups, policies, enabled } = req.body || {};
         if (!name || !address) return res.status(400).json({ error: 'name and address are required' });
+        // The resource must belong to this network before anything below reads or changes it.
+        await getResourceInNetwork(req.params.id, req.params.rid);
         // Blocklist blocks everyone EXCEPT admins - an admin may knowingly override (audited).
         const blocked = addressBlockedForNetwork(address, req.params.id, await getBlocklist());
         if (blocked && !viewer.isAdmin) return res.status(400).json({ error: `Address "${address}" is blocked for this network (matches "${blocked}" on the blocklist).` });
@@ -4027,7 +4029,7 @@ app.put('/api/networks/:id/resources/:rid', async (req, res) => {
         res.json({ status: 'ok', resource: out });
     } catch (err) {
         console.error('Error editing resource:', err.message);
-        res.status(err.status === 400 || err.status === 409 ? err.status : 502).json({ error: err.message || 'Failed to edit resource' });
+        res.status(err.status === 400 || err.status === 404 || err.status === 409 ? err.status : 502).json({ error: err.message || 'Failed to edit resource' });
     }
 });
 
@@ -4064,7 +4066,7 @@ app.delete('/api/networks/:id/resources/:rid', async (req, res) => {
         res.json({ status: 'ok' });
     } catch (err) {
         console.error('Error deleting resource:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to delete resource' });
+        res.status(err.status === 404 ? 404 : 502).json({ error: err.message || 'Failed to delete resource' });
     }
 });
 

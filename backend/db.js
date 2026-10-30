@@ -5392,7 +5392,11 @@ async function deleteNetwork(id) {
     if (detail) {
         for (const r of (detail.resources || [])) {
             if (r && r.id) {
-                try { await deleteResource(id, r.id); } catch (e) { console.error('[deleteNetwork] resource:', e.message); }
+                try { await deleteResource(id, r.id); } catch (e) {
+                    // Keep the network (and the resource's policies) unless NetBird confirms the resource is gone.
+                    if (e.unconfirmed) throw new Error(`Couldn't remove resource "${r.name || r.id}", so the network was not deleted: ${e.message}`);
+                    console.error('[deleteNetwork] resource:', e.message);
+                }
             }
         }
         for (const rt of (detail.routers || [])) {
@@ -7610,7 +7614,7 @@ async function checkResourcePolicySync(resourceId, policies) {
     return dedicated;
 }
 async function syncResourcePolicies(networkId, resourceId, policies) {
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    const r = await getResourceInNetwork(networkId, resourceId);
     const name = (r && r.name) || 'resource';
     const resType = r && r.type;
 
@@ -7755,10 +7759,28 @@ async function setResourcePolicy(networkId, resourceId, protocol, ports) {
     bustNbCaches('policies');
 }
 
+// Read a resource through its network and confirm it belongs to that network. Run before any
+// write keyed on the resource id alone (its policies), so nothing changes for a resource of
+// another network. NetBird answers a mismatched network/resource pair with an error body.
+async function getResourceInNetwork(networkId, resourceId) {
+    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    if (r == null) {
+        const e = new Error("Couldn't read the resource from NetBird. Try again."); e.status = 502; e.unconfirmed = true; throw e;
+    }
+    if (typeof r !== 'object' || r.id !== resourceId) {
+        const e = new Error('Resource not found in this network'); e.status = 404;
+        // A mismatched pair comes back as a generic error, like an outage; only NetBird's own
+        // 404 confirms the resource is gone.
+        e.unconfirmed = r.code !== 404;
+        throw e;
+    }
+    return r;
+}
+
 // Delete a resource and best-effort clean up its auto-created policy + group
 async function deleteResource(networkId, resourceId) {
-    // Fetch the resource first to learn its groups
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    // Fetch the resource first to learn its groups (and that it is in this network)
+    const r = await getResourceInNetwork(networkId, resourceId);
     const groupIds = (r && Array.isArray(r.groups)) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
 
     // Delete policies that target this resource directly (NetBird blocks deleting a
@@ -11442,7 +11464,7 @@ module.exports = {
     pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
     getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
-    getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
+    getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, getResourceInNetwork, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
     setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups,
     getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate,
     getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting,
