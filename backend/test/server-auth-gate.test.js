@@ -398,6 +398,50 @@ test('a restart while signed in (another tab finished first) returns to the app 
     assert.equal(r.location, '/peers');
 });
 
+// One login at a time per browser: a second login start waits for the one in flight.
+const waitsForOtherLogin = (r) => r.status === 200 && /another tab is already signing you in/.test(r.text) && /http-equiv="refresh"/.test(r.text);
+const pendingCleared = (r) => /login_pending=;/.test(r.headers.getSetCookie().join('\n'));
+
+test('a second tab that needs to sign in while a login is in flight waits, then continues signed in', async () => {
+    const ip = freshIp();
+    const first = await beginLogin(ip, '/login?returnTo=/peers'); // tab A is at the provider
+    assert.match(first.cookie, /login_pending=/);
+    assert.ok(stateOf(first.authorize.href).lid, 'the login state carries its in-flight id');
+    const second = await call('GET', '/networks', { ip, cookie: first.cookie }); // tab B's session expired too
+    assert.ok(waitsForOtherLogin(second), `tab B should wait, got ${second.status} ${second.location}`);
+    const loginB = await call('GET', '/login?returnTo=/networks', { ip, cookie: first.cookie });
+    assert.ok(waitsForOtherLogin(loginB), 'also when it goes through /login');
+    const done = await callback(ip, issueCode(first.authorize), first.authorize.searchParams.get('state'), first.cookie);
+    assert.equal(done.status, 302);
+    assert.ok(pendingCleared(done), "tab A's callback ends the in-flight mark");
+    const reload = await call('GET', '/login?returnTo=/networks', { ip, cookie: cookiesOf(done) }); // tab B reloads
+    assert.equal(reload.status, 302);
+    assert.equal(reload.location, '/networks', 'tab B finds the session and goes on');
+});
+
+test("a failed callback ends its own login's in-flight mark, so its restart is not held up", async () => {
+    const ip = freshIp();
+    const { cookie, authorize } = await beginLogin(ip);
+    const r = await callback(ip, 'a-code-the-provider-rejects', authorize.searchParams.get('state'), cookie);
+    assert.ok(restarts(r, 1));
+    assert.ok(pendingCleared(r));
+    const restart = await beginLogin(ip, r.location); // starts a new login instead of waiting
+    assert.equal(stateOf(restart.authorize.href).retry, 1);
+});
+
+test("another login's callback does not end the in-flight mark", async () => {
+    const ip = freshIp();
+    const first = await beginLogin(ip);
+    const r = await callback(ip, 'x', encodedState({ returnTo: '/', lid: 'someone-else' }), first.cookie);
+    assert.ok(!pendingCleared(r));
+});
+
+test('an abandoned login stops holding up new logins after the wait window', async () => {
+    const stale = `login_pending=abandoned.${Date.now() - 31_000}`;
+    const r = await call('GET', '/networks', { cookie: stale });
+    assert.ok(startsLogin(r), `got ${r.status} ${r.location}`);
+});
+
 test('a malformed returnTo in the state (a lone surrogate) still restarts the login', async () => {
     const r = await call('GET', `/callback?code=x&state=${encodedState({ returnTo: '/\ud800' })}`);
     assert.ok(restarts(r, 1), `got ${r.status} ${r.location}`);

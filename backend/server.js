@@ -331,9 +331,40 @@ const spaLimiter = rateLimit(limiterOptions('spa', { assetsDir: path.join(__dirn
 // How often a failed OIDC callback restarts the login before it stops (see the error handler).
 const MAX_LOGIN_RETRIES = 3;
 
+// ── One login at a time per browser ──
+// The library keeps a login's transaction in ONE cookie (auth_verification), so a login started
+// while another is in flight overwrites it and breaks the first one - which is what happens when
+// a session expires and every open tab is sent to sign in at once. A login start therefore sets
+// login_pending (<id>.<started ms>), with the same id in the login's state; the callback of THAT
+// login clears it, whether it succeeds or fails. Another login start that finds it waits on a
+// short page that reloads itself: once the first login finishes, the reload finds the session
+// and goes on; after LOGIN_PENDING_MS (an abandoned login) it starts its own.
+const LOGIN_PENDING_COOKIE = 'login_pending';
+const LOGIN_PENDING_MS = 30_000;
+const loginPendingCookieOptions = () => ({ httpOnly: true, sameSite: 'lax', secure: /^https:/i.test(process.env.BASE_URL || ''), path: '/' });
+function readLoginPending(req) {
+    const m = String(req.headers.cookie || '').match(/(?:^|;\s*)login_pending=([A-Za-z0-9_-]+)\.(\d+)/);
+    return m ? { id: m[1], startedAt: Number(m[2]) } : null;
+}
+// The decoded OIDC state of a /callback request ({} when missing or not ours).
+function callbackState(req) {
+    try {
+        const state = JSON.parse(Buffer.from(String(req.query.state || ''), 'base64url').toString());
+        return state && typeof state === 'object' ? state : {};
+    } catch {
+        return {};
+    }
+}
+
 if (AUTH_ENABLED) {
     // Per client IP, before the OIDC middleware below handles /callback and /logout itself.
     app.use(['/login', '/callback', '/logout'], authLimiter);
+    // A login's own callback (success or failure) ends its in-flight mark - see "One login at a time".
+    app.use('/callback', (req, res, next) => {
+        const pending = readLoginPending(req);
+        if (pending && callbackState(req).lid === pending.id) res.clearCookie(LOGIN_PENDING_COOKIE, loginPendingCookieOptions());
+        next();
+    });
     app.use(auth({
         // Identity only here: login is enforced by requiresAuth() below, after the rate limiters
         // (they key on the signed-in user, which this middleware resolves).
@@ -364,12 +395,14 @@ if (AUTH_ENABLED) {
         // a (strictly validated) ?returnTo= so the SPA sends users back where they were.
         routes: { login: false },
         // The library's default state ({ returnTo }), plus the retry count of a login restarted by
-        // the error handler after a failed callback (/login?retry=N), so the restarts are bounded.
+        // the error handler after a failed callback (/login?retry=N), so the restarts are bounded,
+        // and the login's in-flight id (see "One login at a time").
         getLoginState: (req, options) => {
             const retry = req.path === '/login' ? Number.parseInt(req.query.retry, 10) : 0;
             return {
                 returnTo: options.returnTo || req.originalUrl,
                 ...(retry >= 1 && retry <= MAX_LOGIN_RETRIES ? { retry } : {}),
+                ...(req.loginId ? { lid: req.loginId } : {}),
             };
         },
     }));
@@ -384,6 +417,23 @@ if (AUTH_ENABLED) {
     // not signed in is sent to login (HTML) or refused, and draws from the per-IP auth budget, so
     // these automatic login starts can't bypass the /login limit.
     app.use(authLimiter);
+    // One login at a time per browser (see above): runs where a login would start - an unsigned-in
+    // page load (requiresAuth below) or /login without a session it can bounce back to.
+    app.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+        const startsLogin = req.path === '/login'
+            ? !(req.oidc.isAuthenticated() && sessionPassesCaps(req))
+            : !req.oidc.isAuthenticated() && req.accepts('html');
+        if (!startsLogin) return next();
+        const pending = readLoginPending(req);
+        if (pending && Date.now() - pending.startedAt < LOGIN_PENDING_MS) {
+            res.set('Cache-Control', 'no-store');
+            return res.status(200).send('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2"><title>Signing in…</title><p>Signing in - another tab is already signing you in. This page continues on its own.</p>');
+        }
+        req.loginId = crypto.randomBytes(9).toString('base64url');
+        res.cookie(LOGIN_PENDING_COOKIE, `${req.loginId}.${Date.now()}`, { ...loginPendingCookieOptions(), maxAge: LOGIN_PENDING_MS });
+        next();
+    });
     app.use(requiresAuth());
 
     app.get('/login', (req, res) => {
@@ -4299,8 +4349,7 @@ function loginStateReturnTo(state) {
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (req.path === '/callback' && oidcCallbackRecoverable(err)) {
-        let state = {};
-        try { state = JSON.parse(Buffer.from(String(req.query.state || ''), 'base64url').toString()) || {}; } catch { /* no usable state */ }
+        const state = callbackState(req);
         const tries = Math.max(0, Number.parseInt(state.retry, 10) || 0);
         const returnTo = loginStateReturnTo(state);
         const reason = `${err.error || 'error'}: ${String(err.message || '').split('\n')[0]}`;
