@@ -10,6 +10,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **New requirement: reverse-proxy actions that change a network need edit rights on it.** Attaching
+  a routing peer, creating the resource for a Docker container target, and deleting, disabling or
+  enabling the network resources a service targets now require an `edit` grant on that network,
+  **Manage All Networks**, or admin, in addition to **Manage Reverse Proxy**. Without them the
+  action is refused and nothing changes. Admins and Manage All Networks holders are unaffected.
+
 ---
 
 ## [1.0.5] - 2026-10-30
