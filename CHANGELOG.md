@@ -48,6 +48,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   Settings → NetBird API or Settings → Email (SMTP). On a new server, enter the NetBird API URL
   there after the restore. The restore discards any Telegram callback secret in the file and
   skips a Telegram config that is not a JSON object.
+- **Saving Settings → Approvals saves the delegation list.** Adding a delegation now grants
+  approval rights, and removing one and saving ends it at once. A failed save no longer changes
+  who can approve.
 
 ### Changed
 - **New requirement:** a trusted entry with blocked targets reads the current networks and

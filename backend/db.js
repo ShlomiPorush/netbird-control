@@ -492,20 +492,31 @@ async function loadApproverConfig() {
         console.error('[Approver] config load error:', e.message);
     }
 }
-async function persistApprover() {
+async function persistApprover(c = _approver) {
     await setSetting('approver_config', JSON.stringify({
-        groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates,
+        groupIds: c.groupIds, telegramChatId: c.telegramChatId, telegramApprovers: c.telegramApprovers, delegates: c.delegates,
     }));
 }
 function getApproverConfig() {
     return { groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates };
 }
-async function setApproverConfig({ groupIds, telegramChatId, telegramApprovers, delegates } = {}) {
-    if (Array.isArray(groupIds)) _approver.groupIds = groupIds.map(s => String(s).trim()).filter(Boolean);
-    if (telegramChatId !== undefined) _approver.telegramChatId = String(telegramChatId || '').trim();
-    if (Array.isArray(telegramApprovers)) _approver.telegramApprovers = normApprovers(telegramApprovers);
-    if (Array.isArray(delegates)) _approver.delegates = normDelegates(delegates);
-    await persistApprover();
+// Saves run one at a time and the new config goes live only after it is stored, so a failed
+// write grants or revokes nothing, and a partial save never writes back a field another save
+// just changed.
+let _approverSaving = Promise.resolve();
+function setApproverConfig(input) {
+    const run = _approverSaving.then(() => saveApproverConfig(input));
+    _approverSaving = run.catch(() => { });
+    return run;
+}
+async function saveApproverConfig({ groupIds, telegramChatId, telegramApprovers, delegates } = {}) {
+    const next = { ..._approver };
+    if (Array.isArray(groupIds)) next.groupIds = groupIds.map(s => String(s).trim()).filter(Boolean);
+    if (telegramChatId !== undefined) next.telegramChatId = String(telegramChatId || '').trim();
+    if (Array.isArray(telegramApprovers)) next.telegramApprovers = normApprovers(telegramApprovers);
+    if (Array.isArray(delegates)) next.delegates = normDelegates(delegates);
+    await persistApprover(next);
+    Object.assign(_approver, next);
     return getApproverConfig();
 }
 function getApproverGroupIds() { return _approver.groupIds; }
