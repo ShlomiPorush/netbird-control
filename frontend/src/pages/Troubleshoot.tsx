@@ -92,7 +92,7 @@ function CheckRow({ c }: { c: DiagCheck }) {
   );
 }
 
-function Section({ icon, title, children }: { icon: JSX.Element; title: string; children: React.ReactNode }) {
+function Section({ icon, title, children }: { icon: React.JSX.Element; title: string; children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-4">
       <div className="flex items-center gap-2 text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1">

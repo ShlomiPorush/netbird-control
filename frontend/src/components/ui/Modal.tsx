@@ -37,7 +37,7 @@ const sizes = { sm: 'max-w-[440px]', md: 'max-w-[560px]', lg: 'max-w-[820px]' };
 export function Modal({ open, onClose, title, subtitle, icon, children, footer, size = 'md', widthClass, iconWrapClass, tabs }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  const stackToken = useRef<symbol>();
+  const stackToken = useRef<symbol | undefined>(undefined);
   if (!stackToken.current) stackToken.current = Symbol('modal');
 
   // Register on the modal stack while open (topmost = last).
