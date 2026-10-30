@@ -20,8 +20,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **A failed grant creation keeps its recovery record** until every NetBird object it made is
   confirmed removed. The cleanup job keeps the record when it cannot read NetBird, and it leaves
   a group in place when another active grant of the same user holds it.
-- **A timed device bypass is never left on without its end time.** If the end time cannot be
-  saved, the approval fails, the bypass is removed again and the request stays pending.
+- **A timed device bypass is not left on silently without its end time.** If the end time
+  cannot be saved, the approval fails, the bypass is removed again and the request stays pending.
+  If that removal fails too, the error says the device is still bypassed.
 - **Ending a recurring rule's window reports failures.** Disabling or deleting a rule, or
   revoking it in Access Review, shows an error when the active window could not be torn down, and
   the review item stays pending. A rule disabled while its window is opening ends that window.

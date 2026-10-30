@@ -18,7 +18,7 @@ nb.netbirdReq = async (method, path, body) => {
 };
 nb.netbirdPut = (path, body) => nb.netbirdReq('PUT', path, body);
 
-let item, rule, grant, settings;
+let item, rule, grant, settings, failNextSettingsWrite = false;
 const core = require('../lib/core');
 core.pool.query = async (sql, params = []) => {
     if (/FROM recert_items i JOIN recert_rounds/.test(sql)) return { rows: [clone(item)] };
@@ -31,7 +31,10 @@ core.pool.query = async (sql, params = []) => {
     if (/UPDATE temporary_access_grants SET status=\$2/.test(sql)) { grant.status = params[1]; return { rows: [] }; }
     if (/UPDATE temporary_access_grants SET last_status='', last_error=\$2/.test(sql)) { grant.last_error = params[1]; return { rows: [] }; }
     if (/FROM app_settings WHERE key = \$1/.test(sql)) return { rows: settings.has(params[0]) ? [{ value: settings.get(params[0]) }] : [] };
-    if (/INSERT INTO app_settings/.test(sql)) { settings.set(params[0], params[1]); return { rows: [] }; }
+    if (/INSERT INTO app_settings/.test(sql)) {
+        if (failNextSettingsWrite) { failNextSettingsWrite = false; throw new Error('database unavailable'); }
+        settings.set(params[0], params[1]); return { rows: [] };
+    }
     return { rows: [] };
 };
 const db = require('../db');
@@ -71,4 +74,18 @@ test('an item from before entries had ids still finds its entry after the config
     await setAutoApprovalConfig({ trusted: [{ ...live, maxMinutes: 45 }], rules: [] }); // edited, id kept
     await decideRecertItem(52, 'revoke', { name: 'admin' });
     assert.equal(getAutoApprovalConfig().trusted.length, 0);
+});
+
+test('a revoke whose config save failed is not recorded on retry until the entry is really removed', async () => {
+    settings = new Map();
+    await setAutoApprovalConfig({ trusted: [{ groupIds: ['g-retry'], maxMinutes: 60 }], rules: [] });
+    const snapshot = clone(getAutoApprovalConfig().trusted[0]);
+    item = { id: 53, round_id: 1, round_status: 'open', status: 'pending', kind: 'auto_trusted', label: 'Trusted', detail: { entry: snapshot } };
+    failNextSettingsWrite = true;
+    await assert.rejects(decideRecertItem(53, 'revoke', { name: 'admin' }));
+    assert.equal(item.status, 'pending');
+    assert.equal(getAutoApprovalConfig().trusted.length, 1, 'the live config must match what was saved');
+    await decideRecertItem(53, 'revoke', { name: 'admin' });
+    assert.equal(item.status, 'revoked');
+    assert.equal(JSON.parse(settings.get('auto_approval_config')).trusted.length, 0, 'the saved config must no longer have the entry');
 });

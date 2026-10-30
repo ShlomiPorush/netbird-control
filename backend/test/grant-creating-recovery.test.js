@@ -54,7 +54,10 @@ core.pool.query = async (sql, params = []) => {
     }
     if (/SET group_id=\$2/.test(sql)) { const r = rows.get(params[0]); if (r) r.status = 'active'; return { rows: [{ id: params[0] }] }; }
     if (/FROM temporary_access_grants WHERE status='creating'/.test(sql)) return { rows: [...rows.values()].filter(r => r.status === 'creating').map(clone) };
-    if (/FROM temporary_access_grants WHERE status='active' AND user_id=/.test(sql)) return { rows: otherActiveGrants };
+    if (/FROM temporary_access_grants WHERE status='active' AND regexp_replace\(user_id/.test(sql)) {
+        // Mirrors the SQL: same IdP-subject tail, and the group in assigned_groups.
+        return { rows: otherActiveGrants.filter(o => o.user_id.split('|').pop() === params[0] && o.assigned_groups.includes(params[2])).map(o => ({ id: o.id })) };
+    }
     return { rows: [] };
 };
 const { createTemporaryAccessGrant, cleanupStuckCreatingGrants } = require('../db');
@@ -105,7 +108,7 @@ test('cleanup leaves a group that another active grant of the user holds', async
     reset();
     nbUser.auto_groups = ['g-base', 'g-target'];
     rows.set(13, { id: 13, user_id: 'u1', user_label: 'U', status: 'creating', last_error: 'creation failed', assigned_groups: ['g-target'], targets: [{ type: 'group', id: 'g-target' }] });
-    otherActiveGrants = [{ id: 14 }];
+    otherActiveGrants = [{ id: 14, user_id: 'azure|u1', assigned_groups: ['g-target'] }]; // same user, other id form
     await cleanupStuckCreatingGrants();
     assert.ok(nbUser.auto_groups.includes('g-target'));
     assert.ok(!rows.has(13));

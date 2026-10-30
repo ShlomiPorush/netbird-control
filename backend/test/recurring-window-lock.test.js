@@ -20,13 +20,16 @@ nb.netbirdReq = async (method, path, body) => {
 };
 nb.netbirdPut = (path, body) => nb.netbirdReq('PUT', path, body);
 
-let rule, grants;
+let rule, grants, failLinkSave = false;
 const core = require('../lib/core');
 core.pool.query = async (sql, params = []) => {
     if (/FROM recurring_access WHERE enabled = TRUE/.test(sql)) return { rows: rule.enabled ? [clone(rule)] : [] };
     if (/FROM recurring_access WHERE id=\$1/.test(sql)) return { rows: [clone(rule)] };
     if (/UPDATE recurring_access SET user_id=\$2/.test(sql)) { rule.enabled = params[9]; return { rows: [clone(rule)] }; }
-    if (/UPDATE recurring_access SET active_grant_id=\$2/.test(sql)) { rule.active_grant_id = params[1]; return { rows: [] }; }
+    if (/UPDATE recurring_access SET active_grant_id=\$2/.test(sql)) {
+        if (failLinkSave) { failLinkSave = false; throw new Error('database unavailable'); }
+        rule.active_grant_id = params[1]; return { rows: [] };
+    }
     if (/UPDATE recurring_access SET active_grant_id=NULL/.test(sql)) { rule.active_grant_id = null; return { rows: [] }; }
     if (/nextval/.test(sql)) return { rows: [{ id: 77 }] };
     if (/INSERT INTO temporary_access_grants/.test(sql)) { grants.set(77, { id: 77, user_id: params[1], status: 'creating', assigned_groups: [], policy_ids: [], dest_group_ids: [], dest_resources: [], group_id: '', targets: JSON.parse(params[4]) }); return { rows: [] }; }
@@ -53,6 +56,19 @@ test('a rule disabled while its window is opening ends that window', async (t) =
     await run;
     await disable;
     assert.equal(rule.enabled, false);
+    assert.equal(rule.active_grant_id, null);
+    assert.equal(grants.get(77).status, 'revoked');
+    assert.ok(!nbUser.auto_groups.includes('g-target'));
+});
+
+test('a window whose link to the rule cannot be saved is ended at once', async (t) => {
+    const now = new Date();
+    if (now.getUTCHours() * 60 + now.getUTCMinutes() >= 23 * 60 + 58) return t.skip('too close to midnight UTC for an all-day window');
+    nbUser = { id: 'u1', role: 'user', is_blocked: false, auto_groups: [] };
+    grants = new Map();
+    rule = { id: 4, user_id: 'u1', user_label: 'U', user_email: '', targets: [{ type: 'group', id: 'g-target', name: 'Target' }], days: [0, 1, 2, 3, 4, 5, 6], start_time: '00:00', end_time: '23:59', valid_until: '', enabled: true, active_grant_id: null, last_spawn_key: '' };
+    failLinkSave = true;
+    await runRecurringAccess();
     assert.equal(rule.active_grant_id, null);
     assert.equal(grants.get(77).status, 'revoked');
     assert.ok(!nbUser.auto_groups.includes('g-target'));

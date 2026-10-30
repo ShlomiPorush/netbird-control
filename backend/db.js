@@ -615,9 +615,14 @@ function getAutoApprovalConfig() {
     return { trusted: _autoApproval.trusted, rules: _autoApproval.rules };
 }
 async function setAutoApprovalConfig({ trusted, rules } = {}) {
-    if (Array.isArray(trusted)) _autoApproval.trusted = normTrusted(trusted);
-    if (Array.isArray(rules)) _autoApproval.rules = normAutoRules(rules);
-    await persistAutoApproval();
+    const next = {
+        trusted: Array.isArray(trusted) ? normTrusted(trusted) : _autoApproval.trusted,
+        rules: Array.isArray(rules) ? normAutoRules(rules) : _autoApproval.rules,
+    };
+    // Only a saved config goes live: a failed save leaves the running rules unchanged.
+    await setSetting('auto_approval_config', JSON.stringify(next));
+    _autoApproval.trusted = next.trusted;
+    _autoApproval.rules = next.rules;
     return getAutoApprovalConfig();
 }
 // Per-target decision for a requester with Entra groups `groups`:
@@ -9356,7 +9361,9 @@ async function cleanupStuckCreatingGrants() {
                 : targets.filter(t => t && t.type === 'group').map(t => t.id);
             for (const gid of direct) {
                 await withNbUserLock(g.user_id, async () => {
-                    const held = await pool.query(`SELECT id FROM temporary_access_grants WHERE status='active' AND user_id=$1 AND tenant=$2 AND assigned_groups ? $3`, [g.user_id, tnt(), gid]);
+                    // Same user = same IdP-subject tail (the id forms getNbUser and the lock treat as one).
+                    const held = await pool.query(`SELECT id FROM temporary_access_grants WHERE status='active' AND regexp_replace(user_id, '^.*\\|', '') = $1 AND tenant=$2 AND assigned_groups ? $3`,
+                        [String(g.user_id || '').split('|').pop(), tnt(), gid]);
                     if (!held.rows.length) await applyUserGroupMembership(g.user_id, gid, false);
                 }).catch(() => { ok = false; });
             }
@@ -9570,7 +9577,14 @@ async function runRecurringAccess() {
                     note: `Recurring access rule #${r.id} (${r.start_time}-${r.end_time})`,
                     durationMinutes: endMin - nowMin,
                 }, { name: 'Scheduler', isAdmin: true });
-                await pool.query('UPDATE recurring_access SET active_grant_id=$2 WHERE id=$1 AND tenant=$3', [r.id, grant.id, tnt()]).catch(() => { });
+                try {
+                    await pool.query('UPDATE recurring_access SET active_grant_id=$2 WHERE id=$1 AND tenant=$3', [r.id, grant.id, tnt()]);
+                } catch (e) {
+                    // Without the link a disable could not find this window - end it now. (If that
+                    // fails too, the grant still expires at the window end on its own.)
+                    await revokeTemporaryAccessGrant(grant.id, { trigger: 'manual', actor: { name: 'Scheduler' } }).catch(() => { });
+                    throw e;
+                }
             });
         } catch (e) {
             console.error('[Recurring] rule %s activation failed:', r.id, e.message);
