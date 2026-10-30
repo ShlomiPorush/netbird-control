@@ -1,0 +1,305 @@
+// Who holds app authority. A user blocked in NetBird gets no role, groups or permissions. Direct
+// per-user grants and approval delegations count only for an existing, unblocked NetBird user.
+// Deleting a user in the main account also removes them from those grants and from the Telegram
+// approver mapping, and a deleted user's mirror row never comes back to grant their old role.
+const { test, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+
+Object.assign(process.env, {
+    OIDC_ISSUER_BASE_URL: 'http://127.0.0.1:9', OIDC_CLIENT_ID: 'test-client', OIDC_CLIENT_SECRET: 'test-secret',
+    BASE_URL: 'http://127.0.0.1:8', SESSION_SECRET: 'a-fixed-test-session-secret-0123456789',
+    ADMIN_GROUP_ID: 'admins', NETBIRD_API_URL: '', NETBIRD_API_TOKEN: '',
+});
+
+// ── Stub NetBird BEFORE db.js loads (it destructures these at require time) ──
+const nb = require('../lib/netbird');
+let liveUsers = [];   // what NetBird's user list answers
+let gateOnce = null;  // when set, the next user-list read takes its snapshot, then waits on it
+nb.netbirdGet = async (path) => {
+    if (path === '/api/users/current') return { id: 'svc' };
+    if (path === '/api/users?service_user=true') return [];
+    if (path === '/api/users') {
+        const snapshot = JSON.parse(JSON.stringify(liveUsers));
+        if (gateOnce) { const gate = gateOnce; gateOnce = null; await gate; }
+        return snapshot;
+    }
+    return null;
+};
+nb.netbirdReq = async (method, path) => {
+    liveUsers = liveUsers.filter(u => `/api/users/${encodeURIComponent(u.id)}` !== path);
+    return { status: 200, body: {} };
+};
+nb.netbirdPut = async (path, body) => {
+    const u = liveUsers.find(x => `/api/users/${encodeURIComponent(x.id)}` === path);
+    if (u) Object.assign(u, body);
+    return { status: 200, body: {} };
+};
+nb.bustNbCaches = () => { };
+
+// ── An in-memory stand-in for the users mirror and app_settings ──
+const core = require('../lib/core');
+const users = new Map();    // `${tenant}|${user_id}` → { tenant, user_id, display_name, email, raw_json }
+const settings = new Map(); // app_settings key → value
+let failSettingWrite = '';  // the next write to this key fails once
+let holdWrites = false;     // settings writes wait until released (to reorder them)
+const heldWrites = [];
+let emailLookups = 0;
+const viewerRow = (r, sql) => ({
+    user_id: r.user_id, email: r.email, display_name: r.display_name,
+    role: r.raw_json.role, auto_groups: r.raw_json.auto_groups || [],
+    // Only a query that actually selects the flag gets it.
+    ...(/is_blocked/.test(sql) ? { is_blocked: r.raw_json.is_blocked === true } : {}),
+});
+async function query(sql, params = []) {
+    if (/INSERT INTO app_settings/.test(sql)) {
+        const [key, value] = params;
+        if (failSettingWrite === key) { failSettingWrite = ''; throw new Error('settings write failed'); }
+        if (holdWrites) await new Promise(r => heldWrites.push(r));
+        settings.set(key, value);
+        return { rows: [] };
+    }
+    if (/SELECT value FROM app_settings/.test(sql)) {
+        return { rows: settings.has(params[0]) ? [{ value: settings.get(params[0]) }] : [] };
+    }
+    if (/INSERT INTO users/.test(sql)) {
+        const [id, name, email, raw, t] = params;
+        users.set(`${t}|${id}`, { tenant: t, user_id: id, display_name: name, email, raw_json: JSON.parse(raw) });
+        return { rows: [] };
+    }
+    if (/DELETE FROM users WHERE tenant = \$2 AND user_id <> ALL/.test(sql)) {
+        const [ids, t] = params;
+        for (const [k, r] of users) if (r.tenant === t && !ids.includes(r.user_id)) users.delete(k);
+        return { rows: [] };
+    }
+    if (/DELETE FROM users WHERE tenant = \$2 AND user_id = \$1/.test(sql)) {
+        users.delete(`${params[1]}|${params[0]}`);
+        return { rows: [] };
+    }
+    if (/FROM users WHERE user_id = \$1 AND tenant = \$2/.test(sql)) {
+        const r = users.get(`${params[1]}|${params[0]}`);
+        return { rows: r ? [r] : [] };
+    }
+    if (/FROM users WHERE tenant = '' AND \(user_id = \$1/.test(sql)) {
+        const r = [...users.values()].find(x => x.tenant === '' && (x.user_id === params[0] || x.user_id.endsWith('|' + params[0])));
+        return { rows: r ? [viewerRow(r, sql)] : [] };
+    }
+    if (/FROM users WHERE tenant = '' AND LOWER\(email\)/.test(sql)) {
+        emailLookups++;
+        const r = [...users.values()].find(x => x.tenant === '' && String(x.email).toLowerCase() === String(params[0]).toLowerCase());
+        return { rows: r ? [viewerRow(r, sql)] : [] };
+    }
+    return { rows: [] };
+}
+core.pool.query = query;
+core.pool.connect = async () => ({ query, release() { } });
+
+const db = require('../db');
+// Group sources for getViewer: Entra groups per oid, and one group from the user's peers.
+const adGroupsByOid = {};
+db.fetchUserGroups = async (oid) => adGroupsByOid[oid] || [];
+db.getUserPeerGroupIds = async () => ['peer-grp'];
+const { getViewer } = require('../server');
+
+const ME = { id: 'u-me', email: 'me@corp.com' };
+const OTHER = { id: 'u-other', email: 'other@corp.com' };
+const userRow = (id, email, raw, tenant = '') =>
+    users.set(`${tenant}|${id}`, { tenant, user_id: id, display_name: id, email, raw_json: { id, email, auto_groups: ['nb-grp'], ...raw } });
+const viewerFor = (oid, email) => getViewer({ oidc: { user: { oid, email } } });
+const savedJson = (key) => JSON.parse(settings.get(key) || '{}');
+const tick = () => new Promise(r => setImmediate(r));
+
+beforeEach(async () => {
+    users.clear(); settings.clear(); liveUsers = []; gateOnce = null;
+    failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0;
+    for (const k of Object.keys(adGroupsByOid)) delete adGroupsByOid[k];
+    await db.setFeaturePermsConfig({
+        'networks.manage': { users: [ME, OTHER], groupIds: [] },
+        'audit.view': { users: [], groupIds: ['entra-grp'] },
+        // An id-less entry and a different person who shares my email.
+        'temp.manage': { users: [{ email: 'ME@corp.com' }, { id: 'u-namesake', email: 'me@corp.com' }], groupIds: [] },
+    });
+    await db.setApproverConfig({
+        groupIds: ['peer-grp'],
+        delegates: [
+            { user: ME, from: '2000-01-01', until: '2999-12-31' },
+            { user: OTHER, from: '2000-01-01', until: '2999-12-31' },
+        ],
+        telegramApprovers: [
+            { telegramId: '1', userId: ME.id, email: ME.email },
+            { telegramId: '2', userId: '', email: 'ME@CORP.COM' },
+            { telegramId: '3', userId: OTHER.id, email: OTHER.email },
+            { telegramId: '4', userId: '', email: '' },
+        ],
+    });
+});
+
+test('a user blocked in NetBird has no role, groups or permissions', async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: true });
+    adGroupsByOid[ME.id] = ['admins', 'entra-grp'];
+    const v = await viewerFor(ME.id, ME.email);
+    assert.equal(v.isAdmin, false);
+    assert.equal(v.canApprove, false);
+    assert.equal(v.role, '');
+    assert.deepEqual(v.groups, []);
+    assert.ok(Object.values(v.perms).every(p => p === false), JSON.stringify(v.perms));
+});
+
+test('a blocked user found by email gets nothing, and a blocked id match never falls back to email', async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: true });
+    const byEmail = await viewerFor('unknown-oid', ME.email);
+    assert.equal(byEmail.isAdmin, false);
+    assert.equal(byEmail.perms['networks.manage'], false);
+
+    // The id matches a blocked row; an unblocked admin row with the same email must not be used.
+    userRow('u-twin', ME.email, { role: 'admin', is_blocked: false });
+    emailLookups = 0;
+    const byId = await viewerFor(ME.id, ME.email);
+    assert.equal(byId.isAdmin, false);
+    assert.equal(emailLookups, 0);
+});
+
+test('unblocking restores the direct grant and the delegation', async () => {
+    userRow(ME.id, ME.email, { role: 'user', is_blocked: true });
+    assert.equal((await viewerFor(ME.id, ME.email)).perms['networks.manage'], false);
+    users.get('|u-me').raw_json.is_blocked = false;
+    const v = await viewerFor(ME.id, ME.email);
+    assert.equal(v.isAdmin, false);
+    assert.equal(v.perms['networks.manage'], true);
+    assert.equal(v.canApprove, true);
+});
+
+test('an active user gets direct grants, delegations and group grants', async () => {
+    userRow(ME.id, ME.email, { role: 'user', is_blocked: false });
+    adGroupsByOid[ME.id] = ['entra-grp'];
+    await db.setApproverConfig({ groupIds: [] });
+    const v = await viewerFor(ME.id, ME.email);
+    assert.equal(v.isAdmin, false);
+    assert.equal(v.perms['networks.manage'], true);
+    assert.equal(v.perms['audit.view'], true);
+    assert.equal(v.canApprove, true); // through the delegation only
+});
+
+test('without a NetBird user, direct grants and delegations do not apply, group grants and the admin group still do', async () => {
+    adGroupsByOid[ME.id] = ['entra-grp'];
+    await db.setApproverConfig({ groupIds: [] });
+    const v = await viewerFor(ME.id, ME.email);
+    assert.equal(v.perms['networks.manage'], false);
+    assert.equal(v.perms['temp.manage'], false);
+    assert.equal(v.canApprove, false);
+    assert.equal(v.perms['audit.view'], true);
+
+    adGroupsByOid[ME.id] = ['admins'];
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, true);
+});
+
+test('deleting a user in the main account removes them from direct grants, delegations and Telegram approvers', async () => {
+    userRow(ME.id, ME.email, { role: 'user' });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'user' }];
+    await db.deleteUser(ME.id);
+
+    const perms = savedJson('feature_permissions');
+    assert.deepEqual(perms['networks.manage'].users.map(u => u.id), [OTHER.id]);
+    // The id-less entry with my email is gone; the namesake with its own id stays.
+    assert.deepEqual(perms['temp.manage'].users.map(u => u.id), ['u-namesake']);
+    const approver = savedJson('approver_config');
+    assert.deepEqual(approver.delegates.map(d => d.user.id), [OTHER.id]);
+    assert.deepEqual(approver.telegramApprovers.map(a => a.telegramId), ['3', '4']);
+    assert.deepEqual(db.getApproverConfig().telegramApprovers.map(a => a.telegramId), ['3', '4']);
+});
+
+test('a user without an email never matches id-less entries without an email', async () => {
+    userRow('u-svc', '', { role: 'user' });
+    await db.deleteUser('u-svc');
+    assert.deepEqual(savedJson('approver_config').telegramApprovers.map(a => a.telegramId), ['1', '2', '3', '4']);
+    assert.equal(savedJson('feature_permissions')['temp.manage'].users.length, 2);
+});
+
+test('deleting a user inside a tenant leaves the main-account settings alone', async () => {
+    userRow(ME.id, ME.email, { role: 'user' }, 't1');
+    const before = [settings.get('feature_permissions'), settings.get('approver_config')];
+    await nb.runWithTenant('t1', () => db.deleteUser(ME.id));
+    assert.deepEqual([settings.get('feature_permissions'), settings.get('approver_config')], before);
+    assert.equal(db.getApproverConfig().telegramApprovers.length, 4);
+});
+
+for (const key of ['feature_permissions', 'approver_config']) {
+    test(`a failed ${key} write is reported, both settings are still written, and the next delete persists the cleanup`, async () => {
+        userRow(ME.id, ME.email, { role: 'admin' });
+        userRow('u-gone', 'gone@corp.com', { role: 'user' });
+        const other = key === 'feature_permissions' ? 'approver_config' : 'feature_permissions';
+        failSettingWrite = key;
+        const otherBefore = settings.get(other);
+        await assert.rejects(db.deleteUser(ME.id), (err) => {
+            assert.equal(err.status, 500);
+            assert.match(err.message, /deleted/);
+            assert.equal(err.userDeleted.label, ME.email);
+            return true;
+        });
+        assert.notEqual(settings.get(other), otherBefore); // the other document was still written
+        // The deleted admin's mirror row is gone, so a new request does not get the old role.
+        assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+
+        await db.deleteUser('u-gone');
+        assert.deepEqual(savedJson('feature_permissions')['networks.manage'].users.map(u => u.id), [OTHER.id]);
+        assert.deepEqual(savedJson('approver_config').delegates.map(d => d.user.id), [OTHER.id]);
+    });
+}
+
+test('concurrent deletes are both removed from the saved settings', async () => {
+    userRow(ME.id, ME.email, { role: 'user' });
+    userRow(OTHER.id, OTHER.email, { role: 'user' });
+    holdWrites = true;
+    const done = Promise.all([db.deleteUser(ME.id), db.deleteUser(OTHER.id)]);
+    let finished = false;
+    done.then(() => { finished = true; }, () => { finished = true; });
+    // Let each held write land in reverse order, so an older write would overwrite a newer one.
+    while (!finished) {
+        await tick();
+        const batch = heldWrites.splice(0).reverse();
+        for (const release of batch) { release(); await tick(); }
+    }
+    await done;
+    assert.deepEqual(savedJson('feature_permissions')['networks.manage'].users, []);
+    assert.deepEqual(savedJson('approver_config').delegates, []);
+    assert.deepEqual(savedJson('approver_config').telegramApprovers.map(a => a.telegramId), ['4']);
+});
+
+test('a user-list refresh that started before a delete does not bring the user back', async () => {
+    nb._nbApi.url = 'http://netbird.test'; nb._nbApi.token = 't';
+    try {
+        userRow(ME.id, ME.email, { role: 'admin' });
+        liveUsers = [{ id: ME.id, email: ME.email, role: 'admin' }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+        db.resetNbCaches();
+        let open; gateOnce = new Promise(r => { open = r; });
+        const refresh = db.ensureUsersFresh();  // reads the list (with me), then waits
+        await tick();
+        const deleting = db.deleteUser(ME.id);
+        await tick();
+        open();
+        await Promise.all([refresh, deleting]);
+        assert.equal(users.has('|u-me'), false);
+        assert.equal(await db.resolveViewer(ME.id, ME.email), null);
+    } finally {
+        nb._nbApi.url = ''; nb._nbApi.token = '';
+    }
+});
+
+test('a user-list refresh that started before a block does not leave the user unblocked', async () => {
+    nb._nbApi.url = 'http://netbird.test'; nb._nbApi.token = 't';
+    try {
+        userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
+        liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+        db.resetNbCaches();
+        let open; gateOnce = new Promise(r => { open = r; });
+        const refresh = db.ensureUsersFresh();
+        await tick();
+        const blocking = db.setUserBlocked(ME.id, true);
+        await tick();
+        open();
+        await Promise.all([refresh, blocking]);
+        assert.equal(users.get('|u-me').raw_json.is_blocked, true);
+        assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    } finally {
+        nb._nbApi.url = ''; nb._nbApi.token = '';
+    }
+});

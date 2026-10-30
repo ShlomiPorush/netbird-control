@@ -5130,13 +5130,58 @@ async function deleteUser(id) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to delete the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
+    // A user-list refresh already in flight may have read the list before this delete - let it
+    // land first, so it cannot write the deleted user back into the mirror.
+    await _usersRefreshing.get(acct);
     // Drop the mirror row so the user disappears at once, then force a re-pull of BOTH
     // mirrors for THIS account - the user's peers died with them.
     await pool.query('DELETE FROM users WHERE tenant = $2 AND user_id = $1', [id, acct]).catch(() => { });
     _usersLastRefresh.set(acct, 0);
     _peersLastRefresh.set(acct, 0);
     bustNbCaches('gref', 'usage');
-    return { ok: true, name: row.display_name || '', email: row.email || '', label };
+    const out = { ok: true, name: row.display_name || '', email: row.email || '', label };
+    // The permission settings are main-account only, so a tenant user's delete never touches them.
+    if (!acct) {
+        try {
+            await removeUserFromAppSettings(id, row.email);
+        } catch (err) {
+            console.error('[Users] removing a deleted user from the permission settings failed:', err.message);
+            const e = new Error("The user was deleted, but removing them from the app's permission settings failed. "
+                + 'Their direct permissions and approval delegations no longer apply because the user no longer exists; '
+                + 'check Settings - Approvals for a Telegram approver mapping.');
+            e.status = 500; e.userDeleted = out; throw e;
+        }
+    }
+    return out;
+}
+
+// A user deleted in the main account loses the app authority recorded for them: their direct
+// feature-permission entries, approval delegations and Telegram approver mappings. An entry with
+// an id matches the exact NetBird user id only; an entry without an id matches by email. Runs one
+// at a time, so two deletes never write over each other, and always writes both settings, so a
+// cleanup whose write failed earlier is persisted by the next one.
+let _userSettingsCleanup = Promise.resolve();
+function removeUserFromAppSettings(id, email) {
+    const em = String(email || '').trim().toLowerCase();
+    const isUser = (entryId, entryEmail) => entryId
+        ? entryId === id
+        : !!em && String(entryEmail || '').trim().toLowerCase() === em;
+    const run = async () => {
+        const perms = getFeaturePermsConfig();
+        for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
+        const results = await Promise.allSettled([
+            setFeaturePermsConfig(perms),
+            setApproverConfig({
+                delegates: _approver.delegates.filter(d => !isUser(d.user.id, d.user.email)),
+                telegramApprovers: _approver.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
+            }),
+        ]);
+        const failed = results.find(r => r.status === 'rejected');
+        if (failed) throw failed.reason;
+    };
+    const p = _userSettingsCleanup.then(run, run);
+    _userSettingsCleanup = p.catch(() => { });
+    return p;
 }
 
 // Resolve one user to a mirror-shaped row {user_id, display_name, email, raw_json} for the write
@@ -5198,8 +5243,10 @@ async function setUserBlocked(id, blocked) {
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
     // Refresh the mirror now (bypassing the TTL) so is_blocked flips immediately on the Users page.
+    // A refresh already in flight may have read the list before this change - let it land first.
+    await _usersRefreshing.get(acct);
     _usersLastRefresh.set(acct, 0);
-    await refreshUsersCache().catch(err => console.error('[UserResolve] post-block refresh error:', err.message));
+    await ensureUsersFresh();
     return { ok: true, name: row.display_name || '', email: row.email || '', label, blocked: !!blocked };
 }
 
@@ -7963,17 +8010,21 @@ async function resolveUser(userId) {
 
 // Resolve a logged-in SSO user (by Azure oid and/or email) to their cached
 // NetBird identity + role. Used for access control. Returns null if unknown.
+// A user blocked in NetBird resolves with `blocked: true`, no role and no groups - and an id match
+// is final, so a blocked user is never re-resolved by email.
 async function resolveViewer(oid, email) {
     const mapRow = row => ({
         user_id: row.user_id,
         email: row.email,
         name: row.display_name,
-        role: row.role || '',
-        auto_groups: Array.isArray(row.auto_groups) ? row.auto_groups : [],
+        role: row.is_blocked ? '' : (row.role || ''),
+        auto_groups: !row.is_blocked && Array.isArray(row.auto_groups) ? row.auto_groups : [],
+        blocked: !!row.is_blocked,
     });
     if (oid) {
         const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups
+            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
+                    (raw_json->>'is_blocked') = 'true' AS is_blocked
              FROM users WHERE tenant = '' AND (user_id = $1 OR user_id LIKE '%|' || $1) LIMIT 1`,
             [oid]
         );
@@ -7981,7 +8032,8 @@ async function resolveViewer(oid, email) {
     }
     if (email) {
         const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups
+            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
+                    (raw_json->>'is_blocked') = 'true' AS is_blocked
              FROM users WHERE tenant = '' AND LOWER(email) = LOWER($1) LIMIT 1`,
             [email]
         );
