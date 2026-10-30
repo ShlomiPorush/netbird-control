@@ -17,6 +17,7 @@ parentPort.on('message', ({ seq, jobs, state }) => {
     for (const job of jobs) {
         if (job.pattern !== undefined) rules.set(job.key, { pattern: job.pattern, re: undefined });
     }
+    const begin = performance.now();
     let hit = false;
     for (let i = 0; i < jobs.length && !hit; i++) {
         const rule = rules.get(jobs[i].key);
@@ -32,7 +33,8 @@ parentPort.on('message', ({ seq, jobs, state }) => {
         times[2 * i + 1] = Date.now() - start;
         Atomics.store(counters, 1, i + 1);
     }
-    parentPort.postMessage({ seq, hit });
+    // ms = how long this whole request took here, for the main thread's time limit.
+    parentPort.postMessage({ seq, hit, ms: performance.now() - begin });
 });
 
 // Ready to take requests: the main thread starts a request's time limit only after this.

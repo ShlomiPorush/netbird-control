@@ -771,8 +771,8 @@ function spawnRegexWorker() {
             if (regexInflight && regexInflight.rw === rw) armRegexDeadline();
         } else if (regexInflight && regexInflight.rw === rw && m.seq === regexInflight.seq) {
             // The reply can be read after the time limit when the main thread was busy; it counts
-            // only if the worker's own run of the rules stayed within the limit.
-            finishRegexRequest(m.hit && regexRunMs(regexInflight) <= REGEX_BUDGET_MS);
+            // only if the worker's own run of the request stayed within the limit.
+            finishRegexRequest(m.hit && m.ms <= REGEX_BUDGET_MS);
         }
     });
     worker.on('error', (err) => {
@@ -795,15 +795,6 @@ function retireRegexWorker(rw) {
     // terminate() keeps the worker referenced until it exits, so queued events waiting for a free
     // thread are never abandoned.
     rw.worker.terminate().catch(() => {});
-}
-
-// Total time the worker spent on the in-flight request's finished rules.
-function regexRunMs(req) {
-    const finished = Atomics.load(new Int32Array(req.state, 0, 2), 1);
-    const times = new Float64Array(req.state, 8);
-    let ms = 0;
-    for (let i = 0; i < finished; i++) ms += times[2 * i + 1];
-    return ms;
 }
 
 // Strike every rule of the in-flight request that was slow: finished ones by duration, and the
