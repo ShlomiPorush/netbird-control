@@ -14,13 +14,16 @@ Object.assign(process.env, {
 // ── Stub NetBird BEFORE db.js loads (it destructures these at require time) ──
 const nb = require('../lib/netbird');
 let liveUsers = [];   // what NetBird's user list answers
-let gateOnce = null;  // when set, the next user-list read takes its snapshot, then waits on it
+let gateOnce = null;  // when set, a user-list read (after skipping gateSkip reads) takes its snapshot, then waits on it
+let gateSkip = 0;
+let gateHit = false;
 nb.netbirdGet = async (path) => {
     if (path === '/api/users/current') return { id: 'svc' };
     if (path === '/api/users?service_user=true') return [];
     if (path === '/api/users') {
         const snapshot = JSON.parse(JSON.stringify(liveUsers));
-        if (gateOnce) { const gate = gateOnce; gateOnce = null; await gate; }
+        if (gateOnce && gateSkip > 0) gateSkip--;
+        else if (gateOnce) { const gate = gateOnce; gateOnce = null; gateHit = true; await gate; }
         return snapshot;
     }
     return null;
@@ -35,6 +38,7 @@ nb.netbirdPut = async (path, body) => {
     return { status: 200, body: {} };
 };
 nb.bustNbCaches = () => { };
+nb.refreshBypassedPeers = async () => { };
 
 // ── An in-memory stand-in for the users mirror and app_settings ──
 const core = require('../lib/core');
@@ -107,9 +111,21 @@ const userRow = (id, email, raw, tenant = '') =>
 const viewerFor = (oid, email) => getViewer({ oidc: { user: { oid, email } } });
 const savedJson = (key) => JSON.parse(settings.get(key) || '{}');
 const tick = () => new Promise(r => setImmediate(r));
+// Hold the next user-list read (after `skip` reads) until the returned open() is called.
+function holdListRead(skip = 0) {
+    let open; gateOnce = new Promise(r => { open = r; }); gateSkip = skip; gateHit = false;
+    return open;
+}
+async function untilHeld() { while (!gateHit) await tick(); }
+function withNetbirdApi(fn) {
+    return async () => {
+        nb._nbApi.url = 'http://netbird.test'; nb._nbApi.token = 't';
+        try { await fn(); } finally { nb._nbApi.url = ''; nb._nbApi.token = ''; }
+    };
+}
 
 beforeEach(async () => {
-    users.clear(); settings.clear(); liveUsers = []; gateOnce = null;
+    users.clear(); settings.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
     failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0;
     for (const k of Object.keys(adGroupsByOid)) delete adGroupsByOid[k];
     await db.setFeaturePermsConfig({
@@ -264,42 +280,64 @@ test('concurrent deletes are both removed from the saved settings', async () => 
     assert.deepEqual(savedJson('approver_config').telegramApprovers.map(a => a.telegramId), ['4']);
 });
 
-test('a user-list refresh that started before a delete does not bring the user back', async () => {
-    nb._nbApi.url = 'http://netbird.test'; nb._nbApi.token = 't';
-    try {
-        userRow(ME.id, ME.email, { role: 'admin' });
-        liveUsers = [{ id: ME.id, email: ME.email, role: 'admin' }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
-        db.resetNbCaches();
-        let open; gateOnce = new Promise(r => { open = r; });
-        const refresh = db.ensureUsersFresh();  // reads the list (with me), then waits
+test('a settings save that finishes after a delete does not bring the deleted user back', async () => {
+    userRow(ME.id, ME.email, { role: 'user' });
+    holdWrites = true;
+    // An admin save that still lists me, started before the delete; its write lands last.
+    const saving = db.setFeaturePermsConfig({ 'networks.manage': { users: [ME, OTHER], groupIds: [] } });
+    const deleting = db.deleteUser(ME.id);
+    let finished = false;
+    Promise.allSettled([saving, deleting]).then(() => { finished = true; });
+    while (!finished) {
         await tick();
-        const deleting = db.deleteUser(ME.id);
-        await tick();
-        open();
-        await Promise.all([refresh, deleting]);
-        assert.equal(users.has('|u-me'), false);
-        assert.equal(await db.resolveViewer(ME.id, ME.email), null);
-    } finally {
-        nb._nbApi.url = ''; nb._nbApi.token = '';
+        const batch = heldWrites.splice(0).reverse();
+        for (const release of batch) { release(); await tick(); }
     }
+    await Promise.all([saving, deleting]);
+    assert.deepEqual(savedJson('feature_permissions')['networks.manage'].users.map(u => u.id), [OTHER.id]);
+    assert.deepEqual(savedJson('approver_config').delegates.map(d => d.user.id), [OTHER.id]);
 });
 
-test('a user-list refresh that started before a block does not leave the user unblocked', async () => {
-    nb._nbApi.url = 'http://netbird.test'; nb._nbApi.token = 't';
-    try {
-        userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
-        liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
-        db.resetNbCaches();
-        let open; gateOnce = new Promise(r => { open = r; });
-        const refresh = db.ensureUsersFresh();
-        await tick();
-        const blocking = db.setUserBlocked(ME.id, true);
-        await tick();
-        open();
-        await Promise.all([refresh, blocking]);
-        assert.equal(users.get('|u-me').raw_json.is_blocked, true);
-        assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
-    } finally {
-        nb._nbApi.url = ''; nb._nbApi.token = '';
-    }
-});
+test('a user-list refresh that started before a delete does not bring the user back', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin' });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin' }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+    db.resetNbCaches();
+    const open = holdListRead();
+    const refresh = db.ensureUsersFresh(); // reads the list (with me), then waits
+    await untilHeld();
+    const deleting = db.deleteUser(ME.id);
+    await tick();
+    open();
+    await Promise.all([refresh, deleting]);
+    assert.equal(users.has('|u-me'), false);
+    assert.equal(await db.resolveViewer(ME.id, ME.email), null);
+}));
+
+test('a refresh started by a group change before a delete does not bring the user back', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin' });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner', is_blocked: false, auto_groups: [] }];
+    const open = holdListRead(1); // the group change reads the list once, then its refresh reads it
+    const grouping = db.addUsersToGroup('g9', [OTHER.id]);
+    await untilHeld();
+    const deleting = db.deleteUser(ME.id);
+    await tick();
+    open();
+    await Promise.all([grouping, deleting]);
+    assert.equal(users.has('|u-me'), false);
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+}));
+
+test('a user-list refresh that started before a block does not leave the user unblocked', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+    db.resetNbCaches();
+    const open = holdListRead();
+    const refresh = db.ensureUsersFresh();
+    await untilHeld();
+    const blocking = db.setUserBlocked(ME.id, true);
+    await tick();
+    open();
+    await Promise.all([refresh, blocking]);
+    assert.equal(users.get('|u-me').raw_json.is_blocked, true);
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+}));

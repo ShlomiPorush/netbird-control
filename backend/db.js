@@ -307,8 +307,17 @@ async function setFeaturePermsConfig(cfg) {
     for (const k of PERMISSION_KEYS) {
         if (cfg && cfg[k] !== undefined) _featurePerms[k] = normPermEntry(cfg[k]);
     }
-    await setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig()));
+    await persistInOrder(() => setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig())));
     return getFeaturePermsConfig();
+}
+// Permission and approver settings are written one at a time, each from the CURRENT in-memory
+// state, so a save that finishes late can never overwrite a newer one (such as a deleted user's
+// removal).
+let _permSettingsWrites = Promise.resolve();
+function persistInOrder(write) {
+    const p = _permSettingsWrites.then(write, write);
+    _permSettingsWrites = p.catch(() => { });
+    return p;
 }
 // The viewer's effective permission map. Matches a user by NetBird user id / oid tail / email,
 // and groups against the viewer's FULL group union (same semantics as network grants).
@@ -493,9 +502,9 @@ async function loadApproverConfig() {
     }
 }
 async function persistApprover() {
-    await setSetting('approver_config', JSON.stringify({
+    await persistInOrder(() => setSetting('approver_config', JSON.stringify({
         groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates,
-    }));
+    })));
 }
 function getApproverConfig() {
     return { groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates };
@@ -5132,7 +5141,7 @@ async function deleteUser(id) {
     }
     // A user-list refresh already in flight may have read the list before this delete - let it
     // land first, so it cannot write the deleted user back into the mirror.
-    await _usersRefreshing.get(acct);
+    await settleUserRefreshes(acct);
     // Drop the mirror row so the user disappears at once, then force a re-pull of BOTH
     // mirrors for THIS account - the user's peers died with them.
     await pool.query('DELETE FROM users WHERE tenant = $2 AND user_id = $1', [id, acct]).catch(() => { });
@@ -5157,31 +5166,24 @@ async function deleteUser(id) {
 
 // A user deleted in the main account loses the app authority recorded for them: their direct
 // feature-permission entries, approval delegations and Telegram approver mappings. An entry with
-// an id matches the exact NetBird user id only; an entry without an id matches by email. Runs one
-// at a time, so two deletes never write over each other, and always writes both settings, so a
-// cleanup whose write failed earlier is persisted by the next one.
-let _userSettingsCleanup = Promise.resolve();
-function removeUserFromAppSettings(id, email) {
+// an id matches the exact NetBird user id only; an entry without an id matches by email. Always
+// writes both settings, so a cleanup whose write failed earlier is persisted by the next one.
+async function removeUserFromAppSettings(id, email) {
     const em = String(email || '').trim().toLowerCase();
     const isUser = (entryId, entryEmail) => entryId
         ? entryId === id
         : !!em && String(entryEmail || '').trim().toLowerCase() === em;
-    const run = async () => {
-        const perms = getFeaturePermsConfig();
-        for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
-        const results = await Promise.allSettled([
-            setFeaturePermsConfig(perms),
-            setApproverConfig({
-                delegates: _approver.delegates.filter(d => !isUser(d.user.id, d.user.email)),
-                telegramApprovers: _approver.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
-            }),
-        ]);
-        const failed = results.find(r => r.status === 'rejected');
-        if (failed) throw failed.reason;
-    };
-    const p = _userSettingsCleanup.then(run, run);
-    _userSettingsCleanup = p.catch(() => { });
-    return p;
+    const perms = getFeaturePermsConfig();
+    for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
+    const results = await Promise.allSettled([
+        setFeaturePermsConfig(perms),
+        setApproverConfig({
+            delegates: _approver.delegates.filter(d => !isUser(d.user.id, d.user.email)),
+            telegramApprovers: _approver.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
+        }),
+    ]);
+    const failed = results.find(r => r.status === 'rejected');
+    if (failed) throw failed.reason;
 }
 
 // Resolve one user to a mirror-shaped row {user_id, display_name, email, raw_json} for the write
@@ -5244,9 +5246,9 @@ async function setUserBlocked(id, blocked) {
     }
     // Refresh the mirror now (bypassing the TTL) so is_blocked flips immediately on the Users page.
     // A refresh already in flight may have read the list before this change - let it land first.
-    await _usersRefreshing.get(acct);
+    await settleUserRefreshes(acct);
     _usersLastRefresh.set(acct, 0);
-    await ensureUsersFresh();
+    await refreshUsersCache().catch(err => console.error('[UserResolve] post-block refresh error:', err.message));
     return { ok: true, name: row.display_name || '', email: row.email || '', label, blocked: !!blocked };
 }
 
@@ -7833,7 +7835,22 @@ async function upsertUsers(users) {
     }
 }
 
-async function refreshUsersCache() {
+// Every running refresh per account, whoever started it. A delete or block waits for them, so a
+// list read before the change is never written back after it.
+const _usersPulls = new Map(); // account id → Set of refresh promises
+function refreshUsersCache() {
+    const t = tnt();
+    const p = pullUsersCache();
+    if (!_usersPulls.has(t)) _usersPulls.set(t, new Set());
+    _usersPulls.get(t).add(p);
+    p.catch(() => { }).finally(() => _usersPulls.get(t).delete(p));
+    return p;
+}
+async function settleUserRefreshes(acct) {
+    await Promise.allSettled([...(_usersPulls.get(acct) || [])]);
+}
+
+async function pullUsersCache() {
     const t = tnt();
     const users = await fetchUsersFromApi();
     if (users) {
