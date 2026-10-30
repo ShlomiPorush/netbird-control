@@ -4,7 +4,7 @@
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
-const { httpJson } = require('../lib/http');
+const { httpJson, getNetbirdLastOk } = require('../lib/http');
 
 let current = null;
 
@@ -90,6 +90,20 @@ test('a body over the default size limit is stopped', async () => {
     assert.match(r.error, /larger than/);
     await pause(50);
     assert.equal(current.closed, 1);
+});
+
+test('a body that crosses the size limit in its last chunk does not count as a success', async () => {
+    await serve((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(Buffer.alloc(1001, 0x20));
+    });
+    await pause(10);
+    const lastOk = getNetbirdLastOk();
+    const r = await settles(httpJson('GET', current.url, { maxBytes: 1000 }));
+    assert.equal(r.status, 0);
+    assert.match(r.error, /larger than/);
+    await pause(50);
+    assert.equal(getNetbirdLastOk(), lastOk);
 });
 
 test('a connection dropped mid-body resolves with an error', async () => {

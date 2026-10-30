@@ -43,7 +43,7 @@ function httpJson(method, urlStr, { headers = {}, body = undefined, timeoutMs = 
                 chunks.push(c);
             });
             res.on('error', e => finish({ status: 0, error: e.message }));
-            res.on('end', () => { const d = Buffer.concat(chunks).toString('utf8'); let j = null; try { j = JSON.parse(d); } catch (e) { } if (res.statusCode >= 200 && res.statusCode < 300) _nbLastOkAt = Date.now(); finish({ status: res.statusCode, body: j, raw: d }); });
+            res.on('end', () => { if (settled) return; const d =Buffer.concat(chunks).toString('utf8'); let j = null; try { j = JSON.parse(d); } catch (e) { } if (res.statusCode >= 200 && res.statusCode < 300) _nbLastOkAt = Date.now(); finish({ status: res.statusCode, body: j, raw: d }); });
         });
         deadline = setTimeout(() => { req.destroy(); finish({ status: 0, error: `response not completed within ${deadlineMs / 1000} s` }); }, deadlineMs);
         req.on('error', e => finish({ status: 0, error: e.message }));
