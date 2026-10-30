@@ -67,8 +67,9 @@ function tooManyRequests(req, res, next, options) {
     return res.type('text/plain').send(MESSAGE);
 }
 
-// Options for rateLimit(). `windowMs` is only overridden by the tests.
-function limiterOptions(kind, { windowMs = WINDOW_MS, assetsDir = '' } = {}) {
+// Options for rateLimit(). `windowMs` is only overridden by the tests. `skipAuth(req)` exempts
+// requests from the auth budget that can't start a login at the provider.
+function limiterOptions(kind, { windowMs = WINDOW_MS, assetsDir = '', skipAuth = () => false } = {}) {
     const base = {
         windowMs,
         limit: LIMITS[kind],
@@ -78,7 +79,7 @@ function limiterOptions(kind, { windowMs = WINDOW_MS, assetsDir = '' } = {}) {
         handler: tooManyRequests,
     };
     if (kind === 'auth') {
-        return { ...base, keyGenerator: (req) => `ip:${ipKeyGenerator(req.ip || '')}`, skip: skipAuthBudget };
+        return { ...base, keyGenerator: (req) => `ip:${ipKeyGenerator(req.ip || '')}`, skip: (req) => skipAuth(req) || skipAuthBudget(req) };
     }
     if (kind === 'api') return { ...base, keyGenerator: clientKey };
     if (kind === 'spa') {

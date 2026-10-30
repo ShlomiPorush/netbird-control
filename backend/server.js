@@ -301,6 +301,15 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// The "Signing in" page's script (see "One login at a time"), public because that page is shown
+// to signed-out visitors; the CSP allows only same-origin scripts. It reloads the page every 2 s
+// and stops once a link is clicked, so a reload can't abort "Sign in here instead".
+app.get('/login-wait.js', (req, res) => {
+    res.type('application/javascript').set('Cache-Control', 'public, max-age=86400').send(
+        "var t=setTimeout(function(){location.replace(location.href)},2000);" +
+        "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a'))clearTimeout(t)});");
+});
+
 // Telegram webhook - receives inline-button presses (callback_query). Public (Telegram can't
 // log in), but authenticated by the secret token Telegram echoes in a header, and each press is
 // re-checked against the approver allow-list inside handleTelegramCallback.
@@ -325,13 +334,94 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
 // The routes above (webhook receivers, health probe, Telegram callback) are registered BEFORE
 // every limiter, so they are never rate limited: the receivers must accept NetBird's and
 // Telegram's event volume and are protected by their tokens plus the failed-token throttle.
-const authLimiter = rateLimit(limiterOptions('auth'));
+// A GET that finds a login in flight only gets the "Signing in" page (or goes on signed in): it
+// can't start a login at the provider, so its reloads don't draw from the auth budget - which
+// would otherwise run out and block the in-flight login's own /callback. /callback and /logout
+// reach the provider and always count (checked on the routed path, whatever form the URL took).
+const authLimiter = rateLimit(limiterOptions('auth', {
+    skipAuth: (req) => req.method === 'GET' && !/^\/(callback|logout)(\/|$)/i.test(req.baseUrl + req.path) &&
+        !forcedLogin(req) && loginInFlight(req),
+}));
 const apiLimiter = rateLimit(limiterOptions('api'));
 const spaLimiter = rateLimit(limiterOptions('spa', { assetsDir: path.join(__dirname, 'public', 'assets') }));
+// How often a failed OIDC callback restarts the login before it stops (see the error handler).
+const MAX_LOGIN_RETRIES = 3;
+
+// ── One login at a time per browser ──
+// The library keeps a login's transaction in ONE cookie (auth_verification), so a login started
+// while another is in flight overwrites it and breaks the first one - which is what happens when
+// a session expires and every open tab is sent to sign in at once. A login start therefore sets
+// login_pending (<id>.<started ms>), with the same id in the login's state; the callback of THAT
+// login clears it, whether it succeeds or fails, and so does /logout. Another login start that
+// finds it waits on a short page that reloads itself: once the first login finishes, the reload
+// finds the session and goes on. The wait allows for a slow MFA prompt; the page also offers
+// "Sign in here instead" (/login?force=1) for a login that was abandoned, and after
+// LOGIN_PENDING_MS the tab starts its own anyway. Over HTTPS the cookie is __Host- prefixed, so a
+// sibling subdomain can't plant one; a start time in the future is ignored.
+const LOGIN_PENDING_SECURE = /^https:/i.test(process.env.BASE_URL || '');
+const LOGIN_PENDING_COOKIE = LOGIN_PENDING_SECURE ? '__Host-login_pending' : 'login_pending';
+const LOGIN_PENDING_MS = 120_000;
+const loginPendingCookieOptions = () => ({ httpOnly: true, sameSite: 'lax', secure: LOGIN_PENDING_SECURE, path: '/' });
+function readLoginPending(req) {
+    for (const part of String(req.headers.cookie || '').split(/;\s*/)) {
+        const eq = part.indexOf('=');
+        if (part.slice(0, eq) !== LOGIN_PENDING_COOKIE) continue;
+        const m = /^([A-Za-z0-9_-]+)\.(\d{1,15})$/.exec(part.slice(eq + 1));
+        if (m) return { id: m[1], startedAt: Number(m[2]) };
+    }
+    return null;
+}
+function loginInFlight(req) {
+    const pending = readLoginPending(req);
+    if (!pending) return false;
+    const age = Date.now() - pending.startedAt;
+    return age >= 0 && age < LOGIN_PENDING_MS;
+}
+// On the routed path, so it also matches where the limiter is mounted on /login itself.
+const isLoginPath = (req) => /^\/login\/?$/i.test(req.baseUrl + req.path);
+// "Sign in here instead": starts a login even while another is in flight.
+const forcedLogin = (req) => isLoginPath(req) && req.query.force === '1';
+// Would this request start a login at the provider? Signed out: requiresAuth() does for any
+// request that accepts HTML (any method). Signed in: only GET /login (HEAD is routed there too),
+// when the session fails the in-app caps (see the /login route).
+function startsLogin(req) {
+    if (!req.oidc.isAuthenticated()) return !!req.accepts('html');
+    return (req.method === 'GET' || req.method === 'HEAD') && isLoginPath(req) && !sessionPassesCaps(req);
+}
+// The "Signing in" page: reloads itself (/login-wait.js; a meta refresh without JavaScript);
+// "Sign in here instead" forces a login from this tab.
+function loginWaitPage(req) {
+    const page = isLoginPath(req) ? String(req.query.returnTo || '/') : req.originalUrl;
+    const force = `/login?force=1&returnTo=${encodeURIComponent(page.startsWith('/') ? page : '/')}`.replace(/&/g, '&amp;');
+    return '<!doctype html><meta charset="utf-8"><title>Signing in…</title>' +
+        '<noscript><meta http-equiv="refresh" content="2"></noscript>' +
+        '<p>Signing in - another tab is already signing you in. This page continues on its own.</p>' +
+        `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js"></script>`;
+}
+// The decoded OIDC state of a /callback request ({} when missing or not ours).
+function callbackState(req) {
+    try {
+        const state = JSON.parse(Buffer.from(String(req.query.state || ''), 'base64url').toString());
+        return state && typeof state === 'object' ? state : {};
+    } catch {
+        return {};
+    }
+}
 
 if (AUTH_ENABLED) {
     // Per client IP, before the OIDC middleware below handles /callback and /logout itself.
     app.use(['/login', '/callback', '/logout'], authLimiter);
+    // A login's own callback (success or failure), or a logout, ends its in-flight mark - see "One
+    // login at a time".
+    app.use('/callback', (req, res, next) => {
+        const pending = readLoginPending(req);
+        if (pending && callbackState(req).lid === pending.id) res.clearCookie(LOGIN_PENDING_COOKIE, loginPendingCookieOptions());
+        next();
+    });
+    app.use('/logout', (req, res, next) => {
+        if (readLoginPending(req)) res.clearCookie(LOGIN_PENDING_COOKIE, loginPendingCookieOptions());
+        next();
+    });
     app.use(auth({
         // Identity only here: login is enforced by requiresAuth() below, after the rate limiters
         // (they key on the signed-in user, which this middleware resolves).
@@ -361,6 +451,17 @@ if (AUTH_ENABLED) {
         // users on Home after every re-login. Disabled here; the custom route below honors
         // a (strictly validated) ?returnTo= so the SPA sends users back where they were.
         routes: { login: false },
+        // The library's default state ({ returnTo }), plus the retry count of a login restarted by
+        // the error handler after a failed callback (/login?retry=N), so the restarts are bounded,
+        // and the login's in-flight id (see "One login at a time").
+        getLoginState: (req, options) => {
+            const retry = req.path === '/login' ? Number.parseInt(req.query.retry, 10) : 0;
+            return {
+                returnTo: options.returnTo || req.originalUrl,
+                ...(retry >= 1 && retry <= MAX_LOGIN_RETRIES ? { retry } : {}),
+                ...(req.loginId ? { lid: req.loginId } : {}),
+            };
+        },
     }));
 }
 
@@ -373,6 +474,19 @@ if (AUTH_ENABLED) {
     // not signed in is sent to login (HTML) or refused, and draws from the per-IP auth budget, so
     // these automatic login starts can't bypass the /login limit.
     app.use(authLimiter);
+    // One login at a time per browser (see above), wherever a login would start.
+    app.use((req, res, next) => {
+        if (!startsLogin(req)) return next();
+        // A forced login doesn't wait, but marks itself like any other: other tabs then wait for
+        // IT, and its own callback (or failure) ends the mark.
+        if (loginInFlight(req) && !forcedLogin(req)) {
+            res.set('Cache-Control', 'no-store');
+            return res.status(200).type('html').send(loginWaitPage(req));
+        }
+        req.loginId = crypto.randomBytes(9).toString('base64url');
+        res.cookie(LOGIN_PENDING_COOKIE, `${req.loginId}.${Date.now()}`, { ...loginPendingCookieOptions(), maxAge: LOGIN_PENDING_MS });
+        next();
+    });
     app.use(requiresAuth());
 
     app.get('/login', (req, res) => {
@@ -4257,18 +4371,57 @@ app.get('*', (req, res) => {
 });
 
 // ─── Last-resort error handler ───
-// OIDC callback failures (invalid_grant / state mismatch) are transient by nature: two
-// concurrent logins raced and one overwrote the other's PKCE transaction cookie. A fresh
-// attempt succeeds, so silently restart the login instead of dumping a stack trace on the
-// user. Everything else gets a clean 500 - stack traces never reach the browser.
+// OIDC callback failures are usually transient: two concurrent logins raced, and one overwrote
+// (state mismatch, rejected code) or consumed (missing auth_verification cookie) the other's
+// transaction. A fresh attempt succeeds, so restart the login instead of showing an error.
+// Up to MAX_LOGIN_RETRIES times: each restart goes through /login?retry=N, which stores N in the
+// new login's state (getLoginState above), and a failure past the limit stops with a message.
+// The count travels in the state URL parameter, not a cookie, so a browser that drops cookies
+// can't loop. More than one retry because a session cap expiring sends every open tab to login at
+// once, and the tabs keep overwriting each other's transaction until one finishes; the others
+// then find a session (/login bounces them back). OAUTH_INVALID_RESPONSE also covers real
+// provider errors (wrong alg, no id_token) - the limit bounds those too. Everything else gets a
+// clean 500 - stack traces never reach the browser.
+function oidcCallbackRecoverable(err) {
+    if (!err) return false;
+    if (err.error === 'invalid_grant' || err.error === 'OAUTH_INVALID_RESPONSE') return true;
+    return String(err.message || '').startsWith('"auth_verification" cookie not found');
+}
+// The page a failed login started from. A login started by /login carries '/login?returnTo=<page>'
+// (or '/login?retry=N&returnTo=<page>'): unwrap it, so restarts don't nest one level per attempt.
+function loginStateReturnTo(state) {
+    try {
+        const url = new URL(String(state.returnTo || '/'), 'http://app.invalid');
+        const rt = url.pathname === '/login' ? (url.searchParams.get('returnTo') || '/') : url.pathname + url.search + url.hash;
+        encodeURIComponent(rt); // throws on a lone surrogate - fall back to Home below
+        return rt;
+    } catch {
+        return '/';
+    }
+}
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
-    const msg = String((err && err.message) || err || '');
-    const oidcRace = req.path === '/callback' &&
-        (msg.includes('invalid_grant') || /\bstate\b/i.test(msg) || msg.includes('checks.'));
-    if (oidcRace) {
-        console.warn('OIDC callback failed (transient login race) - restarting login:', msg.split('\n')[0]);
-        return res.redirect('/login');
+    if (req.path === '/callback' && oidcCallbackRecoverable(err)) {
+        const state = callbackState(req);
+        const tries = Math.max(0, Number.parseInt(state.retry, 10) || 0);
+        const returnTo = loginStateReturnTo(state);
+        const reason = `${err.error || 'error'}: ${String(err.message || '').split('\n')[0]}`;
+        if (tries >= MAX_LOGIN_RETRIES) {
+            // Another tab signed in meanwhile: this one just goes back to the app.
+            if (req.oidc && req.oidc.isAuthenticated()) {
+                let origin = 'http://app.invalid';
+                try { origin = new URL(process.env.BASE_URL).origin; } catch { /* keep the placeholder */ }
+                return res.redirect(safeReturnTo(returnTo, origin));
+            }
+            console.error(`OIDC callback failed after ${tries} retries - stopping:`, reason);
+            return res.status(400).send('Sign-in failed. <a href="/">Go to the start page</a> to try again; if it keeps failing, ask your administrator to check the SSO settings.');
+        }
+        console.warn(`OIDC callback failed (transient login race) - restarting login (retry ${tries + 1}):`, reason);
+        // Tabs that fail together would restart together and keep breaking each other's login (a
+        // failing callback also clears the other tab's transaction cookie). A short random delay
+        // lets one finish first; the others then find a session at /login and go back to the app.
+        setTimeout(() => res.redirect(`/login?retry=${tries + 1}&returnTo=${encodeURIComponent(returnTo)}`), crypto.randomInt(100, 900));
+        return;
     }
     console.error('Unhandled error on', req.method, req.path, '-', err);
     if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Internal server error' });
