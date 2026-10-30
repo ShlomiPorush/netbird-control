@@ -18,11 +18,12 @@ nb.netbirdReq = async (method, path, body) => {
 };
 nb.netbirdPut = (path, body) => nb.netbirdReq('PUT', path, body);
 
-let item, rule, grant, settings, failNextSettingsWrite = false;
+let item, rule, grant, settings, failNextSettingsWrite = false, holdNextSettingsWrite = null;
+const items = new Map(); // several items in flight at once; `item` otherwise
 const core = require('../lib/core');
 core.pool.query = async (sql, params = []) => {
-    if (/FROM recert_items i JOIN recert_rounds/.test(sql)) return { rows: [clone(item)] };
-    if (/UPDATE recert_items SET status=\$2/.test(sql)) { item.status = params[1]; return { rows: [] }; }
+    if (/FROM recert_items i JOIN recert_rounds/.test(sql)) return { rows: [clone(items.get(params[0]) || item)] };
+    if (/UPDATE recert_items SET status=\$2/.test(sql)) { (items.get(params[0]) || item).status = params[1]; return { rows: [] }; }
     if (/COUNT\(\*\)::int AS n FROM recert_items/.test(sql)) return { rows: [{ n: 1 }] };
     if (/FROM recurring_access WHERE id=\$1/.test(sql)) return { rows: rule ? [clone(rule)] : [] };
     if (/UPDATE recurring_access SET enabled=false/i.test(sql)) { rule.enabled = false; return { rows: [clone(rule)] }; }
@@ -33,6 +34,7 @@ core.pool.query = async (sql, params = []) => {
     if (/FROM app_settings WHERE key = \$1/.test(sql)) return { rows: settings.has(params[0]) ? [{ value: settings.get(params[0]) }] : [] };
     if (/INSERT INTO app_settings/.test(sql)) {
         if (failNextSettingsWrite) { failNextSettingsWrite = false; throw new Error('database unavailable'); }
+        if (holdNextSettingsWrite) { const h = holdNextSettingsWrite; holdNextSettingsWrite = null; await h; }
         settings.set(params[0], params[1]); return { rows: [] };
     }
     return { rows: [] };
@@ -88,4 +90,21 @@ test('a revoke whose config save failed is not recorded on retry until the entry
     await decideRecertItem(53, 'revoke', { name: 'admin' });
     assert.equal(item.status, 'revoked');
     assert.equal(JSON.parse(settings.get('auto_approval_config')).trusted.length, 0, 'the saved config must no longer have the entry');
+});
+
+test('two revokes running at once both stay removed', async () => {
+    settings = new Map();
+    await setAutoApprovalConfig({ trusted: [{ groupIds: ['g-a'], maxMinutes: 60 }, { groupIds: ['g-b'], maxMinutes: 60 }], rules: [] });
+    const [a, b] = clone(getAutoApprovalConfig().trusted);
+    items.set(61, { id: 61, round_id: 1, round_status: 'open', status: 'pending', kind: 'auto_trusted', label: 'A', detail: { entry: a } });
+    items.set(62, { id: 62, round_id: 1, round_status: 'open', status: 'pending', kind: 'auto_trusted', label: 'B', detail: { entry: b } });
+    let release; holdNextSettingsWrite = new Promise(r => { release = r; }); // the first save is slow
+    const first = decideRecertItem(61, 'revoke', { name: 'admin' });
+    await new Promise(r => setTimeout(r, 10));
+    const second = decideRecertItem(62, 'revoke', { name: 'admin 2' });
+    await new Promise(r => setTimeout(r, 10));
+    release();
+    await Promise.all([first, second]);
+    assert.equal(getAutoApprovalConfig().trusted.length, 0);
+    assert.equal(JSON.parse(settings.get('auto_approval_config')).trusted.length, 0);
 });

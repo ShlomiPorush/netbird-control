@@ -614,7 +614,15 @@ async function persistAutoApproval() {
 function getAutoApprovalConfig() {
     return { trusted: _autoApproval.trusted, rules: _autoApproval.rules };
 }
-async function setAutoApprovalConfig({ trusted, rules } = {}) {
+// Changes to the auto-approval config run one at a time (read, change, save, publish), so two
+// concurrent edits or review revokes never save over each other.
+function withAutoApprovalLock(fn) {
+    return withKeyLock('auto-approval', fn);
+}
+async function setAutoApprovalConfig(cfg) {
+    return withAutoApprovalLock(() => saveAutoApprovalLocked(cfg));
+}
+async function saveAutoApprovalLocked({ trusted, rules } = {}) {
     const next = {
         trusted: Array.isArray(trusted) ? normTrusted(trusted) : _autoApproval.trusted,
         rules: Array.isArray(rules) ? normAutoRules(rules) : _autoApproval.rules,
@@ -11107,26 +11115,28 @@ async function applyRecertRevoke(it, actor) {
         return;
     }
     if (it.kind === 'auto_trusted' || it.kind === 'auto_rule') {
-        const cfg = getAutoApprovalConfig();
-        const trusted = it.kind === 'auto_trusted';
-        const list = (trusted ? cfg.trusted : cfg.rules) || [];
-        // Matched by the entry's id, so an entry edited since the round opened is still the one
-        // removed. An item stored before entries had ids derives the id the entry got on load
-        // (same normalization); a duplicate entry makes that ambiguous, so it is refused.
-        let matches;
-        if (d.entry && d.entry.id) {
-            matches = list.filter(e => e.id === d.entry.id);
-        } else {
-            const { id: _ignored, ...snap } = d.entry || {};
-            const derived = (trusted ? normTrusted : normAutoRules)([snap], true)[0];
-            matches = derived ? list.filter(e => e.id === derived.id || String(e.id).startsWith(derived.id + '-')) : [];
-        }
-        if (matches.length > 1) throw new Error('This item matches more than one auto-approval entry. Check the Auto-Approval settings, then decide again.');
-        if (!matches.length) return; // entry already gone
-        const next = list.filter(e => e !== matches[0]);
-        if (trusted) await setAutoApprovalConfig({ trusted: next, rules: cfg.rules });
-        else await setAutoApprovalConfig({ trusted: cfg.trusted, rules: next });
-        return;
+        // Read, match and save under one lock: a concurrent edit or revoke cannot save over this one.
+        return withAutoApprovalLock(async () => {
+            const cfg = getAutoApprovalConfig();
+            const trusted = it.kind === 'auto_trusted';
+            const list = (trusted ? cfg.trusted : cfg.rules) || [];
+            // Matched by the entry's id, so an entry edited since the round opened is still the one
+            // removed. An item stored before entries had ids derives the id the entry got on load
+            // (same normalization); a duplicate entry makes that ambiguous, so it is refused.
+            let matches;
+            if (d.entry && d.entry.id) {
+                matches = list.filter(e => e.id === d.entry.id);
+            } else {
+                const { id: _ignored, ...snap } = d.entry || {};
+                const derived = (trusted ? normTrusted : normAutoRules)([snap], true)[0];
+                matches = derived ? list.filter(e => e.id === derived.id || String(e.id).startsWith(derived.id + '-')) : [];
+            }
+            if (matches.length > 1) throw new Error('This item matches more than one auto-approval entry. Check the Auto-Approval settings, then decide again.');
+            if (!matches.length) return; // entry already gone
+            const next = list.filter(e => e !== matches[0]);
+            if (trusted) await saveAutoApprovalLocked({ trusted: next, rules: cfg.rules });
+            else await saveAutoApprovalLocked({ trusted: cfg.trusted, rules: next });
+        });
     }
     if (it.kind === 'recurring') {
         return withRuleLock(d.ruleId, async () => {
