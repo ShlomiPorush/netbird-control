@@ -876,6 +876,25 @@ function canEditNetwork(viewer, networkId, grants) {
     return viewer.isAdmin || managesNetworks(viewer) || hasGrant(viewer, networkId, grants, true);
 }
 
+// Middleware: network editors - admins, 'networks.manage' holders, or members of a group with an
+// 'edit' grant on at least one existing network - plus holders of any feature permission given.
+function requireNetworkEditor(...perms) {
+    return async (req, res, next) => {
+        try {
+            const viewer = await getViewer(req);
+            if (viewer.isAdmin || managesNetworks(viewer) || perms.some(p => viewer.perms && viewer.perms[p])) return next();
+            const grants = await getAllGrants();
+            const editable = new Set(Object.keys(grants).filter(id => hasGrant(viewer, id, grants, true)));
+            // A grant can outlive its network, so only a network that still exists counts.
+            if (editable.size && (await getNetworks()).some(n => editable.has(String(n.id)))) return next();
+            return res.status(403).json({ error: 'Forbidden' });
+        } catch (err) {
+            console.error('Authorization error:', err.message);
+            res.status(500).json({ error: 'Internal server error' });
+        }
+    };
+}
+
 // Can this viewer view a network (read-only or better)? Admins → all; others → any grant.
 function canViewNetwork(viewer, networkId, grants) {
     return viewer.isAdmin || managesNetworks(viewer) || hasGrant(viewer, networkId, grants, false);
@@ -2221,8 +2240,9 @@ app.post('/api/access-requests/:id/deny', requireApprover, async (req, res) => {
 });
 
 // ─── Access Profiles (a named source-groups + protocol/ports bundle = group + policy) ───
-// Listing is available to any editor (to assign a profile to a resource); managing is admin.
-app.get('/api/access-profiles', async (req, res) => {
+// Listing is for network editors (to assign a profile to a resource) and Manage Temporary Access
+// holders (shared profiles are grant targets); managing is admin.
+app.get('/api/access-profiles', requireNetworkEditor('temp.manage'), async (req, res) => {
     try {
         res.json(await listAccessProfiles());
     } catch (err) {
@@ -2297,8 +2317,8 @@ app.put('/api/networks/:id/default-profiles', requireAdmin, async (req, res) => 
     }
 });
 
-// ─── Posture Checks (proxied to NetBird) - list for any editor, manage for admins ───
-app.get('/api/posture-checks', async (req, res) => {
+// ─── Posture Checks (proxied to NetBird) - list for network editors, manage for admins ───
+app.get('/api/posture-checks', requireNetworkEditor(), async (req, res) => {
     try {
         res.json(await listPostureChecks());
     } catch (err) {
@@ -3798,8 +3818,8 @@ app.post('/api/filter-rules/propagate', requireAdmin, async (req, res) => {
     }
 });
 
-// ─── Address blocklist - list readable by any editor (for inline checks); admin manages ───
-app.get('/api/blocklist', async (req, res) => {
+// ─── Address blocklist - list readable by network editors (for inline checks); admin manages ───
+app.get('/api/blocklist', requireNetworkEditor(), async (req, res) => {
     try {
         res.json(await getBlocklist());
     } catch (e) {
