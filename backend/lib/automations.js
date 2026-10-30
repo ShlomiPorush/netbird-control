@@ -47,6 +47,14 @@ function resourceHasGroups(res, wantGroupIds) {
     return (wantGroupIds || []).every(g => have.has(g));
 }
 
+// True if a ledger row's resource is off: the removal mode disabled it ('disabled'), or it was
+// already disabled when adopted ('adopted-disabled') and still is (`live` = the resource from
+// getNetworkDetail, missing if it's gone).
+function ledgerRowOff(own, live) {
+    if (own.status === 'disabled') return true;
+    return own.status === 'adopted-disabled' && !(live && live.enabled !== false);
+}
+
 // Update an existing resource's name/description from the source, preserving its
 // address, groups and enabled state. `current` is the resource as returned by getNetworkDetail.
 async function setResourceNameFrom(networkId, current, name, description) {
@@ -312,7 +320,8 @@ async function getAutomationManaged(id) {
         resources: rows.rows.map(x => {
             const r = live.get(x.resource_id);
             return {
-                key: x.external_key, address: x.address, resourceId: x.resource_id, status: x.status || 'active',
+                key: x.external_key, address: x.address, resourceId: x.resource_id,
+                status: x.status === 'adopted-disabled' ? 'disabled' : (x.status || 'active'),
                 lastSeenAt: x.last_seen_at,
                 orphan: detail ? !r : false,
                 liveEnabled: r ? r.enabled !== false : null,
@@ -457,7 +466,7 @@ async function dryRunAutomation(id) {
         const cur = snap(existingById.get(own.resource_id), own);
         const m = { key: own.external_key, name: (cur && cur.name) || '', address: own.address };
         if (row.removal_mode === 'delete') add('delete', m, 'gone from the source - the resource will be DELETED', cur);
-        else if (row.removal_mode === 'disable') { if (own.status !== 'disabled') add('disable', m, 'gone from the source', cur); }
+        else if (row.removal_mode === 'disable') { if (!ledgerRowOff(own, existingById.get(own.resource_id))) add('disable', m, 'gone from the source', cur); }
         else add('keep', m, 'gone from the source - removal mode keeps it untouched', cur);
     }
 
@@ -530,11 +539,16 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
             try {
                 const own = ownByKey.get(m.key);
                 if (own) {
-                    // Already managed by us → keep it in sync (re-enable if it was disabled).
+                    // Already managed by us → keep it in sync (re-enable if the removal mode disabled it).
                     if (own.status === 'disabled') {
                         await setResourceEnabled(networkId, own.resource_id, true);
                         await pool.query(`UPDATE automation_resources SET status='active', address=$3, last_seen_at=NOW() WHERE automation_id=$1 AND external_key=$2 AND tenant=$4`, [id, m.key, m.address, tnt()]);
                         counts.updated++;
+                    } else if (own.status === 'adopted-disabled') {
+                        // Already disabled when adopted: never enable it here. Once it's enabled
+                        // in NetBird, manage it like any active row.
+                        const enabled = !ledgerRowOff(own, existingById.get(own.resource_id));
+                        await pool.query(`UPDATE automation_resources SET ${enabled ? "status='active', " : ''}address=$3, last_seen_at=NOW() WHERE automation_id=$1 AND external_key=$2 AND tenant=$4 AND status='adopted-disabled'`, [id, m.key, m.address, tnt()]);
                     } else {
                         await pool.query(`UPDATE automation_resources SET address=$3, last_seen_at=NOW() WHERE automation_id=$1 AND external_key=$2 AND tenant=$4`, [id, m.key, m.address, tnt()]);
                     }
@@ -549,8 +563,9 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
                 if (existingRes) {
                     // A resource with this address exists but we don't manage it yet (e.g. a
                     // manually-added IP). Adopt it - from now on its lifecycle is managed, so
-                    // it'll be disabled when it disappears from the source.
-                    const adoptStatus = existingRes.enabled === false ? 'disabled' : 'active';
+                    // it'll be disabled when it disappears from the source. One that's already
+                    // disabled stays disabled until it's enabled in NetBird.
+                    const adoptStatus = existingRes.enabled === false ? 'adopted-disabled' : 'active';
                     await pool.query(
                         `INSERT INTO automation_resources (automation_id, external_key, address, resource_id, network_id, status, last_seen_at, tenant)
                          VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7)
@@ -609,7 +624,12 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
                         await deleteResource(networkId, own.resource_id).catch(() => { });
                         await pool.query('DELETE FROM automation_resources WHERE automation_id=$1 AND external_key=$2 AND tenant=$3', [id, own.external_key, tnt()]);
                         counts.disabled++;
-                    } else if (row.removal_mode === 'disable' && own.status !== 'disabled') {
+                    } else if (row.removal_mode === 'disable' && !ledgerRowOff(own, existingById.get(own.resource_id))) {
+                        // Mark it active first, so a failure before the 'disabled' write below
+                        // leaves a row the next sync disables again rather than one it skips.
+                        if (own.status === 'adopted-disabled') {
+                            await pool.query(`UPDATE automation_resources SET status='active' WHERE automation_id=$1 AND external_key=$2 AND tenant=$3 AND status='adopted-disabled'`, [id, own.external_key, tnt()]);
+                        }
                         await setResourceEnabled(networkId, own.resource_id, false);
                         await pool.query(`UPDATE automation_resources SET status='disabled' WHERE automation_id=$1 AND external_key=$2 AND tenant=$3`, [id, own.external_key, tnt()]);
                         counts.disabled++;

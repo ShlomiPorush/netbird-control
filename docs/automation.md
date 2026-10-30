@@ -20,8 +20,8 @@ Connect an **external HTTP source** that returns IP addresses and **auto-provisi
 1. Fetch + parse the source; map each item to `{ key, address, name, description }`.
 2. Apply the **safety floor** - bail out entirely if the response looks broken.
 3. Diff against the **ownership ledger** (`automation_resources` - every resource this automation created or adopted):
-   - **Known key** → keep in sync; re-enable if it had been disabled.
-   - **New key, address already exists (not ours)** → **adopt** it into management (from now on its lifecycle is managed).
+   - **Known key** → keep in sync; re-enable if the removal mode had disabled it.
+   - **New key, address already exists (not ours)** → **adopt** it into management (from now on its lifecycle is managed). A resource that is already disabled stays disabled until someone enables it in NetBird; after that, it is managed like any other.
    - **New key, new address** → **create** the resource (joined to the profile groups).
    - **On the blocklist** for the target network → **skip** (counted `blocked`).
    - **Name already taken** by a different resource → **conflict**, skipped.
