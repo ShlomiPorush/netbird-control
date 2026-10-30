@@ -8,6 +8,7 @@ How the app decides **who sees what** and **who can change what**, and how it pr
 - **Admin** = the NetBird `owner`/`admin` role, **or** membership in `ADMIN_GROUP_ID` (resolved from Microsoft Graph).
 - **Approver** (a scoped role, not full admin) = an admin **or** a member of a configured **Entra approver group** (Settings → Approvals). Approvers can approve/deny [Access Requests](access-requests.md) and see that page - nothing else admin-only. Like the admin group, it needs the Graph group-read permission to resolve membership.
 - **Restricted users** (everyone else) see only their **own** activity and peers, and only the networks they've been **granted** edit/view access to.
+- **Blocked users** - a user blocked in NetBird has **no role, groups or permissions** when signed in to the app: not admin (even as a member of `ADMIN_GROUP_ID`), not an approver, and no feature permissions. Unblocking restores them. The change applies on the user's next request once the user list syncs - at once when blocked from this app, otherwise within the 10-minute sync.
 - **Open mode** - if OIDC isn't configured, SSO is **disabled and the app is fully open** (everyone is admin). Only for a trusted/private network.
 
 ## Feature permissions (per-capability grants)
@@ -28,7 +29,8 @@ How the app decides **who sees what** and **who can change what**, and how it pr
 Notes:
 
 - **Server-side enforcement** - each permission gates its API routes (403 without it); the sidebar and routes follow along in the UI. Hiding a page is cosmetic, the API check is the real guard.
-- A user qualifies by being selected **directly** or via **any selected group** (group membership is resolved the same way as admin/approver groups, so the Graph group-read permission applies).
+- A user qualifies by being selected **directly** or via **any selected group** (group membership is resolved the same way as admin/approver groups, so the Graph group-read permission applies). A direct selection - like an approval delegation - applies only while the person is an existing, unblocked NetBird user.
+- **Deleting a user** in the main account also removes them from the directly selected users here, from approval delegations and from the Telegram approver mapping.
 - **Admins always have every capability**; permission changes are **audited** (`Updated feature permissions`).
 - Manage Temporary Access still respects **read-only mode** - grants can't be created or revoked while `NETBIRD_READONLY=true`.
 
