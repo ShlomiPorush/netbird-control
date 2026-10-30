@@ -46,6 +46,8 @@ const issuer = http.createServer((req, res) => {
         req.on('end', () => {
             const claims = codes.get(new URLSearchParams(body).get('code'));
             if (!claims) { res.statusCode = 400; return send({ error: 'invalid_grant' }); }
+            // A broken provider answer (not a login race): a token response without an ID token.
+            if (claims.omitIdToken) return send({ access_token: 'at', token_type: 'Bearer', expires_in: 3600 });
             const input = `${b64url({ alg: 'RS256', kid: 'k1', typ: 'JWT' })}.${b64url(claims)}`;
             const idToken = `${input}.${crypto.sign('RSA-SHA256', Buffer.from(input), privateKey).toString('base64url')}`;
             send({ access_token: 'at', token_type: 'Bearer', expires_in: 3600, id_token: idToken });
@@ -297,4 +299,102 @@ test('the failed-token throttle on the receivers is separate from the rate limit
     assert.equal(throttled.headers.get('ratelimit'), null, 'not one of the rate limiters');
     const good = await call('POST', '/api/webhook', { ip: freshIp(), accept: 'application/json', headers: { authorization: `Bearer ${HOOK_TOKEN}` }, body: {} });
     assert.equal(good.status, 400);
+});
+
+// ── Failed OIDC callbacks restart the login once; logout ──
+// Two logins that race (two tabs) overwrite or consume each other's transaction: the callback then
+// sees a state mismatch, a code the provider rejects, or no transaction cookie at all. The app
+// restarts the login through /login?retry=1, whose new login carries `retry` in its state; a
+// failure of THAT login stops with a message instead of looping between the app and the provider.
+const stateOf = (location) => JSON.parse(Buffer.from(new URL(location).searchParams.get('state'), 'base64url').toString());
+async function beginLogin(ip, path = '/login') {
+    const start = await fetch(BASE + path, { headers: { accept: 'text/html', 'x-forwarded-for': ip }, redirect: 'manual' });
+    assert.ok(start.headers.get('location').startsWith(`${ISSUER}/authorize`), 'starts a login at the provider');
+    return { cookie: cookiesOf(start), authorize: new URL(start.headers.get('location')) };
+}
+function issueCode(authorize, extra = {}) {
+    const code = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    codes.set(code, { iss: ISSUER, aud: CLIENT_ID, sub: 'racer', nonce: authorize.searchParams.get('nonce'), iat: now, exp: now + 3600, ...extra });
+    return code;
+}
+const callback = (ip, code, state, cookie) => call('GET', `/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, { ip, cookie });
+const restartsOnce = (r) => r.status === 302 && r.location.startsWith('/login?retry=1');
+const stops = (r) => r.status === 400 && /Sign-in failed/.test(r.text) && !r.location;
+
+test('a callback with a mismatched state restarts the login once, and the retry signs in', async () => {
+    const ip = freshIp();
+    const first = await beginLogin(ip, '/login?returnTo=/peers');
+    const otherTab = await beginLogin(ip); // overwrites the first login's transaction cookie
+    const r = await callback(ip, issueCode(first.authorize), first.authorize.searchParams.get('state'), otherTab.cookie);
+    assert.ok(restartsOnce(r), `expected a restart, got ${r.status} ${r.location}`);
+    const retry = await beginLogin(ip, r.location);
+    assert.equal(stateOf(retry.authorize.href).retry, 1, 'the restarted login is marked');
+    const ok = await callback(ip, issueCode(retry.authorize), retry.authorize.searchParams.get('state'), retry.cookie);
+    assert.equal(ok.status, 302);
+    assert.match(cookiesOf(ok), /appSession/, 'the retry signs in');
+    // Back through /login (which sends a signed-in user on) to the page the first login started from.
+    let to = ok.location;
+    const hops = [to];
+    for (let i = 0; i < 3 && to.startsWith('/login'); i++) hops.push(to = (await call('GET', to, { ip, cookie: cookiesOf(ok) })).location);
+    assert.equal(to, '/peers', hops.join(' -> '));
+});
+
+test('a callback whose code the provider rejects (invalid_grant) restarts the login once', async () => {
+    const ip = freshIp();
+    const { cookie, authorize } = await beginLogin(ip);
+    const r = await callback(ip, 'a-code-the-provider-rejects', authorize.searchParams.get('state'), cookie);
+    assert.ok(restartsOnce(r), `expected a restart, got ${r.status} ${r.location}`);
+});
+
+test('a callback without the login transaction cookie restarts the login once', async () => {
+    const ip = freshIp();
+    const { authorize } = await beginLogin(ip);
+    const r = await callback(ip, issueCode(authorize), authorize.searchParams.get('state'), undefined);
+    assert.ok(restartsOnce(r), `expected a restart, got ${r.status} ${r.location}`);
+});
+
+test('a failed retry stops with a message, even when the browser keeps no cookies', async () => {
+    const ip = freshIp();
+    const { authorize } = await beginLogin(ip);
+    const r = await callback(ip, issueCode(authorize), authorize.searchParams.get('state'), undefined);
+    assert.ok(restartsOnce(r));
+    const retry = await beginLogin(ip, r.location); // its transaction cookie is dropped again
+    const again = await callback(ip, issueCode(retry.authorize), retry.authorize.searchParams.get('state'), undefined);
+    assert.ok(stops(again), `expected the stop page, got ${again.status} ${again.location}`);
+});
+
+test('a broken provider answer (no ID token) is retried once, then stops', async () => {
+    const ip = freshIp();
+    const first = await beginLogin(ip);
+    const r = await callback(ip, issueCode(first.authorize, { omitIdToken: true }), first.authorize.searchParams.get('state'), first.cookie);
+    assert.ok(restartsOnce(r), `expected a restart, got ${r.status} ${r.location}`);
+    const retry = await beginLogin(ip, r.location);
+    const again = await callback(ip, issueCode(retry.authorize, { omitIdToken: true }), retry.authorize.searchParams.get('state'), retry.cookie);
+    assert.ok(stops(again), `expected the stop page, got ${again.status} ${again.location}`);
+});
+
+test('a late failure after another tab signed in returns to the app instead of a new login', async () => {
+    const cookie = await signIn('two-tabs');
+    const r = await call('GET', `/login?retry=1&returnTo=${encodeURIComponent('/peers')}`, { cookie });
+    assert.equal(r.status, 302);
+    assert.equal(r.location, '/peers');
+});
+
+test('a stale callback (no transaction cookie) with a valid session returns to the app', async () => {
+    const cookie = await signIn('stale-callback');
+    const r = await call('GET', '/callback?code=used&state=used', { cookie });
+    assert.equal(r.status, 302);
+    assert.ok(!r.location.startsWith(ISSUER) && !r.location.startsWith('/login'), `got ${r.location}`);
+});
+
+test('logout ends the session at the provider and returns to the app', async () => {
+    const cookie = await signIn('logout-user');
+    const r = await call('GET', '/logout', { cookie });
+    assert.equal(r.status, 302);
+    const to = new URL(r.location);
+    assert.equal(to.origin + to.pathname, `${ISSUER}/logout`);
+    assert.ok(to.searchParams.get('id_token_hint'), 'id_token_hint is sent');
+    assert.equal(to.searchParams.get('post_logout_redirect_uri'), BASE);
+    assert.match(r.headers.getSetCookie().join('\n'), /appSession=;/, 'the session cookie is cleared');
 });

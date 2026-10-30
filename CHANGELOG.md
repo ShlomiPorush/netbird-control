@@ -10,6 +10,17 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Sign-in uses `express-openid-connect` 3** (`openid-client` 6). Existing sessions stay valid, so
+  nobody is signed out by the upgrade, and no setting changes.
+
+### Fixed
+- **A sign-in that races another one no longer ends on an error page.** When two tabs sign in at
+  the same time, one of them can lose its login: a state mismatch, a code the identity provider
+  rejects, or a missing login cookie. The app now restarts that login once. If the restart fails
+  too, it shows "Sign-in failed" with a link to try again, instead of looping through the identity
+  provider.
+
 ---
 
 ## [1.0.1] - 2026-10-30

@@ -361,6 +361,12 @@ if (AUTH_ENABLED) {
         // users on Home after every re-login. Disabled here; the custom route below honors
         // a (strictly validated) ?returnTo= so the SPA sends users back where they were.
         routes: { login: false },
+        // The library's default state ({ returnTo }), plus `retry` on a login restarted by the
+        // error handler after a failed callback (/login?retry=1), so a second failure stops.
+        getLoginState: (req, options) => ({
+            returnTo: options.returnTo || req.originalUrl,
+            ...(req.path === '/login' && req.query.retry === '1' ? { retry: 1 } : {}),
+        }),
     }));
 }
 
@@ -4257,18 +4263,32 @@ app.get('*', (req, res) => {
 });
 
 // ─── Last-resort error handler ───
-// OIDC callback failures (invalid_grant / state mismatch) are transient by nature: two
-// concurrent logins raced and one overwrote the other's PKCE transaction cookie. A fresh
-// attempt succeeds, so silently restart the login instead of dumping a stack trace on the
-// user. Everything else gets a clean 500 - stack traces never reach the browser.
+// OIDC callback failures are usually transient: two concurrent logins raced, and one overwrote
+// (state mismatch, rejected code) or consumed (missing auth_verification cookie) the other's
+// transaction. A fresh attempt succeeds, so restart the login instead of showing an error.
+// Only ONCE: the restart goes through /login?retry=1, which marks the new login's state
+// (getLoginState above), and a failure of that marked login stops with a message. The mark
+// travels in the state URL parameter, not a cookie, so a browser that drops cookies can't loop.
+// OAUTH_INVALID_RESPONSE also covers real provider errors (wrong alg, no id_token) - the single
+// retry bounds those too. Everything else gets a clean 500 - stack traces never reach the browser.
+function oidcCallbackRecoverable(err) {
+    if (!err) return false;
+    if (err.error === 'invalid_grant' || err.error === 'OAUTH_INVALID_RESPONSE') return true;
+    return String(err.message || '').startsWith('"auth_verification" cookie not found');
+}
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
-    const msg = String((err && err.message) || err || '');
-    const oidcRace = req.path === '/callback' &&
-        (msg.includes('invalid_grant') || /\bstate\b/i.test(msg) || msg.includes('checks.'));
-    if (oidcRace) {
-        console.warn('OIDC callback failed (transient login race) - restarting login:', msg.split('\n')[0]);
-        return res.redirect('/login');
+    if (req.path === '/callback' && oidcCallbackRecoverable(err)) {
+        let state = {};
+        try { state = JSON.parse(Buffer.from(String(req.query.state || ''), 'base64url').toString()) || {}; } catch { /* no usable state */ }
+        const reason = `${err.error || 'error'}: ${String(err.message || '').split('\n')[0]}`;
+        if (state.retry) {
+            console.error('OIDC callback failed again after a retry - stopping:', reason);
+            return res.status(400).send('Sign-in failed. <a href="/">Go to the start page</a> to try again; if it keeps failing, ask your administrator to check the SSO settings.');
+        }
+        console.warn('OIDC callback failed (transient login race) - restarting login:', reason);
+        const returnTo = typeof state.returnTo === 'string' && state.returnTo.startsWith('/') ? `&returnTo=${encodeURIComponent(state.returnTo)}` : '';
+        return res.redirect(`/login?retry=1${returnTo}`);
     }
     console.error('Unhandled error on', req.method, req.path, '-', err);
     if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Internal server error' });
