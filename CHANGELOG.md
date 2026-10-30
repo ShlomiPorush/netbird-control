@@ -10,6 +10,25 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- **Temporary access stays consistent with NetBird.** Changes to one NetBird user (grant,
+  revoke, the reconcile job, group edits, block and unblock) now run one at a time, from a fresh
+  read of the user. The reconcile job re-checks each grant first, so it never puts back a group
+  of a grant that was revoked or expired in the meantime.
+- **A NetBird call that gets no answer counts as failed.** A revoke whose membership removal or
+  delete got no answer leaves the grant active with the error, and the next run retries it.
+- **A failed grant creation keeps its recovery record** until every NetBird object it made is
+  confirmed removed. The cleanup job keeps the record when it cannot read NetBird, and it leaves
+  a group in place when another active grant of the same user holds it.
+- **A timed device bypass is never left on without its end time.** If the end time cannot be
+  saved, the approval fails, the bypass is removed again and the request stays pending.
+- **Ending a recurring rule's window reports failures.** Disabling or deleting a rule, or
+  revoking it in Access Review, shows an error when the active window could not be torn down, and
+  the review item stays pending. A rule disabled while its window is opening ends that window.
+- **Access Review revokes the right auto-approval entry**, even after it was edited. Each
+  trusted-requester entry and self-service rule now has a stable `id` in the auto-approval
+  config.
+
 ---
 
 ## [1.0.5] - 2026-10-30

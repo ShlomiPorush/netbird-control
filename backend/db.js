@@ -524,9 +524,35 @@ const normIdList = (a) => Array.isArray(a) ? a.map(s => String(s).trim()).filter
 const normTargetList = (a) => (Array.isArray(a) ? a : [])
     .map(t => t && ({ type: String(t.type || '').trim(), id: String(t.id || '').trim(), name: String(t.name || '').trim() }))
     .filter(t => t && t.type && t.id);
-function normTrusted(arr) {
+// Every auto-approval entry carries a stable id, so an Access Review item finds "its" entry even
+// after the entry was edited. A valid, unique id is kept. Otherwise a new entry gets a random id,
+// and an entry stored before ids existed (legacy, on load) gets one derived from its normalized
+// content - the same value on every load until the config is saved with it.
+const AUTO_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function legacyAutoId(e) {
+    return 'aa-' + require('crypto').createHash('sha256').update(stableStringify(e)).digest('hex').slice(0, 16);
+}
+function withAutoIds(arr, legacy, normOne) {
+    const seen = new Set();
+    const out = [];
+    for (const raw of arr) {
+        const e = normOne(raw);
+        if (!e) continue;
+        let id = raw && typeof raw.id === 'string' && AUTO_ID_RE.test(raw.id) && !seen.has(raw.id) ? raw.id : '';
+        if (!id && legacy) {
+            const base = legacyAutoId(e);
+            id = base;
+            for (let n = 2; seen.has(id); n++) id = `${base}-${n}`;
+        }
+        if (!id) id = require('crypto').randomUUID();
+        seen.add(id);
+        out.push({ id, ...e });
+    }
+    return out;
+}
+function normTrusted(arr, legacy = false) {
     if (!Array.isArray(arr)) return [];
-    return arr.map(t => {
+    return withAutoIds(arr, legacy, t => {
         if (!t || typeof t !== 'object') return null;
         const groupIds = normIdList(t.groupIds);
         if (!groupIds.length) return null;
@@ -543,11 +569,11 @@ function normTrusted(arr) {
             networkMode: networks.length ? networkMode : 'all', networks,
             enabled: t.enabled !== false, // paused entries stay configured but never match
         };
-    }).filter(Boolean);
+    });
 }
-function normAutoRules(arr) {
+function normAutoRules(arr, legacy = false) {
     if (!Array.isArray(arr)) return [];
-    return arr.map(r => {
+    return withAutoIds(arr, legacy, r => {
         if (!r || typeof r !== 'object') return null;
         const targets = normTargetList(r.targets);
         const groupIds = normIdList(r.groupIds);
@@ -557,7 +583,7 @@ function normAutoRules(arr) {
         // target's existing exposure, like a human approval would.
         const access = normAccessSpec(r.access);
         return { targets, groupIds, maxMinutes: Math.max(0, parseInt(r.maxMinutes, 10) || 0), enabled: r.enabled !== false, ...(access ? { access } : {}) };
-    }).filter(Boolean);
+    });
 }
 async function loadAutoApproval() {
     try {
@@ -565,17 +591,17 @@ async function loadAutoApproval() {
         if (!v) return;
         const c = JSON.parse(v) || {};
         if (Array.isArray(c.trusted) || (Array.isArray(c.rules) && c.rules[0] && Array.isArray(c.rules[0].targets))) {
-            _autoApproval.trusted = normTrusted(c.trusted);
-            _autoApproval.rules = normAutoRules(c.rules);
+            _autoApproval.trusted = normTrusted(c.trusted, true);
+            _autoApproval.rules = normAutoRules(c.rules, true);
         } else {
             // One-time migration from the flat first version (trustedGroupIds + one global
             // maxMinutes + single-target rules) into per-entry caps / multi-target rules.
             const cap = Math.max(0, parseInt(c.maxMinutes, 10) || 0);
             const tg = normIdList(c.trustedGroupIds);
-            _autoApproval.trusted = tg.length ? [{ groupIds: tg, maxMinutes: cap }] : [];
+            _autoApproval.trusted = normTrusted(tg.length ? [{ groupIds: tg, maxMinutes: cap }] : [], true);
             _autoApproval.rules = normAutoRules((Array.isArray(c.rules) ? c.rules : []).map(r => r && r.targetId ? ({
                 targets: [{ type: r.targetType, id: r.targetId, name: r.targetName }], groupIds: r.groupIds, maxMinutes: cap,
-            }) : null));
+            }) : null), true);
             if (_autoApproval.trusted.length || _autoApproval.rules.length) await persistAutoApproval();
         }
     } catch (e) {
@@ -4809,10 +4835,12 @@ const STALE_USER_ERR = "Couldn't read this user's current state from NetBird - n
 async function setUserGroups(userId, groupIds) {
     const acct = tnt();
     const row = await resolveUserRow(userId, acct);
-    const live = (await liveUsersById([userId])).get(String(userId));
-    if (!live) throw new Error(STALE_USER_ERR);
     const groups = Array.from(new Set((Array.isArray(groupIds) ? groupIds : []).map(x => String(x || '')).filter(Boolean)));
-    const resp = await asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(userId), { role: live.role || 'user', auto_groups: groups, is_blocked: live.is_blocked }));
+    const resp = await withNbUserLock(userId, async () => {
+        const live = (await liveUsersById([userId])).get(String(userId));
+        if (!live) throw new Error(STALE_USER_ERR);
+        return asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(userId), { role: live.role || 'user', auto_groups: groups, is_blocked: live.is_blocked }));
+    });
     if (!resp || resp.status >= 300) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to update the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
@@ -4832,18 +4860,23 @@ async function _applyUsersGroup(groupId, userIds, mode) {
     const live = ids.length ? await liveUsersById(ids) : new Map(); // throws (no writes) when unreadable
     for (const uid of ids) {
         try {
-            const u = live.get(uid);
-            if (!u) throw new Error(STALE_USER_ERR);
-            const cur = Array.isArray(u.auto_groups) ? u.auto_groups.map(g => String((g && g.id) || g)) : [];
-            let next;
-            if (mode === 'add') {
-                if (cur.includes(groupId)) continue; // already a member - no-op
-                next = [...cur, groupId];
-            } else {
-                if (!cur.includes(groupId)) continue; // not a member - no-op
-                next = cur.filter(g => g !== groupId);
-            }
-            const resp = await asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(uid), { role: u.role || 'user', auto_groups: next, is_blocked: u.is_blocked }));
+            if (!live.get(uid)) throw new Error(STALE_USER_ERR);
+            // Each user's write runs under that user's lock, from a read taken inside it.
+            const resp = await withNbUserLock(uid, async () => {
+                const u = (await liveUsersById([uid])).get(uid);
+                if (!u) throw new Error(STALE_USER_ERR);
+                const cur = Array.isArray(u.auto_groups) ? u.auto_groups.map(g => String((g && g.id) || g)) : [];
+                let next;
+                if (mode === 'add') {
+                    if (cur.includes(groupId)) return null; // already a member - no-op
+                    next = [...cur, groupId];
+                } else {
+                    if (!cur.includes(groupId)) return null; // not a member - no-op
+                    next = cur.filter(g => g !== groupId);
+                }
+                return asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(uid), { role: u.role || 'user', auto_groups: next, is_blocked: u.is_blocked }));
+            });
+            if (resp === null) continue;
             if (!resp || resp.status >= 300) {
                 const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to update user';
                 failed.push({ id: uid, error: typeof msg === 'string' ? msg : String(msg) });
@@ -5184,15 +5217,20 @@ async function guardProtectedUser(id, raw, acct, verb) {
 async function setUserBlocked(id, blocked) {
     const acct = tnt();
     const row = await resolveUserRow(id, acct);
-    const raw = row.raw_json || {};
     const label = row.email || row.display_name || row.user_id;
-    if (blocked) await guardProtectedUser(id, raw, acct, 'blocked');
-    const body = {
-        role: raw.role || 'user',
-        auto_groups: Array.isArray(raw.auto_groups) ? raw.auto_groups : [],
-        is_blocked: !!blocked,
-    };
-    const resp = await asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(id), body));
+    // role + auto_groups come from a fresh read under the user's lock, never the mirror: a stale
+    // auto_groups would put back a group removed since the last sync (or drop one added).
+    const resp = await withNbUserLock(id, async () => {
+        const live = (await liveUsersById([id])).get(String(id));
+        if (!live) throw new Error(STALE_USER_ERR);
+        if (blocked) await guardProtectedUser(id, live, acct, 'blocked');
+        const body = {
+            role: live.role || 'user',
+            auto_groups: Array.isArray(live.auto_groups) ? live.auto_groups.map(g => (g && g.id) || g) : [],
+            is_blocked: !!blocked,
+        };
+        return asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(id), body));
+    });
     if (!resp || resp.status >= 300) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to update the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
@@ -7655,14 +7693,18 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
 async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
     const drop = new Set((dropGroupIds || []).filter(Boolean));
     if (!drop.size || !networkId || !resourceId) return false;
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
-    if (!r || !r.id) return false;
+    // Read with the HTTP status: only a 404 means the resource is gone (nothing to detach); any
+    // other failed read must not pass for "already detached".
+    const got = await netbirdReq('GET', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    if (got && got.status === 404) return false;
+    const r = got && got.body;
+    if (!nbWriteOk(got) || !r || !r.id) throw new Error('Failed to read the resource: ' + ((got && (got.raw || got.error || got.status)) || 'no response'));
     const current = Array.isArray(r.groups) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
     const next = current.filter(g => !drop.has(g));
     if (next.length === current.length) return false;
     const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
     const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
-    if (!resp || resp.status >= 300) throw new Error('Failed to detach resource group: ' + (resp && (resp.raw || resp.error || resp.status)));
+    if (!nbWriteOk(resp)) throw new Error('Failed to detach resource group: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
     bustNbCaches('policies', 'gref', 'usage');
     return true;
 }
@@ -8160,8 +8202,8 @@ async function bypassPeer(peerId) {
 // The peer goes back to being blocked until it passes the compliance checks again.
 async function revokePeerBypass(peerId) {
     const resp = await netbirdReq('DELETE', `/api/peers/${encodeURIComponent(peerId)}/edr/bypass`);
-    if (!resp || resp.status >= 300) {
-        throw new Error('Failed to remove the bypass: ' + (resp && (resp.raw || resp.error || resp.status)));
+    if (!nbWriteOk(resp)) {
+        throw new Error('Failed to remove the bypass: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
     }
     // A manual revoke also cancels any scheduled expiry (scoped to the current context).
     await pool.query('DELETE FROM bypass_expirations WHERE tenant=$2 AND peer_id=$1', [peerId, tnt()]).catch(() => { });
@@ -8808,6 +8850,30 @@ initAutomations({ listAccessProfiles, getNetworkDetail, addResourceGroups, setRe
 
 const _runningGrants = new Set();
 
+// One in-process queue per key (this app is single-instance). NetBird's user PUT replaces the
+// whole user (role + auto_groups + is_blocked), so every read-modify-write of one user runs
+// through withNbUserLock: two writers can never interleave and undo each other's change. The
+// lock is NOT reentrant - code already holding it calls the unlocked inner helpers.
+const _keyLocks = new Map();
+function withKeyLock(key, fn) {
+    const run = (_keyLocks.get(key) || Promise.resolve()).then(() => fn());
+    const tail = run.catch(() => { });
+    _keyLocks.set(key, tail);
+    tail.then(() => { if (_keyLocks.get(key) === tail) _keyLocks.delete(key); });
+    return run;
+}
+// Keyed on the account + the IdP-subject tail, since a user may be addressed by either id form.
+function withNbUserLock(userId, fn) {
+    return withKeyLock(`user\u0000${tnt()}\u0000${String(userId || '').split('|').pop()}`, fn);
+}
+
+// A NetBird write succeeded only on a 2xx answer (or a 404 when the target being gone is fine,
+// e.g. a DELETE). netbirdReq resolves a connection error or timeout as { status: 0 }: that is a
+// failure, never a success.
+function nbWriteOk(resp, missingOk = false) {
+    return !!resp && ((resp.status >= 200 && resp.status < 300) || (missingOk && resp.status === 404));
+}
+
 // The grantee's devices (peers) - used for the informational device count only.
 // Match on the NetBird user id (full or the IdP-subject tail) OR the owner email, since a
 // peer's raw user_id and the /api/users id don't always share the same prefix form.
@@ -8831,13 +8897,34 @@ async function getNbUser(userId) {
     const users = await netbirdGet('/api/users');
     return (Array.isArray(users) ? users : []).find(u => String(u.id) === uid || String(u.id).split('|').pop() === tail) || null;
 }
+// True only when both full user lists (regular + service users, read as the real user) were
+// read and neither has this user.
+async function nbUserIsGone(userId) {
+    const uid = String(userId || '');
+    const tail = uid.split('|').pop();
+    const [regular, service] = await asRealUser(() => Promise.all([
+        netbirdGet('/api/users').catch(() => null),
+        netbirdGet('/api/users?service_user=true').catch(() => null),
+    ]));
+    if (!Array.isArray(regular) || !Array.isArray(service)) return false;
+    return ![...regular, ...service].some(u => u && (String(u.id) === uid || String(u.id).split('|').pop() === tail));
+}
 
 // Add/remove a group from a user's auto-assigned groups (what NetBird's "Assign Users" does).
 // The user's peers inherit the group, so a policy sourced from it grants them access.
 // Returns true when it actually changed something. GET-then-PUT preserves role / is_blocked.
 async function setUserGroupMembership(userId, groupId, add) {
+    return withNbUserLock(userId, () => applyUserGroupMembership(userId, groupId, add));
+}
+// The unlocked body - only for callers that already hold this user's lock.
+async function applyUserGroupMembership(userId, groupId, add) {
     const u = await getNbUser(userId);
-    if (!u) throw new Error(`user not found in NetBird (id "${userId}")`);
+    if (!u) {
+        // Removing from a user who no longer exists is done - but only when a full read (regular +
+        // service users, as the real user) confirms it; a partial or failed read is not proof.
+        if (!add && await nbUserIsGone(userId)) return false;
+        throw new Error(`user not found in NetBird (id "${userId}")`);
+    }
     const idsOf = arr => (Array.isArray(arr) ? arr.map(g => (g && g.id) || g).filter(Boolean) : []);
     const current = idsOf(u.auto_groups);
     const has = current.includes(groupId);
@@ -8846,7 +8933,14 @@ async function setUserGroupMembership(userId, groupId, add) {
     const body = { role: u.role || 'user', auto_groups: next, is_blocked: !!u.is_blocked };
     console.log('[grant] %s group %s %s user %s (role %s)', add ? 'assigning' : 'removing', groupId, add ? 'to' : 'from', u.id, u.role || 'user');
     const resp = await netbirdReq('PUT', '/api/users/' + encodeURIComponent(u.id), body);
-    if (!resp || resp.status >= 300) {
+    if (resp && resp.status === 0) {
+        // No answer: the change may or may not have been applied. Callers undoing an add must
+        // treat this group as possibly assigned (the user did not have it before this PUT).
+        const e = new Error(`NetBird did not answer the user update: ${resp.error || 'no response'}`);
+        if (add) e.uncertainGroup = groupId;
+        throw e;
+    }
+    if (!nbWriteOk(resp)) {
         throw new Error(`NetBird rejected the user update (HTTP ${resp && resp.status}): ${resp && (resp.raw || resp.error || '')} - the API token likely lacks user-management permission`);
     }
     // Verify against the returned user object: some tokens accept the request but ignore
@@ -9078,13 +9172,26 @@ async function createTemporaryAccessGrant(cfg, actor) {
         }
         if (!assignedGroups.length) throw new Error('nothing to grant - the user may already be a member of the chosen group(s)');
     } catch (e) {
-        for (const pid of policyIds) await netbirdReq('DELETE', '/api/policies/' + encodeURIComponent(pid)).catch(() => { });
-        for (const rr of destResources) await removeResourceGroups(rr.networkId, rr.resourceId, [rr.groupId]).catch(() => { });
-        for (const gid of assignedGroups) await setUserGroupMembership(userId, gid, false).catch(() => { });
-        for (const gid of allDestGroupIds) await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(gid)).catch(() => { });
-        if (sourceGroupId) await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(sourceGroupId)).catch(() => { });
-        // Compensation removed the NetBird objects - drop the placeholder too.
-        await pool.query(`DELETE FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [grantId, tnt()]).catch(() => { });
+        // An add NetBird did not answer may still land later: undo it now, and keep the
+        // placeholder either way so the delayed cleanup removes it again.
+        let clean = !(e && e.uncertainGroup);
+        if (e && e.uncertainGroup && !assignedGroups.includes(e.uncertainGroup)) assignedGroups.push(e.uncertainGroup);
+        const undo = async (fn) => { try { if (await fn() === false) clean = false; } catch { clean = false; } };
+        const del = (path) => undo(async () => nbWriteOk(await netbirdReq('DELETE', path), true));
+        for (const pid of policyIds) await del('/api/policies/' + encodeURIComponent(pid));
+        for (const rr of destResources) await undo(() => removeResourceGroups(rr.networkId, rr.resourceId, [rr.groupId]).then(() => true));
+        for (const gid of assignedGroups) await undo(() => setUserGroupMembership(userId, gid, false).then(() => true));
+        for (const gid of allDestGroupIds) await del('/api/groups/' + encodeURIComponent(gid));
+        if (sourceGroupId) await del('/api/groups/' + encodeURIComponent(sourceGroupId));
+        if (clean) {
+            // Compensation removed the NetBird objects - drop the placeholder too.
+            await pool.query(`DELETE FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [grantId, tnt()]).catch(() => { });
+        } else {
+            // Keep the placeholder for cleanupStuckCreatingGrants, with the groups this attempt
+            // assigned so the cleanup removes exactly those memberships.
+            await pool.query(`UPDATE temporary_access_grants SET assigned_groups=$2, policy_ids=$3, last_error=$4 WHERE id=$1 AND status='creating' AND tenant=$5`,
+                [grantId, JSON.stringify(assignedGroups), JSON.stringify(policyIds), (e && e.message) || 'creation failed', tnt()]).catch(() => { });
+        }
         throw e;
     }
 
@@ -9105,7 +9212,15 @@ async function createTemporaryAccessGrant(cfg, actor) {
     return { id: row.rows[0].id, devices: peers.length };
 }
 
-async function revokeTemporaryAccessGrant(id, { trigger = 'manual', actor = null } = {}) {
+// The whole revoke - NetBird teardown AND the final status write - runs under the grantee's user
+// lock, so the reconcile job (same lock, re-reads the status) can never re-add a membership in
+// between.
+async function revokeTemporaryAccessGrant(id, opts = {}) {
+    const r = await pool.query('SELECT user_id FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [id, tnt()]);
+    if (!r.rows.length) return { error: 'not found' };
+    return withNbUserLock(r.rows[0].user_id, () => revokeGrantLocked(id, opts));
+}
+async function revokeGrantLocked(id, { trigger = 'manual', actor = null } = {}) {
     if (_runningGrants.has(id)) return { skipped: true };
     const r = await pool.query('SELECT * FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [id, tnt()]);
     if (!r.rows.length) return { error: 'not found' };
@@ -9113,18 +9228,18 @@ async function revokeTemporaryAccessGrant(id, { trigger = 'manual', actor = null
     if (g.status !== 'active') return { skipped: true, reason: 'not active' };
 
     _runningGrants.add(id);
-    await pool.query(`UPDATE temporary_access_grants SET last_status='running' WHERE id=$1 AND tenant=$2`, [id, tnt()]);
     let err = '';
     try {
+        await pool.query(`UPDATE temporary_access_grants SET last_status='running' WHERE id=$1 AND tenant=$2`, [id, tnt()]);
         for (const pid of (Array.isArray(g.policy_ids) ? g.policy_ids : [])) {
             const resp = await netbirdReq('DELETE', '/api/policies/' + encodeURIComponent(pid));
-            if (resp && resp.status >= 300 && resp.status !== 404) throw new Error('policy delete failed: ' + (resp.raw || resp.error || resp.status));
+            if (!nbWriteOk(resp, true)) throw new Error('policy delete failed: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
         }
         // Remove the user from every group we added them to (target groups, profile sources,
         // and the temp source group). Must precede deleting the temp group (a group referenced by
         // a user's auto_groups can't be removed cleanly). Idempotent - safe to retry.
         const assigned = Array.isArray(g.assigned_groups) && g.assigned_groups.length ? g.assigned_groups : (g.group_id ? [g.group_id] : []);
-        for (const gid of assigned) await setUserGroupMembership(g.user_id, gid, false);
+        for (const gid of assigned) await applyUserGroupMembership(g.user_id, gid, false);
         // Detach the loose resources from their temp destination group(s) before deleting them
         // (a group still referenced by a resource can't be removed cleanly). Each entry carries
         // the group it was attached to (combo buckets); legacy rows fall back to dest_group_id.
@@ -9136,7 +9251,7 @@ async function revokeTemporaryAccessGrant(id, { trigger = 'manual', actor = null
         const tempGroups = [...new Set([g.group_id, g.dest_group_id, ...(Array.isArray(g.dest_group_ids) ? g.dest_group_ids : [])].filter(Boolean))];
         for (const gid of tempGroups) {
             const resp = await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(gid));
-            if (resp && resp.status >= 300 && resp.status !== 404) throw new Error('group delete failed: ' + (resp.raw || resp.error || resp.status));
+            if (!nbWriteOk(resp, true)) throw new Error('group delete failed: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
         }
     } catch (e) {
         err = e.message || String(e);
@@ -9222,17 +9337,28 @@ async function cleanupStuckCreatingGrants() {
         let ok = true;
         try {
             // Policies first - they reference the groups.
+            // A list that could not be read is not an empty list: stop and keep the row.
             const polPat = new RegExp(`^Temporary access #${g.id}( \\(\\d+\\))?$`);
-            for (const p of (await netbirdGet('/api/policies')) || []) {
+            const pols = await netbirdGet('/api/policies');
+            if (!Array.isArray(pols)) throw new Error('could not read the policies');
+            for (const p of pols) {
                 if (p && p.id && polPat.test(p.name || '')) {
                     const resp = await netbirdReq('DELETE', '/api/policies/' + encodeURIComponent(p.id));
-                    if (resp && resp.status >= 300 && resp.status !== 404) ok = false;
+                    if (!nbWriteOk(resp, true)) ok = false;
                 }
             }
-            // Membership in directly-joined target groups (recorded on the placeholder row).
+            // Membership in directly-joined target groups: the groups a failed compensation recorded
+            // on the row, else (a crash - nothing recorded) the group targets. A group another active
+            // grant of this user holds is left alone.
             const targets = Array.isArray(g.targets) ? g.targets : [];
-            for (const t of targets) {
-                if (t && t.type === 'group') await setUserGroupMembership(g.user_id, t.id, false).catch(() => { });
+            const direct = g.last_error && Array.isArray(g.assigned_groups)
+                ? g.assigned_groups
+                : targets.filter(t => t && t.type === 'group').map(t => t.id);
+            for (const gid of direct) {
+                await withNbUserLock(g.user_id, async () => {
+                    const held = await pool.query(`SELECT id FROM temporary_access_grants WHERE status='active' AND user_id=$1 AND tenant=$2 AND assigned_groups ? $3`, [g.user_id, tnt(), gid]);
+                    if (!held.rows.length) await applyUserGroupMembership(g.user_id, gid, false);
+                }).catch(() => { ok = false; });
             }
             // Our temp groups: drop the user's membership, detach any resources that already
             // joined (a referenced group can't be deleted cleanly), then delete the group.
@@ -9241,16 +9367,21 @@ async function cleanupStuckCreatingGrants() {
             for (const t of targets) {
                 if (t && t.type === 'resource' && t.networkId) resourceRefs.push({ networkId: t.networkId, resourceId: t.id });
                 if (t && t.type === 'network') {
-                    const rs = await netbirdGet('/api/networks/' + encodeURIComponent(t.id) + '/resources');
-                    for (const res of (Array.isArray(rs) ? rs : [])) if (res && res.id) resourceRefs.push({ networkId: t.id, resourceId: res.id });
+                    // 404 = the network is gone (no resources to detach); any other failure stops.
+                    const rs = await netbirdReq('GET', '/api/networks/' + encodeURIComponent(t.id) + '/resources');
+                    if (rs && rs.status === 404) continue;
+                    if (!nbWriteOk(rs) || !Array.isArray(rs.body)) throw new Error('could not read the network resources');
+                    for (const res of rs.body) if (res && res.id) resourceRefs.push({ networkId: t.id, resourceId: res.id });
                 }
             }
-            for (const grp of (await netbirdGet('/api/groups')) || []) {
+            const grps = await netbirdGet('/api/groups');
+            if (!Array.isArray(grps)) throw new Error('could not read the groups');
+            for (const grp of grps) {
                 if (!grp || !grp.id || !grpPat.test(grp.name || '')) continue;
-                await setUserGroupMembership(g.user_id, grp.id, false).catch(() => { });
-                for (const rr of resourceRefs) await removeResourceGroups(rr.networkId, rr.resourceId, [grp.id]).catch(() => { });
+                await setUserGroupMembership(g.user_id, grp.id, false).catch(() => { ok = false; });
+                for (const rr of resourceRefs) await removeResourceGroups(rr.networkId, rr.resourceId, [grp.id]).catch(() => { ok = false; });
                 const resp = await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(grp.id));
-                if (resp && resp.status >= 300 && resp.status !== 404) ok = false;
+                if (!nbWriteOk(resp, true)) ok = false;
             }
         } catch (e) {
             ok = false;
@@ -9325,7 +9456,24 @@ async function createRecurringAccess(cfg, actor) {
     }).catch(() => { });
     return recurToApi(r.rows[0]);
 }
+// One queue per rule: a window activation (runRecurringAccess) and a disable / delete / review
+// revoke of the same rule never overlap, so a disable always sees the window it has to end.
+function withRuleLock(id, fn) {
+    return withKeyLock(`rule\u0000${tnt()}\u0000${id}`, fn);
+}
+// End the rule's live window, if any. The link is cleared only once the grant is really gone;
+// otherwise this throws and the link stays for a retry.
+async function endRecurringWindow(ruleId, actor) {
+    const r = await pool.query('SELECT active_grant_id FROM recurring_access WHERE id=$1 AND tenant=$2', [ruleId, tnt()]);
+    const grantId = r.rows[0] && r.rows[0].active_grant_id;
+    if (!grantId) return;
+    await revokeCurrentRecurringGrant(grantId, actor);
+    await pool.query('UPDATE recurring_access SET active_grant_id=NULL WHERE id=$1 AND tenant=$2', [ruleId, tnt()]);
+}
 async function updateRecurringAccess(id, cfg, actor) {
+    return withRuleLock(id, () => updateRecurringLocked(id, cfg, actor));
+}
+async function updateRecurringLocked(id, cfg, actor) {
     const old = await pool.query('SELECT * FROM recurring_access WHERE id=$1 AND tenant=$2', [id, tnt()]);
     if (!old.rows.length) throw new Error('rule not found');
     const c = normRecurCfg(cfg);
@@ -9334,22 +9482,28 @@ async function updateRecurringAccess(id, cfg, actor) {
                start_time=$7, end_time=$8, valid_until=$9, enabled=$10, note=$11
         WHERE id=$1 AND tenant=$12 RETURNING *
     `, [id, c.userId, c.userLabel, c.userEmail, JSON.stringify(c.targets), JSON.stringify(c.days), c.startTime, c.endTime, c.validUntil, c.enabled, c.note, tnt()]);
-    // Disabling a rule while its window is active tears the live grant down immediately.
-    if (!c.enabled && old.rows[0].active_grant_id) {
-        await revokeCurrentRecurringGrant(old.rows[0].active_grant_id, actor);
-        await pool.query('UPDATE recurring_access SET active_grant_id=NULL WHERE id=$1 AND tenant=$2', [id, tnt()]).catch(() => { });
-    }
     recordAudit({
         actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
         action: 'recurring.update', target: c.userLabel,
         meta: { targets: c.targets.map(t => t.name).join(', '), days: c.days.join(','), window: `${c.startTime}-${c.endTime}`, until: c.validUntil || undefined, enabled: c.enabled },
     }).catch(() => { });
+    // Disabling a rule while its window is active tears the live grant down immediately. A failed
+    // teardown is reported (the rule stays saved as disabled; saving again retries it).
+    if (!c.enabled) await endRecurringWindow(id, actor);
     return recurToApi(r.rows[0]);
 }
 async function deleteRecurringAccess(id, actor) {
+    return withRuleLock(id, () => deleteRecurringLocked(id, actor));
+}
+async function deleteRecurringLocked(id, actor) {
     const old = await pool.query('SELECT * FROM recurring_access WHERE id=$1 AND tenant=$2', [id, tnt()]);
     if (!old.rows.length) throw new Error('rule not found');
-    if (old.rows[0].active_grant_id) await revokeCurrentRecurringGrant(old.rows[0].active_grant_id, actor);
+    if (old.rows[0].active_grant_id) {
+        // Disable first, delete only once the live window is really gone (else the rule stays,
+        // disabled, and the delete can be retried).
+        await pool.query('UPDATE recurring_access SET enabled=false WHERE id=$1 AND tenant=$2', [id, tnt()]);
+        await endRecurringWindow(id, actor);
+    }
     await pool.query('DELETE FROM recurring_access WHERE id=$1 AND tenant=$2', [id, tnt()]);
     recordAudit({
         actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
@@ -9357,11 +9511,13 @@ async function deleteRecurringAccess(id, actor) {
     }).catch(() => { });
     return { deleted: true };
 }
+// Throws when the window's grant is still active afterwards.
 async function revokeCurrentRecurringGrant(grantId, actor) {
-    try {
-        const g = await pool.query('SELECT status FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [grantId, tnt()]);
-        if (g.rows.length && g.rows[0].status === 'active') await revokeTemporaryAccessGrant(grantId, actor);
-    } catch (e) { console.error('[Recurring] revoke of grant %s failed:', grantId, e.message); }
+    const g = await pool.query('SELECT status FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [grantId, tnt()]);
+    if (!g.rows.length || g.rows[0].status !== 'active') return;
+    const res = await revokeTemporaryAccessGrant(grantId, { trigger: 'manual', actor });
+    if (res && res.status === 'error') throw new Error(`The rule's active window could not be ended (${res.error}). Try again.`);
+    if (res && res.skipped && res.reason !== 'not active') throw new Error("The rule's active window is still being ended. Try again.");
 }
 
 // Scheduler tick: activate any rule whose window just opened (today, app time zone). The spawned
@@ -9395,13 +9551,19 @@ async function runRecurringAccess() {
         // Mark BEFORE creating, so a failure can't spawn twice; a failed day is skipped (next day retries).
         await pool.query('UPDATE recurring_access SET last_spawn_key=$2 WHERE id=$1 AND tenant=$3', [r.id, now.dateKey, tnt()]).catch(() => { });
         try {
-            const grant = await createTemporaryAccessGrant({
-                userId: r.user_id, userLabel: r.user_label || r.user_id, userEmail: r.user_email || '',
-                targets: Array.isArray(r.targets) ? r.targets : [],
-                note: `Recurring access rule #${r.id} (${r.start_time}-${r.end_time})`,
-                durationMinutes: endMin - nowMin,
-            }, { name: 'Scheduler', isAdmin: true });
-            await pool.query('UPDATE recurring_access SET active_grant_id=$2 WHERE id=$1 AND tenant=$3', [r.id, grant.id, tnt()]).catch(() => { });
+            // Under the rule's lock, re-checked: a rule disabled or deleted since the list above
+            // must not open a window.
+            await withRuleLock(r.id, async () => {
+                const cur = await pool.query('SELECT enabled FROM recurring_access WHERE id=$1 AND tenant=$2', [r.id, tnt()]);
+                if (!cur.rows.length || cur.rows[0].enabled === false) return;
+                const grant = await createTemporaryAccessGrant({
+                    userId: r.user_id, userLabel: r.user_label || r.user_id, userEmail: r.user_email || '',
+                    targets: Array.isArray(r.targets) ? r.targets : [],
+                    note: `Recurring access rule #${r.id} (${r.start_time}-${r.end_time})`,
+                    durationMinutes: endMin - nowMin,
+                }, { name: 'Scheduler', isAdmin: true });
+                await pool.query('UPDATE recurring_access SET active_grant_id=$2 WHERE id=$1 AND tenant=$3', [r.id, grant.id, tnt()]).catch(() => { });
+            });
         } catch (e) {
             console.error('[Recurring] rule %s activation failed:', r.id, e.message);
         }
@@ -9416,16 +9578,23 @@ async function revokeExpiredGrants() {
 }
 
 // Re-assert each active grant's user→group assignments (in case an IdP sync stripped them).
-// Best-effort, non-fatal; no-op when the assignment is already in place.
+// Best-effort, non-fatal; no-op when the assignment is already in place. Each grant is re-read
+// under the grantee's user lock (the one revoke holds end to end), so a grant revoked or expired
+// after the snapshot is skipped instead of having its membership put back.
 async function reconcileActiveGrants() {
     if (!netbirdApiConfigured()) return;
-    const r = await pool.query(`SELECT id, user_id, assigned_groups, group_id FROM temporary_access_grants WHERE status='active' AND tenant=$1`, [tnt()]).catch(() => ({ rows: [] }));
-    for (const g of r.rows) {
-        const groups = Array.isArray(g.assigned_groups) && g.assigned_groups.length ? g.assigned_groups : (g.group_id ? [g.group_id] : []);
-        for (const gid of groups) {
-            try { await setUserGroupMembership(g.user_id, gid, true); }
-            catch (e) { console.error('[grant reconcile]', g.id, e.message); }
-        }
+    const r = await pool.query(`SELECT id, user_id FROM temporary_access_grants WHERE status='active' AND tenant=$1`, [tnt()]).catch(() => ({ rows: [] }));
+    for (const snap of r.rows) {
+        await withNbUserLock(snap.user_id, async () => {
+            const cur = await pool.query(`SELECT id, user_id, status, assigned_groups, group_id FROM temporary_access_grants WHERE id=$1 AND tenant=$2`, [snap.id, tnt()]);
+            const g = cur.rows[0];
+            if (!g || g.status !== 'active') return;
+            const groups = Array.isArray(g.assigned_groups) && g.assigned_groups.length ? g.assigned_groups : (g.group_id ? [g.group_id] : []);
+            for (const gid of groups) {
+                try { await applyUserGroupMembership(g.user_id, gid, true); }
+                catch (e) { console.error('[grant reconcile]', g.id, e.message); }
+            }
+        }).catch(e => console.error('[grant reconcile]', snap.id, e.message));
     }
 }
 
@@ -9736,11 +9905,22 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
         try { await bypassPeer(t.id); }
         catch (e) { if (!req.extend_bypass) throw e; }
         if (min > 0) {
-            await pool.query(`
-                INSERT INTO bypass_expirations (tenant, peer_id, peer_name, requester_email, requester_name, request_id, expires_at, delete_peer)
-                VALUES ('', $1, $2, $3, $4, $5, NOW() + ($6 || ' minutes')::interval, $7)
-                ON CONFLICT (tenant, peer_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, request_id = EXCLUDED.request_id, delete_peer = EXCLUDED.delete_peer
-            `, [t.id, t.name || t.id, req.requester_email || '', req.requester_name || '', id, String(min), tempDev]).catch(e => console.error('[Bypass] expiry save error:', e.message));
+            try {
+                await pool.query(`
+                    INSERT INTO bypass_expirations (tenant, peer_id, peer_name, requester_email, requester_name, request_id, expires_at, delete_peer)
+                    VALUES ('', $1, $2, $3, $4, $5, NOW() + ($6 || ' minutes')::interval, $7)
+                    ON CONFLICT (tenant, peer_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, request_id = EXCLUDED.request_id, delete_peer = EXCLUDED.delete_peer
+                `, [t.id, t.name || t.id, req.requester_email || '', req.requester_name || '', id, String(min), tempDev]);
+            } catch (e) {
+                // A timed bypass never stays on without its expiry: take the bypass back and leave the
+                // request pending. Only the NetBird bypass is removed - an expiry already scheduled for
+                // this device (and a temporary device's deletion) stays in place.
+                console.error('[Bypass] expiry save error:', e.message);
+                const back = await netbirdReq('DELETE', `/api/peers/${encodeURIComponent(t.id)}/edr/bypass`);
+                _peersLastRefresh.set(tnt(), 0);
+                if (!nbWriteOk(back, true)) throw new Error("Couldn't save when the bypass ends, and removing it failed - the device is still bypassed with no end time. Revoke the bypass on the Peers page.");
+                throw new Error("Couldn't save when the bypass ends, so the bypass was removed. The request is still pending - try approving it again.");
+            }
         } else {
             await pool.query(`DELETE FROM bypass_expirations WHERE tenant = '' AND peer_id=$1`, [t.id]).catch(() => { });
         }
@@ -10906,20 +11086,34 @@ async function applyRecertRevoke(it, actor) {
     }
     if (it.kind === 'auto_trusted' || it.kind === 'auto_rule') {
         const cfg = getAutoApprovalConfig();
-        const match = stableStringify(d.entry);
-        if (it.kind === 'auto_trusted') await setAutoApprovalConfig({ trusted: (cfg.trusted || []).filter(t => stableStringify(t) !== match), rules: cfg.rules });
-        else await setAutoApprovalConfig({ trusted: cfg.trusted, rules: (cfg.rules || []).filter(r => stableStringify(r) !== match) });
+        const trusted = it.kind === 'auto_trusted';
+        const list = (trusted ? cfg.trusted : cfg.rules) || [];
+        // Matched by the entry's id, so an entry edited since the round opened is still the one
+        // removed. An item stored before entries had ids derives the id the entry got on load
+        // (same normalization); a duplicate entry makes that ambiguous, so it is refused.
+        let matches;
+        if (d.entry && d.entry.id) {
+            matches = list.filter(e => e.id === d.entry.id);
+        } else {
+            const { id: _ignored, ...snap } = d.entry || {};
+            const derived = (trusted ? normTrusted : normAutoRules)([snap], true)[0];
+            matches = derived ? list.filter(e => e.id === derived.id || String(e.id).startsWith(derived.id + '-')) : [];
+        }
+        if (matches.length > 1) throw new Error('This item matches more than one auto-approval entry. Check the Auto-Approval settings, then decide again.');
+        if (!matches.length) return; // entry already gone
+        const next = list.filter(e => e !== matches[0]);
+        if (trusted) await setAutoApprovalConfig({ trusted: next, rules: cfg.rules });
+        else await setAutoApprovalConfig({ trusted: cfg.trusted, rules: next });
         return;
     }
     if (it.kind === 'recurring') {
-        const old = await pool.query('SELECT * FROM recurring_access WHERE id=$1 AND tenant=$2', [d.ruleId, tnt()]);
-        if (!old.rows.length) return; // rule already deleted
-        await pool.query('UPDATE recurring_access SET enabled=false WHERE id=$1 AND tenant=$2', [d.ruleId, tnt()]);
-        if (old.rows[0].active_grant_id) {
-            await revokeCurrentRecurringGrant(old.rows[0].active_grant_id, actor).catch(() => { });
-            await pool.query('UPDATE recurring_access SET active_grant_id=NULL WHERE id=$1 AND tenant=$2', [d.ruleId, tnt()]).catch(() => { });
-        }
-        return;
+        return withRuleLock(d.ruleId, async () => {
+            const old = await pool.query('SELECT * FROM recurring_access WHERE id=$1 AND tenant=$2', [d.ruleId, tnt()]);
+            if (!old.rows.length) return; // rule already deleted
+            await pool.query('UPDATE recurring_access SET enabled=false WHERE id=$1 AND tenant=$2', [d.ruleId, tnt()]);
+            // Throws while the live window is still up - the item then stays pending.
+            await endRecurringWindow(d.ruleId, actor);
+        });
     }
     throw new Error('unknown review item kind: ' + it.kind);
 }
@@ -11346,7 +11540,7 @@ module.exports = {
     // Pure helpers exposed ONLY for unit tests (backend/test) - not part of the app API.
     _internal: { comboKey, combosForResource, ALL_COMBO, splitPortTokens, mergeRulePorts, normSecurityConfig, humanDuration, stableStringify, normDelegates, normEdrAutoBypass, edrOsKey, ruleForPut, carryRuleExtras, ruleHasUnmodeled, policiesSourcingResources, editorProtocol,
         normalizeTenantDefaults, nbShapeFromSettings, nbSettingsFromProfile, dropUnsupportedNbSettings, proxyAccessActionError,
-        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup },
+        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup, loadAutoApproval },
     listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess,
     getSecurityConfig, setSecurityConfig,
     getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS,

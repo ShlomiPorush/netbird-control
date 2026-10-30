@@ -1728,6 +1728,8 @@ export interface CreateAccessRequestResult {
 // Auto-approval: which requests skip human review (trusted Entra groups + per-target self-service).
 // Each entry/rule carries its OWN duration cap (0 = honor the requested length).
 export interface AutoApprovalTrusted {
+  /** Stable server-assigned id; edits must send it back. */
+  id?: string;
   groupIds: string[];
   maxMinutes: number;
   /** false = paused: stays configured but never auto-approves. */
@@ -1748,6 +1750,8 @@ export interface AutoApprovalRuleTarget {
 // key absent = protocol not allowed. null/undefined = mirror the target's existing exposure.
 export interface AutoApprovalAccess { tcp?: string[]; udp?: string[]; icmp?: boolean }
 export interface AutoApprovalRule {
+  /** Stable server-assigned id; edits must send it back. */
+  id?: string;
   targets: AutoApprovalRuleTarget[];
   groupIds: string[];
   maxMinutes: number;
