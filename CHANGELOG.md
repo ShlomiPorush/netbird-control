@@ -52,6 +52,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   editor is an admin, a Manage All Networks holder, or a member of a group with an edit grant on an
   existing network. Manage Temporary Access holders can also read the access profiles. Other
   signed-in users get `403` from these three lists. No screen they use changes.
+- **SSO settings are all or nothing.** **New requirement:** when any of `OIDC_ISSUER_BASE_URL`,
+  `OIDC_CLIENT_ID` or `OIDC_CLIENT_SECRET` is set, all three and `BASE_URL` must be set. Otherwise
+  the app does not start, and the log names the missing variables. **Check before you upgrade:**
+  set the missing variables, or clear every `OIDC_*` variable to keep running without SSO.
+  `BASE_URL` alone does not turn SSO on.
 
 ---
 
