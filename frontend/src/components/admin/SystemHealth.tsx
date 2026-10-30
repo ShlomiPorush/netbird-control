@@ -185,7 +185,7 @@ export function SystemHealthTab() {
                 {s.lastError ? <Badge tone="red">Error</Badge> : s.runs ? <Badge tone="green">OK</Badge> : <Badge tone="gray">Waiting</Badge>}
               </div>
               {SCHED_DESCRIPTIONS[key] && <div className="mt-0.5 text-[0.72rem] leading-snug text-nb-gray-500">{SCHED_DESCRIPTIONS[key]}</div>}
-              {s.lastError && <div className="mt-1 text-[0.74rem] text-red-500 break-words">{s.lastError}</div>}
+              {s.lastError && <div className="mt-1 text-[0.74rem] text-red-500 wrap-break-word">{s.lastError}</div>}
               <div className="mt-1 text-[0.74rem] text-nb-gray-500">
                 {s.lastRunAt ? `last run ${formatTimestamp(s.lastRunAt)}` : 'not run yet'} · {fmtCount(s.runs)} runs · {s.failures} failures
               </div>

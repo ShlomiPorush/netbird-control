@@ -22,7 +22,7 @@ export function Toggle({ checked, onChange, disabled }: { checked: boolean; onCh
         checked ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700',
         disabled && 'opacity-50 cursor-not-allowed')}
     >
-      <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all', checked ? 'left-[18px]' : 'left-0.5')} />
+      <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all', checked ? 'left-[18px]' : 'left-0.5')} />
     </button>
   );
 }
@@ -339,7 +339,7 @@ export function NetbirdCategoryCards({ nb, setNb, off, mfaSupported, variant }: 
             </Select>
             <div className="relative">
               <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[0.72rem] font-medium text-nb-gray-500">Version</span>
-              <Input className="w-full pl-[4.25rem]" value={updVersion}
+              <Input className="w-full pl-17" value={updVersion}
                 disabled={off || updMethod !== 'custom'} placeholder="e.g., 0.52.2"
                 onChange={(e) => setUpdVersion(e.target.value)} />
             </div>

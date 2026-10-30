@@ -143,8 +143,8 @@ export default function AccessReview() {
                       ? <AlertTriangle size={15} className="shrink-0 text-amber-500 mt-0.5" />
                       : <RotateCcw size={15} className="shrink-0 text-nb-gray-400 mt-0.5" />}
                     <span className="min-w-0 flex-1">
-                      <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 break-words">{it.label}</span>
-                      {it.info && <span className="block mt-0.5 text-[0.78rem] leading-relaxed text-nb-gray-500 break-words">{it.info}</span>}
+                      <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 wrap-break-word">{it.label}</span>
+                      {it.info && <span className="block mt-0.5 text-[0.78rem] leading-relaxed text-nb-gray-500 wrap-break-word">{it.info}</span>}
                     </span>
                     {it.status === 'pending' ? (
                       <span className="inline-flex items-center gap-1.5 shrink-0">
@@ -239,8 +239,8 @@ function RoundReportModal({ id, onClose }: { id: number; onClose: () => void }) 
                 {items.map((it) => (
                   <div key={it.id} className="flex flex-wrap items-start gap-3 rounded-md border border-nb-gray-100 dark:border-nb-gray-900 px-3 py-2">
                     <span className="min-w-0 flex-1">
-                      <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 break-words">{it.label}</span>
-                      {it.info && <span className="block mt-0.5 text-[0.76rem] leading-relaxed text-nb-gray-500 break-words">{it.info}</span>}
+                      <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 wrap-break-word">{it.label}</span>
+                      {it.info && <span className="block mt-0.5 text-[0.76rem] leading-relaxed text-nb-gray-500 wrap-break-word">{it.info}</span>}
                     </span>
                     <span className="shrink-0 text-right">
                       <Badge tone={it.status === 'kept' ? 'green' : it.status === 'revoked' ? 'red' : 'gray'}>{ucLabel(it.status)}</Badge>

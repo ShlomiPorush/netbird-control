@@ -19,7 +19,7 @@ function MiniToggle({ checked, onChange, title }: { checked: boolean; onChange: 
       onClick={(e) => { e.stopPropagation(); onChange(); }}
       className={`relative h-5 w-9 rounded-full transition-colors shrink-0 ${checked ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700'}`}
     >
-      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${checked ? 'left-[18px]' : 'left-0.5'}`} />
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all ${checked ? 'left-[18px]' : 'left-0.5'}`} />
     </button>
   );
 }

@@ -82,7 +82,7 @@ function DocLink({ href, children }: { href: string; children: ReactNode }) {
   );
 }
 
-const linkBtnBase = 'inline-flex items-center justify-center gap-2 h-[34px] px-3 rounded-md border text-xs font-medium whitespace-nowrap shadow-sm transition-colors';
+const linkBtnBase = 'inline-flex items-center justify-center gap-2 h-[34px] px-3 rounded-md border text-xs font-medium whitespace-nowrap shadow-xs transition-colors';
 const linkBtnPrimary = `${linkBtnBase} border-transparent bg-netbird text-white hover:bg-netbird-500`;
 const linkBtnSecondary = `${linkBtnBase} bg-white text-nb-gray-900 border-nb-gray-200 hover:bg-nb-gray-100 dark:bg-nb-gray-920 dark:text-nb-gray-300 dark:border-nb-gray-700/40 dark:hover:text-white dark:hover:bg-nb-gray-910`;
 

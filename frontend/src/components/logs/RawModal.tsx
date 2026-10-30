@@ -26,7 +26,7 @@ export function RawModal({ data, onClose, title = 'Raw Webhook Data' }: { data: 
         </Button>
       }
     >
-      <pre className="text-[0.8rem] leading-relaxed font-mono text-nb-blue-700 dark:text-nb-blue-300 bg-nb-gray-100 dark:bg-black/40 rounded-lg p-4 overflow-auto max-h-[60vh] whitespace-pre-wrap break-words">
+      <pre className="text-[0.8rem] leading-relaxed font-mono text-nb-blue-700 dark:text-nb-blue-300 bg-nb-gray-100 dark:bg-black/40 rounded-lg p-4 overflow-auto max-h-[60vh] whitespace-pre-wrap wrap-break-word">
         {json}
       </pre>
     </Modal>

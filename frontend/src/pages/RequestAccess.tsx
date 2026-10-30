@@ -353,8 +353,8 @@ export default function RequestAccess() {
                     {r.status === 'pending' && <IconButton onClick={() => onCancel(r)} title="Cancel request" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Ban size={15} /></IconButton>}
                   </span>
                 </div>
-                {r.reason && <div className="mt-2 text-[0.82rem] text-nb-gray-600 dark:text-nb-gray-300 break-words">{r.reason}</div>}
-                {r.status === 'denied' && r.decisionNote && <div className="mt-1 text-[0.78rem] text-red-500 break-words">Denied: {r.decisionNote}</div>}
+                {r.reason && <div className="mt-2 text-[0.82rem] text-nb-gray-600 dark:text-nb-gray-300 wrap-break-word">{r.reason}</div>}
+                {r.status === 'denied' && r.decisionNote && <div className="mt-1 text-[0.78rem] text-red-500 wrap-break-word">Denied: {r.decisionNote}</div>}
                 <div className="mt-2 flex items-center gap-2 text-[0.76rem] text-nb-gray-500">
                   <span>{formatMaybeDate(r.createdAt)}</span>
                   {durationLabel(r) !== '-' ? <span>· {durationLabel(r)}{durationDiffers(r) ? ` (requested ${r.requestedMinutes} min)` : ''}</span> : null}

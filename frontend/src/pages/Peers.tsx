@@ -105,7 +105,7 @@ function PeerTagChips({ tags, note }: { tags?: string[]; note?: string }) {
   return (
     <div className="mt-0.5 flex items-center gap-1 flex-wrap" title={note || undefined}>
       {shown.map((t) => (
-        <span key={t} className="inline-flex items-center gap-0.5 rounded border border-nb-gray-200 dark:border-nb-gray-800/60 bg-nb-gray-100 dark:bg-nb-gray-930/60 px-1.5 py-px text-[0.68rem] text-nb-gray-500 dark:text-nb-gray-400">
+        <span key={t} className="inline-flex items-center gap-0.5 rounded-sm border border-nb-gray-200 dark:border-nb-gray-800/60 bg-nb-gray-100 dark:bg-nb-gray-930/60 px-1.5 py-px text-[0.68rem] text-nb-gray-500 dark:text-nb-gray-400">
           <TagIcon size={9} /> {t}
         </span>
       ))}
@@ -377,7 +377,7 @@ export default function Peers() {
           active={!!search || anyFilter}
           onClear={() => { setSearch(''); setStatus('all'); setOsKinds([]); setGroupSel([]); setCompliance('none'); setStaleDays(0); setUser(''); }}
         />
-        <Button variant="secondary" className="ml-auto !px-0 w-[42px]" title="Refresh" onClick={async () => { await refresh.mutateAsync().catch(() => { }); pq.refetch(); }}>
+        <Button variant="secondary" className="ml-auto px-0! w-[42px]" title="Refresh" onClick={async () => { await refresh.mutateAsync().catch(() => { }); pq.refetch(); }}>
           <RefreshCw size={16} className={(refresh.isPending || pq.isFetching) ? 'animate-spin' : undefined} />
         </Button>
       </div>
@@ -419,7 +419,7 @@ export default function Peers() {
                 <input type="checkbox" aria-label="Select all"
                   ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
                   checked={allSelected} onChange={toggleAll}
-                  className="h-4 w-4 align-middle rounded border-nb-gray-300 dark:border-nb-gray-700 accent-netbird focus:ring-netbird/40" />
+                  className="h-4 w-4 align-middle rounded-sm border-nb-gray-300 dark:border-nb-gray-700 accent-netbird focus:ring-netbird/40" />
               </Th>
             )}
             <SortTh label="Name" sortKey="name" state={state} />
@@ -432,7 +432,7 @@ export default function Peers() {
           </THead>
           <TBody>
             {pageRows.map((p) => (
-              <Tr key={p.id} onClick={() => navigate(`/peers/${encodeURIComponent(p.id)}`)} className={selected.has(p.id) ? '!bg-netbird/[0.06]' : undefined}>
+              <Tr key={p.id} onClick={() => navigate(`/peers/${encodeURIComponent(p.id)}`)} className={selected.has(p.id) ? 'bg-netbird/6!' : undefined}>
                 {canBulk && (
                   <Td className="pl-2" onClick={(e) => e.stopPropagation()}>
                     <Checkbox checked={selected.has(p.id)} onChange={() => toggleOne(p.id)} />
@@ -480,7 +480,7 @@ export default function Peers() {
           {pageRows.map((p) => (
             <div key={p.id} onClick={() => navigate(`/peers/${encodeURIComponent(p.id)}`)}
               className={cn('rounded-lg border bg-white dark:bg-nb-gray-950 p-3.5 cursor-pointer active:bg-nb-gray-50 dark:active:bg-nb-gray-900/40 transition-colors',
-                selected.has(p.id) ? 'border-netbird/40 !bg-netbird/[0.06]' : 'border-nb-gray-200 dark:border-nb-gray-800')}>
+                selected.has(p.id) ? 'border-netbird/40 bg-netbird/6!' : 'border-nb-gray-200 dark:border-nb-gray-800')}>
               <div className="flex items-start gap-2.5">
                 {canBulk && (
                   <span className="pt-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -624,7 +624,7 @@ function OsIcon({ os }: { os: string }) {
 function CompBtn({ active, onClick, icon, label, count }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; count: number }) {
   return (
     <button onClick={onClick}
-      className={cn('inline-flex items-center gap-2 h-[42px] px-3.5 rounded-md text-sm border shadow-sm transition-colors',
+      className={cn('inline-flex items-center gap-2 h-[42px] px-3.5 rounded-md text-sm border shadow-xs transition-colors',
         active ? 'border-netbird/50 bg-netbird/10 text-netbird'
                : 'bg-white border-nb-gray-200 text-nb-gray-700 hover:bg-nb-gray-100 dark:bg-nb-gray-920 dark:border-nb-gray-700/40 dark:text-nb-gray-300 dark:hover:bg-nb-gray-910')}>
       {icon} {label}
@@ -701,7 +701,7 @@ function PeersFilters({ status, setStatus, osKinds, setOsKinds, osOptions, group
               <>
                 <div className="my-1 border-t border-nb-gray-100 dark:border-nb-gray-900" />
                 <button onClick={() => { setStatus('all'); setOsKinds([]); setGroupSel([]); setStaleDays(0); setTagSel([]); }}
-                  className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded text-sm text-nb-gray-500 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
+                  className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-sm text-sm text-nb-gray-500 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
                   <X size={14} /> Clear all
                 </button>
               </>
@@ -716,7 +716,7 @@ function PeersFilters({ status, setStatus, osKinds, setOsKinds, osOptions, group
 function SubMenu({ label, badge, disabled, children }: { label: string; badge?: number; disabled?: boolean; children: React.ReactNode }) {
   return (
     <div className={cn('group/sub relative', disabled && 'opacity-40 pointer-events-none')}>
-      <button className="flex items-center justify-between w-full px-2.5 py-1.5 rounded text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
+      <button className="flex items-center justify-between w-full px-2.5 py-1.5 rounded-sm text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
         <span>{label}</span>
         <span className="flex items-center gap-1.5">
           {badge ? <span className="inline-flex items-center justify-center h-4 min-w-[16px] px-1 rounded-full bg-netbird text-white text-[0.6rem] font-semibold">{badge}</span> : null}
@@ -733,9 +733,9 @@ function SubMenu({ label, badge, disabled, children }: { label: string; badge?: 
 function OptionRow({ radio, selected, onClick, children }: { radio?: boolean; selected: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button onClick={onClick}
-      className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded text-sm', selected ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
+      className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded-sm text-sm', selected ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
       {!radio && (
-        <span className={cn('flex items-center justify-center h-4 w-4 rounded border shrink-0', selected ? 'bg-netbird border-netbird text-white' : 'border-nb-gray-300 dark:border-nb-gray-600')}>
+        <span className={cn('flex items-center justify-center h-4 w-4 rounded-sm border shrink-0', selected ? 'bg-netbird border-netbird text-white' : 'border-nb-gray-300 dark:border-nb-gray-600')}>
           {selected && <Check size={11} />}
         </span>
       )}

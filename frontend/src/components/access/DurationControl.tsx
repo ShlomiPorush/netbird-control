@@ -33,7 +33,7 @@ export function DurationControl({ value, onChange }: { value: DurationState; onC
   const seg = (mode: 'in' | 'until', label: string) => (
     <button type="button" onClick={() => set({ mode })}
       className={cn('flex-1 h-9 text-sm rounded-md transition-colors',
-        value.mode === mode ? 'bg-white dark:bg-nb-gray-900 text-netbird shadow-sm' : 'text-nb-gray-500 hover:text-nb-gray-800 dark:hover:text-nb-gray-200')}>
+        value.mode === mode ? 'bg-white dark:bg-nb-gray-900 text-netbird shadow-xs' : 'text-nb-gray-500 hover:text-nb-gray-800 dark:hover:text-nb-gray-200')}>
       {label}
     </button>
   );

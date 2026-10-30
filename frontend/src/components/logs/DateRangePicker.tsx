@@ -104,7 +104,7 @@ export function DateRangePicker({ value, onChange }: { value?: DateRange; onChan
       <button
         ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
-        className="inline-flex items-center gap-2 h-[42px] px-4 rounded-md border text-sm font-medium whitespace-nowrap transition-colors shadow-sm bg-white border-gray-200 text-gray-900 hover:bg-gray-100 dark:bg-nb-gray-920 dark:text-nb-gray-300 dark:border-nb-gray-700/40 dark:hover:text-white dark:hover:bg-nb-gray-910"
+        className="inline-flex items-center gap-2 h-[42px] px-4 rounded-md border text-sm font-medium whitespace-nowrap transition-colors shadow-xs bg-white border-gray-200 text-gray-900 hover:bg-gray-100 dark:bg-nb-gray-920 dark:text-nb-gray-300 dark:border-nb-gray-700/40 dark:hover:text-white dark:hover:bg-nb-gray-910"
       >
         <CalendarIcon size={16} className="shrink-0" />
         {label}
@@ -114,7 +114,7 @@ export function DateRangePicker({ value, onChange }: { value?: DateRange; onChan
         <div
           ref={panelRef}
           style={{ position: 'fixed', left: pos.left, top: pos.top }}
-          className={cn('z-[1100]', pos.above ? '-translate-y-full -mt-2' : 'mt-2')}
+          className={cn('z-1100', pos.above ? '-translate-y-full -mt-2' : 'mt-2')}
         >
           <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-2xl max-w-[calc(100vw-16px)] overflow-x-auto">
             {/* Quick ranges. `w-0 min-w-full` keeps this (wide) row from stretching the panel:
@@ -135,10 +135,10 @@ export function DateRangePicker({ value, onChange }: { value?: DateRange; onChan
                 intrinsic dd/mm/yyyy width so the pair always fits the panel instead of overflowing. */}
             <div className="w-0 min-w-full flex items-center gap-2 px-3 py-3 border-t border-nb-gray-100 dark:border-nb-gray-800">
               <input type="date" value={toDateInput(value?.from)} onChange={(e) => setInput('from', e.target.value)}
-                className="h-9 flex-1 min-w-0 rounded-md border px-2.5 text-sm bg-white border-nb-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 outline-none focus:border-netbird/60" />
+                className="h-9 flex-1 min-w-0 rounded-md border px-2.5 text-sm bg-white border-nb-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 outline-hidden focus:border-netbird/60" />
               <span className="shrink-0 text-nb-gray-400">–</span>
               <input type="date" value={toDateInput(value?.to)} onChange={(e) => setInput('to', e.target.value)}
-                className="h-9 flex-1 min-w-0 rounded-md border px-2.5 text-sm bg-white border-nb-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 outline-none focus:border-netbird/60" />
+                className="h-9 flex-1 min-w-0 rounded-md border px-2.5 text-sm bg-white border-nb-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 outline-hidden focus:border-netbird/60" />
             </div>
           </div>
         </div>,

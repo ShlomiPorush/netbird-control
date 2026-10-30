@@ -1,12 +1,13 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 import path from 'node:path';
 
 // The Express backend (auth, API, webhook) runs on :3000. In dev we proxy all
 // server-owned paths there so the React app at :5173 talks to the real backend.
 // The production build emits to ../backend/public, which Express serves.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   resolve: {
     alias: { '@': path.resolve(__dirname, 'src') },
   },

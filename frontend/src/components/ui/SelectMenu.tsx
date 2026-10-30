@@ -105,7 +105,7 @@ export function SelectMenu({
         className={cn(
           'min-h-[44px] w-full flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm transition-all group',
           'border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40',
-          disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:dark:bg-nb-gray-900/50',
+          disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer dark:hover:bg-nb-gray-900/50',
           className,
         )}
       >
@@ -127,7 +127,7 @@ export function SelectMenu({
               <div className="relative border-b border-neutral-200 dark:border-nb-gray-700">
                 <input
                   autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder={searchPlaceholder}
-                  className="min-h-[42px] w-full bg-transparent text-sm outline-none font-light dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400 placeholder:text-neutral-500 pl-10 pr-12"
+                  className="min-h-[42px] w-full bg-transparent text-sm outline-hidden font-light dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400 placeholder:text-neutral-500 pl-10 pr-12"
                 />
                 <div className="absolute left-0 top-0 h-full flex items-center pl-4 text-nb-gray-400"><SearchIcon size={14} /></div>
                 <div className="absolute right-0 top-0 h-full flex items-center pr-4">

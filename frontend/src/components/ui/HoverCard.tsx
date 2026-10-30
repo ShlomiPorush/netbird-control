@@ -43,7 +43,7 @@ export function HoverCard({
           style={{ position: 'fixed', left: pos.left, top: pos.top, width, transform: pos.above ? 'translateY(-100%)' : undefined }}
           onMouseEnter={open}
           onMouseLeave={close}
-          className="z-[1100]"
+          className="z-1100"
         >
           <div className={cn('rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-2xl p-3', className)}>
             {children}

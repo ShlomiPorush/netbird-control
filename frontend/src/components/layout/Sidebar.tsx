@@ -88,7 +88,7 @@ function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: 
             </span>
             {!collapsed && <span className="truncate">{label}</span>}
             {!collapsed && count > 0 && (
-              <span className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-netbird text-white text-[0.7rem] font-medium">{count}</span>
+              <span className="ml-auto inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-netbird text-white text-[0.7rem] font-medium">{count}</span>
             )}
           </NavLink>
           );

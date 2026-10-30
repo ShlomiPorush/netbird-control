@@ -334,7 +334,7 @@ function GroupUsers({ group, canManage }: { group: GroupDetailT; canManage: bool
         {pageRows.map((u) => {
           const st = memberStatus(u);
           return (
-            <Tr key={u.id} onClick={() => navigate(`/users/${encodeURIComponent(u.id)}`)} className={selected.has(u.id) ? '!bg-netbird/[0.06]' : undefined}>
+            <Tr key={u.id} onClick={() => navigate(`/users/${encodeURIComponent(u.id)}`)} className={selected.has(u.id) ? 'bg-netbird/6!' : undefined}>
               {canManage && <Td className="pl-2" onClick={(e) => e.stopPropagation()}><Checkbox checked={selected.has(u.id)} onChange={() => toggleOne(u.id)} /></Td>}
               <Td><MemberNameCell name={u.name} email={u.email} id={u.id} /></Td>
               <Td>{u.role ? <Badge tone="gray">{ucLabel(u.role)}</Badge> : <span className="text-nb-gray-500">-</span>}</Td>
@@ -471,7 +471,7 @@ function GroupPeers({ group, canManage }: { group: GroupDetailT; canManage: bool
       </THead>
       <TBody>
         {pageRows.map((p) => (
-          <Tr key={p.id} onClick={() => navigate(`/peers/${encodeURIComponent(p.id)}`)} className={selected.has(p.id) ? '!bg-netbird/[0.06]' : undefined}>
+          <Tr key={p.id} onClick={() => navigate(`/peers/${encodeURIComponent(p.id)}`)} className={selected.has(p.id) ? 'bg-netbird/6!' : undefined}>
             {canManage && <Td className="pl-2" onClick={(e) => e.stopPropagation()}><Checkbox checked={selected.has(p.id)} onChange={() => toggleOne(p.id)} /></Td>}
             <Td>
               <div className="flex items-center gap-2.5">
@@ -591,7 +591,7 @@ function AssignModal<T extends { id: string }>({
             ) : filtered.map((i) => (
               <button type="button" key={i.id} onClick={() => toggle(i.id)}
                 className={cn('flex items-center gap-3 w-full text-left px-2.5 py-2 rounded-md border transition-colors',
-                  selected.has(i.id) ? 'border-netbird/40 bg-netbird/[0.06]' : 'border-transparent hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
+                  selected.has(i.id) ? 'border-netbird/40 bg-netbird/6' : 'border-transparent hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
                 <span onClick={(e) => e.stopPropagation()}><Checkbox checked={selected.has(i.id)} onChange={() => toggle(i.id)} /></span>
                 <div className="min-w-0 flex-1">{renderRow(i)}</div>
               </button>
@@ -700,7 +700,7 @@ function GroupResources({ resources, canManage }: { resources: GroupResourceRef[
       {pageRows.map((r) => (
         <DCard key={r.id} onClick={r.network_id ? () => openResource(r) : undefined}>
           <div className="flex items-start justify-between gap-2">
-            <span className="min-w-0 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 break-words">{r.name || <span className="font-mono text-[0.78rem] text-nb-gray-500">{r.id}</span>}</span>
+            <span className="min-w-0 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 wrap-break-word">{r.name || <span className="font-mono text-[0.78rem] text-nb-gray-500">{r.id}</span>}</span>
             <span className="shrink-0"><EnabledBadge on={r.enabled !== false} /></span>
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -756,7 +756,7 @@ function GroupRoutes({ routes }: { routes: GroupRoute[] }) {
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 break-all">{r.network_id || '-'}</div>
-              {r.description && <div className="mt-0.5 text-[0.72rem] text-nb-gray-500 break-words">{r.description}</div>}
+              {r.description && <div className="mt-0.5 text-[0.72rem] text-nb-gray-500 wrap-break-word">{r.description}</div>}
             </div>
             <span className="shrink-0"><EnabledBadge on={r.enabled} /></span>
           </div>
@@ -808,7 +808,7 @@ function GroupNameservers({ nameservers }: { nameservers: GroupNameserver[] }) {
       {pageRows.map((ns) => (
         <DCard key={ns.id}>
           <div className="flex items-start justify-between gap-2">
-            <span className="min-w-0 flex items-center gap-2 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 break-words">
+            <span className="min-w-0 flex items-center gap-2 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 wrap-break-word">
               {ns.name || '-'}{ns.primary && <Badge tone="cyan">Primary</Badge>}
             </span>
             <span className="shrink-0"><EnabledBadge on={ns.enabled} /></span>
@@ -855,7 +855,7 @@ function GroupZones({ zones }: { zones: GroupZone[] }) {
       {pageRows.map((z) => (
         <DCard key={z.id}>
           <div className="flex items-start justify-between gap-2">
-            <span className="min-w-0 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 break-words">{z.name || '-'}</span>
+            <span className="min-w-0 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 wrap-break-word">{z.name || '-'}</span>
             <span className="shrink-0"><EnabledBadge on={z.enabled} /></span>
           </div>
           <div className="mt-2 font-mono text-[0.82rem] text-nb-gray-600 dark:text-nb-gray-300 break-all">{z.domain || '-'}</div>
@@ -936,7 +936,7 @@ function GroupSetupKeys({ group, canManage }: { group: GroupDetailT; canManage: 
         return (
           <DCard key={k.id}>
             <div className="flex items-start justify-between gap-2">
-              <span className="min-w-0 flex items-center gap-2 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 break-words">
+              <span className="min-w-0 flex items-center gap-2 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 wrap-break-word">
                 {k.name || '-'}{k.ephemeral && <Badge tone="gray">Ephemeral</Badge>}
               </span>
               <span className="shrink-0"><Badge tone={st.tone}>{st.label}</Badge></span>
@@ -972,7 +972,7 @@ function SwitchRow({ checked, onChange, icon, label, hint }: {
         <p className="mt-0.5 text-[0.78rem] text-nb-gray-500">{hint}</p>
       </div>
       <span className={cn('relative h-6 w-11 rounded-full transition-colors shrink-0', checked ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700')}>
-        <span className={cn('absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all', checked ? 'left-[22px]' : 'left-0.5')} />
+        <span className={cn('absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-all', checked ? 'left-[22px]' : 'left-0.5')} />
       </span>
     </button>
   );

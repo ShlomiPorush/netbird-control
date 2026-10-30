@@ -393,7 +393,7 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
                     <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
                       {activeMetas(pc.checks).map((m, i) => (
                         <span key={i} title={m.title} onClick={() => setDetailCheck(pc)}
-                          className={cn('h-7 w-7 rounded-md flex items-center justify-center shadow-sm cursor-pointer', m.iconClass)}>{m.icon}</span>
+                          className={cn('h-7 w-7 rounded-md flex items-center justify-center shadow-xs cursor-pointer', m.iconClass)}>{m.icon}</span>
                       ))}
                       <button onClick={() => togglePosture(id)} title="Detach from this policy"
                         className="ml-1 text-nb-gray-400 hover:text-red-500 transition-colors"><X size={16} /></button>
@@ -421,7 +421,7 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
               placeholder="e.g. Devs are allowed to access servers."
-              className="rounded-md border px-3 py-2 text-sm outline-none transition-colors resize-none bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400/70 focus:ring-2 focus:ring-netbird-400/30 focus:border-netbird/60"
+              className="rounded-md border px-3 py-2 text-sm outline-hidden transition-colors resize-none bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400/70 focus:ring-2 focus:ring-netbird-400/30 focus:border-netbird/60"
             />
           </div>
         </div>
@@ -482,7 +482,7 @@ function BrowseChecksModal({ checks, selected, onToggle, onView, onClose }: {
                 <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
                   {activeMetas(pc.checks).map((m, i) => (
                     <span key={i} title={`${m.title} - click for details`} onClick={() => onView(pc)}
-                      className={cn('h-6 w-6 rounded-md flex items-center justify-center shadow-sm cursor-pointer [&>svg]:h-3.5 [&>svg]:w-3.5', m.iconClass)}>{m.icon}</span>
+                      className={cn('h-6 w-6 rounded-md flex items-center justify-center shadow-xs cursor-pointer [&>svg]:h-3.5 [&>svg]:w-3.5', m.iconClass)}>{m.icon}</span>
                   ))}
                 </div>
               </div>
@@ -515,7 +515,7 @@ function DetailSection({ meta, action, children }: { meta: Meta; action?: 'allow
   return (
     <div className="rounded-md border border-nb-gray-200 dark:border-nb-gray-800 p-4">
       <div className="flex items-center gap-3">
-        <span className={cn('h-9 w-9 rounded-md flex items-center justify-center shadow-sm shrink-0', meta.iconClass)}>{meta.icon}</span>
+        <span className={cn('h-9 w-9 rounded-md flex items-center justify-center shadow-xs shrink-0', meta.iconClass)}>{meta.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-nb-gray-900 dark:text-nb-gray-100">{meta.title}</div>
           <div className="text-[0.74rem] text-nb-gray-500">{meta.desc}</div>
@@ -659,7 +659,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       onClick={() => onChange(!checked)}
       className={cn('relative h-6 w-11 rounded-full transition-colors shrink-0', checked ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700')}
     >
-      <span className={cn('absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all', checked ? 'left-[22px]' : 'left-0.5')} />
+      <span className={cn('absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-all', checked ? 'left-[22px]' : 'left-0.5')} />
     </button>
   );
 }

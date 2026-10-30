@@ -70,7 +70,7 @@ export function UserSelect({ users, value, onChange }: { users: UserOpt[]; value
       <button
         ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
-        className="inline-flex items-center justify-between gap-2 h-[42px] px-4 rounded-md border text-sm font-medium whitespace-nowrap transition-colors shadow-sm bg-white border-gray-200 text-gray-900 hover:bg-gray-100 dark:bg-nb-gray-920 dark:text-nb-gray-300 dark:border-nb-gray-700/40 dark:hover:text-white dark:hover:bg-nb-gray-910"
+        className="inline-flex items-center justify-between gap-2 h-[42px] px-4 rounded-md border text-sm font-medium whitespace-nowrap transition-colors shadow-xs bg-white border-gray-200 text-gray-900 hover:bg-gray-100 dark:bg-nb-gray-920 dark:text-nb-gray-300 dark:border-nb-gray-700/40 dark:hover:text-white dark:hover:bg-nb-gray-910"
         style={{ minWidth: 170 }}
       >
         <span className="inline-flex items-center gap-2 min-w-0">
@@ -84,14 +84,14 @@ export function UserSelect({ users, value, onChange }: { users: UserOpt[]; value
         <div
           ref={panelRef}
           style={{ position: 'fixed', left: pos.left, top: pos.top, width: pos.width }}
-          className={cn('z-[1100]', pos.above ? '-translate-y-full -mt-2' : 'mt-2')}
+          className={cn('z-1100', pos.above ? '-translate-y-full -mt-2' : 'mt-2')}
         >
           <div className="rounded-md border border-nb-gray-200 dark:border-nb-gray-900 bg-white dark:bg-nb-gray-950 shadow-2xl overflow-hidden">
             <div className="relative border-b border-nb-gray-100 dark:border-nb-gray-800">
               <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-nb-gray-400" />
               <input
                 autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search user..."
-                className="h-11 w-full bg-transparent pl-10 pr-3 text-sm outline-none font-light dark:text-nb-gray-100 placeholder:text-nb-gray-500 dark:placeholder:text-nb-gray-400"
+                className="h-11 w-full bg-transparent pl-10 pr-3 text-sm outline-hidden font-light dark:text-nb-gray-100 placeholder:text-nb-gray-500 dark:placeholder:text-nb-gray-400"
               />
             </div>
             <div className="nb-scroll max-h-[360px] overflow-y-auto p-1.5">

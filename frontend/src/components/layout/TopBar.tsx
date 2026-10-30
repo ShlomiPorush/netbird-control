@@ -78,7 +78,7 @@ export function TopBar({ collapsed, onToggleCollapse, onOpenMobile }: { collapse
         >
           <Search size={16} className="shrink-0" />
           <span className="hidden sm:inline text-sm">Search…</span>
-          <span className="hidden md:inline-flex sm:ml-auto items-center h-[19px] rounded border border-nb-gray-300 dark:border-nb-gray-700 px-1.5 text-[0.68rem] font-medium leading-none text-nb-gray-400 dark:text-nb-gray-500">⌘K</span>
+          <span className="hidden md:inline-flex sm:ml-auto items-center h-[19px] rounded-sm border border-nb-gray-300 dark:border-nb-gray-700 px-1.5 text-[0.68rem] font-medium leading-none text-nb-gray-400 dark:text-nb-gray-500">⌘K</span>
         </button>
         <TenantSwitcher />
         <button
@@ -102,7 +102,7 @@ function TenantChip({ name }: { name: string }) {
       <Building2 size={13} className="shrink-0" />
       <span className="truncate max-w-[130px] sm:max-w-[260px]"><span className="hidden sm:inline">Managing Tenant: </span>{name}</span>
       <button type="button" onClick={() => switchAccount(null)} title="Exit Tenant"
-        className="ml-0.5 flex items-center justify-center h-6 w-6 rounded hover:bg-white/15 transition-colors shrink-0">
+        className="ml-0.5 flex items-center justify-center h-6 w-6 rounded-sm hover:bg-white/15 transition-colors shrink-0">
         <X size={13} />
       </button>
     </span>
@@ -207,7 +207,7 @@ function TenantSwitcher() {
         <span className="hidden sm:flex flex-col min-w-0 max-w-[150px] leading-tight">
           <span className="flex items-center gap-1.5">
             <span className="truncate text-[0.8rem] font-semibold text-nb-gray-800 dark:text-nb-gray-100">{current.title}</span>
-            {current.msp && <span className="shrink-0 rounded bg-netbird px-1 py-px text-[0.56rem] font-bold leading-tight text-white">MSP</span>}
+            {current.msp && <span className="shrink-0 rounded-sm bg-netbird px-1 py-px text-[0.56rem] font-bold leading-tight text-white">MSP</span>}
           </span>
           {current.sub && <span className="truncate text-[0.68rem] text-nb-gray-500">{current.sub}</span>}
         </span>
@@ -219,7 +219,7 @@ function TenantSwitcher() {
           <div className="flex items-center gap-2 px-3 py-2.5 border-b border-nb-gray-200 dark:border-nb-gray-800">
             <Search size={14} className="shrink-0 text-nb-gray-400" />
             <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by name or domain..."
-              className="w-full bg-transparent text-sm text-nb-gray-800 dark:text-nb-gray-200 placeholder:text-nb-gray-400 outline-none" />
+              className="w-full bg-transparent text-sm text-nb-gray-800 dark:text-nb-gray-200 placeholder:text-nb-gray-400 outline-hidden" />
           </div>
           <div className="nb-scroll max-h-[300px] overflow-y-auto p-1.5 flex flex-col gap-0.5">
             {/* The MSP (parent) account - always first, like the official switcher. */}
@@ -232,7 +232,7 @@ function TenantSwitcher() {
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-1.5">
                   <span className="truncate text-sm text-nb-gray-800 dark:text-nb-gray-100">{msp?.name || msp?.domain || 'MSP Account'}</span>
-                  <span className="shrink-0 rounded bg-netbird px-1 py-px text-[0.56rem] font-bold leading-tight text-white">MSP</span>
+                  <span className="shrink-0 rounded-sm bg-netbird px-1 py-px text-[0.56rem] font-bold leading-tight text-white">MSP</span>
                 </span>
                 {msp?.domain && <span className="block truncate text-[0.7rem] text-nb-gray-500">{msp.domain}</span>}
               </span>

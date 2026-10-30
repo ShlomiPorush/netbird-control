@@ -75,12 +75,12 @@ export function RowMenu({
       <IconButton onClick={toggle} title={title}>{icon || <MoreVertical size={16} />}</IconButton>
       {open && pos && createPortal(
         <>
-          <div className="fixed inset-0 z-[1090]" onClick={close} />
+          <div className="fixed inset-0 z-1090" onClick={close} />
           <div
             ref={panelRef}
             role="menu"
             style={{ position: 'fixed', left: pos.left, top: pos.top, width }}
-            className="z-[1100] rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1.5"
+            className="z-1100 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1.5"
           >
             {children(close)}
           </div>
@@ -100,8 +100,8 @@ export function MenuItem({
       role="menuitem"
       onClick={onClick}
       className={cn(
-        'flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded text-sm text-left',
-        'focus-visible:outline-none focus-visible:bg-nb-gray-100 dark:focus-visible:bg-nb-gray-900',
+        'flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded-sm text-sm text-left',
+        'focus-visible:outline-hidden focus-visible:bg-nb-gray-100 dark:focus-visible:bg-nb-gray-900',
         danger
           ? 'text-red-600 dark:text-red-500 hover:bg-red-500/10'
           : 'text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900',

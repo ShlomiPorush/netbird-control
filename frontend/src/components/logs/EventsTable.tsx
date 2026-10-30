@@ -14,7 +14,7 @@ interface Group { flowId: string | null; events: LogEvent[] }
 // and cn() is a plain string join (no tailwind-merge), so we force h-11/px-5/text-[0.68rem] with
 // `!` to keep the sortable headers pixel-identical to the plain <th>s next to them.
 const TH_CLS = 'h-11 px-5 uppercase font-medium text-[0.68rem] tracking-wide text-nb-gray-500 dark:text-nb-gray-400';
-const SORT_TH_CLS = '!h-11 !px-5 !text-[0.68rem]';
+const SORT_TH_CLS = 'h-11! px-5! text-[0.68rem]!';
 
 // Header columns, in order. `sort` is the GET /api/logs sort key for the sortable ones; Traffic
 // (combined rx/tx) and Router have no server sort key, so they stay plain. There's no User column
@@ -238,7 +238,7 @@ function Cells({ ev, usersMap, traffic, showRouter, sub }: { ev: LogEvent; users
 
 function EventRow({ ev, usersMap, onRaw, sub, showRouter }: { ev: LogEvent; usersMap: Record<string, UserRef>; onRaw: (e: LogEvent) => void; sub?: boolean; showRouter: boolean }) {
   return (
-    <tr className={cn('border-b border-nb-gray-100 dark:border-nb-gray-900 last:border-0', sub ? 'bg-nb-gray-100/60 dark:bg-nb-gray-930/60' : 'hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/[0.15]')}>
+    <tr className={cn('border-b border-nb-gray-100 dark:border-nb-gray-900 last:border-0', sub ? 'bg-nb-gray-100/60 dark:bg-nb-gray-930/60' : 'hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/15')}>
       <Cells
         ev={ev}
         usersMap={usersMap}
@@ -265,7 +265,7 @@ function GroupRow({ ev, count, rx, tx, open, onToggle, usersMap, showRouter }: {
 }) {
   return (
     <tr onClick={onToggle} className={cn('border-b border-nb-gray-100 dark:border-nb-gray-900 cursor-pointer',
-      open ? 'bg-nb-gray-100/70 dark:bg-nb-gray-920/80' : 'hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/[0.15]')}>
+      open ? 'bg-nb-gray-100/70 dark:bg-nb-gray-920/80' : 'hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/15')}>
       {/* When expanded, the orange guide line starts here and runs down through the sub-events. */}
       <td className={cn('px-5 py-4 align-top', open && 'border-l-2 border-netbird/60')}>
         <div className="flex items-start gap-2">

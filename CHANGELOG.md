@@ -10,6 +10,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The web interface is styled with Tailwind CSS 4.** Layout and spacing stay as they were.
+  Some status colors, such as the red, green and amber badges, are a little more vivid.
+- **The web interface needs a browser from 2023 or later:** Chrome or Edge 111, Safari 16.4 or
+  Firefox 128. Older browsers show the pages without their layout.
+
 ---
 
 ## [1.0.4] - 2026-10-30

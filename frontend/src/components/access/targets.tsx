@@ -89,7 +89,7 @@ function TargetChip({ t, netName, canAdmin }: { t: GrantTarget; netName: (id?: s
       {href ? <Link to={href} onClick={(e) => e.stopPropagation()}>{chip}</Link> : chip}
       {pos && createPortal(
         <div style={{ position: 'fixed', left: pos.left, top: pos.top, width: W, transform: pos.above ? 'translateY(-100%)' : undefined }}
-          onMouseEnter={open} onMouseLeave={close} className="z-[1100]">
+          onMouseEnter={open} onMouseLeave={close} className="z-1100">
           <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-2xl divide-y divide-nb-gray-100 dark:divide-nb-gray-800/50">
             {fields.map((f, i) => (
               <div key={i} className="flex items-center justify-between gap-4 px-3.5 py-2 text-[0.8rem]">

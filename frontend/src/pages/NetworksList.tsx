@@ -110,7 +110,7 @@ export default function NetworksList() {
         <StatusFilter value={status} onChange={setStatus} />
         {status !== 'all' && <button onClick={() => setStatus('all')} className="text-[0.8rem] text-netbird hover:underline">Clear</button>}
         <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
-        <Button variant="secondary" className="ml-auto !px-0 w-[42px]" title="Refresh" onClick={async () => { await refresh.mutateAsync(); nq.refetch(); }}>
+        <Button variant="secondary" className="ml-auto px-0! w-[42px]" title="Refresh" onClick={async () => { await refresh.mutateAsync(); nq.refetch(); }}>
           <RefreshCw size={16} className={(refresh.isPending || nq.isFetching) ? 'animate-spin' : undefined} />
         </Button>
       </div>
@@ -168,7 +168,7 @@ export default function NetworksList() {
                         {active && (
                           <span className="inline-flex items-center gap-1.5 rounded-md text-[0.75rem] py-1 pl-2.5 pr-1 border border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-500">
                             <span className="h-2 w-2 rounded-full bg-green-500" /> {n.routingPeers} Peer{n.routingPeers === 1 ? '' : 's'}
-                            {n.canEdit && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
+                            {n.canEdit && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-sm text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
                           </span>
                         )}
                         {n.canEdit && <AddChip onClick={(e) => goTab(n, 'routers', e)} />}
@@ -216,7 +216,7 @@ export default function NetworksList() {
                     {active && (
                       <span className="inline-flex items-center gap-1.5 rounded-md text-[0.75rem] py-1 pl-2.5 pr-1 border border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-500">
                         <span className="h-2 w-2 rounded-full bg-green-500" /> {n.routingPeers} Peer{n.routingPeers === 1 ? '' : 's'}
-                        {n.canEdit && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
+                        {n.canEdit && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-sm text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
                       </span>
                     )}
                     {n.canEdit && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
@@ -271,7 +271,7 @@ function StatusFilter({ value, onChange }: { value: StatusF; onChange: (v: Statu
             <div className="px-2.5 pt-1 pb-1 text-[0.7rem] font-semibold uppercase tracking-wide text-nb-gray-400">Status</div>
             {opts.map((o) => (
               <button key={o.v} onClick={() => { onChange(o.v); setOpen(false); }}
-                className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
+                className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded-sm text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
                 <span className={cn('h-2 w-2 rounded-full', o.dot)} /> {o.label}
               </button>
             ))}
