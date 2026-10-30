@@ -129,7 +129,7 @@ export default function Cleanup() {
   const toggleIgnore = (f: Finding, ignore: boolean) =>
     setIgnore.mutate({ category: f.category, id: f.id, name: f.name, ignore });
 
-  const tiles: { cat: CleanupCategory; icon: JSX.Element }[] = [
+  const tiles: { cat: CleanupCategory; icon: React.JSX.Element }[] = [
     { cat: 'orphaned-policy', icon: <Shield size={15} /> },
     { cat: 'ineffective-policy', icon: <Shield size={15} /> },
     { cat: 'empty-group', icon: <Users size={15} /> },
