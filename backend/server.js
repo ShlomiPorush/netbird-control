@@ -4315,7 +4315,11 @@ app.use((err, req, res, next) => {
             return res.status(400).send('Sign-in failed. <a href="/">Go to the start page</a> to try again; if it keeps failing, ask your administrator to check the SSO settings.');
         }
         console.warn(`OIDC callback failed (transient login race) - restarting login (retry ${tries + 1}):`, reason);
-        return res.redirect(`/login?retry=${tries + 1}&returnTo=${encodeURIComponent(returnTo)}`);
+        // Tabs that fail together would restart together and keep breaking each other's login (a
+        // failing callback also clears the other tab's transaction cookie). A short random delay
+        // lets one finish first; the others then find a session at /login and go back to the app.
+        setTimeout(() => res.redirect(`/login?retry=${tries + 1}&returnTo=${encodeURIComponent(returnTo)}`), crypto.randomInt(100, 900));
+        return;
     }
     console.error('Unhandled error on', req.method, req.path, '-', err);
     if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Internal server error' });
