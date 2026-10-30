@@ -1,6 +1,6 @@
-// Recertification matching + config: revoked auto-approval entries are matched by
-// CONTENT via stableStringify, because their detail JSON round-trips through Postgres
-// JSONB which reorders object keys - a naive JSON.stringify comparison would miss.
+// Recertification helpers + config: stableStringify gives a key-order-independent form,
+// because detail JSON round-trips through Postgres JSONB, which reorders object keys - a naive
+// JSON.stringify comparison would miss. (Revoked auto-approval entries are matched by id.)
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { _internal } = require('../db');

@@ -9393,7 +9393,7 @@ async function cleanupStuckCreatingGrants() {
             recordAudit({
                 actorId: '', actorEmail: '', actorName: 'Scheduler',
                 action: 'grant.cleanup', target: g.user_label || g.user_id,
-                meta: { grant: g.id, reason: 'creation crashed mid-way - removed the orphaned NetBird objects' },
+                meta: { grant: g.id, reason: g.last_error ? 'creation failed and its undo was incomplete - removed the leftover NetBird objects' : 'creation crashed mid-way - removed the orphaned NetBird objects' },
             }).catch(() => { });
         } else {
             throw new Error(`grant #${g.id}: could not remove all orphaned NetBird objects (will retry)`);
@@ -9502,7 +9502,15 @@ async function deleteRecurringLocked(id, actor) {
         // Disable first, delete only once the live window is really gone (else the rule stays,
         // disabled, and the delete can be retried).
         await pool.query('UPDATE recurring_access SET enabled=false WHERE id=$1 AND tenant=$2', [id, tnt()]);
-        await endRecurringWindow(id, actor);
+        try { await endRecurringWindow(id, actor); }
+        catch (e) {
+            recordAudit({
+                actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
+                action: 'recurring.update', target: old.rows[0].user_label || old.rows[0].user_id,
+                meta: { enabled: false, reason: 'delete could not end the active window' },
+            }).catch(() => { });
+            throw e;
+        }
     }
     await pool.query('DELETE FROM recurring_access WHERE id=$1 AND tenant=$2', [id, tnt()]);
     recordAudit({
