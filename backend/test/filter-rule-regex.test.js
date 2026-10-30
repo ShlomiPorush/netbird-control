@@ -89,15 +89,30 @@ test('regex filter rules: a rule that is slow twice is skipped for that account 
     const r = inChild(`
         const warnings = [];
         console.warn = (...a) => warnings.push(a.join(' '));
-        const c = cfg({ field: 'source_name', operator: 'regex', value: ${JSON.stringify(SLOW)} });
+        // The same rule ids in two accounts: a slow rule, then a rule that always matches.
+        const c = cfg(
+            { field: 'source_name', operator: 'regex', value: ${JSON.stringify(SLOW)} },
+            { field: 'destination_addr', operator: 'regex', value: ':443$' });
         const slowRow = row({ source_name: ${JSON.stringify(SLOW_VALUE)} });
         const main = [];
-        for (let i = 0; i < 3; i++) main.push(await timed(() => ev.eventMatchesFilters(slowRow, c)));
-        const other = await runWithTenant('acct-b', () => timed(() => ev.eventMatchesFilters(slowRow, c)));
+        for (let i = 0; i < 3; i++) main.push(await ev.eventMatchesFilters(slowRow, c));
+        const other = await runWithTenant('acct-b', () => ev.eventMatchesFilters(slowRow, c));
         return { main, other, warnings };
     `);
-    assert.ok(r.main[0].ms >= 20 && r.main[1].ms >= 20, JSON.stringify(r.main));
-    assert.ok(r.main[2].ms < 15, `the skipped rule still took ${r.main[2].ms} ms`);
-    assert.ok(r.other.ms >= 20, 'another account with the same rule is still evaluated');
+    // Main: two runs over the limit, then the slow rule is skipped and the other rule matches.
+    assert.deepEqual(r.main, [false, false, true]);
+    // The other account still evaluates its own copy of the slow rule, so it is over the limit.
+    assert.equal(r.other, false);
     assert.equal(r.warnings.length, 1);
+});
+
+test('regex filter rules: events waiting for a free worker are all answered', () => {
+    const r = inChild(`
+        // Distinct slow-to-compile patterns, so each one runs over the limit and its worker is
+        // replaced while the other events wait in the queue.
+        const rules = [];
+        for (let i = 0; i < 12; i++) rules.push(cfg({ field: 'source_name', operator: 'regex', value: '(' + 'a|'.repeat(200000) + 'b' + i + ')' }));
+        return Promise.all(rules.map((c) => ev.eventMatchesFilters(row({ source_name: 'x' }), c)));
+    `, 60000);
+    assert.deepEqual(r, new Array(12).fill(false));
 });

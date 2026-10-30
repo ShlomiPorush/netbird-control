@@ -34,3 +34,6 @@ parentPort.on('message', ({ seq, jobs, state }) => {
     }
     parentPort.postMessage({ seq, hit });
 });
+
+// Ready to take requests: the main thread starts a request's time limit only after this.
+parentPort.postMessage({ ready: true });

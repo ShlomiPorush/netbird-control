@@ -721,6 +721,7 @@ const REGEX_SKIP_MS = 10 * 60 * 1000;
 const REGEX_MAX_QUEUE = 1000;          // waiting events beyond this count as not matched
 const REGEX_MAX_THREADS = 3;           // live worker threads, including ones still shutting down
 const REGEX_MAX_KNOWN = 2000;          // rule patterns cached by one worker before it is recycled
+const REGEX_START_MS = 5000;           // a worker not ready by then is replaced
 
 const regexRuleKey = (account, id) => `${account}\n${id}`;
 // Rule key -> Map(pattern -> { strikes, until }). Per pattern, so an evaluation from an older
@@ -760,12 +761,19 @@ function spawnRegexWorker() {
     const worker = new Worker(path.join(__dirname, 'regex-worker.js'));
     const rw = { worker, online: false, known: new Map() };
     regexThreads++;
-    worker.on('online', () => {
-        rw.online = true;
-        if (regexInflight && regexInflight.rw === rw) armRegexDeadline();
-    });
+    // A worker that never reports ready is replaced, so queued events are never stuck on it.
+    const startTimer = setTimeout(() => { if (!rw.online) retireRegexWorker(rw); }, REGEX_START_MS);
+    startTimer.unref();
     worker.on('message', (m) => {
-        if (regexInflight && regexInflight.rw === rw && m.seq === regexInflight.seq) finishRegexRequest(m.hit);
+        if (m.ready) {
+            rw.online = true;
+            clearTimeout(startTimer);
+            if (regexInflight && regexInflight.rw === rw) armRegexDeadline();
+        } else if (regexInflight && regexInflight.rw === rw && m.seq === regexInflight.seq) {
+            // The reply can be read after the time limit when the main thread was busy; it counts
+            // only if the worker's own run of the rules stayed within the limit.
+            finishRegexRequest(m.hit && regexRunMs(regexInflight) <= REGEX_BUDGET_MS);
+        }
     });
     worker.on('error', (err) => {
         console.error('Regex filter worker error:', err.message);
@@ -784,8 +792,18 @@ function spawnRegexWorker() {
 function retireRegexWorker(rw) {
     if (regexWorker === rw) regexWorker = null;
     rw.retired = true;
+    // terminate() keeps the worker referenced until it exits, so queued events waiting for a free
+    // thread are never abandoned.
     rw.worker.terminate().catch(() => {});
-    rw.worker.unref(); // terminate() references the worker; never keep the process alive for it
+}
+
+// Total time the worker spent on the in-flight request's finished rules.
+function regexRunMs(req) {
+    const finished = Atomics.load(new Int32Array(req.state, 0, 2), 1);
+    const times = new Float64Array(req.state, 8);
+    let ms = 0;
+    for (let i = 0; i < finished; i++) ms += times[2 * i + 1];
+    return ms;
 }
 
 // Strike every rule of the in-flight request that was slow: finished ones by duration, and the
@@ -823,7 +841,13 @@ function pumpRegexQueue() {
         if (regexWorker && regexWorker.known.size > REGEX_MAX_KNOWN) retireRegexWorker(regexWorker);
         if (!regexWorker) {
             if (regexThreads >= REGEX_MAX_THREADS) return; // resumes when a thread exits
-            regexWorker = spawnRegexWorker();
+            try {
+                regexWorker = spawnRegexWorker();
+            } catch (err) {
+                console.error('Regex filter worker could not start:', err.message);
+                for (const waiting of regexQueue.splice(0)) waiting.resolve(false);
+                return;
+            }
         }
         const next = regexQueue.shift();
         // Rules skipped while this event waited are left out.
@@ -839,7 +863,7 @@ function pumpRegexQueue() {
         regexInflight = { rw, seq: ++regexSeq, jobs, state, resolve: next.resolve, timer: null };
         rw.worker.ref();
         rw.worker.postMessage({ seq: regexInflight.seq, jobs: msg, state });
-        // Worker start-up never counts against a rule: the clock starts once it is running.
+        // Worker start-up never counts against a rule: the clock starts once it is ready.
         if (rw.online) armRegexDeadline();
     }
 }
