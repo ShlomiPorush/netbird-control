@@ -155,7 +155,7 @@ const PUBLIC_ROUTES = new Set([
 
 test('every app route except the public ones requires login (unauthenticated browser request starts the OIDC login)', async () => {
     const routes = [];
-    for (const layer of app._router.stack) {
+    for (const layer of app.router.stack) {
         if (!layer.route) continue;
         for (const method of Object.keys(layer.route.methods)) {
             if (method === '_all') continue;
@@ -166,7 +166,7 @@ test('every app route except the public ones requires login (unauthenticated bro
     const registered = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8').match(/^\s*app\.(get|post|put|patch|delete)\(/gm).length;
     assert.equal(routes.length, registered);
     const results = await inBatches(routes, 10, async ({ method, path }) => {
-        const url = path === '*' ? '/some/spa/page' : path.replace(/:\w+\??/g, 'x');
+        const url = path === '/{*splat}' ? '/some/spa/page' : path.replace(/:\w+\??/g, 'x');
         const r = await call(method, url, { body: method === 'GET' ? undefined : {} });
         return { key: `${method} ${path}`, r };
     });
@@ -175,6 +175,16 @@ test('every app route except the public ones requires login (unauthenticated bro
     for (const { key, r } of results) {
         if (PUBLIC_ROUTES.has(key)) assert.notEqual(r.status, 429, key);
     }
+});
+
+test('a request without a body still gets an empty req.body (as in Express 4), not undefined', async () => {
+    // Registered after the route census above; POST is not caught by the GET-only SPA fallback.
+    app.post('/api/__test/body', (req, res) => res.json({ type: req.body === undefined ? 'undefined' : typeof req.body, keys: Object.keys(req.body || {}).length }));
+    const cookie = await signIn('body-check');
+    // No Content-Type (like the app's DELETE requests): Express 5 skips parsing and leaves undefined.
+    const r = await call('POST', '/api/__test/body', { cookie, accept: 'application/json' });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(JSON.parse(r.text), { type: 'object', keys: 0 });
 });
 
 test('static files, the app shell, API docs and /login?returnTo= still require login', async () => {

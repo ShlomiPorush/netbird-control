@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The backend runs on Express 5.** Express 4 only receives maintenance fixes. Nothing changes for
+  users or settings.
+
 ---
 
 ## [1.0.2] - 2026-10-30
