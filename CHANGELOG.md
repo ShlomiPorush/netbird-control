@@ -10,6 +10,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Regex event filter rules run with a time limit.** They are checked outside the main server
+  thread, so a slow pattern no longer delays other work. When the regex rules for an event take
+  longer than 25 ms, the event is kept. A rule that is too slow twice is skipped for that account
+  for 10 minutes, and the server log names the rule.
+
 ---
 
 ## [1.0.5] - 2026-10-30
