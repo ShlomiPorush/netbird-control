@@ -36,7 +36,7 @@ When a request is created, the bot posts a message to the **Access requests** to
 Every press/reply:
 
 1. Reaches the app via the **Telegram webhook** (a public endpoint, `POST /api/integrations/telegram/callback`).
-2. Is authenticated two ways: the **secret token** Telegram echoes in a header (set when the webhook is registered), **and** the presser's/replier's Telegram user id must be **mapped to a system user** in the approver list.
+2. Is authenticated two ways: the **secret token** Telegram echoes in a header (set when the webhook is registered), **and** the presser's/replier's Telegram user id must be **mapped to a system user** in the approver list. Until the webhook is registered, every press and reply is rejected (see [Telegram](telegram-notifications.md#inbound-approving-from-telegram)).
 3. On a final decision the original message is **edited** to show the outcome and the button press is answered. It's idempotent - a second press or an already-decided request just re-shows the result.
 
 The decision is **attributed to the mapped system user** - both the audit log (`request.approve` / `request.deny`) and the grant's `access.grant` record that person, not the Telegram handle. The message still shows `via: Telegram`.

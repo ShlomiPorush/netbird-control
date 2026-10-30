@@ -107,7 +107,8 @@ covers the database, SSO and a few locked values:
 - **Rate limits** apply to everything except the webhook receivers (sign-in 30 requests a minute per
   client address, the API 600 and pages 300 a minute per user). The receivers are not rate limited, so
   any deployment that others can reach should set `WEBHOOK_AUTH_TOKEN` (and the notifications token
-  in **Settings → Webhook**) and register the Telegram webhook, which sets its secret.
+  in **Settings → Webhook**). The Telegram callback rejects every update until the Telegram webhook
+  is registered, which sets its secret.
 - **Secrets** are write-only: they are never sent back to the browser, and a value from the
   environment locks the field in the app.
 - **Destructive actions are gated** - with SSO on, deleting stored events needs an admin listed in

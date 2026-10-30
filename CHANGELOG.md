@@ -57,6 +57,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   the app does not start, and the log names the missing variables. **Check before you upgrade:**
   set the missing variables, or clear every `OIDC_*` variable to keep running without SSO.
   `BASE_URL` alone does not turn SSO on.
+- **The Telegram callback needs a registered webhook.** Approve and Deny presses and denial-reason
+  replies are accepted only after this deployment has registered the Telegram webhook, which
+  stores its secret. Until then every update is rejected. A deployment with Telegram enabled, a
+  bot token and `BASE_URL` registers the webhook on start, so nothing changes for it. After
+  importing settings into a new deployment, save **Settings → Telegram** in the main account to
+  register it. See [Telegram notifications](docs/telegram-notifications.md#inbound-approving-from-telegram).
 
 ---
 
