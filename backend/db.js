@@ -10488,19 +10488,37 @@ async function importAppSettings(payload, actor) {
     const entries = Object.entries(settings)
         .filter(([k, v]) => typeof k === 'string' && k.length <= 100 && typeof v === 'string' && !settingKeyExcluded(k));
     if (!entries.length) throw new Error('the backup contains no importable settings');
+    // A NetBird API URL or SMTP server (host, port, security, user) that differs from the stored one is
+    // skipped (reported in skippedSettings). A Telegram callback secret in the file is discarded, and a
+    // Telegram config that is not a JSON object is skipped.
+    const parseObject = (s) => { try { const j = JSON.parse(s); return j && typeof j === 'object' && !Array.isArray(j) ? j : null; } catch { return null; } };
+    const smtpServer = (c) => JSON.stringify([c.host || '', parseInt(c.port, 10) || 587, !!c.secure, c.user || '']); // as loadSmtp reads it
+    const importedKeys = [], skippedSettings = [];
     for (const [k, v] of entries) {
         let val = v;
+        if (k === 'netbird_api_url') {
+            if (v !== ((await getSetting(k)) || '')) { skippedSettings.push({ key: k, reason: 'kept the current NetBird API URL - change it in Settings > NetBird API' }); continue; }
+            importedKeys.push(k); continue; // unchanged - nothing to write
+        }
+        if (k === 'smtp_config') {
+            const imp = parseObject(v);
+            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            if (smtpServer(imp) !== smtpServer(parseObject((await getSetting(k)) || '') || {})) {
+                skippedSettings.push({ key: k, reason: 'kept the current SMTP server - change it in Settings > Email (SMTP)' }); continue;
+            }
+        }
         if (isTelegramConfigKey(k)) {
-            // Exports carry telegram_config WITHOUT its webhookSecret - keep this deployment's
-            // existing secret so the approvals callback keeps working after a restore.
-            try {
-                const cur = JSON.parse((await getSetting(k)) || 'null');
-                const imp = JSON.parse(v);
-                if (cur && cur.webhookSecret && !imp.webhookSecret) imp.webhookSecret = cur.webhookSecret;
-                val = JSON.stringify(imp);
-            } catch { /* keep the imported value as-is */ }
+            const imp = parseObject(v);
+            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            delete imp.webhookSecret;
+            // Keep the active main secret first (memory can hold one the stored row lacks), else the stored one.
+            const cur = parseObject((await getSetting(k)) || '');
+            const secret = (k === 'telegram_config' && getTelegramWebhookSecret()) || (cur && cur.webhookSecret);
+            if (secret) imp.webhookSecret = secret;
+            val = JSON.stringify(imp);
         }
         await setSetting(k, val);
+        importedKeys.push(k);
     }
     // Reload every config module state so the import applies without a restart.
     await loadNbApi(); await loadWebhook(); await loadTelegram(); await loadApproverConfig();
@@ -10515,9 +10533,9 @@ async function importAppSettings(payload, actor) {
     recordAudit({
         actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
         action: 'settings.import', target: 'app settings',
-        meta: { keys: entries.length, restored: entries.map(([k]) => k).join(', '), tables: tableResults, skipped: tableSkipped },
+        meta: { keys: importedKeys.length, restored: importedKeys.join(', '), skippedSettings: skippedSettings.map(s => s.key).join(', '), tables: tableResults, skipped: tableSkipped },
     }).catch(() => { });
-    return { imported: entries.length, keys: entries.map(([k]) => k), tables: tableResults, skipped: tableSkipped };
+    return { imported: importedKeys.length, keys: importedKeys, skippedSettings, tables: tableResults, skipped: tableSkipped };
 }
 
 // ─── Internal ENVELOPE-ENCRYPTED backup (tier 2) - full config + ALL secrets, written to a mounted
