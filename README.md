@@ -56,7 +56,8 @@ docker compose up -d
 ```
 
 `docker compose` runs `ghcr.io/shlomiporush/nbcontrol` and PostgreSQL. Open
-**http://localhost:3000**.
+**http://localhost:3000**. The web interface needs a current browser: Chrome or Edge 111,
+Safari 16.4 or Firefox 128 or later.
 
 > **Without SSO the app is fully open:** anyone who can reach it is an admin. Run it that way only
 > on a trusted network, and configure SSO for anything else (see [Security](#security)).
