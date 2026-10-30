@@ -510,7 +510,7 @@ function UserStatusFilter({ value, onChange }: { value: StatusF; onChange: (v: S
             <div className="px-2.5 pt-1 pb-1 text-[0.7rem] font-semibold uppercase tracking-wide text-nb-gray-400">Status</div>
             {opts.map((o) => (
               <button key={o.v} onClick={() => { onChange(o.v); setOpen(false); }}
-                className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
+                className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded-sm text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
                 <span className={cn('h-2 w-2 rounded-full', o.dot)} /> {o.label}
               </button>
             ))}
@@ -678,7 +678,7 @@ function GroupsTab() {
                     checked={allSelected}
                     onChange={toggleAll}
                     disabled={!selectableIds.length}
-                    className="h-4 w-4 align-middle rounded border-nb-gray-300 dark:border-nb-gray-700 accent-netbird focus:ring-netbird/40 disabled:opacity-40"
+                    className="h-4 w-4 align-middle rounded-sm border-nb-gray-300 dark:border-nb-gray-700 accent-netbird focus:ring-netbird/40 disabled:opacity-40"
                   />
                 </Th>
               )}
@@ -692,7 +692,7 @@ function GroupsTab() {
             </THead>
             <TBody>
               {pageRows.map((g) => (
-                <Tr key={g.id} onClick={() => navigate(`/groups/${encodeURIComponent(g.id)}`)} className={selected.has(g.id) ? '!bg-netbird/[0.06]' : undefined}>
+                <Tr key={g.id} onClick={() => navigate(`/groups/${encodeURIComponent(g.id)}`)} className={selected.has(g.id) ? 'bg-netbird/6!' : undefined}>
                   {canBulk && (
                     <Td className="pl-2" onClick={(e) => e.stopPropagation()}>
                       <Checkbox
@@ -731,7 +731,7 @@ function GroupsTab() {
             {pageRows.map((g) => (
               <div key={g.id} onClick={() => navigate(`/groups/${encodeURIComponent(g.id)}`)}
                 className={cn('rounded-lg border bg-white dark:bg-nb-gray-950 p-3.5 cursor-pointer active:bg-nb-gray-50 dark:active:bg-nb-gray-900/40 transition-colors',
-                  selected.has(g.id) ? 'border-netbird/40 !bg-netbird/[0.06]' : 'border-nb-gray-200 dark:border-nb-gray-800')}>
+                  selected.has(g.id) ? 'border-netbird/40 bg-netbird/6!' : 'border-nb-gray-200 dark:border-nb-gray-800')}>
                 <div className="flex items-center gap-2.5">
                   {canBulk && (
                     <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -783,14 +783,14 @@ function UsageFilter({ value, onChange }: { value: UsageF; onChange: (v: UsageF)
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className="absolute left-0 top-full mt-1.5 z-50 w-44 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1.5">
             <div className="group/usage relative">
-              <button className="flex items-center justify-between w-full px-2.5 py-1.5 rounded text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
+              <button className="flex items-center justify-between w-full px-2.5 py-1.5 rounded-sm text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
                 <span className="flex items-center gap-2"><Activity size={14} className="text-nb-gray-400" /> Usage</span>
                 <ChevronRight size={14} className="text-nb-gray-400" />
               </button>
               <div className="invisible opacity-0 group-hover/usage:visible group-hover/usage:opacity-100 transition-opacity absolute left-full top-0 z-50 w-40 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1.5">
                 {opts.map((o) => (
                   <button key={o.v} onClick={() => { onChange(o.v); setOpen(false); }}
-                    className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
+                    className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded-sm text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
                     <span className={cn('h-2 w-2 rounded-full', o.dot)} /> {o.label}
                   </button>
                 ))}

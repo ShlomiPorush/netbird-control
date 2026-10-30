@@ -57,7 +57,7 @@ function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (
         checked ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700',
         disabled && 'opacity-50 cursor-not-allowed')}
     >
-      <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all', checked ? 'left-[18px]' : 'left-0.5')} />
+      <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all', checked ? 'left-[18px]' : 'left-0.5')} />
     </button>
   );
 }

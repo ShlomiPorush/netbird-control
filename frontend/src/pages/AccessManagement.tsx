@@ -60,7 +60,7 @@ export default function AccessManagement() {
                   : 'text-nb-gray-500 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900/50 hover:text-nb-gray-800 dark:hover:text-nb-gray-200')}>
               <Icon size={14} className="shrink-0" /> {t.label}
               {t.key === 'requests' && pending > 0 && (
-                <span className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-netbird text-white text-[0.7rem] font-medium">{pending}</span>
+                <span className="ml-auto inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-netbird text-white text-[0.7rem] font-medium">{pending}</span>
               )}
             </button>
           );

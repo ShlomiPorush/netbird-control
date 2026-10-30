@@ -478,7 +478,7 @@ function DigestToggle({ title, help, checked, onChange }: { title: string; help?
       </div>
       <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
         className={cn('relative h-5 w-9 rounded-full transition-colors shrink-0 mt-0.5', checked ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700')}>
-        <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all', checked ? 'left-[18px]' : 'left-0.5')} />
+        <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all', checked ? 'left-[18px]' : 'left-0.5')} />
       </button>
     </div>
   );
@@ -762,8 +762,8 @@ function TenantModal({ tenant, onClose, onCreatedWithChallenge }: {
  * REAL BILLING: Upgrade subscribes the tenant to a paid plan charged to the MSP account, so every
  * click goes through an explicit confirmation naming the tenant, the plan and the price. */
 const PLAN_TILES: Record<string, { icon: typeof UsersIcon; cls: string }> = {
-  team: { icon: UsersIcon, cls: 'bg-gradient-to-b from-sky-500 to-sky-300' },
-  business: { icon: Briefcase, cls: 'bg-gradient-to-b from-netbird to-netbird-300' },
+  team: { icon: UsersIcon, cls: 'bg-linear-to-b/srgb from-sky-500 to-sky-300' },
+  business: { icon: Briefcase, cls: 'bg-linear-to-b/srgb from-netbird to-netbird-300' },
 };
 // EUR trails the amount, USD leads it - like the official card.
 const money = (amount: number, currency: string) => (currency === 'eur' ? `${amount}€` : `$${amount}`);
@@ -1013,7 +1013,7 @@ function AddGroupButton({ options, onAdd }: { options: { id: string; name: strin
           <div className="flex items-center gap-2 px-3 py-2 border-b border-nb-gray-200 dark:border-nb-gray-800">
             <SearchIcon size={14} className="shrink-0 text-nb-gray-400" />
             <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search groups..."
-              className="w-full bg-transparent text-sm text-nb-gray-800 dark:text-nb-gray-200 placeholder:text-nb-gray-400 outline-none" />
+              className="w-full bg-transparent text-sm text-nb-gray-800 dark:text-nb-gray-200 placeholder:text-nb-gray-400 outline-hidden" />
           </div>
           <div className="nb-scroll max-h-[220px] overflow-y-auto p-1.5 flex flex-col gap-0.5">
             {rows.length ? rows.map((o) => (
@@ -1278,7 +1278,7 @@ function DomainVerifyModal({ tenant, initialChallenge, onClose }: {
   };
 
   const mark = (t: string) => (
-    <span className="inline-flex items-center rounded border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-100 dark:bg-nb-gray-900 px-1.5 py-0.5 font-mono text-[0.74rem] text-nb-gray-700 dark:text-nb-gray-200">{t}</span>
+    <span className="inline-flex items-center rounded-sm border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-100 dark:bg-nb-gray-900 px-1.5 py-0.5 font-mono text-[0.74rem] text-nb-gray-700 dark:text-nb-gray-200">{t}</span>
   );
 
   return (

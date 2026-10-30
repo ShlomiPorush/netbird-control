@@ -134,7 +134,7 @@ export function PeerCell({ name, addr, fields, icon, peerId }: { name: string; a
           style={{ position: 'fixed', left: pos.left, top: pos.top, width: W, transform: pos.above ? 'translateY(-100%)' : undefined }}
           onMouseEnter={open}
           onMouseLeave={close}
-          className="z-[1100]"
+          className="z-1100"
         >
           <TooltipContent items={items} />
         </div>,

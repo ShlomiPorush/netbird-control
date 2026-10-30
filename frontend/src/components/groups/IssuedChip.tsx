@@ -17,7 +17,7 @@ export function IssuedChip({ issued, className }: { issued: string; className?: 
     <span
       title={m ? m.label : `Issued by ${issued}`}
       className={cn(
-        'inline-flex items-center justify-center h-5 min-w-[20px] px-1 rounded shrink-0 border',
+        'inline-flex items-center justify-center h-5 min-w-[20px] px-1 rounded-sm shrink-0 border',
         'border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-100 dark:bg-nb-gray-900 text-nb-gray-500 dark:text-nb-gray-400',
         className,
       )}

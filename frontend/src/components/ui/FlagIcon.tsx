@@ -16,7 +16,7 @@ export function FlagIcon({ cc, className }: { cc?: string; className?: string })
         height={12}
         loading="lazy"
         onError={() => setErr(true)}
-        className={cn('inline-block rounded-[2px] object-cover shadow-sm', className)}
+        className={cn('inline-block rounded-[2px] object-cover shadow-xs', className)}
       />
     );
   }

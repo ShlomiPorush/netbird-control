@@ -104,7 +104,7 @@ export function PortSelector({ value, onChange, disabled = false }: Props) {
         className={cn(
           'min-h-[48px] w-full relative items-center',
           'border border-neutral-200 dark:border-nb-gray-700 justify-between py-2 px-3',
-          'rounded-md bg-white text-sm dark:bg-nb-gray-900/40 flex dark:text-neutral-400/70 text-neutral-500 cursor-pointer hover:dark:bg-nb-gray-900/50 transition-all',
+          'rounded-md bg-white text-sm dark:bg-nb-gray-900/40 flex dark:text-neutral-400/70 text-neutral-500 cursor-pointer dark:hover:bg-nb-gray-900/50 transition-all',
           disabled && 'opacity-60 pointer-events-none',
         )}
       >
@@ -145,7 +145,7 @@ export function PortSelector({ value, onChange, disabled = false }: Props) {
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(search); } }}
                 placeholder='Add a port or a range e.g. 80 or 1-1023 and press "Enter" to add...'
-                className="min-h-[42px] w-full bg-transparent text-sm outline-none font-light dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400 placeholder:text-neutral-500 pl-10 pr-12"
+                className="min-h-[42px] w-full bg-transparent text-sm outline-hidden font-light dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400 placeholder:text-neutral-500 pl-10 pr-12"
               />
               <div className="absolute left-0 top-0 h-full flex items-center pl-4 text-nb-gray-400"><SearchIcon size={14} /></div>
               <div className="absolute right-0 top-0 h-full flex items-center pr-4">

@@ -5,7 +5,7 @@ import { cn } from '@/lib/cn';
 import { registerPopup } from '@/lib/popupBus';
 
 const secondaryBtn =
-  'inline-flex items-center gap-2 h-[42px] px-4 rounded-md border text-sm font-medium whitespace-nowrap transition-colors shadow-sm ' +
+  'inline-flex items-center gap-2 h-[42px] px-4 rounded-md border text-sm font-medium whitespace-nowrap transition-colors shadow-xs ' +
   'bg-white border-gray-200 text-gray-900 hover:bg-gray-100 ' +
   'dark:bg-nb-gray-920 dark:text-nb-gray-400 dark:border-nb-gray-700/40 dark:hover:text-white dark:hover:bg-nb-gray-910';
 
@@ -14,7 +14,7 @@ export function Segmented({ options, value, onChange }: {
   options: { value: string; label: string }[]; value: string; onChange: (v: string) => void;
 }) {
   return (
-    <div className="inline-flex h-[42px] rounded-md overflow-hidden border border-gray-200 dark:border-nb-gray-700/40 shadow-sm">
+    <div className="inline-flex h-[42px] rounded-md overflow-hidden border border-gray-200 dark:border-nb-gray-700/40 shadow-xs">
       {options.map((o) => {
         const active = o.value === value;
         return (
@@ -126,7 +126,7 @@ export function ToolbarMenu({ icon, label, options, value, onChange, align = 'st
         <div
           ref={menuRef}
           style={{ position: 'fixed', left: pos.left, top: pos.top, minWidth: pos.width }}
-          className="nb-scroll z-[1100] max-h-72 overflow-y-auto rounded-md border border-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1"
+          className="nb-scroll z-1100 max-h-72 overflow-y-auto rounded-md border border-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1"
         >
           {optionButtons}
         </div>,
@@ -147,7 +147,7 @@ export function FilterPopover({
 }) {
   const { open, setOpen, ref } = usePopover();
   const count = (protocol ? 1 : 0) + (source ? 1 : 0) + (destination ? 1 : 0);
-  const fieldCls = 'h-9 w-full rounded-md border px-3 text-sm outline-none bg-white border-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:border-netbird/60';
+  const fieldCls = 'h-9 w-full rounded-md border px-3 text-sm outline-hidden bg-white border-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:border-netbird/60';
   return (
     <div className="relative" ref={ref}>
       <button onClick={() => setOpen((o) => !o)} className={secondaryBtn}>

@@ -67,7 +67,7 @@ function AuthMethodIcon({ v }: { v?: string }) {
   const m = authMeta(v);
   if (!m) return null;
   const cls = 'text-nb-gray-400 shrink-0';
-  const pill = (t: string) => <span className="font-mono text-[0.6rem] border border-nb-gray-300 dark:border-nb-gray-700 rounded px-1 text-nb-gray-500">{t}</span>;
+  const pill = (t: string) => <span className="font-mono text-[0.6rem] border border-nb-gray-300 dark:border-nb-gray-700 rounded-sm px-1 text-nb-gray-500">{t}</span>;
   return (
     <span title={`Auth: ${m.label}`} className="inline-flex items-center">
       {m.icon === 'users' ? <UsersIcon size={12} className={cls} />
@@ -459,7 +459,7 @@ function ServicesTab({ services, clusters }: { services: ProxyService[]; cluster
         <ClearFiltersButton active={!!search} onClear={() => setSearch('')} />
         <div className="ml-auto flex items-center gap-2">
           <span className="text-[0.8rem] text-nb-gray-500 hidden lg:inline">{clustersOnline} cluster{clustersOnline === 1 ? '' : 's'} online</span>
-          <Button variant="secondary" className="!px-0 w-[42px]" title="Pull the current state from NetBird now" onClick={refreshNow} disabled={refreshing}>
+          <Button variant="secondary" className="px-0! w-[42px]" title="Pull the current state from NetBird now" onClick={refreshNow} disabled={refreshing}>
             <RefreshCw size={16} className={refreshing ? 'animate-spin' : undefined} />
           </Button>
           <Button variant="secondary" onClick={() => setExposing(true)} title="Routing peer + domain resource + service, in one step">
@@ -814,7 +814,7 @@ function LogFilters({ status, setStatus, location, setLocation }: {
                   { v: 'failed', label: 'Failed', d: 'bg-red-500' },
                 ].map((o) => (
                   <button key={o.v} onClick={() => setStatus(o.v)}
-                    className={cn('flex items-center gap-2.5 px-2 py-1.5 rounded text-sm text-left hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900', status === o.v && 'bg-nb-gray-100 dark:bg-nb-gray-900')}>
+                    className={cn('flex items-center gap-2.5 px-2 py-1.5 rounded-sm text-sm text-left hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900', status === o.v && 'bg-nb-gray-100 dark:bg-nb-gray-900')}>
                     {dot(o.d)} {o.label}
                   </button>
                 ))}
@@ -911,7 +911,7 @@ function AccessLogsTab() {
         <LogFilters status={statusF} setStatus={setStatusF} location={locationF} setLocation={setLocationF} />
         <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
         <ClearFiltersButton active={anyFilter} onClear={() => { setSearch(''); setStatusF('all'); setMethodF('all'); setUserId(''); setLocationF(''); setRange(undefined); }} />
-        <Button variant="secondary" className="ml-auto !px-0 w-[42px]" title="Pull new logs from NetBird now" onClick={refreshNow} disabled={syncing}>
+        <Button variant="secondary" className="ml-auto px-0! w-[42px]" title="Pull new logs from NetBird now" onClick={refreshNow} disabled={syncing}>
           <RefreshCw size={16} className={(syncing || q.isFetching) ? 'animate-spin' : undefined} />
         </Button>
       </div>

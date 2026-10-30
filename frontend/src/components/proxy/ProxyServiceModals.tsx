@@ -103,8 +103,8 @@ function PlainSelect({ value, onChange, options, className, disabled, joined }: 
         className={cn(
           'min-h-[44px] w-full flex items-center justify-between gap-2 border px-3 py-2 text-sm transition-all',
           'border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40',
-          joined === 'left' ? 'rounded-l-md' : joined === 'right' ? 'rounded-r-md !border-l-0' : joined === 'middle' ? '!border-l-0' : 'rounded-md',
-          disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:dark:bg-nb-gray-900/50',
+          joined === 'left' ? 'rounded-l-md' : joined === 'right' ? 'rounded-r-md border-l-0!' : joined === 'middle' ? 'border-l-0!' : 'rounded-md',
+          disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer dark:hover:bg-nb-gray-900/50',
           className,
         )}>
         <span className={cn('truncate', sel ? 'text-nb-gray-800 dark:text-nb-gray-200' : 'text-neutral-500 dark:text-nb-gray-400/70')}>{sel?.label || 'Select…'}</span>
@@ -133,7 +133,7 @@ function PanelSearch({ value, onChange, placeholder }: { value: string; onChange
   return (
     <div className="relative border-b border-neutral-200 dark:border-nb-gray-700">
       <input autoFocus value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
-        className="min-h-[42px] w-full bg-transparent text-sm outline-none font-light dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400 placeholder:text-neutral-500 pl-10 pr-12" />
+        className="min-h-[42px] w-full bg-transparent text-sm outline-hidden font-light dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400 placeholder:text-neutral-500 pl-10 pr-12" />
       <div className="absolute left-0 top-0 h-full flex items-center pl-4 text-nb-gray-400"><SearchIcon size={14} /></div>
       <div className="absolute right-3 top-0 h-full flex items-center">
         <span className="flex items-center rounded-[4px] border border-nb-gray-300 dark:border-nb-gray-500 bg-nb-gray-100 dark:bg-nb-gray-800 px-1.5 py-1 text-nb-gray-500 dark:text-nb-gray-300">
@@ -165,7 +165,7 @@ function CountrySelect({ value, onChange }: { value: string; onChange: (v: strin
   return (
     <>
       <button type="button" ref={triggerRef as React.RefObject<HTMLButtonElement>} onClick={() => setOpen((o) => !o)}
-        className="min-h-[44px] w-full flex items-center justify-between gap-2 rounded-r-md border !border-l-0 border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer hover:dark:bg-nb-gray-900/50 transition-all">
+        className="min-h-[44px] w-full flex items-center justify-between gap-2 rounded-r-md border border-l-0! border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer dark:hover:bg-nb-gray-900/50 transition-all">
         <span className={cn('truncate flex items-center gap-2', sel ? 'text-nb-gray-800 dark:text-nb-gray-200' : 'text-neutral-500 dark:text-nb-gray-400/70')}>
           {sel ? <><RoundedFlag cc={sel.country_code} size={18} /><span className="truncate">{sel.country_name} ({sel.country_code})</span></> : 'Select country...'}
         </span>
@@ -195,7 +195,7 @@ function CountrySelect({ value, onChange }: { value: string; onChange: (v: strin
 // ─── DomainSelect: the official CustomDomainSelector - search, .domain rows with badges ───
 function SmallBadge({ text, tone }: { text: string; tone: 'sky' | 'green' }) {
   return (
-    <span className={cn('px-1.5 py-0.5 rounded text-[0.65rem] font-medium border shrink-0',
+    <span className={cn('px-1.5 py-0.5 rounded-sm text-[0.65rem] font-medium border shrink-0',
       tone === 'sky' ? 'bg-sky-950/60 border-sky-500/40 text-sky-300' : 'bg-green-950 border-green-500/40 text-green-400')}>
       {text}
     </span>
@@ -228,7 +228,7 @@ function DomainSelect({ domains, clusters, value, onChange }: {
   return (
     <>
       <button type="button" ref={triggerRef as React.RefObject<HTMLButtonElement>} onClick={() => setOpen((o) => !o)}
-        className="min-h-[44px] w-full flex items-center justify-between gap-2 rounded-r-md border !border-l-0 border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer hover:dark:bg-nb-gray-900/50 transition-all">
+        className="min-h-[44px] w-full flex items-center justify-between gap-2 rounded-r-md border border-l-0! border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer dark:hover:bg-nb-gray-900/50 transition-all">
         <span className={cn('truncate', value ? 'text-nb-gray-800 dark:text-nb-gray-200' : 'text-neutral-500 dark:text-nb-gray-400/70')}>
           {value ? `.${value}` : 'Select domain...'}
         </span>
@@ -265,7 +265,7 @@ function PeerOsIcon({ os }: { os: string }) {
       : o.includes('android') ? <FcAndroidOs className="text-nb-gray-600 dark:text-white text-2xl brightness-200" />
         : <FcLinux className="text-nb-gray-600 dark:text-white text-2xl brightness-150" />;
   return (
-    <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center grayscale contrast-[40%]', win && 'p-[2.5px]', mac && 'p-[2.7px]')}>
+    <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center grayscale contrast-40', win && 'p-[2.5px]', mac && 'p-[2.7px]')}>
       {icon}
     </span>
   );
@@ -340,7 +340,7 @@ function TargetPicker({ value, onChange, clusters }: {
   return (
     <>
       <div ref={triggerRef as React.RefObject<HTMLDivElement>} onClick={() => setOpen((o) => !o)}
-        className="min-h-[46px] w-full flex items-center justify-between gap-2 rounded-md border border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer hover:dark:bg-nb-gray-900/50 transition-all">
+        className="min-h-[46px] w-full flex items-center justify-between gap-2 rounded-md border border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer dark:hover:bg-nb-gray-900/50 transition-all">
         {value ? (
           <span className="inline-flex items-center h-7 gap-2 rounded-md border border-nb-gray-200 dark:border-nb-gray-800/50 bg-nb-gray-100 dark:bg-nb-gray-900 px-2 text-[0.78rem] text-nb-gray-700 dark:text-nb-gray-300"
             onClick={(e) => e.stopPropagation()}>
@@ -406,7 +406,7 @@ function NetworkPickerField({ value, onChange }: { value: string; onChange: (id:
   return (
     <>
       <div ref={triggerRef as React.RefObject<HTMLDivElement>} onClick={() => setOpen((o) => !o)}
-        className="min-h-[46px] w-full flex items-center justify-between gap-2 rounded-md border border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer hover:dark:bg-nb-gray-900/50 transition-all">
+        className="min-h-[46px] w-full flex items-center justify-between gap-2 rounded-md border border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 px-3 py-2 text-sm cursor-pointer dark:hover:bg-nb-gray-900/50 transition-all">
         {sel ? (
           <span className="inline-flex items-center h-7 gap-2 rounded-md border border-nb-gray-200 dark:border-nb-gray-800/50 bg-nb-gray-100 dark:bg-nb-gray-900 px-2 text-[0.78rem] text-nb-gray-700 dark:text-nb-gray-300"
             onClick={(e) => e.stopPropagation()}>
@@ -484,7 +484,7 @@ function DomainField({ value, onChange, domains, clusters }: {
   return (
     <Block label="Domain" hint={required ? 'Enter a subdomain and select a domain for your service.' : 'Optionally enter a subdomain, or use the domain directly.'}>
       <div className="flex items-stretch min-w-0">
-        <Input autoFocus className="flex-1 min-w-0 !rounded-r-none" value={value.sub}
+        <Input autoFocus className="flex-1 min-w-0 rounded-r-none!" value={value.sub}
           onChange={(e) => onChange({ ...value, sub: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
           placeholder={required ? 'myapp' : 'myapp (optional)'} />
         <div className="w-[46%] max-w-[280px] shrink-0">
@@ -654,7 +654,7 @@ function TargetModal({ serviceDomain, clusters, existing, taken, isPrivate, isHt
                 {serviceDomain || 'domain.example.com'}
               </span>
               <span className="w-px bg-neutral-200 dark:bg-nb-gray-700" />
-              <Input className="flex-1 min-w-0 !rounded-l-none !border-l-0" value={path} disabled={!picked}
+              <Input className="flex-1 min-w-0 rounded-l-none! border-l-0!" value={path} disabled={!picked}
                 onChange={(e) => { const v = e.target.value; setPath(v && !v.startsWith('/') ? `/${v}` : v); }}
                 placeholder="/" />
             </div>
@@ -688,11 +688,11 @@ function TargetModal({ serviceDomain, clusters, existing, taken, isPrivate, isHt
               <PlainSelect joined="left" value={protocol} onChange={setProtocol}
                 options={[{ value: 'http', label: 'http://' }, { value: 'https', label: 'https://' }]} />
             </div>
-            <Input className="flex-1 min-w-0 !rounded-none !border-l-0 !border-r-0" value={isCluster ? host : (picked?.resolvedHost || '')}
+            <Input className="flex-1 min-w-0 rounded-none! border-l-0! border-r-0!" value={isCluster ? host : (picked?.resolvedHost || '')}
               onChange={(e) => setHost(e.target.value)} readOnly={!isCluster} disabled={!picked}
               placeholder={isCluster ? 'e.g., 127.0.0.1 or backend.lan' : 'e.g., 192.168.0.10'} />
             <span className="inline-flex items-center px-1 border-y border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 text-nb-gray-500 text-sm select-none">:</span>
-            <Input className="w-[110px] shrink-0 !rounded-l-none !border-l-0" value={port}
+            <Input className="w-[110px] shrink-0 rounded-l-none! border-l-0!" value={port}
               onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))}
               placeholder={protocol === 'https' ? '443' : '80'} />
           </div>
@@ -781,7 +781,7 @@ function TargetsList({ targets, onEdit, onToggle, onRemove }: {
           <span onClick={(e) => e.stopPropagation()} className="shrink-0 inline-flex items-center gap-1.5">
             <button type="button" role="switch" aria-checked={t.enabled} onClick={() => onToggle(i)}
               className={cn('relative h-5 w-9 rounded-full transition-colors', t.enabled ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700')}>
-              <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all', t.enabled ? 'left-[18px]' : 'left-0.5')} />
+              <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all', t.enabled ? 'left-[18px]' : 'left-0.5')} />
             </button>
             <button type="button" className="inline-flex items-center justify-center h-7 w-7 rounded-md text-nb-gray-500 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900"
               onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setMenu(menu?.i === i ? null : { i, left: r.right - 180, top: r.bottom + 4 }); }}>
@@ -792,15 +792,15 @@ function TargetsList({ targets, onEdit, onToggle, onRemove }: {
       ))}
       {menu && createPortal(
         <>
-          <div className="fixed inset-0 z-[1090]" onClick={() => setMenu(null)} />
+          <div className="fixed inset-0 z-1090" onClick={() => setMenu(null)} />
           <div style={{ position: 'fixed', left: menu.left, top: menu.top, zIndex: 1100, minWidth: 180 }}
             className="rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1.5">
             <button onClick={() => { const i = menu.i; setMenu(null); onEdit(i); }}
-              className="flex items-center gap-3 w-full px-2.5 py-2 rounded text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
+              className="flex items-center gap-3 w-full px-2.5 py-2 rounded-sm text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
               <Pencil size={14} /> Edit Target
             </button>
             <button onClick={() => { const i = menu.i; setMenu(null); onRemove(i); }}
-              className="flex items-center gap-3 w-full px-2.5 py-2 rounded text-sm text-red-500 hover:bg-red-500/10">
+              className="flex items-center gap-3 w-full px-2.5 py-2 rounded-sm text-sm text-red-500 hover:bg-red-500/10">
               <MinusCircle size={14} /> Remove Target
             </button>
           </div>
@@ -973,12 +973,12 @@ function HeadersAuthModal({ current, onSave, onClose }: {
                   <div className="flex flex-col gap-2">
                     <div className="flex items-stretch min-w-0">
                       <span className="inline-flex items-center px-3 rounded-l-md border border-r-0 border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 text-nb-gray-500"><UserIcon2 size={15} /></span>
-                      <Input className="flex-1 min-w-0 !rounded-l-none" value={it.username} autoComplete="off"
+                      <Input className="flex-1 min-w-0 rounded-l-none!" value={it.username} autoComplete="off"
                         onChange={(e) => upd(it.id, { username: e.target.value })} placeholder="Username" />
                     </div>
                     <div className="flex items-stretch min-w-0">
                       <span className="inline-flex items-center px-3 rounded-l-md border border-r-0 border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 text-nb-gray-500"><KeyRound size={15} /></span>
-                      <Input className="flex-1 min-w-0 !rounded-l-none" type="password" value={it.password} autoComplete="new-password"
+                      <Input className="flex-1 min-w-0 rounded-l-none!" type="password" value={it.password} autoComplete="new-password"
                         onChange={(e) => upd(it.id, { password: e.target.value })} placeholder="Password" />
                     </div>
                   </div>
@@ -987,7 +987,7 @@ function HeadersAuthModal({ current, onSave, onClose }: {
                 {it.type === 'bearer' && (
                   <div className="flex items-stretch min-w-0">
                     <span className="inline-flex items-center px-3 rounded-l-md border border-r-0 border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 text-sm text-nb-gray-500">Bearer</span>
-                    <Input className="flex-1 min-w-0 !rounded-l-none" type="password" value={it.value} autoComplete="off"
+                    <Input className="flex-1 min-w-0 rounded-l-none!" type="password" value={it.value} autoComplete="off"
                       onChange={(e) => upd(it.id, { value: e.target.value })} placeholder="e.g. eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..." />
                   </div>
                 )}
@@ -996,12 +996,12 @@ function HeadersAuthModal({ current, onSave, onClose }: {
                   <div className="flex flex-col gap-2">
                     <div className="flex items-stretch min-w-0">
                       <span className="inline-flex items-center px-3 rounded-l-md border border-r-0 border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 text-sm text-nb-gray-500 min-w-[64px]">Name</span>
-                      <Input className="flex-1 min-w-0 !rounded-l-none" value={it.header} autoComplete="off"
+                      <Input className="flex-1 min-w-0 rounded-l-none!" value={it.header} autoComplete="off"
                         onChange={(e) => upd(it.id, { header: e.target.value })} placeholder="e.g., X-API-Key" />
                     </div>
                     <div className="flex items-stretch min-w-0">
                       <span className="inline-flex items-center px-3 rounded-l-md border border-r-0 border-neutral-200 dark:border-nb-gray-700 bg-white dark:bg-nb-gray-900/40 text-sm text-nb-gray-500 min-w-[64px]">Value</span>
-                      <Input className="flex-1 min-w-0 !rounded-l-none" type="password" value={it.value} autoComplete="off"
+                      <Input className="flex-1 min-w-0 rounded-l-none!" type="password" value={it.value} autoComplete="off"
                         onChange={(e) => upd(it.id, { value: e.target.value })} placeholder="e.g., AIiaSyDaGmWKa4JsXZ-HjGw7ISLn..." />
                     </div>
                   </div>
@@ -1103,7 +1103,7 @@ function AccessRulesEditor({ rules, setRules, crowdsec, setCrowdsec, isPrivate }
                   <CountrySelect value={r.value} onChange={(v) => upd(i, { value: v })} />
                 </div>
               ) : (
-                <Input className="flex-1 min-w-0 !rounded-l-none !border-l-0" value={r.value} onChange={(e) => upd(i, { value: e.target.value })}
+                <Input className="flex-1 min-w-0 rounded-l-none! border-l-0!" value={r.value} onChange={(e) => upd(i, { value: e.target.value })}
                   placeholder={r.type === 'ip' ? 'e.g., 85.203.15.42 or 2001:db8::1' : 'e.g., 74.125.0.0/16 or 2001:db8::/64'} />
               )}
               <button type="button" aria-label="Remove rule" onClick={() => setRules(rules.filter((_, idx) => idx !== i))}
@@ -1663,7 +1663,7 @@ export function ExposeDockerModal({ clusters, onClose }: { clusters: ProxyCluste
                       <PlainSelect joined="left" value={protocol} onChange={setProtocol}
                         options={[{ value: 'http', label: 'http://' }, { value: 'https', label: 'https://' }]} />
                     </div>
-                    <Input className="flex-1 min-w-0 !rounded-l-none !border-l-0" value={containerDomain} onChange={(e) => setContainerDomain(e.target.value)} placeholder="e.g. grafana.internal" />
+                    <Input className="flex-1 min-w-0 rounded-l-none! border-l-0!" value={containerDomain} onChange={(e) => setContainerDomain(e.target.value)} placeholder="e.g. grafana.internal" />
                   </div>
                 </div>
                 <div className="w-[130px] shrink-0 flex flex-col gap-1.5">
@@ -1678,7 +1678,7 @@ export function ExposeDockerModal({ clusters, onClose }: { clusters: ProxyCluste
                     {DOMAIN_RE.test(containerDomain.trim().toLowerCase()) ? containerDomain.trim().toLowerCase() : 'container.domain'}
                   </span>
                   <span className="w-px bg-neutral-200 dark:bg-nb-gray-700" />
-                  <Input className="flex-1 min-w-0 !rounded-l-none !border-l-0" value={path}
+                  <Input className="flex-1 min-w-0 rounded-l-none! border-l-0!" value={path}
                     onChange={(e) => { const v = e.target.value; setPath(v && !v.startsWith('/') ? `/${v}` : v); }}
                     placeholder="/" />
                 </div>

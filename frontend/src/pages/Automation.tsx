@@ -156,7 +156,7 @@ export default function Automation() {
                           {(a.lastStatus === 'error' || a.lastStatus === 'warning') && a.lastError && runMsg?.id !== a.id && (
                             <HoverCard width={380}
                               trigger={<div className={cn('text-[0.75rem] truncate max-w-[340px] cursor-help', a.lastStatus === 'error' ? 'text-red-500' : 'text-amber-500')}>{a.lastError}</div>}>
-                              <p className="text-[0.82rem] leading-relaxed text-nb-gray-700 dark:text-nb-gray-200 break-words">{a.lastError}</p>
+                              <p className="text-[0.82rem] leading-relaxed text-nb-gray-700 dark:text-nb-gray-200 wrap-break-word">{a.lastError}</p>
                             </HoverCard>
                           )}
                         </Td>
@@ -202,7 +202,7 @@ export default function Automation() {
                       </span>
                     </div>
                     {(a.lastStatus === 'error' || a.lastStatus === 'warning') && a.lastError && (
-                      <div className={cn('mt-1.5 text-[0.75rem] break-words', a.lastStatus === 'error' ? 'text-red-500' : 'text-amber-500')}>{a.lastError}</div>
+                      <div className={cn('mt-1.5 text-[0.75rem] wrap-break-word', a.lastStatus === 'error' ? 'text-red-500' : 'text-amber-500')}>{a.lastError}</div>
                     )}
                     <div className="mt-2 flex items-center justify-between gap-2">
                       <span className="inline-flex items-center gap-2 text-[0.76rem] text-nb-gray-500">
@@ -510,8 +510,8 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
           {f.sourceFormat === 'text' ? (
             <>
               <FieldHint>
-                Each non-empty line is one address (IP, CIDR or domain). Lines starting with <code className="px-1 rounded bg-nb-gray-100 dark:bg-nb-gray-900">#</code> are ignored.
-                Optionally add a name after a space or comma, e.g. <code className="px-1 rounded bg-nb-gray-100 dark:bg-nb-gray-900">10.0.0.5 db1</code>.
+                Each non-empty line is one address (IP, CIDR or domain). Lines starting with <code className="px-1 rounded-sm bg-nb-gray-100 dark:bg-nb-gray-900">#</code> are ignored.
+                Optionally add a name after a space or comma, e.g. <code className="px-1 rounded-sm bg-nb-gray-100 dark:bg-nb-gray-900">10.0.0.5 db1</code>.
               </FieldHint>
               <Field label="Name Prefix (Optional)" hint={`The resource name becomes prefix + address${f.namePrefix ? `, e.g. "${f.namePrefix}10.0.0.5"` : ' (e.g. "Client-10.0.0.5")'}.`}>
                 <Input value={f.namePrefix} onChange={(e) => set('namePrefix', e.target.value)} placeholder="e.g. Client-" maxLength={40} />
@@ -625,7 +625,7 @@ function RunCard({ r }: { r: AutomationRun }) {
         {noChange ? <span className="text-[0.78rem] text-nb-gray-500">No changes.</span> : chips.map((c) => <Badge key={c.label} tone={c.tone}>{c.label}</Badge>)}
       </div>
       {(r.errors?.length || r.error) && (
-        <div className="mt-2 rounded bg-red-500/5 border border-red-500/20 p-2 text-[0.78rem] text-red-600 dark:text-red-400">
+        <div className="mt-2 rounded-sm bg-red-500/5 border border-red-500/20 p-2 text-[0.78rem] text-red-600 dark:text-red-400">
           {r.errors?.length
             ? <ul className="list-disc ml-4 space-y-0.5">{r.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
             : <span>{r.error}</span>}
@@ -677,7 +677,7 @@ function TestReport({ result }: { result: AutomationTestResult }) {
         {bannerIcon}
         <div className="min-w-0">
           <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">{banner.title}</div>
-          <div className="text-[0.82rem] text-nb-gray-600 dark:text-nb-gray-400 break-words">{banner.sub}</div>
+          <div className="text-[0.82rem] text-nb-gray-600 dark:text-nb-gray-400 wrap-break-word">{banner.sub}</div>
         </div>
       </div>
 
@@ -694,12 +694,12 @@ function TestReport({ result }: { result: AutomationTestResult }) {
       {!!result.availableFields?.length && (
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[0.72rem] text-nb-gray-500">Fields in the source:</span>
-          {result.availableFields.map((f) => <code key={f} className="text-[0.72rem] px-1.5 py-0.5 rounded bg-nb-gray-100 dark:bg-nb-gray-900 text-nb-gray-600 dark:text-nb-gray-300">{f}</code>)}
+          {result.availableFields.map((f) => <code key={f} className="text-[0.72rem] px-1.5 py-0.5 rounded-sm bg-nb-gray-100 dark:bg-nb-gray-900 text-nb-gray-600 dark:text-nb-gray-300">{f}</code>)}
         </div>
       )}
 
       {!!suggestions.length && (
-        <Tip tone="amber"><b>Tip:</b> the Address field looks off. Try mapping it to {suggestions.map((f, i) => <span key={f}><code className="px-1 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400">{f}</code>{i < suggestions.length - 1 ? ' or ' : ''}</span>)}.</Tip>
+        <Tip tone="amber"><b>Tip:</b> the Address field looks off. Try mapping it to {suggestions.map((f, i) => <span key={f}><code className="px-1 rounded-sm bg-amber-500/10 text-amber-700 dark:text-amber-400">{f}</code>{i < suggestions.length - 1 ? ' or ' : ''}</span>)}.</Tip>
       )}
 
       {!!result.preview?.length && (
@@ -708,7 +708,7 @@ function TestReport({ result }: { result: AutomationTestResult }) {
           <table className="w-full text-[0.78rem]">
             <tbody>
               {result.preview.map((p, i) => (
-                <tr key={i} className={cn('border-t border-nb-gray-100 dark:border-nb-gray-900', !p.valid ? 'bg-red-500/[0.04]' : p.blocked && 'bg-amber-500/[0.05]')}>
+                <tr key={i} className={cn('border-t border-nb-gray-100 dark:border-nb-gray-900', !p.valid ? 'bg-red-500/4' : p.blocked && 'bg-amber-500/5')}>
                   <td className="px-3 py-1.5 w-5">{!p.valid ? <AlertTriangle size={13} className="text-red-500" /> : p.blocked ? <Ban size={13} className="text-amber-500" /> : <CheckCircle2 size={13} className="text-green-500" />}</td>
                   <td className="px-2 py-1.5 font-mono">
                     {!p.valid
@@ -730,7 +730,7 @@ function TestReport({ result }: { result: AutomationTestResult }) {
       {result.rawSnippet && result.error && (
         <details className="text-[0.78rem]">
           <summary className="cursor-pointer text-nb-gray-500 hover:text-nb-gray-700 dark:hover:text-nb-gray-300">Show raw response</summary>
-          <pre className="mt-1.5 max-h-32 overflow-auto rounded bg-nb-gray-100 dark:bg-nb-gray-920 p-2 text-[0.72rem] font-mono whitespace-pre-wrap">{result.rawSnippet}</pre>
+          <pre className="mt-1.5 max-h-32 overflow-auto rounded-sm bg-nb-gray-100 dark:bg-nb-gray-920 p-2 text-[0.72rem] font-mono whitespace-pre-wrap">{result.rawSnippet}</pre>
         </details>
       )}
     </div>
@@ -827,7 +827,7 @@ function DiagnosticsModal({ automation, onClose }: { automation: Automation; onC
                   </thead>
                   <tbody>
                     {rows.map((r) => (
-                      <tr key={r.key} className={cn('border-t border-nb-gray-100 dark:border-nb-gray-900', r.orphan && 'bg-red-500/[0.04]')}>
+                      <tr key={r.key} className={cn('border-t border-nb-gray-100 dark:border-nb-gray-900', r.orphan && 'bg-red-500/4')}>
                         <td className="px-3 py-1.5"><Copyable value={r.address}><span className="font-mono text-nb-gray-700 dark:text-nb-gray-200">{r.address}</span></Copyable></td>
                         <td className="px-3 py-1.5 text-nb-gray-600 dark:text-nb-gray-300 truncate max-w-[160px]">{r.name || '-'}</td>
                         <td className="px-3 py-1.5">

@@ -30,12 +30,12 @@ const ANDROID_VERSIONS = ['8.0', '9.0', '10', '11', '12', '13', '14', '15', '16'
 // looks identical wherever it appears.
 export type Meta = { icon: ReactNode; iconClass: string; title: string; desc: string };
 export const META: Record<'nb' | 'os' | 'geo' | 'net' | 'proc' | 'cert', Meta> = {
-  nb: { icon: <Hexagon size={18} />, iconClass: 'bg-gradient-to-tr from-netbird-200 to-netbird-100 text-netbird-950', title: 'NetBird Client Version', desc: 'Restrict access to peers with a specific NetBird client version.' },
-  os: { icon: <Disc3 size={16} />, iconClass: 'bg-gradient-to-tr from-nb-gray-500 to-nb-gray-300 text-nb-gray-900', title: 'Operating System', desc: 'Restrict access in your network based on the operating system.' },
-  geo: { icon: <Flag size={16} />, iconClass: 'bg-gradient-to-tr from-indigo-500 to-indigo-400 text-white', title: 'Country & Region', desc: 'Restrict access in your network based on country or region.' },
-  net: { icon: <Network size={16} />, iconClass: 'bg-gradient-to-tr from-blue-500 to-blue-400 text-white', title: 'Peer Network Range', desc: 'Restrict access by allowing or blocking peer network ranges.' },
-  proc: { icon: <ServerCog size={18} />, iconClass: 'bg-gradient-to-tr from-nb-gray-500 to-nb-gray-300 text-nb-gray-900', title: 'Process', desc: 'Restrict access in your network based on running processes of a peer.' },
-  cert: { icon: <FileKey2 size={16} />, iconClass: 'bg-gradient-to-tr from-emerald-500 to-emerald-400 text-white', title: 'Certificate', desc: 'Restrict access to peers holding a certificate issued by your own certificate authority.' },
+  nb: { icon: <Hexagon size={18} />, iconClass: 'bg-linear-to-tr/srgb from-netbird-200 to-netbird-100 text-netbird-950', title: 'NetBird Client Version', desc: 'Restrict access to peers with a specific NetBird client version.' },
+  os: { icon: <Disc3 size={16} />, iconClass: 'bg-linear-to-tr/srgb from-nb-gray-500 to-nb-gray-300 text-nb-gray-900', title: 'Operating System', desc: 'Restrict access in your network based on the operating system.' },
+  geo: { icon: <Flag size={16} />, iconClass: 'bg-linear-to-tr/srgb from-indigo-500 to-indigo-400 text-white', title: 'Country & Region', desc: 'Restrict access in your network based on country or region.' },
+  net: { icon: <Network size={16} />, iconClass: 'bg-linear-to-tr/srgb from-blue-500 to-blue-400 text-white', title: 'Peer Network Range', desc: 'Restrict access by allowing or blocking peer network ranges.' },
+  proc: { icon: <ServerCog size={18} />, iconClass: 'bg-linear-to-tr/srgb from-nb-gray-500 to-nb-gray-300 text-nb-gray-900', title: 'Process', desc: 'Restrict access in your network based on running processes of a peer.' },
+  cert: { icon: <FileKey2 size={16} />, iconClass: 'bg-linear-to-tr/srgb from-emerald-500 to-emerald-400 text-white', title: 'Certificate', desc: 'Restrict access to peers holding a certificate issued by your own certificate authority.' },
 };
 
 // Shown wherever a Certificate check is configured or displayed (official wording).
@@ -128,7 +128,7 @@ export function PostureChecks() {
                 <Td>
                   <div className="flex items-center gap-1.5">
                     {activeMetas(c.checks).map((m, i) => (
-                      <span key={i} title={m.title} className={cn('h-7 w-7 rounded-md flex items-center justify-center shadow-sm', m.iconClass)}>{m.icon}</span>
+                      <span key={i} title={m.title} className={cn('h-7 w-7 rounded-md flex items-center justify-center shadow-xs', m.iconClass)}>{m.icon}</span>
                     ))}
                     {!activeMetas(c.checks).length && <span className="text-nb-gray-500 text-xs">-</span>}
                   </div>
@@ -207,11 +207,11 @@ function EditorModal({ meta, size = 'md', onClose, onSave, saveDisabled, childre
 function AllowBlock({ value, onChange }: { value: 'allow' | 'deny'; onChange: (v: 'allow' | 'deny') => void }) {
   return (
     <div className="inline-flex shrink-0 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 p-0.5 gap-0.5">
-      <button onClick={() => onChange('allow')} className={cn('flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded text-sm font-medium transition-colors',
+      <button onClick={() => onChange('allow')} className={cn('flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded-sm text-sm font-medium transition-colors',
         value === 'allow' ? 'bg-green-500/15 text-green-500' : 'text-nb-gray-500 hover:text-nb-gray-700 dark:hover:text-nb-gray-300')}>
         <ShieldCheck size={15} /> Allow
       </button>
-      <button onClick={() => onChange('deny')} className={cn('flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded text-sm font-medium transition-colors',
+      <button onClick={() => onChange('deny')} className={cn('flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded-sm text-sm font-medium transition-colors',
         value === 'deny' ? 'bg-red-500/15 text-red-500' : 'text-nb-gray-500 hover:text-nb-gray-700 dark:hover:text-nb-gray-300')}>
         <ShieldX size={15} /> Block
       </button>
@@ -329,7 +329,7 @@ function LocationRow({ loc, onChange, onRemove }: { loc: Loc; onChange: (v: Loc)
         options={(countries || []).map((c) => ({ value: c.country_code, label: `${c.country_name} (${c.country_code})` }))} />
       <SelectMenu value={loc.city_name} onChange={(v) => onChange({ ...loc, city_name: v })} disabled={!loc.country_code} className="flex-1"
         options={[{ value: '', label: isFetching ? 'Loading…' : 'All Locations' }, ...(cities || []).map((ct) => ({ value: ct.city_name, label: ct.city_name }))]} />
-      <Button variant="secondary" size="sm" className="!h-[42px] !px-3" onClick={onRemove}><MinusCircle size={15} /></Button>
+      <Button variant="secondary" size="sm" className="h-[42px]! px-3!" onClick={onRemove}><MinusCircle size={15} /></Button>
     </div>
   );
 }
@@ -357,7 +357,7 @@ function NetCard({ value, onChange }: { value?: PeerNetworkRangeCheck; onChange:
             {ranges.map((r) => (
               <div key={r.id} className="flex gap-2">
                 <Input value={r.value} onChange={(e) => setRanges((p) => p.map((x) => (x.id === r.id ? { ...x, value: e.target.value } : x)))} placeholder="e.g. 192.168.1.0/24" />
-                <Button variant="secondary" size="sm" className="!h-[42px] !px-3" onClick={() => setRanges((p) => p.filter((x) => x.id !== r.id))}><MinusCircle size={15} /></Button>
+                <Button variant="secondary" size="sm" className="h-[42px]! px-3!" onClick={() => setRanges((p) => p.filter((x) => x.id !== r.id))}><MinusCircle size={15} /></Button>
               </div>
             ))}
             <DottedAdd onClick={() => setRanges((p) => [...p, { id: uid(), value: '' }])}>Add Network Range</DottedAdd>
@@ -443,10 +443,10 @@ function CertCard({ value, onChange }: { value?: { ca_certificates: string[] }; 
                     onChange={(e) => setCerts((p) => p.map((y) => (y.id === x.id ? { ...y, pem: e.target.value } : y)))}
                     placeholder={'-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----'}
                     spellCheck={false}
-                    className="w-full rounded-md border px-3 py-2 font-mono text-xs leading-5 outline-none resize-y bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:ring-2 focus:ring-netbird-400/30 focus:border-netbird/60" />
+                    className="w-full rounded-md border px-3 py-2 font-mono text-xs leading-5 outline-hidden resize-y bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:ring-2 focus:ring-netbird-400/30 focus:border-netbird/60" />
                   {x.pem.trim() && <CertInfoLine info={infos?.[i]} />}
                 </div>
-                <Button variant="secondary" size="sm" className="!h-[42px] !px-3" onClick={() => setCerts((p) => p.filter((y) => y.id !== x.id))} title="Remove certificate"><MinusCircle size={15} /></Button>
+                <Button variant="secondary" size="sm" className="h-[42px]! px-3!" onClick={() => setCerts((p) => p.filter((y) => y.id !== x.id))} title="Remove certificate"><MinusCircle size={15} /></Button>
               </div>
             ))}
             {insp.isError && <p className="text-xs text-red-500">Couldn't check the certificates - {(insp.error as Error).message}</p>}
@@ -550,7 +550,7 @@ function PostureCheckModal({ check, onClose }: { check: PostureCheck | null; onC
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
               placeholder="e.g. Check that the NetBird version is at least 0.30.0"
-              className="rounded-md border px-3 py-2 text-sm outline-none transition-colors resize-none bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:ring-2 focus:ring-netbird-400/30 focus:border-netbird/60"
+              className="rounded-md border px-3 py-2 text-sm outline-hidden transition-colors resize-none bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:ring-2 focus:ring-netbird-400/30 focus:border-netbird/60"
             />
           </Field>
           {error && <p className="text-sm text-red-500">{error}</p>}

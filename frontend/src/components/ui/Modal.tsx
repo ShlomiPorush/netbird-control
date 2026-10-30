@@ -91,7 +91,7 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
 
   return createPortal(
     // Backdrop: clicking it does NOT close the modal (only the X / Cancel / Escape do).
-    <div className="fixed inset-0 z-[1000] flex items-start justify-center px-4 pb-4 pt-[7vh] bg-black/50 animate-fade-in">
+    <div className="fixed inset-0 z-1000 flex items-start justify-center px-4 pb-4 pt-[7vh] bg-black/50 animate-fade-in">
       <div
         ref={panelRef}
         role="dialog"
@@ -112,7 +112,7 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
           )}>
             <div className="flex items-center gap-3 min-w-0">
               {icon && (
-                <div className={cn('flex items-center justify-center h-10 w-10 rounded-md shrink-0', iconWrapClass || 'bg-netbird-950 border border-netbird text-netbird shadow-sm')}>
+                <div className={cn('flex items-center justify-center h-10 w-10 rounded-md shrink-0', iconWrapClass || 'bg-netbird-950 border border-netbird text-netbird shadow-xs')}>
                   {icon}
                 </div>
               )}

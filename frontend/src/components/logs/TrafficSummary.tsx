@@ -18,7 +18,7 @@ const rowKey = (r: TrafficSummaryRow) => `${r.sourceId || r.sourceHost}→${r.de
 // cn() is a plain join (no tailwind-merge), so we force the tighter metrics with `!` to keep the
 // sortable headers pixel-identical to the non-sortable ones.
 const TH_CLS = 'h-11 px-5 uppercase font-medium text-[0.68rem] tracking-wide text-nb-gray-500 dark:text-nb-gray-400';
-const SORT_TH_CLS = '!h-11 !px-5 !text-[0.68rem]';
+const SORT_TH_CLS = 'h-11! px-5! text-[0.68rem]!';
 
 // Header columns, in order. `sort` is the GET /api/logs/summary sort key. The combined Traffic
 // cell shows rx (down) over tx (up); the API sorts each separately, so we sort it by `tx` (bytes
@@ -173,7 +173,7 @@ export function TrafficSummary({ filters, perPage, onDrill, sortState }: {
                 <ReactGroup key={k}>
                   <tr onClick={() => setOpen(isOpen ? null : k)}
                     className={cn('border-b border-nb-gray-100 dark:border-nb-gray-900 cursor-pointer',
-                      isOpen ? 'bg-nb-gray-100/70 dark:bg-nb-gray-920/80' : 'hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/[0.15]')}>
+                      isOpen ? 'bg-nb-gray-100/70 dark:bg-nb-gray-920/80' : 'hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/15')}>
                     <td className={cn('px-5 py-3.5', isOpen && 'border-l-2 border-netbird/60')}>
                       <div className="flex items-center gap-2">
                         <ChevronRight size={15} className={cn('shrink-0 transition-transform', isOpen ? 'rotate-90 text-netbird' : 'text-nb-gray-400')} />

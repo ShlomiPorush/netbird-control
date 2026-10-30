@@ -21,7 +21,7 @@ const TYPE_META: Record<SearchResult['type'], { label: string; icon: ReactNode }
 
 function Kbd({ children }: { children: ReactNode }) {
   return (
-    <kbd className="inline-flex min-w-[1.4rem] items-center justify-center rounded border border-nb-gray-300 dark:border-nb-gray-700 bg-nb-gray-100 dark:bg-nb-gray-800 px-1.5 py-0.5 font-sans text-[0.7rem] text-nb-gray-600 dark:text-nb-gray-300">
+    <kbd className="inline-flex min-w-[1.4rem] items-center justify-center rounded-sm border border-nb-gray-300 dark:border-nb-gray-700 bg-nb-gray-100 dark:bg-nb-gray-800 px-1.5 py-0.5 font-sans text-[0.7rem] text-nb-gray-600 dark:text-nb-gray-300">
       {children}
     </kbd>
   );
@@ -77,7 +77,7 @@ export function GlobalSearch() {
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-[1200] flex items-start justify-center bg-black/50 px-4 pt-[12vh] backdrop-blur-sm"
+    <div className="fixed inset-0 z-1200 flex items-start justify-center bg-black/50 px-4 pt-[12vh] backdrop-blur-xs"
       onMouseDown={() => setOpen(false)}>
       <div className="w-full max-w-xl overflow-hidden rounded-xl border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-2xl"
         onMouseDown={(e) => e.stopPropagation()}>
@@ -90,7 +90,7 @@ export function GlobalSearch() {
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Search networks, resources, peers…"
-            className="h-12 flex-1 bg-transparent text-sm text-nb-gray-900 outline-none placeholder:text-nb-gray-400 dark:text-nb-gray-100"
+            className="h-12 flex-1 bg-transparent text-sm text-nb-gray-900 outline-hidden placeholder:text-nb-gray-400 dark:text-nb-gray-100"
           />
         </div>
 

@@ -39,7 +39,7 @@ export function ResendInviteButton({ userId, email, variant = 'icon', className 
   if (variant === 'button') {
     return (
       <Button variant="secondary" size="sm" onClick={click} disabled={resend.isPending} title={title}
-        className={cn(failed && 'border-red-500/50 !text-red-500', className)}>
+        className={cn(failed && 'border-red-500/50 text-red-500!', className)}>
         {icon} {done ? 'Invitation Sent' : resend.isPending ? 'Sending…' : 'Resend Invitation'}
       </Button>
     );

@@ -105,7 +105,7 @@ export default function Policies() {
         <StatusFilter value={status} onChange={setStatus} />
         <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
         <ClearFiltersButton active={!!search || status !== 'all'} onClear={() => { setSearch(''); setStatus('all'); }} />
-        <Button variant="secondary" className="ml-auto !px-0 w-[42px]" title="Refresh" onClick={async () => { await refresh.mutateAsync(); pq.refetch(); }}>
+        <Button variant="secondary" className="ml-auto px-0! w-[42px]" title="Refresh" onClick={async () => { await refresh.mutateAsync(); pq.refetch(); }}>
           <RefreshCw size={16} className={(refresh.isPending || pq.isFetching) ? 'animate-spin' : undefined} />
         </Button>
       </div>
@@ -274,7 +274,7 @@ function StatusFilter({ value, onChange }: { value: StatusF; onChange: (v: Statu
             <div className="px-2.5 pt-1 pb-1 text-[0.7rem] font-semibold uppercase tracking-wide text-nb-gray-400">Status</div>
             {opts.map((o) => (
               <button key={o.v} onClick={() => { onChange(o.v); setOpen(false); }}
-                className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
+                className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded-sm text-sm', value === o.v ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
                 <span className={cn('h-2 w-2 rounded-full', o.dot)} /> {o.label}
               </button>
             ))}

@@ -69,7 +69,7 @@ export function ComplianceIcon({ peer }: { peer: ComplianceFields }) {
 export function ComplianceBanner({ info, className }: { info: Compliance; className?: string }) {
   return (
     <div className={cn('flex items-start gap-3 rounded-lg border p-3.5',
-      info.tone === 'amber' ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-red-500/30 bg-red-500/[0.06]', className)}>
+      info.tone === 'amber' ? 'border-amber-500/30 bg-amber-500/6' : 'border-red-500/30 bg-red-500/6', className)}>
       <AlertTriangle size={18} className={cn('mt-0.5 shrink-0', info.tone === 'amber' ? 'text-amber-500' : 'text-red-500')} />
       <div className="min-w-0">
         <p className="text-sm leading-relaxed text-nb-gray-700 dark:text-nb-gray-200">{info.message}</p>

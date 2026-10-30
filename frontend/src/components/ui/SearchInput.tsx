@@ -19,7 +19,7 @@ export function SearchInput({ value, onChange, placeholder = 'Search...', kbd = 
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         className={cn(
-          'h-[42px] w-full rounded-md border text-sm outline-none transition-colors',
+          'h-[42px] w-full rounded-md border text-sm outline-hidden transition-colors',
           'pl-10', kbd ? 'pr-16' : 'pr-3',
           'bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500',
           'dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400/70',

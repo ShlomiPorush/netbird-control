@@ -203,7 +203,7 @@ function RequestsList() {
                   {r.kind === 'bypass' && r.tempDevice && <Badge tone="orange">Temp Device</Badge>}
                   <TargetChips targets={r.targets} />
                 </div>
-                {r.reason && <div className="mt-2 text-[0.82rem] text-nb-gray-600 dark:text-nb-gray-300 break-words">{r.reason}</div>}
+                {r.reason && <div className="mt-2 text-[0.82rem] text-nb-gray-600 dark:text-nb-gray-300 wrap-break-word">{r.reason}</div>}
                 <div className="mt-2 text-[0.76rem] text-nb-gray-500">
                   {formatMaybeDate(r.createdAt)}
                   {forLabel(r) !== '-' ? <> · For: {forLabel(r)}{forDiffers(r) ? ` (requested ${r.requestedMinutes ? durLabel(r.requestedMinutes) : '-'})` : ''}</> : null}
@@ -376,7 +376,7 @@ function ReviewModal({ request, onClose }: { request: AccessRequest; onClose: ()
                           const requestedIt = (request.targets || []).some((r) => r.type === t.type && r.id === t.id);
                           return (
                             <span key={`${t.type}-${t.id}`} className={cn('inline-flex items-center gap-1.5 rounded-md border pl-2 pr-1 py-1 text-[0.78rem]',
-                              requestedIt ? 'border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-50 dark:bg-nb-gray-900' : 'border-netbird/40 bg-netbird/[0.06]')}>
+                              requestedIt ? 'border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-50 dark:bg-nb-gray-900' : 'border-netbird/40 bg-netbird/6')}>
                               <span className="text-nb-gray-400">{TARGET_META[t.type].icon}</span>
                               <span className="text-nb-gray-700 dark:text-nb-gray-200">{t.name}</span>
                               {!requestedIt && <span className="text-[0.65rem] uppercase tracking-wide text-netbird">added</span>}

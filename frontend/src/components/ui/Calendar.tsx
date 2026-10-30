@@ -22,7 +22,7 @@ export function Calendar({ className, classNames, showOutsideDays = true, ...pro
         weekdays: 'flex',
         weekday: 'text-nb-gray-500 dark:text-nb-gray-400 rounded-md w-9 font-normal text-[0.8rem]',
         week: 'flex w-full mt-2',
-        day: 'h-9 w-9 text-center text-sm p-0 relative text-nb-gray-700 dark:text-nb-gray-200 [&:has([aria-selected])]:bg-netbird/10 first:[&:has([aria-selected])]:rounded-l-md last:[&:has([aria-selected])]:rounded-r-md focus-within:relative focus-within:z-20',
+        day: 'h-9 w-9 text-center text-sm p-0 relative text-nb-gray-700 dark:text-nb-gray-200 has-aria-[selected]:bg-netbird/10 first:has-aria-[selected]:rounded-l-md last:has-aria-[selected]:rounded-r-md focus-within:relative focus-within:z-20',
         day_button: 'h-9 w-9 p-0 font-normal rounded-md hover:bg-nb-gray-100 dark:hover:bg-nb-gray-800 aria-selected:opacity-100',
         range_end: 'day-range-end rounded-r-md',
         range_start: 'day-range-start rounded-l-md',

@@ -737,7 +737,7 @@ function FilterCat({ label, valueLabel, onEnter, active, children }: {
 }) {
   return (
     <div className="relative" onMouseEnter={onEnter}>
-      <button className={cn('flex items-center justify-between w-full px-2.5 py-1.5 rounded text-sm transition-colors',
+      <button className={cn('flex items-center justify-between w-full px-2.5 py-1.5 rounded-sm text-sm transition-colors',
         active ? 'bg-nb-gray-100 dark:bg-nb-gray-900 text-nb-gray-900 dark:text-nb-gray-100' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
         <span>{label}</span>
         <span className="flex items-center gap-1.5">
@@ -760,7 +760,7 @@ function Flyout({ wide, children }: { wide?: boolean; children: React.ReactNode 
 
 function OptRow({ selected, onClick, children }: { selected: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button onClick={onClick} className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded text-sm',
+    <button onClick={onClick} className={cn('flex items-center gap-2 w-full text-left px-2.5 py-1.5 rounded-sm text-sm',
       selected ? 'bg-netbird/10 text-netbird' : 'text-nb-gray-600 dark:text-nb-gray-300 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
       {children}
     </button>
@@ -771,7 +771,7 @@ function FilterChip({ onClear, children }: { onClear: () => void; children: Reac
   return (
     <span className="inline-flex items-center gap-1.5 h-7 pl-2.5 pr-1.5 rounded-md text-[0.78rem] border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-100/60 dark:bg-nb-gray-920/60 text-nb-gray-600 dark:text-nb-gray-300">
       {children}
-      <button onClick={onClear} className="inline-flex items-center justify-center h-4 w-4 rounded hover:bg-nb-gray-200 dark:hover:bg-nb-gray-800 text-nb-gray-400 hover:text-nb-gray-700 dark:hover:text-nb-gray-100"><X size={12} /></button>
+      <button onClick={onClear} className="inline-flex items-center justify-center h-4 w-4 rounded-sm hover:bg-nb-gray-200 dark:hover:bg-nb-gray-800 text-nb-gray-400 hover:text-nb-gray-700 dark:hover:text-nb-gray-100"><X size={12} /></button>
     </span>
   );
 }
@@ -783,7 +783,7 @@ function ResourceRow({ r, canEdit, canSelect, selected, onToggle, onEdit, onDupl
   const pc = r.policies?.length || 0;
   return (
     <tr
-      className={cn('border-b border-nb-gray-100 dark:border-nb-gray-900 last:border-0 hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/[0.15]', canEdit && 'cursor-pointer', r.enabled === false && 'opacity-50', selected && '!bg-netbird/[0.06]')}
+      className={cn('border-b border-nb-gray-100 dark:border-nb-gray-900 last:border-0 hover:bg-nb-gray-100/50 dark:hover:bg-nb-gray-910/15', canEdit && 'cursor-pointer', r.enabled === false && 'opacity-50', selected && 'bg-netbird/6!')}
       onClick={canEdit ? () => onEdit('resource') : undefined}
     >
       {canSelect && (
@@ -861,7 +861,7 @@ function ResourceCard({ r, canEdit, canSelect, selected, onToggle, onEdit, onDup
       className={cn('rounded-lg border bg-white dark:bg-nb-gray-950 p-3.5',
         canEdit && 'cursor-pointer active:bg-nb-gray-50 dark:active:bg-nb-gray-900/40 transition-colors',
         r.enabled === false && 'opacity-60',
-        selected ? 'border-netbird/40 !bg-netbird/[0.06]' : 'border-nb-gray-200 dark:border-nb-gray-800')}
+        selected ? 'border-netbird/40 bg-netbird/6!' : 'border-nb-gray-200 dark:border-nb-gray-800')}
       onClick={canEdit ? () => onEdit('resource') : undefined}
     >
       <div className="flex items-center gap-2.5">
@@ -1147,7 +1147,7 @@ function AddRoutingPeerModal({ networkId, name, onClose }: { networkId: string; 
             </div>
             <div className="inline-flex items-stretch shrink-0">
               <span className="inline-flex items-center justify-center px-2.5 rounded-l-md border border-r-0 border-nb-gray-200 dark:border-nb-gray-700 text-nb-gray-400 bg-nb-gray-100/60 dark:bg-nb-gray-930/60"><ArrowDownNarrowWide size={14} /></span>
-              <Input type="number" min={1} max={9999} value={metric} onChange={(e) => setMetric(parseInt(e.target.value, 10) || 9999)} className="w-24 !rounded-l-none" />
+              <Input type="number" min={1} max={9999} value={metric} onChange={(e) => setMetric(parseInt(e.target.value, 10) || 9999)} className="w-24 rounded-l-none!" />
             </div>
           </div>
           {error && <p className="text-sm text-red-500">{error}</p>}
@@ -1161,7 +1161,7 @@ function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   return (
     <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
       className={cn('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors', checked ? 'bg-netbird' : 'bg-nb-gray-300 dark:bg-nb-gray-700')}>
-      <span className={cn('inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform', checked ? 'translate-x-[18px]' : 'translate-x-0.5')} />
+      <span className={cn('inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform', checked ? 'translate-x-[18px]' : 'translate-x-0.5')} />
     </button>
   );
 }

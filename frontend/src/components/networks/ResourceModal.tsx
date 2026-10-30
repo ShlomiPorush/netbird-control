@@ -274,7 +274,7 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Production Web Server"
-              className={nameExists ? '!border-red-500 focus:!border-red-500 focus:!ring-red-500/20' : undefined}
+              className={nameExists ? 'border-red-500! focus:border-red-500! focus:ring-red-500/20!' : undefined}
             />
           </Field>
           {nameExists && (
@@ -282,8 +282,8 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
           )}
           <Field label="Address" hint="Enter a single IP Address, CIDR Block or Domain Name.">
             <Input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="e.g. 10.0.0.5, 10.0.0.0/24 or db.example.com"
-              className={(blockedHard || addressExists) ? '!border-red-500 focus:!border-red-500 focus:!ring-red-500/20'
-                : blockedBy ? '!border-amber-500 focus:!border-amber-500 focus:!ring-amber-500/20' : undefined} />
+              className={(blockedHard || addressExists) ? 'border-red-500! focus:border-red-500! focus:ring-red-500/20!'
+                : blockedBy ? 'border-amber-500! focus:border-amber-500! focus:ring-amber-500/20!' : undefined} />
           </Field>
           {addressConflict && !allowDuplicates && (
             <p className="-mt-2.5 text-[0.78rem] text-red-500">
@@ -582,19 +582,19 @@ function RowMenu({ onEdit, onCopy, onDelete }: { onEdit: () => void; onCopy: () 
       </button>
       {open && createPortal(
         <>
-          <div className="fixed inset-0 z-[1090]" onClick={() => setOpen(false)} />
+          <div className="fixed inset-0 z-1090" onClick={() => setOpen(false)} />
           <div style={{ position: 'fixed', left: pos.left, top: pos.top, zIndex: 1100, minWidth: 200 }}
             className="rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-1.5">
             <button onClick={() => { setOpen(false); onEdit(); }}
-              className="flex items-center gap-3 w-full px-2.5 py-2 rounded text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
+              className="flex items-center gap-3 w-full px-2.5 py-2 rounded-sm text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
               <Edit2 size={14} /> Edit Policy
             </button>
             <button onClick={() => { setOpen(false); onCopy(); }}
-              className="flex items-center gap-3 w-full px-2.5 py-2 rounded text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
+              className="flex items-center gap-3 w-full px-2.5 py-2 rounded-sm text-sm text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900">
               <Copy size={14} /> Copy Policy
             </button>
             <button onClick={() => { setOpen(false); onDelete(); }}
-              className="flex items-center gap-3 w-full px-2.5 py-2 rounded text-sm text-red-500 hover:bg-red-500/10">
+              className="flex items-center gap-3 w-full px-2.5 py-2 rounded-sm text-sm text-red-500 hover:bg-red-500/10">
               <Trash2 size={14} /> Delete Policy
             </button>
           </div>

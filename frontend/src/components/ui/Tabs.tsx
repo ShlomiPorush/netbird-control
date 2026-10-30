@@ -67,9 +67,9 @@ export function PillTabs({
             onClick={() => onChange(t.key)}
             // gap-2 only affects buttons that carry an icon; text-only tabs are unchanged.
             className={cn(
-              'inline-flex items-center gap-2 whitespace-nowrap h-[38px] px-3.5 text-sm font-medium rounded transition-colors',
+              'inline-flex items-center gap-2 whitespace-nowrap h-[38px] px-3.5 text-sm font-medium rounded-sm transition-colors',
               active
-                ? 'bg-white dark:bg-nb-gray-900 text-netbird shadow-sm'
+                ? 'bg-white dark:bg-nb-gray-900 text-netbird shadow-xs'
                 : 'text-nb-gray-500 hover:text-nb-gray-800 dark:hover:text-nb-gray-200',
             )}
           >

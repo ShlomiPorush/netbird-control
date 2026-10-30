@@ -2,7 +2,7 @@ import { forwardRef, type InputHTMLAttributes, type SelectHTMLAttributes, type T
 import { cn } from '@/lib/cn';
 
 const fieldColors =
-  'rounded-md border px-3 text-sm outline-none transition-colors ' +
+  'rounded-md border px-3 text-sm outline-hidden transition-colors ' +
   'bg-white border-nb-gray-200 text-nb-gray-900 placeholder:text-nb-gray-500 ' +
   'dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 dark:placeholder:text-nb-gray-400/70 ' +
   'focus:ring-2 focus:ring-netbird-400/30 focus:border-netbird/60';
@@ -55,7 +55,7 @@ export function Checkbox({ className, ...rest }: InputHTMLAttributes<HTMLInputEl
   return (
     <input
       type="checkbox"
-      className={cn('h-4 w-4 rounded border-nb-gray-300 dark:border-nb-gray-700 text-netbird accent-netbird focus:ring-netbird/40', className)}
+      className={cn('h-4 w-4 rounded-sm border-nb-gray-300 dark:border-nb-gray-700 text-netbird accent-netbird focus:ring-netbird/40', className)}
       {...rest}
     />
   );

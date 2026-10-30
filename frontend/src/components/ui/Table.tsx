@@ -44,7 +44,7 @@ export function Tr({ children, className, onClick }: { children: ReactNode; clas
       onClick={onClick}
       className={cn(
         'border-b border-nb-gray-100 dark:border-nb-gray-900 last:border-0 transition-colors',
-        'hover:bg-nb-gray-100/60 dark:hover:bg-nb-gray-910/[0.15]',
+        'hover:bg-nb-gray-100/60 dark:hover:bg-nb-gray-910/15',
         onClick && 'cursor-pointer',
         className,
       )}
