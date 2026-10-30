@@ -10,6 +10,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- **An automation no longer enables a disabled resource that it adopts.** The resource stays
+  disabled on later syncs until someone enables it in NetBird. A sync re-enables only the resources
+  that its own removal mode disabled.
+
 ---
 
 ## [1.0.5] - 2026-10-30
