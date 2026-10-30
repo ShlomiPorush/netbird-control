@@ -328,9 +328,9 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
 // A GET that finds a login in flight only gets the "Signing in" page (or goes on signed in): it
 // can't start a login at the provider, so its reloads don't draw from the auth budget - which
 // would otherwise run out and block the in-flight login's own /callback. /callback and /logout
-// reach the provider and always count.
+// reach the provider and always count (checked on the routed path, whatever form the URL took).
 const authLimiter = rateLimit(limiterOptions('auth', {
-    skipAuth: (req) => req.method === 'GET' && !/^\/(callback|logout)\b/i.test(req.originalUrl) && loginInFlight(req),
+    skipAuth: (req) => req.method === 'GET' && !/^\/(callback|logout)(\/|$)/i.test(req.baseUrl + req.path) && loginInFlight(req),
 }));
 const apiLimiter = rateLimit(limiterOptions('api'));
 const spaLimiter = rateLimit(limiterOptions('spa', { assetsDir: path.join(__dirname, 'public', 'assets') }));
@@ -342,19 +342,46 @@ const MAX_LOGIN_RETRIES = 3;
 // while another is in flight overwrites it and breaks the first one - which is what happens when
 // a session expires and every open tab is sent to sign in at once. A login start therefore sets
 // login_pending (<id>.<started ms>), with the same id in the login's state; the callback of THAT
-// login clears it, whether it succeeds or fails. Another login start that finds it waits on a
-// short page that reloads itself: once the first login finishes, the reload finds the session
-// and goes on; after LOGIN_PENDING_MS (an abandoned login) it starts its own.
-const LOGIN_PENDING_COOKIE = 'login_pending';
-const LOGIN_PENDING_MS = 30_000;
-const loginPendingCookieOptions = () => ({ httpOnly: true, sameSite: 'lax', secure: /^https:/i.test(process.env.BASE_URL || ''), path: '/' });
+// login clears it, whether it succeeds or fails, and so does /logout. Another login start that
+// finds it waits on a short page that reloads itself: once the first login finishes, the reload
+// finds the session and goes on. The wait allows for a slow MFA prompt; the page also offers
+// "Sign in here instead" (/login?force=1) for a login that was abandoned, and after
+// LOGIN_PENDING_MS the tab starts its own anyway. Over HTTPS the cookie is __Host- prefixed, so a
+// sibling subdomain can't plant one; a start time in the future is ignored.
+const LOGIN_PENDING_SECURE = /^https:/i.test(process.env.BASE_URL || '');
+const LOGIN_PENDING_COOKIE = LOGIN_PENDING_SECURE ? '__Host-login_pending' : 'login_pending';
+const LOGIN_PENDING_MS = 120_000;
+const loginPendingCookieOptions = () => ({ httpOnly: true, sameSite: 'lax', secure: LOGIN_PENDING_SECURE, path: '/' });
 function readLoginPending(req) {
-    const m = String(req.headers.cookie || '').match(/(?:^|;\s*)login_pending=([A-Za-z0-9_-]+)\.(\d+)/);
-    return m ? { id: m[1], startedAt: Number(m[2]) } : null;
+    for (const part of String(req.headers.cookie || '').split(/;\s*/)) {
+        const eq = part.indexOf('=');
+        if (part.slice(0, eq) !== LOGIN_PENDING_COOKIE) continue;
+        const m = /^([A-Za-z0-9_-]+)\.(\d{1,15})$/.exec(part.slice(eq + 1));
+        if (m) return { id: m[1], startedAt: Number(m[2]) };
+    }
+    return null;
 }
 function loginInFlight(req) {
     const pending = readLoginPending(req);
-    return !!pending && Date.now() - pending.startedAt < LOGIN_PENDING_MS;
+    if (!pending) return false;
+    const age = Date.now() - pending.startedAt;
+    return age >= 0 && age < LOGIN_PENDING_MS;
+}
+const isLoginPath = (req) => /^\/login\/?$/i.test(req.path);
+// Would this request start a login at the provider? Signed out: requiresAuth() does for any
+// request that accepts HTML (any method). Signed in: only /login, when the session fails the
+// in-app caps (see the /login route).
+function startsLogin(req) {
+    if (!req.oidc.isAuthenticated()) return !!req.accepts('html');
+    return isLoginPath(req) && !sessionPassesCaps(req);
+}
+// The "Signing in" page: reloads itself; "Sign in here instead" forces a login from this tab.
+function loginWaitPage(req) {
+    const page = isLoginPath(req) ? String(req.query.returnTo || '/') : req.originalUrl;
+    const force = `/login?force=1&returnTo=${encodeURIComponent(page.startsWith('/') ? page : '/')}`.replace(/&/g, '&amp;');
+    return '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2"><title>Signing in…</title>' +
+        '<p>Signing in - another tab is already signing you in. This page continues on its own.</p>' +
+        `<p><a href="${force}">Sign in here instead</a></p>`;
 }
 // The decoded OIDC state of a /callback request ({} when missing or not ours).
 function callbackState(req) {
@@ -369,10 +396,15 @@ function callbackState(req) {
 if (AUTH_ENABLED) {
     // Per client IP, before the OIDC middleware below handles /callback and /logout itself.
     app.use(['/login', '/callback', '/logout'], authLimiter);
-    // A login's own callback (success or failure) ends its in-flight mark - see "One login at a time".
+    // A login's own callback (success or failure), or a logout, ends its in-flight mark - see "One
+    // login at a time".
     app.use('/callback', (req, res, next) => {
         const pending = readLoginPending(req);
         if (pending && callbackState(req).lid === pending.id) res.clearCookie(LOGIN_PENDING_COOKIE, loginPendingCookieOptions());
+        next();
+    });
+    app.use('/logout', (req, res, next) => {
+        if (readLoginPending(req)) res.clearCookie(LOGIN_PENDING_COOKIE, loginPendingCookieOptions());
         next();
     });
     app.use(auth({
@@ -427,17 +459,12 @@ if (AUTH_ENABLED) {
     // not signed in is sent to login (HTML) or refused, and draws from the per-IP auth budget, so
     // these automatic login starts can't bypass the /login limit.
     app.use(authLimiter);
-    // One login at a time per browser (see above): runs where a login would start - an unsigned-in
-    // page load (requiresAuth below) or /login without a session it can bounce back to.
+    // One login at a time per browser (see above), wherever a login would start.
     app.use((req, res, next) => {
-        if (req.method !== 'GET') return next();
-        const startsLogin = req.path === '/login'
-            ? !(req.oidc.isAuthenticated() && sessionPassesCaps(req))
-            : !req.oidc.isAuthenticated() && req.accepts('html');
-        if (!startsLogin) return next();
-        if (loginInFlight(req)) {
+        if (!startsLogin(req)) return next();
+        if (loginInFlight(req) && !(isLoginPath(req) && req.query.force === '1')) {
             res.set('Cache-Control', 'no-store');
-            return res.status(200).send('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2"><title>Signing in…</title><p>Signing in - another tab is already signing you in. This page continues on its own.</p>');
+            return res.status(200).type('html').send(loginWaitPage(req));
         }
         req.loginId = crypto.randomBytes(9).toString('base64url');
         res.cookie(LOGIN_PENDING_COOKIE, `${req.loginId}.${Date.now()}`, { ...loginPendingCookieOptions(), maxAge: LOGIN_PENDING_MS });

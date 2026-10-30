@@ -447,9 +447,58 @@ test('waiting-page reloads do not use up the auth budget; /callback still counts
 });
 
 test('an abandoned login stops holding up new logins after the wait window', async () => {
-    const stale = `login_pending=abandoned.${Date.now() - 31_000}`;
+    const stale = `login_pending=abandoned.${Date.now() - 121_000}`;
     const r = await call('GET', '/networks', { cookie: stale });
     assert.ok(startsLogin(r), `got ${r.status} ${r.location}`);
+});
+
+test('"Sign in here instead" on the waiting page starts a login from this tab', async () => {
+    const pending = `login_pending=inflight.${Date.now()}`;
+    const wait = await call('GET', '/networks?x=1', { cookie: pending });
+    assert.ok(waitsForOtherLogin(wait));
+    const href = /href="([^"]+)"/.exec(wait.text)[1].replace(/&amp;/g, '&');
+    assert.equal(href, `/login?force=1&returnTo=${encodeURIComponent('/networks?x=1')}`);
+    assert.ok(startsLogin(await call('GET', href, { cookie: pending })));
+});
+
+test('a login_pending with a start time in the future is ignored', async () => {
+    const r = await call('GET', '/networks', { cookie: `login_pending=planted.${Date.now() + 365 * 86400_000}` });
+    assert.ok(startsLogin(r), `got ${r.status} ${r.location}`);
+});
+
+test('every request that would start a login waits for one in flight', async () => {
+    const pending = `login_pending=inflight.${Date.now()}`;
+    assert.ok(waitsForOtherLogin(await call('POST', '/networks', { cookie: pending, body: {} })), 'POST');
+    const head = await call('HEAD', '/networks', { cookie: pending });
+    assert.equal(head.status, 200, 'HEAD gets the waiting page, not a login');
+    assert.ok(waitsForOtherLogin(await call('GET', '/LOGIN/?returnTo=/peers', { cookie: pending })), '/LOGIN/');
+    const old = await signIn('over-cap', { iat: Math.floor(Date.now() / 1000) - 7 * 3600 });
+    assert.ok(waitsForOtherLogin(await call('GET', '/Login?returnTo=/peers', { cookie: `${old}; ${pending}` })), 'an over-cap session at /Login');
+});
+
+test('a request that does not start a login does not mark one in flight', async () => {
+    const r = await call('GET', '/login', { accept: 'application/json' });
+    assert.notEqual(r.status, 302);
+    assert.doesNotMatch(r.headers.getSetCookie().join('\n'), /login_pending=/);
+});
+
+test('logout ends an in-flight mark', async () => {
+    const cookie = await signIn('logout-pending');
+    const r = await call('GET', '/logout', { cookie: `${cookie}; login_pending=inflight.${Date.now()}` });
+    assert.ok(pendingCleared(r));
+});
+
+test('an absolute-form request line to /callback still counts against the auth budget', async () => {
+    const ip = freshIp();
+    const pending = `login_pending=inflight.${Date.now()}`;
+    for (let i = 0; i < 30; i++) await call('GET', '/callback', { ip, cookie: pending });
+    const { port } = new URL(BASE);
+    const status = await new Promise((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: `${BASE}/callback?code=x&state=y`, headers: { 'x-forwarded-for': ip, cookie: pending, accept: 'text/html' } }, (res) => { res.resume(); resolve(res.statusCode); });
+        req.on('error', reject);
+        req.end();
+    });
+    assert.equal(status, 429);
 });
 
 test('a malformed returnTo in the state (a lone surrogate) still restarts the login', async () => {
