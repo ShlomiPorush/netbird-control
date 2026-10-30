@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The web interface runs on React 19.** Nothing changes for users. The frontend is now
+  type-checked with TypeScript 7.
+
 ---
 
 ## [1.0.3] - 2026-10-30
