@@ -10,6 +10,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **New requirement: an automation source must send its complete response within 30 seconds
+  and at most 10 MiB.** A slower or larger response stops the request, and the run fails with an
+  error before any resource changes. Telegram API calls use the same limits. See
+  [Automation](docs/automation.md).
+
 ---
 
 ## [1.0.5] - 2026-10-30
