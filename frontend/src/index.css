@@ -60,6 +60,17 @@
   --color-nb-gray-960: #16181b;
   --color-nb-gray: #181a1d;
 
+  /* v3 line heights. v4 makes them a ratio of the font size, so text that overrides only the
+     size (text-[0.95rem] on an h2) or inherits a line height would sit tighter than before. */
+  --text-xs--line-height: 1rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl--line-height: 2.25rem;
+  --text-4xl--line-height: 2.5rem;
+
   --animate-fade-in: fade-in 150ms ease-out;
 
   @keyframes fade-in {
@@ -74,7 +85,8 @@
 
 /* Tailwind v3 defaults that v4 dropped. The app was built on them, so keep them:
    bare `border` is gray-200 (v4: currentcolor), placeholders are gray-400 (v4: half the text
-   color), and buttons show the pointer cursor (v4: the default arrow). */
+   color), buttons show the pointer cursor (v4: the default arrow), and table cells keep the
+   browser's 1px padding (v4: 0), which table column widths depend on. */
 @layer base {
   *,
   ::after,
@@ -92,6 +104,11 @@
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
+  }
+
+  th,
+  td {
+    padding: 1px;
   }
 }
 
