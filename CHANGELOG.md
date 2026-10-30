@@ -38,6 +38,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   policies. When NetBird can't return the resource, the edit or delete stops with an error before
   any change. Deleting a network then stops before the network is deleted, and an automation keeps
   the resource and retries its removal on the next run.
+- **A session ended by the idle timeout stays ended.** Every later request with the same session
+  cookie is refused, even after the idle timeout in Settings → Security is raised or turned off, and
+  only a new sign-in gets back in. When a session ends, the response also removes the session
+  cookie, and signing in again starts a new session.
 
 ### Changed
 - **New requirement:** a trusted entry with blocked targets reads the current networks and

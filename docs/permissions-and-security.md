@@ -56,6 +56,8 @@ Signed-in sessions are deliberately short to reduce exposure. All three limits a
 
 The absolute caps are measured from the ID token's issue time - stamped at the actual login and *not* extended by activity - so past a cap the session cookie is dropped, the API answers 401 and the app redirects to sign-in. A stolen session cookie is therefore useful for at most the remaining window, and an admin cookie for at most the admin cap. (Note: if the user's Entra session is still alive, the re-login may complete silently via SSO - the protection targets the app's own cookie, not the IdP session.)
 
+A session that ended by the idle timeout stays ended: the same cookie is refused on every later request, also after the timeout is raised or turned off, and only a new sign-in gets back in. The app keeps the idle clock and the list of ended sessions in memory, so a restart clears both. The caps keep applying because they are measured from the login time.
+
 ## Automatic EDR bypass by OS
 
 Some devices can **never** run the EDR agent - phones, appliance-style Linux servers - so each one lands in the compliance-blocked queue (`approval_required`) and needs an admin to click **Bypass** by hand, forever. **Settings → Security → Automatic EDR Bypass** automates that decision **per operating system**, with guardrails.

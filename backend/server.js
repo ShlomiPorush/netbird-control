@@ -508,6 +508,7 @@ if (AUTH_ENABLED) {
         // the API 401s a policy-expired session even though its cookie is still valid, so
         // bouncing one back would refresh-loop forever (SPA → 401 → /login → SPA → …).
         if (req.oidc && req.oidc.isAuthenticated() && sessionPassesCaps(req)) return res.redirect(returnTo);
+        if (req.oidc && req.oidc.isAuthenticated()) req.appSession = undefined; // re-authenticate into a new session
         res.oidc.login({ returnTo });
     });
 
@@ -518,6 +519,16 @@ if (AUTH_ENABLED) {
     // 401, which the SPA turns into a redirect to /login. Idle time is tracked per login session
     // (oid+iat) in memory - a restart just restarts the idle clock, never extends a cap.
     const _sessionSeen = new Map(); // `${oid}|${iat}` → last-activity ms
+    // Sessions the API ended (idle or cap), or that /login found idle, stay ended even if the
+    // limits are loosened later.
+    // Pruned after 7 days: the session cookie cannot outlive absoluteDuration (7 d) from login.
+    const _sessionEnded = new Map(); // `${oid}|${iat}` → ended-at ms
+    const endSession = (key, nowMs) => {
+        if (!_sessionEnded.has(key)) _sessionEnded.set(key, nowMs);
+        if (_sessionEnded.size > 5000) {
+            for (const [k, v] of _sessionEnded) if (nowMs - v > 7 * 86400_000) _sessionEnded.delete(k);
+        }
+    };
     app.use('/api', async (req, res, next) => {
         try {
             if (!req.oidc || !req.oidc.isAuthenticated()) return next();
@@ -529,10 +540,11 @@ if (AUTH_ENABLED) {
             const nowMs = Date.now();
             const kill = (msg) => {
                 _sessionSeen.delete(key);
-                res.clearCookie('appSession');
-                for (let i = 0; i < 5; i++) res.clearCookie(`appSession.${i}`); // chunked-cookie variants
+                endSession(key, nowMs);
+                req.appSession = undefined; // the session library then clears the cookie (and its chunks)
                 return res.status(401).json({ error: msg });
             };
+            if (_sessionEnded.has(key)) return kill('Session expired - please sign in again');
             // Idle timeout (everyone).
             const last = _sessionSeen.get(key);
             if (last && sec.sessionIdleHours > 0 && nowMs - last > sec.sessionIdleHours * 3600_000) {
@@ -567,8 +579,12 @@ if (AUTH_ENABLED) {
             if (!claims.iat) return true;
             const sec = getSecurityConfig();
             const key = `${claims.oid || claims.sub || ''}|${claims.iat}`;
+            if (_sessionEnded.has(key)) return false;
             const last = _sessionSeen.get(key);
-            if (last && sec.sessionIdleHours > 0 && Date.now() - last > sec.sessionIdleHours * 3600_000) return false;
+            if (last && sec.sessionIdleHours > 0 && Date.now() - last > sec.sessionIdleHours * 3600_000) {
+                endSession(key, Date.now());
+                return false;
+            }
             const ageHours = (Date.now() / 1000 - Number(claims.iat)) / 3600;
             if (sec.sessionMaxHours > 0 && ageHours > sec.sessionMaxHours) return false;
             if (sec.adminSessionMaxHours > 0 && ageHours > sec.adminSessionMaxHours) return false;
