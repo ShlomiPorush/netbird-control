@@ -208,7 +208,7 @@ const pathParams = (p) => (p.match(/:([A-Za-z0-9_]+)/g) || []).map((s) => s.slic
 function buildOpenApiSpec(app, { version = '' } = {}) {
     const paths = {};
     const tags = new Set();
-    const stack = (app._router && app._router.stack) || [];
+    const stack = (app.router && app.router.stack) || []; // Express 5 (app._router in Express 4)
 
     for (const layer of stack) {
         const route = layer.route;
