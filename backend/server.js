@@ -126,7 +126,13 @@ const jsonBody1mb = express.json({ limit: '1mb' });
 // /api/settings-import carries the config TABLES (10mb parser on the route). /api/internal-backup/upload
 // is RAW encrypted binary (express.raw on the route) - both bypass the global 1mb json wrapper.
 const BODY_PARSER_EXEMPT = new Set(['/api/settings-import', '/api/internal-backup/upload']);
-app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) ? next() : jsonBody1mb(req, res, next)));
+// Express 5's parser leaves req.body undefined when a request has no JSON body - no Content-Type or
+// another one, like the app's DELETE requests (Express 4 set {}). Keep {} so a handler that reads
+// req.body.x answers its usual 400 instead of throwing.
+app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) ? next() : jsonBody1mb(req, res, (err) => {
+    if (!err && req.body === undefined) req.body = {};
+    next(err);
+})));
 
 // ─── Security headers (hand-rolled) ───
 const HSTS_ON = String(process.env.BASE_URL || '').startsWith('https://');
@@ -4365,7 +4371,7 @@ app.delete('/api/policies/:id', requireAdmin, async (req, res) => {
 }
 
 // Fallback to index.html for SPA
-app.get('*', (req, res) => {
+app.get('/{*splat}', (req, res) => { // Express 5 path syntax: any path, including /
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
