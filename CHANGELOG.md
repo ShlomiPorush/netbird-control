@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.0.2] - 2026-10-30
+
 ### Changed
 - **Sign-in uses `express-openid-connect` 3** (`openid-client` 6). Existing sessions stay valid, so
   nobody is signed out by the upgrade, and no setting changes.
