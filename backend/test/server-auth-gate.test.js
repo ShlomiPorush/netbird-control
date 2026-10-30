@@ -436,6 +436,16 @@ test("another login's callback does not end the in-flight mark", async () => {
     assert.ok(!pendingCleared(r));
 });
 
+test('waiting-page reloads do not use up the auth budget; /callback still counts', async () => {
+    const ip = freshIp();
+    const pending = `login_pending=inflight.${Date.now()}`;
+    for (let i = 0; i < 40; i++) assert.ok(waitsForOtherLogin(await call('GET', '/networks', { ip, cookie: pending })), `reload ${i + 1}`);
+    assert.ok(waitsForOtherLogin(await call('GET', '/login?returnTo=/networks', { ip, cookie: pending })));
+    const c = freshIp();
+    for (let i = 0; i < 30; i++) await call('GET', '/callback', { ip: c, cookie: pending });
+    assert.equal((await call('GET', '/callback', { ip: c, cookie: pending })).status, 429);
+});
+
 test('an abandoned login stops holding up new logins after the wait window', async () => {
     const stale = `login_pending=abandoned.${Date.now() - 31_000}`;
     const r = await call('GET', '/networks', { cookie: stale });

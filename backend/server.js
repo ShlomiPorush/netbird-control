@@ -325,7 +325,13 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
 // The routes above (webhook receivers, health probe, Telegram callback) are registered BEFORE
 // every limiter, so they are never rate limited: the receivers must accept NetBird's and
 // Telegram's event volume and are protected by their tokens plus the failed-token throttle.
-const authLimiter = rateLimit(limiterOptions('auth'));
+// A GET that finds a login in flight only gets the "Signing in" page (or goes on signed in): it
+// can't start a login at the provider, so its reloads don't draw from the auth budget - which
+// would otherwise run out and block the in-flight login's own /callback. /callback and /logout
+// reach the provider and always count.
+const authLimiter = rateLimit(limiterOptions('auth', {
+    skipAuth: (req) => req.method === 'GET' && !/^\/(callback|logout)\b/i.test(req.originalUrl) && loginInFlight(req),
+}));
 const apiLimiter = rateLimit(limiterOptions('api'));
 const spaLimiter = rateLimit(limiterOptions('spa', { assetsDir: path.join(__dirname, 'public', 'assets') }));
 // How often a failed OIDC callback restarts the login before it stops (see the error handler).
@@ -345,6 +351,10 @@ const loginPendingCookieOptions = () => ({ httpOnly: true, sameSite: 'lax', secu
 function readLoginPending(req) {
     const m = String(req.headers.cookie || '').match(/(?:^|;\s*)login_pending=([A-Za-z0-9_-]+)\.(\d+)/);
     return m ? { id: m[1], startedAt: Number(m[2]) } : null;
+}
+function loginInFlight(req) {
+    const pending = readLoginPending(req);
+    return !!pending && Date.now() - pending.startedAt < LOGIN_PENDING_MS;
 }
 // The decoded OIDC state of a /callback request ({} when missing or not ours).
 function callbackState(req) {
@@ -425,8 +435,7 @@ if (AUTH_ENABLED) {
             ? !(req.oidc.isAuthenticated() && sessionPassesCaps(req))
             : !req.oidc.isAuthenticated() && req.accepts('html');
         if (!startsLogin) return next();
-        const pending = readLoginPending(req);
-        if (pending && Date.now() - pending.startedAt < LOGIN_PENDING_MS) {
+        if (loginInFlight(req)) {
             res.set('Cache-Control', 'no-store');
             return res.status(200).send('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2"><title>Signing in…</title><p>Signing in - another tab is already signing you in. This page continues on its own.</p>');
         }
