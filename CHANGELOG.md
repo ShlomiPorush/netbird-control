@@ -17,9 +17,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ### Fixed
 - **A sign-in that races another one no longer ends on an error page.** When two tabs sign in at
   the same time, one of them can lose its login: a state mismatch, a code the identity provider
-  rejects, or a missing login cookie. The app now restarts that login once. If the restart fails
-  too, it shows "Sign-in failed" with a link to try again, instead of looping through the identity
-  provider.
+  rejects, or a missing login cookie. This also happens when a session expires while several tabs
+  are open, because they all sign in again at once. The app now restarts that login, up to three
+  times. If it still fails, it shows "Sign-in failed" with a link to try again, instead of looping
+  through the identity provider.
 
 ---
 

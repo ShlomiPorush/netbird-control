@@ -328,6 +328,8 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
 const authLimiter = rateLimit(limiterOptions('auth'));
 const apiLimiter = rateLimit(limiterOptions('api'));
 const spaLimiter = rateLimit(limiterOptions('spa', { assetsDir: path.join(__dirname, 'public', 'assets') }));
+// How often a failed OIDC callback restarts the login before it stops (see the error handler).
+const MAX_LOGIN_RETRIES = 3;
 
 if (AUTH_ENABLED) {
     // Per client IP, before the OIDC middleware below handles /callback and /logout itself.
@@ -361,12 +363,15 @@ if (AUTH_ENABLED) {
         // users on Home after every re-login. Disabled here; the custom route below honors
         // a (strictly validated) ?returnTo= so the SPA sends users back where they were.
         routes: { login: false },
-        // The library's default state ({ returnTo }), plus `retry` on a login restarted by the
-        // error handler after a failed callback (/login?retry=1), so a second failure stops.
-        getLoginState: (req, options) => ({
-            returnTo: options.returnTo || req.originalUrl,
-            ...(req.path === '/login' && req.query.retry === '1' ? { retry: 1 } : {}),
-        }),
+        // The library's default state ({ returnTo }), plus the retry count of a login restarted by
+        // the error handler after a failed callback (/login?retry=N), so the restarts are bounded.
+        getLoginState: (req, options) => {
+            const retry = req.path === '/login' ? Number.parseInt(req.query.retry, 10) : 0;
+            return {
+                returnTo: options.returnTo || req.originalUrl,
+                ...(retry >= 1 && retry <= MAX_LOGIN_RETRIES ? { retry } : {}),
+            };
+        },
     }));
 }
 
@@ -4266,29 +4271,51 @@ app.get('*', (req, res) => {
 // OIDC callback failures are usually transient: two concurrent logins raced, and one overwrote
 // (state mismatch, rejected code) or consumed (missing auth_verification cookie) the other's
 // transaction. A fresh attempt succeeds, so restart the login instead of showing an error.
-// Only ONCE: the restart goes through /login?retry=1, which marks the new login's state
-// (getLoginState above), and a failure of that marked login stops with a message. The mark
-// travels in the state URL parameter, not a cookie, so a browser that drops cookies can't loop.
-// OAUTH_INVALID_RESPONSE also covers real provider errors (wrong alg, no id_token) - the single
-// retry bounds those too. Everything else gets a clean 500 - stack traces never reach the browser.
+// Up to MAX_LOGIN_RETRIES times: each restart goes through /login?retry=N, which stores N in the
+// new login's state (getLoginState above), and a failure past the limit stops with a message.
+// The count travels in the state URL parameter, not a cookie, so a browser that drops cookies
+// can't loop. More than one retry because a session cap expiring sends every open tab to login at
+// once, and the tabs keep overwriting each other's transaction until one finishes; the others
+// then find a session (/login bounces them back). OAUTH_INVALID_RESPONSE also covers real
+// provider errors (wrong alg, no id_token) - the limit bounds those too. Everything else gets a
+// clean 500 - stack traces never reach the browser.
 function oidcCallbackRecoverable(err) {
     if (!err) return false;
     if (err.error === 'invalid_grant' || err.error === 'OAUTH_INVALID_RESPONSE') return true;
     return String(err.message || '').startsWith('"auth_verification" cookie not found');
+}
+// The page a failed login started from. A login started by /login carries '/login?returnTo=<page>'
+// (or '/login?retry=N&returnTo=<page>'): unwrap it, so restarts don't nest one level per attempt.
+function loginStateReturnTo(state) {
+    try {
+        const url = new URL(String(state.returnTo || '/'), 'http://app.invalid');
+        const rt = url.pathname === '/login' ? (url.searchParams.get('returnTo') || '/') : url.pathname + url.search + url.hash;
+        encodeURIComponent(rt); // throws on a lone surrogate - fall back to Home below
+        return rt;
+    } catch {
+        return '/';
+    }
 }
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (req.path === '/callback' && oidcCallbackRecoverable(err)) {
         let state = {};
         try { state = JSON.parse(Buffer.from(String(req.query.state || ''), 'base64url').toString()) || {}; } catch { /* no usable state */ }
+        const tries = Math.max(0, Number.parseInt(state.retry, 10) || 0);
+        const returnTo = loginStateReturnTo(state);
         const reason = `${err.error || 'error'}: ${String(err.message || '').split('\n')[0]}`;
-        if (state.retry) {
-            console.error('OIDC callback failed again after a retry - stopping:', reason);
+        if (tries >= MAX_LOGIN_RETRIES) {
+            // Another tab signed in meanwhile: this one just goes back to the app.
+            if (req.oidc && req.oidc.isAuthenticated()) {
+                let origin = 'http://app.invalid';
+                try { origin = new URL(process.env.BASE_URL).origin; } catch { /* keep the placeholder */ }
+                return res.redirect(safeReturnTo(returnTo, origin));
+            }
+            console.error(`OIDC callback failed after ${tries} retries - stopping:`, reason);
             return res.status(400).send('Sign-in failed. <a href="/">Go to the start page</a> to try again; if it keeps failing, ask your administrator to check the SSO settings.');
         }
-        console.warn('OIDC callback failed (transient login race) - restarting login:', reason);
-        const returnTo = typeof state.returnTo === 'string' && state.returnTo.startsWith('/') ? `&returnTo=${encodeURIComponent(state.returnTo)}` : '';
-        return res.redirect(`/login?retry=1${returnTo}`);
+        console.warn(`OIDC callback failed (transient login race) - restarting login (retry ${tries + 1}):`, reason);
+        return res.redirect(`/login?retry=${tries + 1}&returnTo=${encodeURIComponent(returnTo)}`);
     }
     console.error('Unhandled error on', req.method, req.path, '-', err);
     if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Internal server error' });
