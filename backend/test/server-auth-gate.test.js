@@ -458,7 +458,22 @@ test('"Sign in here instead" on the waiting page starts a login from this tab', 
     assert.ok(waitsForOtherLogin(wait));
     const href = /href="([^"]+)"/.exec(wait.text)[1].replace(/&amp;/g, '&');
     assert.equal(href, `/login?force=1&returnTo=${encodeURIComponent('/networks?x=1')}`);
-    assert.ok(startsLogin(await call('GET', href, { cookie: pending })));
+    const forced = await call('GET', href, { cookie: pending });
+    assert.ok(startsLogin(forced));
+    assert.doesNotMatch(forced.headers.getSetCookie().join('\n'), /login_pending=/, 'and leaves the in-flight mark alone');
+});
+
+test('forced logins still count against the auth budget', async () => {
+    const ip = freshIp();
+    const pending = `login_pending=inflight.${Date.now()}`;
+    for (let i = 0; i < 30; i++) await call('GET', '/login?force=1', { ip, cookie: pending });
+    assert.equal((await call('GET', '/login?force=1', { ip, cookie: pending })).status, 429);
+});
+
+test('a signed-in POST to /login (no route, no login) sets no in-flight mark', async () => {
+    const old = await signIn('over-cap-post', { iat: Math.floor(Date.now() / 1000) - 7 * 3600 });
+    const r = await call('POST', '/login', { cookie: old, body: {} });
+    assert.doesNotMatch(r.headers.getSetCookie().join('\n'), /login_pending=/);
 });
 
 test('a login_pending with a start time in the future is ignored', async () => {

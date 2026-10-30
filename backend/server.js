@@ -330,7 +330,8 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
 // would otherwise run out and block the in-flight login's own /callback. /callback and /logout
 // reach the provider and always count (checked on the routed path, whatever form the URL took).
 const authLimiter = rateLimit(limiterOptions('auth', {
-    skipAuth: (req) => req.method === 'GET' && !/^\/(callback|logout)(\/|$)/i.test(req.baseUrl + req.path) && loginInFlight(req),
+    skipAuth: (req) => req.method === 'GET' && !/^\/(callback|logout)(\/|$)/i.test(req.baseUrl + req.path) &&
+        !forcedLogin(req) && loginInFlight(req),
 }));
 const apiLimiter = rateLimit(limiterOptions('api'));
 const spaLimiter = rateLimit(limiterOptions('spa', { assetsDir: path.join(__dirname, 'public', 'assets') }));
@@ -367,13 +368,16 @@ function loginInFlight(req) {
     const age = Date.now() - pending.startedAt;
     return age >= 0 && age < LOGIN_PENDING_MS;
 }
-const isLoginPath = (req) => /^\/login\/?$/i.test(req.path);
+// On the routed path, so it also matches where the limiter is mounted on /login itself.
+const isLoginPath = (req) => /^\/login\/?$/i.test(req.baseUrl + req.path);
+// "Sign in here instead": starts a login even while another is in flight.
+const forcedLogin = (req) => isLoginPath(req) && req.query.force === '1';
 // Would this request start a login at the provider? Signed out: requiresAuth() does for any
-// request that accepts HTML (any method). Signed in: only /login, when the session fails the
-// in-app caps (see the /login route).
+// request that accepts HTML (any method). Signed in: only GET /login (HEAD is routed there too),
+// when the session fails the in-app caps (see the /login route).
 function startsLogin(req) {
     if (!req.oidc.isAuthenticated()) return !!req.accepts('html');
-    return isLoginPath(req) && !sessionPassesCaps(req);
+    return (req.method === 'GET' || req.method === 'HEAD') && isLoginPath(req) && !sessionPassesCaps(req);
 }
 // The "Signing in" page: reloads itself; "Sign in here instead" forces a login from this tab.
 function loginWaitPage(req) {
@@ -462,7 +466,10 @@ if (AUTH_ENABLED) {
     // One login at a time per browser (see above), wherever a login would start.
     app.use((req, res, next) => {
         if (!startsLogin(req)) return next();
-        if (loginInFlight(req) && !(isLoginPath(req) && req.query.force === '1')) {
+        // A forced login leaves the mark alone: if the waiting page's own reload aborts it, the
+        // tab must not end up waiting on the login it just started.
+        if (forcedLogin(req)) return next();
+        if (loginInFlight(req)) {
             res.set('Cache-Control', 'no-store');
             return res.status(200).type('html').send(loginWaitPage(req));
         }
