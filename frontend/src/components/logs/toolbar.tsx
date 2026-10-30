@@ -147,7 +147,7 @@ export function FilterPopover({
 }) {
   const { open, setOpen, ref } = usePopover();
   const count = (protocol ? 1 : 0) + (source ? 1 : 0) + (destination ? 1 : 0);
-  const fieldCls = 'h-9 w-full rounded-md border px-3 text-sm outline-hidden bg-white border-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:border-netbird/60';
+  const fieldCls = 'mt-1.5 h-9 w-full rounded-md border px-3 text-sm outline-hidden bg-white border-gray-200 dark:bg-nb-gray-900 dark:border-nb-gray-700 dark:text-nb-gray-100 focus:border-netbird/60';
   return (
     <div className="relative" ref={ref}>
       <button onClick={() => setOpen((o) => !o)} className={secondaryBtn}>
@@ -157,7 +157,7 @@ export function FilterPopover({
       </button>
       {open && (
         <div className="absolute top-full right-0 mt-1.5 z-50 w-64 rounded-md border border-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 shadow-xl p-3 space-y-3">
-          <div className="space-y-1.5">
+          <div>
             <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-nb-gray-500">Protocol</span>
             <select value={protocol} onChange={(e) => onProtocol(e.target.value)} className={fieldCls + ' cursor-pointer'}>
               <option value="">All Protocols</option>
@@ -166,11 +166,11 @@ export function FilterPopover({
               <option value="1">ICMP</option>
             </select>
           </div>
-          <div className="space-y-1.5">
+          <div>
             <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-nb-gray-500">Source</span>
             <input value={source} onChange={(e) => onSource(e.target.value)} placeholder="Source IP / peer…" autoComplete="off" className={fieldCls} />
           </div>
-          <div className="space-y-1.5">
+          <div>
             <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-nb-gray-500">Destination</span>
             <input value={destination} onChange={(e) => onDestination(e.target.value)} placeholder="Destination IP / peer…" autoComplete="off" className={fieldCls} />
           </div>
