@@ -10,6 +10,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- **Tenant Support users follow the Admin Session Cap while they manage a tenant.** Inside a
+  tenant they act as admins, so once their sign-in is older than the Admin Session Cap
+  (Settings - Security), they are asked to sign in again, as admins are. Their use of the main
+  account still follows the User Session Cap.
+
 ---
 
 ## [1.0.5] - 2026-10-30
