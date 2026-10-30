@@ -10,6 +10,10 @@ policies, users and peers through the NetBird Management API.
 > by, or sponsored by NetBird.** "NetBird" is a trademark of its owner and is used only to describe
 > interoperability. See [Credits and licensing](#credits-and-licensing).
 
+
+https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
+
+
 ## Screenshots
 
 | | |
