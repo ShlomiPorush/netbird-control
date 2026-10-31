@@ -186,8 +186,8 @@ test('past the Admin Session Cap, a Tenant Support user keeps using the main acc
 });
 
 test('past the Admin Session Cap, an admin is signed out', async () => {
-    const cookie = await signIn('admin-old', 3);
     for (const tenant of [undefined, TENANT]) {
+        const cookie = await signIn(`admin-old-${tenant || 'main'}`, 3);
         const r = await api('/api/policies', cookie, { tenant });
         assert.equal(r.status, 401, r.text);
         assert.match(r.text, /Admin session expired/);
