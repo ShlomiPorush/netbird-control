@@ -33,9 +33,15 @@ function mergeRulePorts(rule) {
 // resource directly via destinationResource, or via a group the resource belongs to;
 // disabled and non-accept rules are ignored). A resource with no matching policy has
 // nothing to mirror and gets ALL_COMBO - otherwise the grant would be inert.
+// A combo may also carry `postureChecks` (sorted ids, present only when non-empty): the
+// posture checks that gate that exposure, so the temp policy enforces them too.
 const ALL_COMBO = Object.freeze({ protocol: 'all', ports: [], portRanges: [] });
 function comboKey(c) {
-    return `${c.protocol}|${(c.ports || []).slice().sort().join(',')}|${(c.portRanges || []).map(r => `${r.start}-${r.end}`).sort().join(',')}`;
+    return `${c.protocol}|${(c.ports || []).slice().sort().join(',')}|${(c.portRanges || []).map(r => `${r.start}-${r.end}`).sort().join(',')}|${(c.postureChecks || []).join(',')}`;
+}
+// Posture check ids (string ids or {id} refs) → sorted, de-duplicated id list.
+function postureIds(list) {
+    return [...new Set((Array.isArray(list) ? list : []).map(x => (x && x.id) || x).filter(x => typeof x === 'string' && x))].sort();
 }
 function combosForResource(polArr, resourceId, resourceGroupIds) {
     const gidOf = (x) => (x && x.id) || x;
@@ -52,10 +58,32 @@ function combosForResource(polArr, resourceId, resourceGroupIds) {
                 ports: Array.isArray(rule.ports) ? rule.ports : [],
                 portRanges: Array.isArray(rule.port_ranges) ? rule.port_ranges : [],
             };
+            const pc = postureIds(p.source_posture_checks);
+            if (pc.length) c.postureChecks = pc;
             combos.set(comboKey(c), c);
         }
     }
     return combos.size ? [...combos.values()] : [ALL_COMBO];
+}
+
+// Posture checks for a rule-pinned combo: the union of the checks on every existing exposure
+// that overlaps it (protocol and ports), so a pinned port keeps the gate of the exposure that
+// serves it. NetBird ANDs checks within one policy, so the union is never weaker than any of
+// them. A pinned combo that overlaps no exposure gets the union of all of them.
+function postureChecksFor(combo, exposures) {
+    const spans = (c) => [
+        ...(c.ports || []).map(p => [Number(p), Number(p)]),
+        ...(c.portRanges || []).map(r => [Number(r.start), Number(r.end)]),
+    ];
+    const overlaps = (a, b) => {
+        if (a.protocol !== 'all' && b.protocol !== 'all' && a.protocol !== b.protocol) return false;
+        const sa = spans(a), sb = spans(b);
+        if (!sa.length || !sb.length) return true; // no ports = every port
+        return sa.some(([s1, e1]) => sb.some(([s2, e2]) => s1 <= e2 && s2 <= e1));
+    };
+    const list = Array.isArray(exposures) ? exposures : [];
+    const hit = list.filter(e => overlaps(combo, e));
+    return postureIds((hit.length ? hit : list).flatMap(e => e.postureChecks || []));
 }
 
 // ─── Self-service access spec: per-rule control of what an auto-approved grant opens ───
@@ -329,7 +357,7 @@ function routingPeerName(message) {
 
 module.exports = {
     inspectCaCertificates,
-    splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, stableStringify, humanDuration,
+    splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration,
     normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses,
     safeReturnTo, tgFirstLine, isPlausibleEmail, routingPeerName,
 };
