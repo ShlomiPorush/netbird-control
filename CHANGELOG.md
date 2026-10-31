@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.1.1] - 2026-10-31
+
 ### Fixed
 - **An open page whose session ended goes to sign-in again** instead of stopping at "Too many
   requests - try again in a moment". The API answered its requests with an internal server error
