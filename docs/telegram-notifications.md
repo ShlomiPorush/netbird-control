@@ -63,6 +63,14 @@ All of these are configured in **Settings → Security**:
 
 The integration is not only outbound. [Access Requests](access-requests.md) post **Approve/Deny buttons**, and presses come back via a **Telegram webhook** - a public endpoint (`POST /api/integrations/telegram/callback`) registered automatically when Telegram is enabled with a bot token and a public `BASE_URL`. The webhook subscribes to both `callback_query` (button presses) and `message` updates - the latter so an approver can **reply with a denial reason**. The flow is interactive: **Approve** opens a duration submenu (keep the requested length or override it with a preset), multi-target requests add an **Edit Targets** submenu (toggle requested targets off before approving), and **Deny** offers a typed reason (via a force-reply) or none. Every action is authenticated by a **secret token** (Telegram-signed header) and checked against the **Telegram-id→system-user mapping** (Settings → Approvals → *Approver Telegram users*); the decision is logged under the mapped system user. The buttons post to the main group's *Access requests* topic by default, or to a **separate approvals group** if an *Approvals group chat ID* is set (so approvals stay out of the logs group). See [Access Requests](access-requests.md) for the full flow.
 
+**New requirement:** the endpoint accepts updates only after this deployment has registered the webhook, which stores the secret token. Until then it rejects every update, so the buttons and denial-reason replies do nothing. A deployment can be left without a registered webhook, for example after you import settings into a new deployment (the export leaves out the secret and the bot token). To register it:
+
+1. Make sure the server has a public HTTPS `BASE_URL`.
+2. In the **main account** (not while managing a tenant), open **Settings → Telegram**, make sure a bot token is set and Telegram is enabled, and select **Save**. Restarting the server also registers the webhook when these conditions are already met.
+3. Press a button on a pending request to confirm that it works. The *Webhook: registered* status on the Approvals tab means a secret is stored, not that Telegram accepted the registration. If presses still do nothing, check the server log for `setWebhook failed`, fix the cause and save again.
+
+Telegram retries a rejected update for a limited time only, so presses made before the webhook was registered may be lost. Press the button again.
+
 ## Gotchas
 
 - Messages are sent through an internal **FIFO queue**: on a rate limit (HTTP 429) or a network error the queue pauses (Telegram's `retry_after`, at least 30s) and the message is **retried in place** (up to 5 attempts) - bursts like the weekly digest are never dropped. Only hard rejections (bad request, bot kicked) fail immediately; every final outcome still lands in the [outbound log](README.md).
