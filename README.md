@@ -86,7 +86,7 @@ covers the database, SSO and a few locked values:
 |---|---|
 | `PORT`, `TAG` | The host port to publish (the app listens on 3000 inside the container), and the image tag to run (`latest` or a version) |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | PostgreSQL connection (**change the password**) |
-| `OIDC_ISSUER_BASE_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `BASE_URL` | SSO with Entra ID; setting all four turns SSO on ([setup guide](docs/sso-entra-id.md)). `BASE_URL` is also needed for the one-click NetBird setup |
+| `OIDC_ISSUER_BASE_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `BASE_URL` | SSO with Entra ID; setting all four turns SSO on ([setup guide](docs/sso-entra-id.md)). **New requirement:** if any `OIDC_*` variable is set, all four are required, or the app does not start. `BASE_URL` alone does not turn SSO on, and is also needed for the one-click NetBird setup |
 | `SESSION_SECRET` | A fixed session secret (`openssl rand -hex 32`). Without it, every restart signs everyone out |
 | `ADMIN_GROUP_ID` | Entra group whose members are admins, in addition to NetBird owners and admins |
 | `NETBIRD_API_URL`, `NETBIRD_API_TOKEN` | NetBird Management API (can also be set in the app) |
@@ -102,11 +102,14 @@ covers the database, SSO and a few locked values:
 
 - **SSO** - with the three `OIDC_*` variables and `BASE_URL` set, every page requires login. Admins are
   NetBird owners and admins, or members of `ADMIN_GROUP_ID`; everyone else sees only their own data
-  and what they were granted.
+  and what they were granted. If any `OIDC_*` variable is set but one of the four is missing, the
+  app does not start and logs which ones are missing. A user blocked in NetBird has no role or
+  permissions when signed in to the app.
 - **Rate limits** apply to everything except the webhook receivers (sign-in 30 requests a minute per
   client address, the API 600 and pages 300 a minute per user). The receivers are not rate limited, so
   any deployment that others can reach should set `WEBHOOK_AUTH_TOKEN` (and the notifications token
-  in **Settings → Webhook**) and register the Telegram webhook, which sets its secret.
+  in **Settings → Webhook**). The Telegram callback rejects every update until the Telegram webhook
+  is registered, which sets its secret.
 - **Secrets** are write-only: they are never sent back to the browser, and a value from the
   environment locks the field in the app.
 - **Destructive actions are gated** - with SSO on, deleting stored events needs an admin listed in

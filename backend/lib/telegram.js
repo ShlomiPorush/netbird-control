@@ -150,16 +150,22 @@ function setTelegramObserver(fn) { _onSend = typeof fn === 'function' ? fn : nul
 // ─── Send queue ───
 // Messages are never posted straight to the Bot API: they enter a FIFO queue drained by a
 // single worker, so bursts (weekly digest, event storms) can't race each other into
-// Telegram's per-chat rate limit and get silently dropped. A retryable failure - HTTP 429
-// or a network error - pauses the WHOLE queue (Telegram's retry_after, but at least 30s)
-// and the message is retried in place; it is only reported as failed after TG_MAX_ATTEMPTS.
-// Hard API rejections (400 bad request, 403 kicked from chat, …) fail immediately.
-const TG_RETRY_WAIT_MS = 30_000;
+// Telegram's per-chat rate limit and get silently dropped. Only a 2xx response counts as
+// sent. A TEMPORARY failure - a network error or timeout (httpJson returns status 0), HTTP
+// 429, a server error (5xx) or a thrown error - pauses the WHOLE queue for a minute (or
+// Telegram's retry_after, if longer) and the message is retried in place; it is only
+// reported as failed after TG_MAX_ATTEMPTS. A timeout may hide a message Telegram already
+// accepted, so a retry can post it twice. Any other 4xx is PERMANENT - a bad message or a
+// bad config (wrong token, bot removed, unknown chat or topic) that a retry cannot fix - so
+// the message fails at once and the queue moves on.
+const TG_RETRY_WAIT_MS = 60_000;
 const TG_MAX_ATTEMPTS = 5;
 const TG_QUEUE_LIMIT = 1000; // runaway backstop - never expected in practice
 const _tgQueue = [];
 let _tgDraining = false;
-const _tgSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let _tgSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Test seam: replaces the retry wait so tests need not wait a real minute.
+function _setTelegramSleepForTests(fn) { _tgSleep = fn; }
 // Process-lifetime counters for System Health (reset on restart, like scheduler stats).
 const _tgStats = { sent: 0, failed: 0, retries: 0, lastSentAt: null, lastErrorAt: null, lastError: '', pausedUntil: 0 };
 
@@ -199,13 +205,13 @@ async function drainTelegramQueue() {
                 // The token was captured at enqueue time from the QUEUING account's config - the
                 // ALS context is gone by now, so each job carries its own token explicitly.
                 const r = await httpJson('POST', `https://api.telegram.org/bot${job.token}/sendMessage`, { body: job.body });
-                if (r && r.status < 300) {
+                if (r && r.status >= 200 && r.status < 300) {
                     outcome = { result: r.body && r.body.result };
-                } else if (r && r.status === 429) {
-                    const ra = Number(r.body && r.body.parameters && r.body.parameters.retry_after) || 0;
-                    outcome = { retry: true, waitMs: Math.max(ra * 1000, TG_RETRY_WAIT_MS), error: String((r && (r.raw || r.error)) || 'HTTP 429') };
                 } else {
-                    outcome = { error: String((r && (r.raw || r.error || r.status)) || 'send failed') };
+                    const status = (r && r.status) || 0;
+                    const permanent = status >= 400 && status < 500 && status !== 429;
+                    const ra = Number(r && r.body && r.body.parameters && r.body.parameters.retry_after) || 0;
+                    outcome = { retry: !permanent, waitMs: Math.max(ra * 1000, TG_RETRY_WAIT_MS), error: String((r && (r.raw || r.error || r.status)) || 'send failed') };
                 }
             } catch (e) {
                 outcome = { retry: true, waitMs: TG_RETRY_WAIT_MS, error: e.message };
@@ -331,7 +337,7 @@ async function telegramTest() {
     const r = await httpJson('POST', `https://api.telegram.org/bot${s.token}/sendMessage`, {
         body: { chat_id: s.chatId, text: '✅ NetBird Control - Telegram notifications are connected.', disable_web_page_preview: true },
     });
-    if (!r || r.status >= 300) return { ok: false, error: (r && (r.raw || r.error)) || `HTTP ${r && r.status}` };
+    if (!r || !(r.status >= 200 && r.status < 300)) return { ok: false, error: (r && (r.raw || r.error)) || `HTTP ${r && r.status}` };
     return { ok: true };
 }
 
@@ -372,4 +378,5 @@ module.exports = {
     tgEsc, TG_CAT_EMOJI,
     sendTelegram, setTelegramObserver, getTelegramQueueStats, telegramApi, answerCallbackQuery, editTelegramMessage, editTelegramReplyMarkup,
     telegramSetWebhook, telegramDeleteWebhook, telegramTest, telegramCreateTopics,
+    _setTelegramSleepForTests,
 };

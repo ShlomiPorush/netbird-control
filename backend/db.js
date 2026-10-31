@@ -22,7 +22,7 @@ const {
 } = require('./lib/events');
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
-const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
+const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
 // notify*Email helpers stay in db.js and use the imported sendMail/mailLayout/mailRows/htmlEsc.
@@ -307,8 +307,16 @@ async function setFeaturePermsConfig(cfg) {
     for (const k of PERMISSION_KEYS) {
         if (cfg && cfg[k] !== undefined) _featurePerms[k] = normPermEntry(cfg[k]);
     }
-    await setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig()));
+    await persistInOrder(() => setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig())));
     return getFeaturePermsConfig();
+}
+// Permission settings are written one at a time, each from the CURRENT in-memory state, so a save
+// that finishes late can never overwrite a newer one (such as a deleted user's removal).
+let _permSettingsWrites = Promise.resolve();
+function persistInOrder(write) {
+    const p = _permSettingsWrites.then(write, write);
+    _permSettingsWrites = p.catch(() => { });
+    return p;
 }
 // The viewer's effective permission map. Matches a user by NetBird user id / oid tail / email,
 // and groups against the viewer's FULL group union (same semantics as network grants).
@@ -492,20 +500,31 @@ async function loadApproverConfig() {
         console.error('[Approver] config load error:', e.message);
     }
 }
-async function persistApprover() {
+async function persistApprover(c = _approver) {
     await setSetting('approver_config', JSON.stringify({
-        groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates,
+        groupIds: c.groupIds, telegramChatId: c.telegramChatId, telegramApprovers: c.telegramApprovers, delegates: c.delegates,
     }));
 }
 function getApproverConfig() {
     return { groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates };
 }
-async function setApproverConfig({ groupIds, telegramChatId, telegramApprovers, delegates } = {}) {
-    if (Array.isArray(groupIds)) _approver.groupIds = groupIds.map(s => String(s).trim()).filter(Boolean);
-    if (telegramChatId !== undefined) _approver.telegramChatId = String(telegramChatId || '').trim();
-    if (Array.isArray(telegramApprovers)) _approver.telegramApprovers = normApprovers(telegramApprovers);
-    if (Array.isArray(delegates)) _approver.delegates = normDelegates(delegates);
-    await persistApprover();
+// Saves run one at a time and the new config goes live only after it is stored, so a failed
+// write grants or revokes nothing, and a partial save never writes back a field another save
+// just changed. `input` may be a function of the current config, evaluated when the save runs.
+let _approverSaving = Promise.resolve();
+function setApproverConfig(input) {
+    const run = _approverSaving.then(() => saveApproverConfig(typeof input === 'function' ? input(getApproverConfig()) : input));
+    _approverSaving = run.catch(() => { });
+    return run;
+}
+async function saveApproverConfig({ groupIds, telegramChatId, telegramApprovers, delegates } = {}) {
+    const next = { ..._approver };
+    if (Array.isArray(groupIds)) next.groupIds = groupIds.map(s => String(s).trim()).filter(Boolean);
+    if (telegramChatId !== undefined) next.telegramChatId = String(telegramChatId || '').trim();
+    if (Array.isArray(telegramApprovers)) next.telegramApprovers = normApprovers(telegramApprovers);
+    if (Array.isArray(delegates)) next.delegates = normDelegates(delegates);
+    await persistApprover(next);
+    Object.assign(_approver, next);
     return getApproverConfig();
 }
 function getApproverGroupIds() { return _approver.groupIds; }
@@ -633,6 +652,71 @@ async function saveAutoApprovalLocked({ trusted, rules } = {}) {
     _autoApproval.rules = next.rules;
     return getAutoApprovalConfig();
 }
+// Blocked Targets cover what a grant reaches: a network grant covers all of its resources and a
+// profile grant every resource in the profile's group. autoApproveTargets is synchronous, so the
+// request route reads this inventory (network ↔ resource ↔ group membership) live from NetBird
+// right before deciding. Only entries WITH blocked targets need it; when it's missing, stale,
+// or inconsistent, their non-exact network/resource/profile matches fall back to review.
+const AA_INVENTORY_MAX_AGE_MS = 30 * 1000;
+let _aaInventory = null, _aaSeq = 0, _aaApplied = 0;
+async function refreshAutoApprovalInventory() {
+    if (!netbirdApiConfigured() || NETBIRD_READONLY) return;
+    if (!_autoApproval.trusted.some(tr => tr.enabled !== false && tr.excludedTargets.length)) return;
+    const seq = ++_aaSeq, startedAt = Date.now();
+    const [networks, resources] = await Promise.all([
+        netbirdGet('/api/networks').catch(() => null),
+        netbirdGet('/api/networks/resources').catch(() => null),
+    ]);
+    let next = null;
+    // Both lists must be readable and agree on the same resource ids. NetBird sends null for an
+    // empty list (a network without resources, a resource without groups).
+    const list = (v) => v == null ? [] : v;
+    if (Array.isArray(networks) && Array.isArray(resources) && resources.every(r => r && r.id && Array.isArray(list(r.groups)))
+        && networks.every(n => n && n.id && Array.isArray(list(n.resources)))) {
+        const networkIds = new Set(networks.map(n => String(n.id)));
+        const netOfResource = new Map();
+        for (const n of networks) for (const rid of list(n.resources)) netOfResource.set(String(rid), String(n.id));
+        // All-null groups can also mean group data wasn't readable - then profile membership is unknown.
+        const groupsKnown = resources.every(r => Array.isArray(r.groups)) || resources.some(r => Array.isArray(r.groups) && r.groups.length);
+        const resourcesOfGroup = new Map();
+        for (const r of resources) {
+            for (const g of list(r.groups)) {
+                const gid = String((g && g.id) || g || '');
+                if (!gid) continue;
+                if (!resourcesOfGroup.has(gid)) resourcesOfGroup.set(gid, []);
+                resourcesOfGroup.get(gid).push(String(r.id));
+            }
+        }
+        const resourceIds = new Set(resources.map(r => String(r.id)));
+        if (resourceIds.size === netOfResource.size && [...resourceIds].every(id => netOfResource.has(id))) {
+            next = { startedAt, tenant: currentTenantAccount(), networkIds, netOfResource, resourcesOfGroup: groupsKnown ? resourcesOfGroup : null };
+        }
+    }
+    // A newer attempt's outcome (success or failure) is never overwritten by an older one.
+    if (seq > _aaApplied) { _aaApplied = seq; _aaInventory = next; }
+}
+// Whether trusted entry `tr` must leave target `t` to review: an exact match, or (via the
+// inventory) a network/resource/profile that contains or is inside a blocked resource or network.
+function isBlockedForEntry(tr, t) {
+    const ex = tr.excludedTargets;
+    if (!ex.length) return false;
+    if (ex.some(x => x.type === t.type && x.id === String(t.id))) return true;
+    if (!['network', 'resource', 'profile'].includes(t.type)) return false;
+    const inv = _aaInventory;
+    if (!inv || inv.tenant !== currentTenantAccount() || Date.now() - inv.startedAt > AA_INVENTORY_MAX_AGE_MS) return true;
+    const blockedRes = new Set(ex.filter(x => x.type === 'resource').map(x => x.id));
+    const blockedNet = new Set(ex.filter(x => x.type === 'network').map(x => x.id));
+    const id = String(t.id);
+    if (t.type === 'resource') return !inv.netOfResource.has(id) || blockedNet.has(inv.netOfResource.get(id));
+    if (t.type === 'network') {
+        if (!inv.networkIds.has(id)) return true;
+        for (const [rid, nid] of inv.netOfResource) if (nid === id && blockedRes.has(rid)) return true;
+        return false;
+    }
+    if (!t.groupId || !inv.resourcesOfGroup) return true;
+    return (inv.resourcesOfGroup.get(String(t.groupId)) || []).some(rid => blockedRes.has(rid) || blockedNet.has(inv.netOfResource.get(rid)));
+}
+
 // Per-target decision for a requester with Entra groups `groups`:
 // { auto: [{ t, cap }], manual: [t…] } - cap is that target's effective max (0 = as requested).
 // A trusted entry does NOT apply to targets it excludes (those fall back to review, unless a
@@ -653,7 +737,7 @@ function autoApproveTargets(targets, groups) {
         let unrestricted = false;
         const specs = [];
         for (const tr of trustedEntries) {
-            if (tr.excludedTargets.some(x => x.type === t.type && x.id === String(t.id))) continue; // blocked for this entry
+            if (isBlockedForEntry(tr, t)) continue; // blocked for this entry
             const nid = netOf(t);
             if (tr.networkMode === 'allow' && !(nid && tr.networks.some(n => n.id === nid))) continue; // outside the approved networks
             if (tr.networkMode === 'block' && nid && tr.networks.some(n => n.id === nid)) continue;    // inside a blocked network
@@ -1318,12 +1402,14 @@ function proxyAccessActionError(service) {
 // Docker Container), then rewrite it into a normal 'domain' target. If a resource with that
 // exact address already exists in the network it is REUSED, never duplicated. Returns the
 // created resources so a failing service create/update can roll them back.
-async function materializeContainerTargets(rawTargets) {
-    const targets = [];
-    const created = []; // [{ networkId, resourceId }]
+// planContainerTargets is the read-only first pass: it validates every container target, finds
+// the resource it reuses, and checks edit rights on each network where a resource must be
+// created - for ALL targets, before anything is written. materializeContainerTargets creates.
+async function planContainerTargets(rawTargets, canEdit) {
+    const plan = [];
     for (const t of (rawTargets || [])) {
         const type = t && (t.type || t.target_type);
-        if (type !== 'container') { targets.push(t); continue; }
+        if (type !== 'container') { plan.push({ t }); continue; }
         const networkId = String(t.networkId || '').trim();
         if (!networkId) throw new Error('a network is required for a container target');
         const address = String(t.containerDomain || t.host || '').trim().toLowerCase();
@@ -1339,33 +1425,65 @@ async function materializeContainerTargets(rawTargets) {
             const match = (usage.resources || []).find(r => r && inNet.has(r.id) && String(r.address || '').toLowerCase() === address);
             if (match) resourceId = match.id;
         }
-        if (!resourceId) {
-            const { resource } = await createClientResource(networkId, {
-                name: address, address, description: 'Created by reverse-proxy container target', groups: [], policies: [],
-            });
-            resourceId = (resource && resource.id) || null;
-            if (!resourceId) throw new Error('resource creation returned no id');
-            created.push({ networkId, resourceId });
-        }
-        targets.push({ ...t, type: 'domain', target_type: 'domain', id: resourceId, target_id: resourceId });
+        if (!resourceId && !(await canEdit(networkId))) throw networkEditForbidden();
+        plan.push({ t, networkId, address, resourceId });
     }
+    return plan;
+}
+async function materializeContainerTargets(plan) {
+    const targets = [];
+    const created = []; // [{ networkId, resourceId }]
+    const createdByAddress = new Map(); // the same address twice in one request shares one resource
+    try {
+        for (const { t, networkId, address, resourceId: reuseId } of plan) {
+            if (!networkId) { targets.push(t); continue; }
+            let resourceId = reuseId || createdByAddress.get(`${networkId}|${address}`) || null;
+            if (!resourceId) {
+                const { resource } = await createClientResource(networkId, {
+                    name: address, address, description: 'Created by reverse-proxy container target', groups: [], policies: [],
+                });
+                resourceId = (resource && resource.id) || null;
+                if (!resourceId) throw new Error('resource creation returned no id');
+                created.push({ networkId, resourceId });
+                createdByAddress.set(`${networkId}|${address}`, resourceId);
+            }
+            targets.push({ ...t, type: 'domain', target_type: 'domain', id: resourceId, target_id: resourceId });
+        }
+    } catch (e) { await rollbackContainerResources(created); throw e; }
     return { targets, created };
 }
 async function rollbackContainerResources(created) {
     for (const c of (created || [])) await deleteResource(c.networkId, c.resourceId).catch(() => { });
 }
 
+// Proxy actions that change a network (routing peer, resources for container targets, the
+// linked-resource delete/disable/enable) need edit rights on that network. The caller passes
+// opts.canEditNetwork(networkId) → boolean (may be async); without it those changes are refused.
+function networkEditPredicate(opts) {
+    return (opts && typeof opts.canEditNetwork === 'function') ? opts.canEditNetwork : async () => false;
+}
+function networkEditForbidden(msg = 'Forbidden - you cannot edit this network.') {
+    const e = new Error(msg); e.status = 403; return e;
+}
+async function assertCanEditLinked(changes, canEdit) {
+    for (const c of changes) {
+        if (!(await canEdit(c.networkId))) {
+            throw networkEditForbidden('Forbidden - this service targets a network resource in a network you cannot edit. Ask someone who can edit that network.');
+        }
+    }
+}
+
 // Create one HTTPS reverse-proxy service. Targets: peer/resource (NetBird resolves the host
 // from target_id) or 'cluster' = direct upstream (the proxy dials the given host via its own
 // network stack - useful when the self-hosted proxy shares a Docker network with the target).
-async function createProxyService(cfg = {}) {
+async function createProxyService(cfg = {}, opts = {}) {
     const domain = String(cfg.domain || '').trim().toLowerCase();
     if (!DOMAIN_RE.test(domain)) throw new Error('a valid service domain is required (e.g. app.example.com)');
     const cluster = String(cfg.cluster || cfg.proxy_cluster || '').trim();
     if (!cluster) throw new Error('a proxy cluster is required');
     const rawTargets = Array.isArray(cfg.targets) && cfg.targets.length ? cfg.targets : (cfg.target ? [cfg.target] : []);
     if (!rawTargets.length) throw new Error('at least one target is required');
-    const { targets: matTargets, created } = await materializeContainerTargets(rawTargets);
+    const { targets: matTargets, created } = await materializeContainerTargets(await planContainerTargets(rawTargets, networkEditPredicate(opts)));
     try {
         const body = {
             name: String(cfg.name || '').trim() || domain,
@@ -1454,16 +1572,34 @@ function sanitizeProxyService(raw) {
 // Partial update: GET the full service, merge the patch, PUT it back. Password/PIN values
 // are only replaced when a NEW value arrives - otherwise the existing one is kept
 // server-side and never travels to the browser.
-async function updateProxyService(id, patch = {}) {
+async function updateProxyService(id, patch = {}, opts = {}) {
+    const canEdit = networkEditPredicate(opts);
     const raw = await getProxyServiceRaw(id);
     const body = { ...raw };
     if (patch.name !== undefined) body.name = String(patch.name).trim() || raw.name;
     if (patch.enabled !== undefined) body.enabled = !!patch.enabled;
+    // Enable/disable follows through to the resources the service targets - work out which ones
+    // change and check the caller may edit their networks BEFORE writing anything.
+    const toggled = patch.enabled !== undefined && !!patch.enabled !== (raw.enabled !== false);
+    let linked = [];
     let createdContainerRes = [];
     if (patch.targets !== undefined) {
         if (!Array.isArray(patch.targets) || !patch.targets.length) throw new Error('at least one target is required');
-        const { targets: matTargets, created } = await materializeContainerTargets(patch.targets);
+        const plan = await planContainerTargets(patch.targets, canEdit);
+        if (toggled) {
+            // A resource still to be created is left out here - its network was checked above.
+            const planned = plan.filter(p => !p.networkId || p.resourceId).map(p => buildProxyTarget(p.networkId
+                ? { ...p.t, type: 'domain', target_type: 'domain', id: p.resourceId, target_id: p.resourceId } : p.t));
+            linked = await linkedProxyResourceChanges({ id, targets: planned }, patch.enabled ? 'enable' : 'disable');
+            await assertCanEditLinked(linked, canEdit);
+        }
+        const { targets: matTargets, created } = await materializeContainerTargets(plan);
         createdContainerRes = created;
+        // A resource just created for a container target follows the service's new state too;
+        // its network was checked before it was created.
+        if (toggled && created.length) {
+            linked = linked.concat(await linkedProxyResourceChanges({ id, targets: created.map(c => ({ target_type: 'domain', target_id: c.resourceId })) }, patch.enabled ? 'enable' : 'disable'));
+        }
         // Keep fields the app doesn't model on targets that already existed. Refuses (409) an
         // ambiguous edit - then a resource just created for a container target must not outlive it.
         try { body.targets = mergeProxyTargets(raw.targets, matTargets.map(buildProxyTarget)); }
@@ -1525,6 +1661,11 @@ async function updateProxyService(id, patch = {}) {
         await rollbackContainerResources(createdContainerRes);
         const e = new Error(accessErr); e.status = 400; throw e;
     }
+    // Without a target edit the check runs here - nothing has been written yet.
+    if (toggled && patch.targets === undefined) {
+        linked = await linkedProxyResourceChanges({ id, targets: body.targets }, patch.enabled ? 'enable' : 'disable');
+        await assertCanEditLinked(linked, canEdit);
+    }
     const resp = await netbirdReq('PUT', '/api/reverse-proxies/services/' + encodeURIComponent(id), body);
     if (!resp || resp.status >= 300) {
         // A resource created for a NEW container target must not outlive a failed update.
@@ -1532,10 +1673,9 @@ async function updateProxyService(id, patch = {}) {
         throw new Error('Failed to update service: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
     bustReverseProxyCache();
-    // Enable/disable follows through to the resources the service targets.
     let syncedResources = [];
-    if (patch.enabled !== undefined && !!patch.enabled !== (raw.enabled !== false)) {
-        syncedResources = await syncLinkedProxyResources({ id, targets: body.targets }, patch.enabled ? 'enable' : 'disable');
+    if (toggled) {
+        syncedResources = await syncLinkedProxyResources(linked, patch.enabled ? 'enable' : 'disable');
     }
     return { id, syncedResources };
 }
@@ -1549,8 +1689,10 @@ function proxyResourceTargetIds(svc) {
 
 // Keep linked network resources in step with their service: deleting a service deletes the
 // resources it targeted, disabling/enabling a service disables/enables them. A resource still
-// referenced by ANOTHER service (any for delete, an enabled one for disable) is left alone.
-async function syncLinkedProxyResources(svc, mode) {
+// referenced by ANOTHER service (any for delete, an enabled one for disable) is left alone, and
+// so is one already in the requested state. Returns the resources that WILL change,
+// [{ rid, networkId, r }], so the caller can check network edit rights before any write.
+async function linkedProxyResourceChanges(svc, mode) {
     const ids = proxyResourceTargetIds(svc);
     if (!ids.length) return [];
     const services = await netbirdGet('/api/reverse-proxies/services').catch(() => null);
@@ -1562,22 +1704,33 @@ async function syncLinkedProxyResources(svc, mode) {
     for (const n of (Array.isArray(nets) ? nets : [])) {
         for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOf.set(rid, n.id);
     }
-    const done = [];
+    const changes = [];
     for (const rid of ids) {
         const networkId = netOf.get(rid);
         if (!networkId) continue; // already gone / not a network resource
+        if (mode !== 'enable' && usedElsewhere(rid)) continue;
+        if (mode === 'delete') { changes.push({ rid, networkId }); continue; }
+        let r = null;
+        try { r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`); }
+        catch (e) { console.error('[proxy] linked resource sync failed:', mode, rid, e.message); }
+        if (!r || !r.id) continue;
+        if ((r.enabled !== false) === (mode === 'enable')) continue; // already in the right state
+        changes.push({ rid, networkId, r });
+    }
+    return changes;
+}
+
+async function syncLinkedProxyResources(changes, mode) {
+    const done = [];
+    for (const { rid, networkId, r } of changes) {
         try {
-            if (mode !== 'enable' && usedElsewhere(rid)) continue;
             if (mode === 'delete') {
                 let name = rid;
                 try { name = ((await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`)) || {}).name || rid; } catch { /* keep id */ }
                 await deleteResource(networkId, rid);
                 done.push(name);
             } else {
-                const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`);
-                if (!r || !r.id) continue;
                 const enabled = mode === 'enable';
-                if ((r.enabled !== false) === enabled) continue; // already in the right state
                 const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`, {
                     name: r.name, address: r.address, description: r.description || '', enabled,
                     groups: (Array.isArray(r.groups) ? r.groups : []).map(g => (g && g.id) || g).filter(Boolean),
@@ -1591,16 +1744,18 @@ async function syncLinkedProxyResources(svc, mode) {
     return done;
 }
 
-async function deleteProxyService(id) {
+async function deleteProxyService(id, opts = {}) {
     // Snapshot the service BEFORE deletion - afterwards its targets are gone.
     let svc = null;
     try { svc = await getProxyServiceRaw(id); } catch { /* service may already be gone */ }
+    const linked = svc ? await linkedProxyResourceChanges(svc, 'delete') : [];
+    await assertCanEditLinked(linked, networkEditPredicate(opts));
     const resp = await netbirdReq('DELETE', '/api/reverse-proxies/services/' + encodeURIComponent(id));
     if (!resp || (resp.status >= 300 && resp.status !== 404)) {
         throw new Error('Failed to delete service: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
     bustReverseProxyCache();
-    const cleanedResources = svc ? await syncLinkedProxyResources(svc, 'delete') : [];
+    const cleanedResources = await syncLinkedProxyResources(linked, 'delete');
     return { ok: true, cleanedResources };
 }
 
@@ -1608,9 +1763,10 @@ async function deleteProxyService(id) {
 // DOMAIN resource (the container's DNS name, resolved by the routing peer on the Docker
 // host) → create a service targeting that resource. Any step failing tears down whatever
 // this call already created - nothing half-configured is left behind.
-async function exposeDockerService(cfg = {}) {
+async function exposeDockerService(cfg = {}, opts = {}) {
     const networkId = String(cfg.networkId || '').trim();
     if (!networkId) throw new Error('a network is required');
+    if (!(await networkEditPredicate(opts)(networkId))) throw networkEditForbidden();
     const address = String(cfg.containerDomain || '').trim().toLowerCase();
     if (!DOMAIN_RE.test(address)) throw new Error('the container address must be a domain name (e.g. app.internal)');
     const blocked = addressBlockedForNetwork(address, networkId, await getBlocklist());
@@ -4453,7 +4609,7 @@ async function getAllUsers() {
             status: raw.status || '',
             last_login: raw.last_login || '',
             is_service_user: !!raw.is_service_user,
-            is_blocked: !!raw.is_blocked,
+            is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
             pending_approval: !!raw.pending_approval,
             // Auto-assigned groups (assigned to peers this user enrolls), resolved to {id,name}.
             groups: autoGroups.map(gid => ({ id: gid, name: getGroupsMap()[gid] || gid })),
@@ -5116,7 +5272,7 @@ async function getUserDetail(id) {
         role: raw.role || '',
         status: raw.status || '',
         last_login: raw.last_login || '',
-        is_blocked: !!raw.is_blocked,
+        is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
         is_service_user: !!raw.is_service_user,
         // Whether NetBird serves the cloud MFA reset endpoint on this API base (cached probe). The
         // Reset MFA button disables itself with a tooltip when false - like the Tenant Defaults MFA
@@ -5176,13 +5332,51 @@ async function deleteUser(id) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to delete the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
+    // A user-list refresh already in flight may have read the list before this delete - let it
+    // land first, so it cannot write the deleted user back into the mirror.
+    await settleUserRefreshes(acct);
     // Drop the mirror row so the user disappears at once, then force a re-pull of BOTH
     // mirrors for THIS account - the user's peers died with them.
     await pool.query('DELETE FROM users WHERE tenant = $2 AND user_id = $1', [id, acct]).catch(() => { });
     _usersLastRefresh.set(acct, 0);
     _peersLastRefresh.set(acct, 0);
     bustNbCaches('gref', 'usage');
-    return { ok: true, name: row.display_name || '', email: row.email || '', label };
+    const out = { ok: true, name: row.display_name || '', email: row.email || '', label };
+    // The permission settings are main-account only, so a tenant user's delete never touches them.
+    if (!acct) {
+        try {
+            await removeUserFromAppSettings(id, row.email);
+        } catch (err) {
+            console.error('[Users] removing a deleted user from the permission settings failed:', err.message);
+            const e = new Error("The user was deleted, but removing them from the app's permission settings failed. "
+                + 'Their direct permissions, approval delegations and Telegram approver mapping no longer apply because the user '
+                + 'no longer exists; you can remove the leftover entries in Settings - Permissions and Settings - Approvals.');
+            e.status = 500; e.userDeleted = out; throw e;
+        }
+    }
+    return out;
+}
+
+// A user deleted in the main account loses the app authority recorded for them: their direct
+// feature-permission entries, approval delegations and Telegram approver mappings. An entry with
+// an id matches the exact NetBird user id only; an entry without an id matches by email. Always
+// writes both settings, so a cleanup whose write failed earlier is persisted by the next one.
+async function removeUserFromAppSettings(id, email) {
+    const em = String(email || '').trim().toLowerCase();
+    const isUser = (entryId, entryEmail) => entryId
+        ? entryId === id
+        : !!em && String(entryEmail || '').trim().toLowerCase() === em;
+    const perms = getFeaturePermsConfig();
+    for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
+    const results = await Promise.allSettled([
+        setFeaturePermsConfig(perms),
+        setApproverConfig(c => ({
+            delegates: c.delegates.filter(d => !isUser(d.user.id, d.user.email)),
+            telegramApprovers: c.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
+        })),
+    ]);
+    const failed = results.find(r => r.status === 'rejected');
+    if (failed) throw failed.reason;
 }
 
 // Resolve one user to a mirror-shaped row {user_id, display_name, email, raw_json} for the write
@@ -5227,7 +5421,17 @@ async function guardProtectedUser(id, raw, acct, verb) {
 // only is_blocked changes here. The write routes through the MSP Provisioning Token when set
 // (asRealUser), matching the tenant service-user restriction on user writes. The owner and the
 // app's own service user cannot be blocked. The identity/label is resolved for the audit entry.
-async function setUserBlocked(id, blocked) {
+// Changes to one user run one at a time, so a slow earlier change never lands after a newer one.
+const _blockChanges = new Map(); // `${account}|${user id}` → the last queued change
+function setUserBlocked(id, blocked) {
+    const key = `${tnt()}|${id}`;
+    const run = (_blockChanges.get(key) || Promise.resolve()).then(() => applyUserBlocked(id, blocked));
+    const tail = run.catch(() => { });
+    _blockChanges.set(key, tail);
+    tail.then(() => { if (_blockChanges.get(key) === tail) _blockChanges.delete(key); });
+    return run;
+}
+async function applyUserBlocked(id, blocked) {
     const acct = tnt();
     const row = await resolveUserRow(id, acct);
     const label = row.email || row.display_name || row.user_id;
@@ -5249,6 +5453,16 @@ async function setUserBlocked(id, blocked) {
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
     // Refresh the mirror now (bypassing the TTL) so is_blocked flips immediately on the Users page.
+    // A refresh already in flight may have read the list before this change - let it land first.
+    await settleUserRefreshes(acct);
+    // Record the new state in the mirror row itself, so it holds even if the refresh below fails.
+    // A block that cannot be recorded is held in memory until a user-list refresh records it.
+    const recorded = await pool.query(
+        `UPDATE users SET raw_json = jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{is_blocked}', to_jsonb($3::boolean)) WHERE tenant = $2 AND user_id = $1`,
+        [id, acct, !!blocked]
+    ).then(() => true, err => { console.error('[UserResolve] block state update error:', err.message); return false; });
+    if (blocked && !recorded) _unrecordedBlocks.add(`${acct}|${id}`);
+    else _unrecordedBlocks.delete(`${acct}|${id}`);
     _usersLastRefresh.set(acct, 0);
     await refreshUsersCache().catch(err => console.error('[UserResolve] post-block refresh error:', err.message));
     return { ok: true, name: row.display_name || '', email: row.email || '', label, blocked: !!blocked };
@@ -5378,7 +5592,11 @@ async function deleteNetwork(id) {
     if (detail) {
         for (const r of (detail.resources || [])) {
             if (r && r.id) {
-                try { await deleteResource(id, r.id); } catch (e) { console.error('[deleteNetwork] resource:', e.message); }
+                try { await deleteResource(id, r.id); } catch (e) {
+                    // Keep the network (and the resource's policies) unless NetBird confirms the resource is gone.
+                    if (e.unconfirmed) throw new Error(`Couldn't remove resource "${r.name || r.id}", so the network was not deleted: ${e.message}`);
+                    console.error('[deleteNetwork] resource:', e.message);
+                }
             }
         }
         for (const rt of (detail.routers || [])) {
@@ -7596,7 +7814,7 @@ async function checkResourcePolicySync(resourceId, policies) {
     return dedicated;
 }
 async function syncResourcePolicies(networkId, resourceId, policies) {
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    const r = await getResourceInNetwork(networkId, resourceId);
     const name = (r && r.name) || 'resource';
     const resType = r && r.type;
 
@@ -7745,10 +7963,28 @@ async function setResourcePolicy(networkId, resourceId, protocol, ports) {
     bustNbCaches('policies');
 }
 
+// Read a resource through its network and confirm it belongs to that network. Run before any
+// write keyed on the resource id alone (its policies), so nothing changes for a resource of
+// another network. NetBird answers a mismatched network/resource pair with an error body.
+async function getResourceInNetwork(networkId, resourceId) {
+    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    if (r == null) {
+        const e = new Error("Couldn't read the resource from NetBird. Try again."); e.status = 502; e.unconfirmed = true; throw e;
+    }
+    if (typeof r !== 'object' || r.id !== resourceId) {
+        const e = new Error('Resource not found in this network'); e.status = 404;
+        // A mismatched pair comes back as a generic error, like an outage; only NetBird's own
+        // 404 confirms the resource is gone.
+        e.unconfirmed = r.code !== 404;
+        throw e;
+    }
+    return r;
+}
+
 // Delete a resource and best-effort clean up its auto-created policy + group
 async function deleteResource(networkId, resourceId) {
-    // Fetch the resource first to learn its groups
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    // Fetch the resource first to learn its groups (and that it is in this network)
+    const r = await getResourceInNetwork(networkId, resourceId);
     const groupIds = (r && Array.isArray(r.groups)) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
 
     // Delete policies that target this resource directly (NetBird blocks deleting a
@@ -7815,6 +8051,7 @@ function fetchUsersFromApi() {
         for (const u of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
             if (u && u.id && !seen.has(u.id)) { seen.add(u.id); out.push(u); }
         }
+        out.usersListed = Array.isArray(a); // the regular list, which holds every human user, answered
         return out;
     });
     // Runs in the active account's context (service token for a tenant) - that already lists users
@@ -7841,15 +8078,38 @@ async function upsertUsers(users) {
     }
 }
 
-async function refreshUsersCache() {
+// Every running refresh per account, whoever started it. A delete or block waits for them, so a
+// list read before the change is never written back after it.
+const _usersPulls = new Map(); // account id → Set of refresh promises
+function refreshUsersCache() {
+    const t = tnt();
+    const p = pullUsersCache();
+    if (!_usersPulls.has(t)) _usersPulls.set(t, new Set());
+    _usersPulls.get(t).add(p);
+    p.catch(() => { }).finally(() => _usersPulls.get(t).delete(p));
+    return p;
+}
+async function settleUserRefreshes(acct) {
+    await Promise.allSettled([...(_usersPulls.get(acct) || [])]);
+}
+
+// Users blocked from this app whose mirror row could not be updated (`${account}|${user id}`).
+// They count as blocked until a user-list refresh has written NetBird's state to the mirror.
+const _unrecordedBlocks = new Set();
+function blockUnrecorded(userId, acct = '') { return _unrecordedBlocks.has(`${acct}|${userId}`); }
+
+async function pullUsersCache() {
     const t = tnt();
     const users = await fetchUsersFromApi();
     if (users) {
         await upsertUsers(users);
-        // Prune users deleted in NetBird. Only when the API returned at least one (an account
-        // always has its owner, so an empty result means a transient error - don't wipe).
+        // Only a user the list returned now has NetBird's state in the mirror.
+        for (const u of users) if (u && u.id) _unrecordedBlocks.delete(`${t}|${u.id}`);
+        // Prune users deleted in NetBird. Only when the regular user list answered and at least one
+        // user came back (an account always has its owner, so an empty result means a transient
+        // error - don't wipe; without the regular list every human user would be dropped).
         const ids = users.map(u => u && u.id).filter(Boolean);
-        if (ids.length) {
+        if (ids.length && users.usersListed) {
             // Prune only THIS account's rows - other accounts' rows must survive.
             await pool.query(`DELETE FROM users WHERE tenant = $2 AND user_id <> ALL($1)`, [ids, t])
                 .catch(e => console.error('[UserResolve] prune error:', e.message));
@@ -8018,17 +8278,24 @@ async function resolveUser(userId) {
 
 // Resolve a logged-in SSO user (by Azure oid and/or email) to their cached
 // NetBird identity + role. Used for access control. Returns null if unknown.
+// A user blocked in NetBird resolves with `blocked: true`, no role and no groups - and an id match
+// is final, so a blocked user is never re-resolved by email.
 async function resolveViewer(oid, email) {
-    const mapRow = row => ({
-        user_id: row.user_id,
-        email: row.email,
-        name: row.display_name,
-        role: row.role || '',
-        auto_groups: Array.isArray(row.auto_groups) ? row.auto_groups : [],
-    });
+    const mapRow = row => {
+        const blocked = !!row.is_blocked || blockUnrecorded(row.user_id);
+        return {
+            user_id: row.user_id,
+            email: row.email,
+            name: row.display_name,
+            role: blocked ? '' : (row.role || ''),
+            auto_groups: !blocked && Array.isArray(row.auto_groups) ? row.auto_groups : [],
+            blocked,
+        };
+    };
     if (oid) {
         const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups
+            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
+                    (raw_json->>'is_blocked') = 'true' AS is_blocked
              FROM users WHERE tenant = '' AND (user_id = $1 OR user_id LIKE '%|' || $1) LIMIT 1`,
             [oid]
         );
@@ -8036,7 +8303,8 @@ async function resolveViewer(oid, email) {
     }
     if (email) {
         const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups
+            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
+                    (raw_json->>'is_blocked') = 'true' AS is_blocked
              FROM users WHERE tenant = '' AND LOWER(email) = LOWER($1) LIMIT 1`,
             [email]
         );
@@ -9115,22 +9383,32 @@ async function createGrantTracked(cfg, actor, run) {
             // ── Existing exposure per resource → combo buckets (pure logic: combosForResource) ──
             // Resource → groups lookup (one fetch per network; network targets were fetched above
             // but refetching here keeps this self-contained and cheap).
+            // An unreadable list stops the grant: treating it as empty would mirror no policy
+            // and no posture checks.
             const netResources = new Map();
             for (const rr of resourceRefs) {
                 if (netResources.has(rr.networkId)) continue;
                 const rs = await netbirdGet('/api/networks/' + encodeURIComponent(rr.networkId) + '/resources');
-                netResources.set(rr.networkId, Array.isArray(rs) ? rs : []);
+                if (!Array.isArray(rs)) throw new Error('could not read the resources of network ' + rr.networkId);
+                netResources.set(rr.networkId, rs);
             }
             // All enabled, non-temporary policies (other grants' temp policies must not leak
             // their 'all' back into new grants).
             const rawPolicies = await netbirdGet('/api/policies');
+            if (resourceRefs.length && !Array.isArray(rawPolicies)) throw new Error('could not read the existing policies');
             const polArr = (Array.isArray(rawPolicies) ? rawPolicies : [])
                 .filter(p => p && p.enabled !== false && !/^Temporary access #\d+/.test(p.name || ''));
             const combosFor = (rr) => {
-                if (rr.access) return accessSpecCombos(rr.access); // rule-pinned protocols/ports
                 const res = (netResources.get(rr.networkId) || []).find(x => x && x.id === rr.resourceId);
-                const rgroups = (res && Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
-                return combosForResource(polArr, rr.resourceId, rgroups);
+                if (!res) throw new Error('resource ' + rr.resourceId + ' was not found in network ' + rr.networkId);
+                const rgroups = (Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
+                const existing = combosForResource(polArr, rr.resourceId, rgroups);
+                if (!rr.access) return existing;
+                // Rule-pinned protocols/ports keep the posture checks of the exposure they overlap.
+                return accessSpecCombos(rr.access).map(c => {
+                    const pc = postureChecksFor(c, existing);
+                    return pc.length ? { ...c, postureChecks: pc } : c;
+                });
             };
 
             // bucket key → { combo, resources: [rr], profileGroups: [gid] }
@@ -9146,17 +9424,21 @@ async function createGrantTracked(cfg, actor, run) {
             if (destGroupIds.size) {
                 const profByGid = new Map((await listAccessProfiles()).map(p => [p.groupId, p]));
                 for (const gid of destGroupIds) {
+                    const prof = profByGid.get(gid);
+                    if (!prof) throw new Error('access profile not found for group ' + gid);
+                    // The profile's posture checks gate the temp policy too.
+                    const pc = postureIds(prof.postureChecks);
+                    const gated = (c) => (pc.length ? { ...c, postureChecks: pc } : c);
                     const acc = destGroupAccess.get(gid);
                     if (acc) { // rule-pinned protocols/ports override the profile's definition
-                        for (const c of accessSpecCombos(acc)) bucketFor(c).profileGroups.push(gid);
+                        for (const c of accessSpecCombos(acc)) bucketFor(gated(c)).profileGroups.push(gid);
                         continue;
                     }
-                    const prof = profByGid.get(gid);
                     const ports = prof && (Array.isArray(prof.ports) ? prof.ports : String(prof.ports || '').split(',').map(s => s.trim()).filter(Boolean));
                     const c = prof && prof.protocol && prof.protocol !== 'all'
                         ? { protocol: prof.protocol, ...splitPortTokens(ports || []) }
                         : ALL_COMBO;
-                    bucketFor(c).profileGroups.push(gid);
+                    bucketFor(gated(c)).profileGroups.push(gid);
                 }
             }
 
@@ -9184,6 +9466,7 @@ async function createGrantTracked(cfg, actor, run) {
                 if (b.combo.portRanges && b.combo.portRanges.length) rule.port_ranges = b.combo.portRanges;
                 const p = await netbirdPost('/api/policies', {
                     name: `Temporary access #${grantId}${suffix}`, description: `Auto-managed temporary access for ${label}`, enabled: true,
+                    source_posture_checks: b.combo.postureChecks || [],
                     rules: [rule],
                 });
                 if (p && p.status < 300 && p.body && p.body.id) policyIds.push(p.body.id);
@@ -9695,27 +9978,12 @@ function decisionVia(actor) {
 
 // humanDuration now lives in lib/pure.js (imported at the top).
 
-// Typeahead over grantable things (resources / networks / shared profiles). NOT filtered by the
-// requester's own grants - they're asking for what they lack. Min 2 chars, capped.
-async function searchRequestTargets(q) {
-    const query = String(q || '').trim().toLowerCase();
-    if (query.length < 2) return { results: [] };
-    // Cap PER TYPE, not overall - with a shared cap, resources (scanned first) exhausted it
-    // and matching networks/profiles never showed up at all. Generous cap: the dropdown
-    // scrolls, so there's no reason to hide matches.
-    const CAP = 50;
-    const has = (s) => String(s || '').toLowerCase().includes(query);
-    const results = [];
-    const usage = await getUsageData();
-    const netName = new Map(), netOfResource = new Map();
-    for (const n of usage.networks || []) {
-        netName.set(n.id, n.name || n.id);
-        for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(rid, n.id);
-    }
-    // Per-resource PORT policies (destinationResource with a specific protocol) become
-    // requestable sub-entries: "resource · policy (TCP 8006)". The policy already carries the
-    // service's name and ports, so one merged resource with many port policies still offers
-    // per-service requests - and the grant opens ONLY that policy's ports (target.access).
+// Per-resource PORT policies (destinationResource with a specific protocol) become
+// requestable sub-entries: "resource · policy (TCP 8006)". The policy already carries the
+// service's name and ports, so one merged resource with many port policies still offers
+// per-service requests - and the grant opens ONLY that policy's ports (target.access).
+// Shared by the typeahead and resolveRequestTargets, so both see the same entries.
+function requestPortEntries(usage) {
     const polByResource = new Map();
     for (const p of usage.policies || []) {
         if (!p || p.enabled === false) continue;
@@ -9740,6 +10008,27 @@ async function searchRequestTargets(q) {
             });
         }
     }
+    return polByResource;
+}
+
+// Typeahead over grantable things (resources / networks / shared profiles). NOT filtered by the
+// requester's own grants - they're asking for what they lack. Min 2 chars, capped.
+async function searchRequestTargets(q) {
+    const query = String(q || '').trim().toLowerCase();
+    if (query.length < 2) return { results: [] };
+    // Cap PER TYPE, not overall - with a shared cap, resources (scanned first) exhausted it
+    // and matching networks/profiles never showed up at all. Generous cap: the dropdown
+    // scrolls, so there's no reason to hide matches.
+    const CAP = 50;
+    const has = (s) => String(s || '').toLowerCase().includes(query);
+    const results = [];
+    const usage = await getUsageData();
+    const netName = new Map(), netOfResource = new Map();
+    for (const n of usage.networks || []) {
+        netName.set(n.id, n.name || n.id);
+        for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(rid, n.id);
+    }
+    const polByResource = requestPortEntries(usage);
 
     let hits = 0;
     for (const r of usage.resources || []) {
@@ -9783,6 +10072,68 @@ async function searchRequestTargets(q) {
     return { results };
 }
 
+// Server-side view of access-request targets, from the same catalogue the typeahead offers
+// (resources in a network + their port entries, networks, shared profiles). Only what this
+// returns is stored and granted - name, network, profile group and port scope never come
+// from the request body. A port scope must be one of the resource's port entries, or (on
+// approval) the exact scope an auto-approval rule pinned on the request's stored row
+// (ruleSpecs, server-written). Anything else is rejected, never widened to full exposure.
+// Port order doesn't change what a scope opens, so the comparison key sorts the lists.
+function accessSpecKey(a) {
+    const n = normAccessSpec(a);
+    if (!n) return '';
+    return stableStringify({ ...n, ...(n.tcp ? { tcp: [...n.tcp].sort() } : {}), ...(n.udp ? { udp: [...n.udp].sort() } : {}) });
+}
+async function resolveRequestTargets(targets, ruleSpecs = []) {
+    const gone = () => new Error('a requested target or port scope is no longer offered - pick it again from search');
+    const usage = await getUsageData();
+    const networks = new Map((usage.networks || []).filter(n => n && n.id).map(n => [String(n.id), n]));
+    const netOfResource = new Map();
+    for (const [nid, n] of networks) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(String(rid), nid);
+    const resources = new Map((usage.resources || []).filter(r => r && r.id).map(r => [String(r.id), r]));
+    const portEntries = requestPortEntries(usage);
+    let profiles = null;
+    const out = [];
+    for (const t of targets) {
+        if (!t || (t.type !== 'resource' && t.type !== 'network' && t.type !== 'profile')) throw new Error('only resources, networks and access profiles can be requested');
+        if (typeof t.id !== 'string' && typeof t.id !== 'number') throw gone();
+        const type = t.type, id = String(t.id);
+        let r;
+        if (type === 'resource') {
+            const res = resources.get(id), nid = netOfResource.get(id);
+            if (!res || !nid) throw gone();
+            r = { type, id, name: String(res.name || res.address || res.id), networkId: nid, resourceType: res.type || '' };
+        } else if (type === 'network') {
+            const n = networks.get(id);
+            if (!n) throw gone();
+            r = { type, id, name: String(n.name || n.id) };
+        } else {
+            if (!profiles) profiles = new Map((await listAccessProfiles()).filter(p => p.shared).map(p => [String(p.id), p]));
+            const p = profiles.get(id);
+            if (!p) throw gone();
+            r = { type, id, name: String(p.name), groupId: p.groupId };
+        }
+        if (t.access !== undefined && t.access !== null) {
+            const k = accessSpecKey(t.access);
+            if (!k) throw gone();
+            const entries = type === 'resource' ? (portEntries.get(id) || []).filter(s => accessSpecKey(s.access) === k) : [];
+            const entryName = (s) => s.label || `${r.name} (${s.portsLabel})`;
+            if (entries.length) {
+                const s = entries.find(e => entryName(e) === t.name) || entries[0];
+                r.name = entryName(s);
+                r.access = normAccessSpec(s.access);
+            } else if (ruleSpecs.some(x => x && x.ruleAccess === true && x.type === type && String(x.id) === id && accessSpecKey(x.access) === k)) {
+                r.access = normAccessSpec(t.access);
+                r.ruleAccess = true;
+            } else {
+                throw gone();
+            }
+        }
+        out.push(r);
+    }
+    return out;
+}
+
 // System actor for auto-approved requests, so the decision is attributed to "Auto-approval".
 const AUTO_ACTOR = { name: 'Auto-approval', email: '', user_id: '', oid: '', isAdmin: true, auto: true };
 
@@ -9800,7 +10151,7 @@ async function createAccessRequest(cfg, requester) {
     // Temporary device (bypass only): delete the device automatically when the approved
     // bypass period ends. Recorded on the request so the approver sees it up front.
     const tempDevice = kind === 'bypass' && !!cfg.tempDevice;
-    const clean = targets.map(t => {
+    const clean = kind === 'access' ? await resolveRequestTargets(targets) : targets.map(t => {
         const access = normAccessSpec(t.access);
         return { type: t.type, id: String(t.id), name: String(t.name || t.id), networkId: t.networkId, resourceType: t.resourceType, groupId: t.groupId, ...(access ? { access } : {}) };
     });
@@ -9870,14 +10221,18 @@ async function createAccessRequest(cfg, requester) {
         for (const { t, cap, access } of auto) {
             const dur = cap ? Math.min(minutes || cap, cap) : (minutes || 60);
             if (!buckets.has(dur)) buckets.set(dur, []);
-            buckets.get(dur).push(access ? { ...t, access } : t);
+            // ruleAccess marks a server-pinned scope, so a later human approval keeps it. A pin
+            // that replaces a picked port entry also drops that entry's label for the target's own.
+            const relabel = access && t.access && accessSpecKey(access) !== accessSpecKey(t.access);
+            const name = relabel ? (await resolveRequestTargets([{ type: t.type, id: t.id }]))[0].name : t.name;
+            buckets.get(dur).push(access ? { ...t, name, access, ruleAccess: true } : t);
         }
         for (const [dur, bucketTargets] of buckets) {
             const req = await insertRow(bucketTargets);
             ids.push(req.id);
             try {
-                await approveAccessRequest(req.id, { durationMinutes: dur, actor: AUTO_ACTOR });
-                notifyAutoApprovedTelegram(req, dur).catch(() => { });
+                const res = await approveAccessRequest(req.id, { durationMinutes: dur, actor: AUTO_ACTOR });
+                notifyAutoApprovedTelegram({ ...req, targets: res.targets }, dur).catch(() => { });
                 autoApproved = 1;
             } catch (e) {
                 // Grant creation failed - don't lose the request: fall back to human review.
@@ -10008,19 +10363,16 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     const requested = Array.isArray(req.targets) ? req.targets : [];
     let effective = requested;
     if (Array.isArray(targets) && targets.length) {
-        effective = targets
-            .map(t => {
-                if (!t) return null;
-                const access = normAccessSpec(t.access);
-                return { type: String(t.type || ''), id: String(t.id || ''), name: String(t.name || t.id || ''), networkId: t.networkId, groupId: t.groupId, ...(access ? { access } : {}) };
-            })
-            .filter(t => t && t.type && t.id);
+        effective = targets.filter(t => t && t.type && t.id);
         if (!effective.length) throw new Error('at least one target is required');
     } else if (Array.isArray(req.excluded_targets) && req.excluded_targets.length) {
         const ex = new Set(req.excluded_targets.map(x => `${x.type}:${x.id}`));
         effective = requested.filter(t => !ex.has(`${t.type}:${t.id}`));
         if (!effective.length) throw new Error('all targets were removed - deny the request instead');
     }
+    // Every path grants only what the catalogue offers now; a port scope an auto-approval
+    // rule pinned on THIS row (ruleAccess, server-written) is kept as stored.
+    effective = await resolveRequestTargets(effective, requested.filter(t => t && t.ruleAccess === true));
     const changed = effective.length !== requested.length ||
         effective.some(t => !requested.some(r => r.type === t.type && r.id === t.id));
 
@@ -10052,7 +10404,7 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     if (req.tg_chat_id && req.tg_message_id) {
         editTelegramMessage(req.tg_chat_id, req.tg_message_id, accessRequestOutcomeHtml({ ...req, targets: effective }, 'approved', decidedBy, { grantedMinutes: approvedMin })).catch(() => { });
     }
-    return { id, grantId: grant.id };
+    return { id, grantId: grant.id, targets: effective };
 }
 
 async function denyAccessRequest(id, { reason, actor } = {}) {
@@ -10563,19 +10915,37 @@ async function importAppSettings(payload, actor) {
     const entries = Object.entries(settings)
         .filter(([k, v]) => typeof k === 'string' && k.length <= 100 && typeof v === 'string' && !settingKeyExcluded(k));
     if (!entries.length) throw new Error('the backup contains no importable settings');
+    // A NetBird API URL or SMTP server (host, port, security, user) that differs from the stored one is
+    // skipped (reported in skippedSettings). A Telegram callback secret in the file is discarded, and a
+    // Telegram config that is not a JSON object is skipped.
+    const parseObject = (s) => { try { const j = JSON.parse(s); return j && typeof j === 'object' && !Array.isArray(j) ? j : null; } catch { return null; } };
+    const smtpServer = (c) => JSON.stringify([c.host || '', parseInt(c.port, 10) || 587, !!c.secure, c.user || '']); // as loadSmtp reads it
+    const importedKeys = [], skippedSettings = [];
     for (const [k, v] of entries) {
         let val = v;
+        if (k === 'netbird_api_url') {
+            if (v !== ((await getSetting(k)) || '')) { skippedSettings.push({ key: k, reason: 'kept the current NetBird API URL - change it in Settings > NetBird API' }); continue; }
+            importedKeys.push(k); continue; // unchanged - nothing to write
+        }
+        if (k === 'smtp_config') {
+            const imp = parseObject(v);
+            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            if (smtpServer(imp) !== smtpServer(parseObject((await getSetting(k)) || '') || {})) {
+                skippedSettings.push({ key: k, reason: 'kept the current SMTP server - change it in Settings > Email (SMTP)' }); continue;
+            }
+        }
         if (isTelegramConfigKey(k)) {
-            // Exports carry telegram_config WITHOUT its webhookSecret - keep this deployment's
-            // existing secret so the approvals callback keeps working after a restore.
-            try {
-                const cur = JSON.parse((await getSetting(k)) || 'null');
-                const imp = JSON.parse(v);
-                if (cur && cur.webhookSecret && !imp.webhookSecret) imp.webhookSecret = cur.webhookSecret;
-                val = JSON.stringify(imp);
-            } catch { /* keep the imported value as-is */ }
+            const imp = parseObject(v);
+            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            delete imp.webhookSecret;
+            // Keep the active main secret first (memory can hold one the stored row lacks), else the stored one.
+            const cur = parseObject((await getSetting(k)) || '');
+            const secret = (k === 'telegram_config' && getTelegramWebhookSecret()) || (cur && cur.webhookSecret);
+            if (secret) imp.webhookSecret = secret;
+            val = JSON.stringify(imp);
         }
         await setSetting(k, val);
+        importedKeys.push(k);
     }
     // Reload every config module state so the import applies without a restart.
     await loadNbApi(); await loadWebhook(); await loadTelegram(); await loadApproverConfig();
@@ -10590,9 +10960,9 @@ async function importAppSettings(payload, actor) {
     recordAudit({
         actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
         action: 'settings.import', target: 'app settings',
-        meta: { keys: entries.length, restored: entries.map(([k]) => k).join(', '), tables: tableResults, skipped: tableSkipped },
+        meta: { keys: importedKeys.length, restored: importedKeys.join(', '), skippedSettings: skippedSettings.map(s => s.key).join(', '), tables: tableResults, skipped: tableSkipped },
     }).catch(() => { });
-    return { imported: entries.length, keys: entries.map(([k]) => k), tables: tableResults, skipped: tableSkipped };
+    return { imported: importedKeys.length, keys: importedKeys, skippedSettings, tables: tableResults, skipped: tableSkipped };
 }
 
 // ─── Internal ENVELOPE-ENCRYPTED backup (tier 2) - full config + ALL secrets, written to a mounted
@@ -11448,6 +11818,20 @@ async function sendAccessReviewDigest({ force = false } = {}) {
     return { telegram: !!tgSent, emails: emailsSent };
 }
 
+// A Telegram approver acts only while the system user it maps to exists in NetBird and is not
+// blocked there. An entry without a user id is matched by its email; an entry with neither is not
+// tied to a person and keeps working. A failed lookup refuses.
+async function telegramApproverActive(approver) {
+    const id = approver.userId, email = String(approver.email || '').trim();
+    if (!id && !email) return true;
+    await ensureUsersFresh().catch(() => { });
+    const r = await pool.query(
+        `SELECT user_id, (raw_json->>'is_blocked') = 'true' AS is_blocked FROM users WHERE tenant = '' AND ${id ? 'user_id = $1' : 'LOWER(email) = LOWER($1)'}`,
+        [id || email]
+    ).catch(() => ({ rows: [] }));
+    return r.rows.length > 0 && r.rows.every(x => !x.is_blocked && !blockUnrecorded(x.user_id));
+}
+
 // Handle a Telegram update: either a button press (callback_query) or a reply carrying a denial
 // reason (message). The webhook is subscribed to both.
 async function handleTelegramCallback(update) {
@@ -11458,7 +11842,7 @@ async function handleTelegramCallback(update) {
     // Authorize by the Telegram id, and resolve it to the mapped SYSTEM user so the decision is
     // attributed to the real person in the audit log - not their Telegram handle.
     const approver = getApproverByTelegramId(from.id);
-    if (!approver) {
+    if (!approver || !(await telegramApproverActive(approver))) {
         await answerCallbackQuery(cq.id, '⛔ You are not authorized to approve access requests.');
         return;
     }
@@ -11535,7 +11919,7 @@ async function handleTelegramReplyMessage(msg) {
     const mk = reply.text.match(/DENY request #(\d+)/i);   // only our deny prompt qualifies
     if (!mk) return;
     const approver = getApproverByTelegramId((msg.from || {}).id);
-    if (!approver) return;                                  // silently ignore non-approvers
+    if (!approver || !(await telegramApproverActive(approver))) return; // silently ignore non-approvers
     const reason = String(msg.text || '').trim();
     if (!reason) return;
     const id = parseInt(mk[1], 10);
@@ -11555,7 +11939,7 @@ module.exports = {
     pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
     getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
-    getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
+    getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, getResourceInNetwork, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
     setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups,
     getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate,
     getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting,
@@ -11608,7 +11992,8 @@ module.exports = {
     // Pure helpers exposed ONLY for unit tests (backend/test) - not part of the app API.
     _internal: { comboKey, combosForResource, ALL_COMBO, splitPortTokens, mergeRulePorts, normSecurityConfig, humanDuration, stableStringify, normDelegates, normEdrAutoBypass, edrOsKey, ruleForPut, carryRuleExtras, ruleHasUnmodeled, policiesSourcingResources, editorProtocol,
         normalizeTenantDefaults, nbShapeFromSettings, nbSettingsFromProfile, dropUnsupportedNbSettings, proxyAccessActionError,
-        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup, loadAutoApproval },
+        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup, autoApproveTargets, loadAutoApproval },
+    refreshAutoApprovalInventory,
     listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess,
     getSecurityConfig, setSecurityConfig,
     getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS,

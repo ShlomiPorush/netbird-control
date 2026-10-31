@@ -8,11 +8,12 @@ const rateLimit = require('express-rate-limit');
 const { auth, requiresAuth } = require('express-openid-connect');
 const { parseTrustProxy, limiterOptions } = require('./lib/rate-limit');
 const { safeReturnTo, isPlausibleEmail } = require('./lib/pure');
+const { missingSsoSettings } = require('./lib/sso-config');
 const { initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
-const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS } = require('./db');
+const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
 
 // AD group whose members are treated as admins (in addition to NetBird owner/admin)
 const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID || '';
@@ -322,12 +323,12 @@ app.get('/login-wait.js', (req, res) => {
 app.post('/api/integrations/telegram/callback', async (req, res) => {
     try {
         const secret = getTelegramWebhookSecret();
-        if (secret) {
-            if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
-            if (!safeEqual(req.headers['x-telegram-bot-api-secret-token'], secret)) {
-                noteAuthFail(req.ip);
-                return res.status(403).json({ error: 'forbidden' });
-            }
+        // No secret is stored until the webhook is registered, so nothing can prove the update came from Telegram.
+        if (!secret) return res.status(403).json({ error: 'forbidden' });
+        if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
+        if (!safeEqual(req.headers['x-telegram-bot-api-secret-token'], secret)) {
+            noteAuthFail(req.ip);
+            return res.status(403).json({ error: 'forbidden' });
         }
         await handleTelegramCallback(req.body || {});
     } catch (e) {
@@ -508,6 +509,7 @@ if (AUTH_ENABLED) {
         // the API 401s a policy-expired session even though its cookie is still valid, so
         // bouncing one back would refresh-loop forever (SPA → 401 → /login → SPA → …).
         if (req.oidc && req.oidc.isAuthenticated() && sessionPassesCaps(req)) return res.redirect(returnTo);
+        if (req.oidc && req.oidc.isAuthenticated()) req.appSession = undefined; // re-authenticate into a new session
         res.oidc.login({ returnTo });
     });
 
@@ -518,6 +520,16 @@ if (AUTH_ENABLED) {
     // 401, which the SPA turns into a redirect to /login. Idle time is tracked per login session
     // (oid+iat) in memory - a restart just restarts the idle clock, never extends a cap.
     const _sessionSeen = new Map(); // `${oid}|${iat}` → last-activity ms
+    // Sessions the API ended (idle or cap), or that /login found idle, stay ended even if the
+    // limits are loosened later.
+    // Pruned after 7 days: the session cookie cannot outlive absoluteDuration (7 d) from login.
+    const _sessionEnded = new Map(); // `${oid}|${iat}` → ended-at ms
+    const endSession = (key, nowMs) => {
+        if (!_sessionEnded.has(key)) _sessionEnded.set(key, nowMs);
+        if (_sessionEnded.size > 5000) {
+            for (const [k, v] of _sessionEnded) if (nowMs - v > 7 * 86400_000) _sessionEnded.delete(k);
+        }
+    };
     app.use('/api', async (req, res, next) => {
         try {
             if (!req.oidc || !req.oidc.isAuthenticated()) return next();
@@ -529,10 +541,11 @@ if (AUTH_ENABLED) {
             const nowMs = Date.now();
             const kill = (msg) => {
                 _sessionSeen.delete(key);
-                res.clearCookie('appSession');
-                for (let i = 0; i < 5; i++) res.clearCookie(`appSession.${i}`); // chunked-cookie variants
+                endSession(key, nowMs);
+                req.appSession = undefined; // the session library then clears the cookie (and its chunks)
                 return res.status(401).json({ error: msg });
             };
+            if (_sessionEnded.has(key)) return kill('Session expired - please sign in again');
             // Idle timeout (everyone).
             const last = _sessionSeen.get(key);
             if (last && sec.sessionIdleHours > 0 && nowMs - last > sec.sessionIdleHours * 3600_000) {
@@ -548,6 +561,9 @@ if (AUTH_ENABLED) {
                 return kill('Session expired - please sign in again');
             }
             if (sec.adminSessionMaxHours > 0 && ageHours > sec.adminSessionMaxHours) {
+                // Set before the role lookup (which may fail): the tenant middleware calls this
+                // instead of granting a Tenant Support user admin rights inside a tenant.
+                req.adminSessionExpired = () => kill('Admin session expired - please sign in again');
                 const viewer = await getViewer(req); // only resolved once past the admin threshold
                 if (viewer.isAdmin) return kill('Admin session expired - please sign in again');
             }
@@ -567,8 +583,12 @@ if (AUTH_ENABLED) {
             if (!claims.iat) return true;
             const sec = getSecurityConfig();
             const key = `${claims.oid || claims.sub || ''}|${claims.iat}`;
+            if (_sessionEnded.has(key)) return false;
             const last = _sessionSeen.get(key);
-            if (last && sec.sessionIdleHours > 0 && Date.now() - last > sec.sessionIdleHours * 3600_000) return false;
+            if (last && sec.sessionIdleHours > 0 && Date.now() - last > sec.sessionIdleHours * 3600_000) {
+                endSession(key, Date.now());
+                return false;
+            }
             const ageHours = (Date.now() / 1000 - Number(claims.iat)) / 3600;
             if (sec.sessionMaxHours > 0 && ageHours > sec.sessionMaxHours) return false;
             if (sec.adminSessionMaxHours > 0 && ageHours > sec.adminSessionMaxHours) return false;
@@ -671,7 +691,11 @@ app.use('/api', async (req, res, next) => {
         // validated in-context request only. The flag is set ONLY after the allowlist check passes,
         // so it never covers TENANT_PLAIN_PREFIXES (e.g. /api/msp CRUD) or a headerless request -
         // getViewer returns an elevated per-request copy that keeps the real identity for audits.
-        if (!viewer.isAdmin) req.tenantSupportAdmin = true;
+        // Admin rights follow the Admin Session Cap, so past it the session ends as an admin's would.
+        if (!viewer.isAdmin) {
+            if (req.adminSessionExpired) return req.adminSessionExpired();
+            req.tenantSupportAdmin = true;
+        }
         // Validate against the SWITCHER list (the official dashboard's own switch source) plus
         // the tenants list (60s cache) - a stale/foreign id is refused. Any linked tenant is
         // manageable - including pending-verification ones; only 'invited' is not.
@@ -731,9 +755,13 @@ async function getViewer(req) {
     const email = claims.email || claims.preferred_username || claims.upn || '';
     await Promise.all([ensureUsersFresh().catch(() => { }), ensurePeersFresh().catch(() => { })]);
     const v = await resolveViewer(oid, email);
+    // A user blocked in NetBird holds no role, groups or permissions here. Direct per-user grants
+    // and delegations count only for an existing, unblocked NetBird user (`live`).
+    const blocked = !!(v && v.blocked);
+    const live = v && !blocked ? v : null;
     const role = v ? (v.role || '') : '';
     // AD group membership (Microsoft Graph) - admin if in the configured admin group
-    const adGroups = await fetchUserGroups(oid).catch(() => []);
+    const adGroups = blocked ? [] : await fetchUserGroups(oid).catch(() => []);
     const isAdmin = role === 'owner' || role === 'admin' || (!!ADMIN_GROUP_ID && adGroups.includes(ADMIN_GROUP_ID));
 
     // Groups used for network-edit grants AND approver / auto-approval matching. Grants and rules
@@ -744,7 +772,7 @@ async function getViewer(req) {
     //   2. their NetBird user.auto_groups (IdP-synced groups)
     //   3. groups their PEERS belong to (native groups like a Support Department)
     const netbirdGroups = (v && v.auto_groups) || [];
-    const peerGroups = await getUserPeerGroupIds(v ? v.user_id : null, oid).catch(() => []);
+    const peerGroups = blocked ? [] : await getUserPeerGroupIds(v ? v.user_id : null, oid).catch(() => []);
     const allNb = [...netbirdGroups, ...peerGroups];
     const groups = [...new Set([
         ...adGroups,
@@ -757,7 +785,7 @@ async function getViewer(req) {
     // A time-boxed DELEGATION (Settings → Approvals → Delegation) also grants approval rights
     // while its date window is active - for covering an approver's vacation.
     const canApprove = isAdmin || getApproverGroupIds().some(g => groups.includes(g))
-        || await isActiveDelegate({ oid, userId: v ? v.user_id : '', email });
+        || (!!live && await isActiveDelegate({ oid, userId: live.user_id, email }));
 
     req._viewer = {
         authEnabled: true,
@@ -773,7 +801,7 @@ async function getViewer(req) {
         netbirdGroups,
         peerGroups,
         // Fine-grained feature permissions (admins get everything).
-        perms: resolveFeaturePerms({ isAdmin, userId: v ? v.user_id : null, oid, email: (v && v.email) || email, groups }),
+        perms: resolveFeaturePerms({ isAdmin, userId: live ? live.user_id : null, oid: live ? oid : '', email: live ? (live.email || email) : '', groups }),
     };
     return elevate(req._viewer);
 }
@@ -858,6 +886,25 @@ function managesNetworks(viewer) {
 }
 function canEditNetwork(viewer, networkId, grants) {
     return viewer.isAdmin || managesNetworks(viewer) || hasGrant(viewer, networkId, grants, true);
+}
+
+// Middleware: network editors - admins, 'networks.manage' holders, or members of a group with an
+// 'edit' grant on at least one existing network - plus holders of any feature permission given.
+function requireNetworkEditor(...perms) {
+    return async (req, res, next) => {
+        try {
+            const viewer = await getViewer(req);
+            if (viewer.isAdmin || managesNetworks(viewer) || perms.some(p => viewer.perms && viewer.perms[p])) return next();
+            const grants = await getAllGrants();
+            const editable = new Set(Object.keys(grants).filter(id => hasGrant(viewer, id, grants, true)));
+            // A grant can outlive its network, so only a network that still exists counts.
+            if (editable.size && (await getNetworks()).some(n => editable.has(String(n.id)))) return next();
+            return res.status(403).json({ error: 'Forbidden' });
+        } catch (err) {
+            console.error('Authorization error:', err.message);
+            res.status(500).json({ error: 'Internal server error' });
+        }
+    };
 }
 
 // Can this viewer view a network (read-only or better)? Admins → all; others → any grant.
@@ -2034,10 +2081,10 @@ app.get('/api/approver-config', requireAdmin, async (req, res) => {
 app.put('/api/approver-config', requireAdmin, async (req, res) => {
     try {
         const b = req.body || {};
-        const out = await setApproverConfig({ groupIds: b.groupIds, telegramChatId: b.telegramChatId, telegramApprovers: b.telegramApprovers });
+        const out = await setApproverConfig({ groupIds: b.groupIds, telegramChatId: b.telegramChatId, telegramApprovers: b.telegramApprovers, delegates: b.delegates });
         // Make sure the callback webhook is registered so Telegram approvals work.
         if (getTelegramConfig().enabled && getTelegramConfig().hasToken && process.env.BASE_URL) telegramSetWebhook(process.env.BASE_URL).catch(() => { });
-        audit(await getViewer(req), 'settings.approvers', '', { groups: out.groupIds.length, tgApprovers: out.telegramApprovers.length });
+        audit(await getViewer(req), 'settings.approvers', '', { groups: out.groupIds.length, tgApprovers: out.telegramApprovers.length, delegates: out.delegates.length });
         res.json({ ...out, webhookConfigured: !!getTelegramConfig().webhookConfigured });
     } catch (err) {
         console.error('Error saving approver config:', err.message);
@@ -2137,9 +2184,13 @@ app.get('/api/request-targets', async (req, res) => {
 });
 
 // Create a request (any logged-in user).
+const { refreshAutoApprovalInventory } = require('./db');
 app.post('/api/access-requests', async (req, res) => {
     try {
-        res.json(await createAccessRequest(req.body || {}, await getViewer(req)));
+        const viewer = await getViewer(req);
+        // Auto-approval decides synchronously - load what blocked targets cover right before it.
+        if ((req.body || {}).kind !== 'bypass') await refreshAutoApprovalInventory().catch(() => { });
+        res.json(await createAccessRequest(req.body || {}, viewer));
     } catch (e) {
         console.error('Error creating access request:', e.message);
         res.status(400).json({ error: e.message || 'Failed to create request' });
@@ -2201,8 +2252,9 @@ app.post('/api/access-requests/:id/deny', requireApprover, async (req, res) => {
 });
 
 // ─── Access Profiles (a named source-groups + protocol/ports bundle = group + policy) ───
-// Listing is available to any editor (to assign a profile to a resource); managing is admin.
-app.get('/api/access-profiles', async (req, res) => {
+// Listing is for network editors (to assign a profile to a resource) and Manage Temporary Access
+// holders (shared profiles are grant targets); managing is admin.
+app.get('/api/access-profiles', requireNetworkEditor('temp.manage'), async (req, res) => {
     try {
         res.json(await listAccessProfiles());
     } catch (err) {
@@ -2277,8 +2329,8 @@ app.put('/api/networks/:id/default-profiles', requireAdmin, async (req, res) => 
     }
 });
 
-// ─── Posture Checks (proxied to NetBird) - list for any editor, manage for admins ───
-app.get('/api/posture-checks', async (req, res) => {
+// ─── Posture Checks (proxied to NetBird) - list for network editors, manage for admins ───
+app.get('/api/posture-checks', requireNetworkEditor(), async (req, res) => {
     try {
         res.json(await listPostureChecks());
     } catch (err) {
@@ -2729,19 +2781,31 @@ app.get('/api/reverse-proxy-domains', requirePerm('proxy.manage'), async (req, r
     }
 });
 
+// The canEditNetwork check the proxy helpers apply to every network they change. Grants are
+// read only when a restricted viewer actually touches a network.
+function networkEditCheck(viewer) {
+    let grants = null;
+    return async (networkId) => {
+        if (viewer.isAdmin || managesNetworks(viewer)) return true;
+        if (!grants) grants = await getAllGrants();
+        return canEditNetwork(viewer, String(networkId || ''), grants);
+    };
+}
+
 // Create a reverse-proxy service (Add Service).
 app.post('/api/reverse-proxy-services', requirePerm('proxy.manage'), async (req, res) => {
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const out = await createProxyService(req.body || {});
+        const viewer = await getViewer(req);
+        const out = await createProxyService(req.body || {}, { canEditNetwork: networkEditCheck(viewer) });
         const t = (req.body && req.body.target) || {};
-        audit(await getViewer(req), 'proxy.create', out.domain, {
+        audit(viewer, 'proxy.create', out.domain, {
             cluster: String((req.body && req.body.cluster) || ''), targetType: String(t.type || ''), port: t.port, protocol: t.protocol || 'http',
         });
         res.json(out);
     } catch (err) {
         console.error('Error creating reverse-proxy service:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to create service' });
+        res.status(err.status === 403 ? 403 : 502).json({ error: err.message || 'Failed to create service' });
     }
 });
 
@@ -2769,15 +2833,16 @@ app.get('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async (r
 app.put('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async (req, res) => {
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const out = await updateProxyService(req.params.id, req.body || {});
-        audit(await getViewer(req), 'proxy.update', String((req.body && req.body.domain) || req.params.id), {
+        const viewer = await getViewer(req);
+        const out = await updateProxyService(req.params.id, req.body || {}, { canEditNetwork: networkEditCheck(viewer) });
+        audit(viewer, 'proxy.update', String((req.body && req.body.domain) || req.params.id), {
             fields: Object.keys(req.body || {}).filter(k => k !== 'domain').join(', ') || 'nothing',
             ...(out.syncedResources && out.syncedResources.length ? { linkedResources: out.syncedResources.join(', ') } : {}),
         });
         res.json(out);
     } catch (err) {
         console.error('Error updating reverse-proxy service:', err.message);
-        res.status(err.status === 409 || err.status === 400 ? err.status : 502).json({ error: err.message || 'Failed to update service' });
+        res.status(err.status === 409 || err.status === 400 || err.status === 403 ? err.status : 502).json({ error: err.message || 'Failed to update service' });
     }
 });
 
@@ -2787,13 +2852,14 @@ app.delete('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async
         // Resolve the domain BEFORE deletion so the audit names the service, not an id.
         let label = req.params.id;
         try { label = (await getProxyServiceRaw(req.params.id)).domain || label; } catch { /* keep id */ }
-        const out = await deleteProxyService(req.params.id);
-        audit(await getViewer(req), 'proxy.delete', label,
+        const viewer = await getViewer(req);
+        const out = await deleteProxyService(req.params.id, { canEditNetwork: networkEditCheck(viewer) });
+        audit(viewer, 'proxy.delete', label,
             out.cleanedResources && out.cleanedResources.length ? { deletedResources: out.cleanedResources.join(', ') } : undefined);
         res.json(out);
     } catch (err) {
         console.error('Error deleting reverse-proxy service:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to delete service' });
+        res.status(err.status === 403 ? 403 : 502).json({ error: err.message || 'Failed to delete service' });
     }
 });
 
@@ -2801,8 +2867,9 @@ app.delete('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async
 app.post('/api/reverse-proxy-services/expose-docker', requirePerm('proxy.manage'), async (req, res) => {
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const out = await exposeDockerService(req.body || {});
-        audit(await getViewer(req), 'proxy.expose', String((req.body && req.body.serviceDomain) || ''), {
+        const viewer = await getViewer(req);
+        const out = await exposeDockerService(req.body || {}, { canEditNetwork: networkEditCheck(viewer) });
+        audit(viewer, 'proxy.expose', String((req.body && req.body.serviceDomain) || ''), {
             container: String((req.body && req.body.containerDomain) || ''),
             network: await netLabel(String((req.body && req.body.networkId) || '')),
             routerAttached: req.body && req.body.routerPeerId ? 'yes' : 'no',
@@ -2810,7 +2877,7 @@ app.post('/api/reverse-proxy-services/expose-docker', requirePerm('proxy.manage'
         res.json(out);
     } catch (err) {
         console.error('Error exposing docker container:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to expose container' });
+        res.status(err.status === 403 ? 403 : 502).json({ error: err.message || 'Failed to expose container' });
     }
 });
 
@@ -3018,6 +3085,8 @@ app.delete('/api/users/:id', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error deleting user:', err.message);
+        // The user is gone from NetBird even though the cleanup after it failed - audit the delete.
+        if (err.userDeleted) audit(await getViewer(req).catch(() => null), 'user.delete', err.userDeleted.label, { cleanupFailed: true });
         res.status(err.status || 502).json({ error: err.message || 'Failed to delete the user' });
     }
 });
@@ -3727,7 +3796,7 @@ app.get('/api/filter-rules/matching', requirePurgeAdmin, async (req, res) => {
             if (!rows.length) break;
             scanned += rows.length;
             for (const row of rows) {
-                if (eventMatchesFilters(row, cfg)) {
+                if (await eventMatchesFilters(row, cfg)) {
                     total++;
                     if (sample.length < SAMPLE) sample.push(row);
                 }
@@ -3751,7 +3820,8 @@ app.post('/api/filter-rules/purge', requirePurgeAdmin, async (req, res) => {
             const rows = await scanEvents(after, SCAN_BATCH);
             if (!rows.length) break;
             after = rows[rows.length - 1].id;
-            const ids = rows.filter(r => eventMatchesFilters(r, cfg)).map(r => r.id);
+            const ids = [];
+            for (const r of rows) if (await eventMatchesFilters(r, cfg)) ids.push(r.id);
             if (ids.length) deleted += await deleteEventsByIds(ids);
             if (rows.length < SCAN_BATCH) break;
         }
@@ -3778,8 +3848,8 @@ app.post('/api/filter-rules/propagate', requireAdmin, async (req, res) => {
     }
 });
 
-// ─── Address blocklist - list readable by any editor (for inline checks); admin manages ───
-app.get('/api/blocklist', async (req, res) => {
+// ─── Address blocklist - list readable by network editors (for inline checks); admin manages ───
+app.get('/api/blocklist', requireNetworkEditor(), async (req, res) => {
     try {
         res.json(await getBlocklist());
     } catch (e) {
@@ -3998,6 +4068,8 @@ app.put('/api/networks/:id/resources/:rid', async (req, res) => {
         if (!canEditNetwork(viewer, req.params.id, grants)) return res.status(403).json({ error: 'Forbidden' });
         const { name, address, description, groups, policies, enabled } = req.body || {};
         if (!name || !address) return res.status(400).json({ error: 'name and address are required' });
+        // The resource must belong to this network before anything below reads or changes it.
+        await getResourceInNetwork(req.params.id, req.params.rid);
         // Blocklist blocks everyone EXCEPT admins - an admin may knowingly override (audited).
         const blocked = addressBlockedForNetwork(address, req.params.id, await getBlocklist());
         if (blocked && !viewer.isAdmin) return res.status(400).json({ error: `Address "${address}" is blocked for this network (matches "${blocked}" on the blocklist).` });
@@ -4023,7 +4095,7 @@ app.put('/api/networks/:id/resources/:rid', async (req, res) => {
         res.json({ status: 'ok', resource: out });
     } catch (err) {
         console.error('Error editing resource:', err.message);
-        res.status(err.status === 400 || err.status === 409 ? err.status : 502).json({ error: err.message || 'Failed to edit resource' });
+        res.status(err.status === 400 || err.status === 404 || err.status === 409 ? err.status : 502).json({ error: err.message || 'Failed to edit resource' });
     }
 });
 
@@ -4060,7 +4132,7 @@ app.delete('/api/networks/:id/resources/:rid', async (req, res) => {
         res.json({ status: 'ok' });
     } catch (err) {
         console.error('Error deleting resource:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to delete resource' });
+        res.status(err.status === 404 ? 404 : 502).json({ error: err.message || 'Failed to delete resource' });
     }
 });
 
@@ -4479,6 +4551,9 @@ async function trackedRun(name, s, fn) {
 // Start server after DB initialization
 async function start() {
     try {
+        // SSO is all or nothing: a partial SSO setup stops the start.
+        const ssoMissing = missingSsoSettings(process.env);
+        if (ssoMissing.length) throw new Error(`SSO is partially configured: set ${ssoMissing.join(', ')}, or clear every OIDC_* variable to run without login`);
         await initializeDatabase();
         // One-time: fill approved_minutes on old approved requests from grants/bypass evidence.
         backfillApprovedDurations().catch(err => console.error('Approved-durations backfill error:', err.message));
@@ -4626,4 +4701,4 @@ async function start() {
 // Tests load the app without starting it (no database, schedulers or listener).
 if (require.main === module) start();
 
-module.exports = { app };
+module.exports = { app, getViewer };

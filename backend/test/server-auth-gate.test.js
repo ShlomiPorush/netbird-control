@@ -229,6 +229,56 @@ test('a session past the absolute cap is still refused (API 401, /login starts a
     assert.ok(startsLogin(again));
 });
 
+// The response removes the session cookie: the last Set-Cookie for it is empty.
+const dropsSession = (r) => {
+    const set = r.headers.getSetCookie().filter((c) => c.startsWith('appSession='));
+    return set.length > 0 && set.at(-1).startsWith('appSession=;');
+};
+
+test('a session ended by the idle timeout stays ended (every later API call 401, /login starts a fresh login)', async (t) => {
+    const cookie = await signIn('idle-session');
+    const post = () => call('POST', '/api/posture-checks/inspect-certificates', { cookie, accept: 'application/json', body: { pems: [] } });
+    assert.equal((await post()).status, 200);
+    // 90 minutes later: past the idle timeout (default 1 h), below the admin cap (default 2 h).
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 90 * 60_000 });
+    const first = await post();
+    assert.equal(first.status, 401);
+    assert.match(first.text, /inactivity/);
+    assert.ok(dropsSession(first));
+    // The same cookie again (a retry, or a request already in flight) is still refused.
+    const again = await post();
+    assert.equal(again.status, 401);
+    assert.match(again.text, /Session expired/);
+    const relogin = await call('GET', '/login?returnTo=/peers', { cookie });
+    assert.ok(startsLogin(relogin));
+    assert.ok(dropsSession(relogin), 'the new login starts without the old session');
+    // A new sign-in starts a new session.
+    const fresh = await signIn('idle-session');
+    assert.equal((await call('POST', '/api/posture-checks/inspect-certificates', { cookie: fresh, accept: 'application/json', body: { pems: [] } })).status, 200);
+});
+
+test('a session ended by the idle timeout stays ended when the timeout is raised or turned off later', async (t) => {
+    const { _security } = require('../lib/security');
+    const idleHours = _security.sessionIdleHours;
+    t.after(() => { _security.sessionIdleHours = idleHours; });
+    const apiCookie = await signIn('idle-api');
+    const loginCookie = await signIn('idle-login');
+    const post = (cookie) => call('POST', '/api/posture-checks/inspect-certificates', { cookie, accept: 'application/json', body: { pems: [] } });
+    assert.equal((await post(apiCookie)).status, 200);
+    assert.equal((await post(loginCookie)).status, 200);
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 90 * 60_000 });
+    // One session is ended by an API call, the other by a visit to /login.
+    assert.equal((await post(apiCookie)).status, 401);
+    const relogin = await call('GET', '/login?returnTo=/peers', { cookie: loginCookie });
+    assert.ok(startsLogin(relogin) && dropsSession(relogin));
+    for (const hours of [8, 0]) {
+        _security.sessionIdleHours = hours;
+        assert.equal((await post(apiCookie)).status, 401, `idle ${hours} h`);
+        assert.equal((await post(loginCookie)).status, 401, `idle ${hours} h`);
+        assert.ok(startsLogin(await call('GET', '/login?returnTo=/peers', { cookie: loginCookie })), `idle ${hours} h`);
+    }
+});
+
 test('auth budget: 30 per minute per IP across /login and automatic login starts; other IPs unaffected', async () => {
     const a = freshIp();
     for (let i = 0; i < 30; i++) assert.ok(startsLogin(await call('GET', '/login', { ip: a })), `request ${i + 1}`);
