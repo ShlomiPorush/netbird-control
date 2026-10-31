@@ -87,6 +87,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   thread, so a slow pattern no longer delays other work. When the regex rules for an event take
   longer than 25 ms, the event is kept. A rule that is too slow twice is skipped for that account
   for 10 minutes, and the server log names the rule.
+- **New requirement: reverse-proxy actions that change a network need edit rights on it.** Attaching
+  a routing peer, creating the resource for a Docker container target, and deleting, disabling or
+  enabling the network resources a service targets now require an `edit` grant on that network,
+  **Manage All Networks**, or admin, in addition to **Manage Reverse Proxy**. Without them the
+  action is refused and nothing changes. Admins and Manage All Networks holders are unaffected.
 - **A user blocked in NetBird has no role, groups or permissions when signed in to the app.** This
   includes admin rights through `ADMIN_GROUP_ID`, approval rights and feature permissions. Unblocking
   restores them.

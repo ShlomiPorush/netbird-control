@@ -1363,12 +1363,14 @@ function proxyAccessActionError(service) {
 // Docker Container), then rewrite it into a normal 'domain' target. If a resource with that
 // exact address already exists in the network it is REUSED, never duplicated. Returns the
 // created resources so a failing service create/update can roll them back.
-async function materializeContainerTargets(rawTargets) {
-    const targets = [];
-    const created = []; // [{ networkId, resourceId }]
+// planContainerTargets is the read-only first pass: it validates every container target, finds
+// the resource it reuses, and checks edit rights on each network where a resource must be
+// created - for ALL targets, before anything is written. materializeContainerTargets creates.
+async function planContainerTargets(rawTargets, canEdit) {
+    const plan = [];
     for (const t of (rawTargets || [])) {
         const type = t && (t.type || t.target_type);
-        if (type !== 'container') { targets.push(t); continue; }
+        if (type !== 'container') { plan.push({ t }); continue; }
         const networkId = String(t.networkId || '').trim();
         if (!networkId) throw new Error('a network is required for a container target');
         const address = String(t.containerDomain || t.host || '').trim().toLowerCase();
@@ -1384,33 +1386,65 @@ async function materializeContainerTargets(rawTargets) {
             const match = (usage.resources || []).find(r => r && inNet.has(r.id) && String(r.address || '').toLowerCase() === address);
             if (match) resourceId = match.id;
         }
-        if (!resourceId) {
-            const { resource } = await createClientResource(networkId, {
-                name: address, address, description: 'Created by reverse-proxy container target', groups: [], policies: [],
-            });
-            resourceId = (resource && resource.id) || null;
-            if (!resourceId) throw new Error('resource creation returned no id');
-            created.push({ networkId, resourceId });
-        }
-        targets.push({ ...t, type: 'domain', target_type: 'domain', id: resourceId, target_id: resourceId });
+        if (!resourceId && !(await canEdit(networkId))) throw networkEditForbidden();
+        plan.push({ t, networkId, address, resourceId });
     }
+    return plan;
+}
+async function materializeContainerTargets(plan) {
+    const targets = [];
+    const created = []; // [{ networkId, resourceId }]
+    const createdByAddress = new Map(); // the same address twice in one request shares one resource
+    try {
+        for (const { t, networkId, address, resourceId: reuseId } of plan) {
+            if (!networkId) { targets.push(t); continue; }
+            let resourceId = reuseId || createdByAddress.get(`${networkId}|${address}`) || null;
+            if (!resourceId) {
+                const { resource } = await createClientResource(networkId, {
+                    name: address, address, description: 'Created by reverse-proxy container target', groups: [], policies: [],
+                });
+                resourceId = (resource && resource.id) || null;
+                if (!resourceId) throw new Error('resource creation returned no id');
+                created.push({ networkId, resourceId });
+                createdByAddress.set(`${networkId}|${address}`, resourceId);
+            }
+            targets.push({ ...t, type: 'domain', target_type: 'domain', id: resourceId, target_id: resourceId });
+        }
+    } catch (e) { await rollbackContainerResources(created); throw e; }
     return { targets, created };
 }
 async function rollbackContainerResources(created) {
     for (const c of (created || [])) await deleteResource(c.networkId, c.resourceId).catch(() => { });
 }
 
+// Proxy actions that change a network (routing peer, resources for container targets, the
+// linked-resource delete/disable/enable) need edit rights on that network. The caller passes
+// opts.canEditNetwork(networkId) → boolean (may be async); without it those changes are refused.
+function networkEditPredicate(opts) {
+    return (opts && typeof opts.canEditNetwork === 'function') ? opts.canEditNetwork : async () => false;
+}
+function networkEditForbidden(msg = 'Forbidden - you cannot edit this network.') {
+    const e = new Error(msg); e.status = 403; return e;
+}
+async function assertCanEditLinked(changes, canEdit) {
+    for (const c of changes) {
+        if (!(await canEdit(c.networkId))) {
+            throw networkEditForbidden('Forbidden - this service targets a network resource in a network you cannot edit. Ask someone who can edit that network.');
+        }
+    }
+}
+
 // Create one HTTPS reverse-proxy service. Targets: peer/resource (NetBird resolves the host
 // from target_id) or 'cluster' = direct upstream (the proxy dials the given host via its own
 // network stack - useful when the self-hosted proxy shares a Docker network with the target).
-async function createProxyService(cfg = {}) {
+async function createProxyService(cfg = {}, opts = {}) {
     const domain = String(cfg.domain || '').trim().toLowerCase();
     if (!DOMAIN_RE.test(domain)) throw new Error('a valid service domain is required (e.g. app.example.com)');
     const cluster = String(cfg.cluster || cfg.proxy_cluster || '').trim();
     if (!cluster) throw new Error('a proxy cluster is required');
     const rawTargets = Array.isArray(cfg.targets) && cfg.targets.length ? cfg.targets : (cfg.target ? [cfg.target] : []);
     if (!rawTargets.length) throw new Error('at least one target is required');
-    const { targets: matTargets, created } = await materializeContainerTargets(rawTargets);
+    const { targets: matTargets, created } = await materializeContainerTargets(await planContainerTargets(rawTargets, networkEditPredicate(opts)));
     try {
         const body = {
             name: String(cfg.name || '').trim() || domain,
@@ -1499,16 +1533,34 @@ function sanitizeProxyService(raw) {
 // Partial update: GET the full service, merge the patch, PUT it back. Password/PIN values
 // are only replaced when a NEW value arrives - otherwise the existing one is kept
 // server-side and never travels to the browser.
-async function updateProxyService(id, patch = {}) {
+async function updateProxyService(id, patch = {}, opts = {}) {
+    const canEdit = networkEditPredicate(opts);
     const raw = await getProxyServiceRaw(id);
     const body = { ...raw };
     if (patch.name !== undefined) body.name = String(patch.name).trim() || raw.name;
     if (patch.enabled !== undefined) body.enabled = !!patch.enabled;
+    // Enable/disable follows through to the resources the service targets - work out which ones
+    // change and check the caller may edit their networks BEFORE writing anything.
+    const toggled = patch.enabled !== undefined && !!patch.enabled !== (raw.enabled !== false);
+    let linked = [];
     let createdContainerRes = [];
     if (patch.targets !== undefined) {
         if (!Array.isArray(patch.targets) || !patch.targets.length) throw new Error('at least one target is required');
-        const { targets: matTargets, created } = await materializeContainerTargets(patch.targets);
+        const plan = await planContainerTargets(patch.targets, canEdit);
+        if (toggled) {
+            // A resource still to be created is left out here - its network was checked above.
+            const planned = plan.filter(p => !p.networkId || p.resourceId).map(p => buildProxyTarget(p.networkId
+                ? { ...p.t, type: 'domain', target_type: 'domain', id: p.resourceId, target_id: p.resourceId } : p.t));
+            linked = await linkedProxyResourceChanges({ id, targets: planned }, patch.enabled ? 'enable' : 'disable');
+            await assertCanEditLinked(linked, canEdit);
+        }
+        const { targets: matTargets, created } = await materializeContainerTargets(plan);
         createdContainerRes = created;
+        // A resource just created for a container target follows the service's new state too;
+        // its network was checked before it was created.
+        if (toggled && created.length) {
+            linked = linked.concat(await linkedProxyResourceChanges({ id, targets: created.map(c => ({ target_type: 'domain', target_id: c.resourceId })) }, patch.enabled ? 'enable' : 'disable'));
+        }
         // Keep fields the app doesn't model on targets that already existed. Refuses (409) an
         // ambiguous edit - then a resource just created for a container target must not outlive it.
         try { body.targets = mergeProxyTargets(raw.targets, matTargets.map(buildProxyTarget)); }
@@ -1570,6 +1622,11 @@ async function updateProxyService(id, patch = {}) {
         await rollbackContainerResources(createdContainerRes);
         const e = new Error(accessErr); e.status = 400; throw e;
     }
+    // Without a target edit the check runs here - nothing has been written yet.
+    if (toggled && patch.targets === undefined) {
+        linked = await linkedProxyResourceChanges({ id, targets: body.targets }, patch.enabled ? 'enable' : 'disable');
+        await assertCanEditLinked(linked, canEdit);
+    }
     const resp = await netbirdReq('PUT', '/api/reverse-proxies/services/' + encodeURIComponent(id), body);
     if (!resp || resp.status >= 300) {
         // A resource created for a NEW container target must not outlive a failed update.
@@ -1577,10 +1634,9 @@ async function updateProxyService(id, patch = {}) {
         throw new Error('Failed to update service: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
     bustReverseProxyCache();
-    // Enable/disable follows through to the resources the service targets.
     let syncedResources = [];
-    if (patch.enabled !== undefined && !!patch.enabled !== (raw.enabled !== false)) {
-        syncedResources = await syncLinkedProxyResources({ id, targets: body.targets }, patch.enabled ? 'enable' : 'disable');
+    if (toggled) {
+        syncedResources = await syncLinkedProxyResources(linked, patch.enabled ? 'enable' : 'disable');
     }
     return { id, syncedResources };
 }
@@ -1594,8 +1650,10 @@ function proxyResourceTargetIds(svc) {
 
 // Keep linked network resources in step with their service: deleting a service deletes the
 // resources it targeted, disabling/enabling a service disables/enables them. A resource still
-// referenced by ANOTHER service (any for delete, an enabled one for disable) is left alone.
-async function syncLinkedProxyResources(svc, mode) {
+// referenced by ANOTHER service (any for delete, an enabled one for disable) is left alone, and
+// so is one already in the requested state. Returns the resources that WILL change,
+// [{ rid, networkId, r }], so the caller can check network edit rights before any write.
+async function linkedProxyResourceChanges(svc, mode) {
     const ids = proxyResourceTargetIds(svc);
     if (!ids.length) return [];
     const services = await netbirdGet('/api/reverse-proxies/services').catch(() => null);
@@ -1607,22 +1665,33 @@ async function syncLinkedProxyResources(svc, mode) {
     for (const n of (Array.isArray(nets) ? nets : [])) {
         for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOf.set(rid, n.id);
     }
-    const done = [];
+    const changes = [];
     for (const rid of ids) {
         const networkId = netOf.get(rid);
         if (!networkId) continue; // already gone / not a network resource
+        if (mode !== 'enable' && usedElsewhere(rid)) continue;
+        if (mode === 'delete') { changes.push({ rid, networkId }); continue; }
+        let r = null;
+        try { r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`); }
+        catch (e) { console.error('[proxy] linked resource sync failed:', mode, rid, e.message); }
+        if (!r || !r.id) continue;
+        if ((r.enabled !== false) === (mode === 'enable')) continue; // already in the right state
+        changes.push({ rid, networkId, r });
+    }
+    return changes;
+}
+
+async function syncLinkedProxyResources(changes, mode) {
+    const done = [];
+    for (const { rid, networkId, r } of changes) {
         try {
-            if (mode !== 'enable' && usedElsewhere(rid)) continue;
             if (mode === 'delete') {
                 let name = rid;
                 try { name = ((await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`)) || {}).name || rid; } catch { /* keep id */ }
                 await deleteResource(networkId, rid);
                 done.push(name);
             } else {
-                const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`);
-                if (!r || !r.id) continue;
                 const enabled = mode === 'enable';
-                if ((r.enabled !== false) === enabled) continue; // already in the right state
                 const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`, {
                     name: r.name, address: r.address, description: r.description || '', enabled,
                     groups: (Array.isArray(r.groups) ? r.groups : []).map(g => (g && g.id) || g).filter(Boolean),
@@ -1636,16 +1705,18 @@ async function syncLinkedProxyResources(svc, mode) {
     return done;
 }
 
-async function deleteProxyService(id) {
+async function deleteProxyService(id, opts = {}) {
     // Snapshot the service BEFORE deletion - afterwards its targets are gone.
     let svc = null;
     try { svc = await getProxyServiceRaw(id); } catch { /* service may already be gone */ }
+    const linked = svc ? await linkedProxyResourceChanges(svc, 'delete') : [];
+    await assertCanEditLinked(linked, networkEditPredicate(opts));
     const resp = await netbirdReq('DELETE', '/api/reverse-proxies/services/' + encodeURIComponent(id));
     if (!resp || (resp.status >= 300 && resp.status !== 404)) {
         throw new Error('Failed to delete service: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
     bustReverseProxyCache();
-    const cleanedResources = svc ? await syncLinkedProxyResources(svc, 'delete') : [];
+    const cleanedResources = await syncLinkedProxyResources(linked, 'delete');
     return { ok: true, cleanedResources };
 }
 
@@ -1653,9 +1724,10 @@ async function deleteProxyService(id) {
 // DOMAIN resource (the container's DNS name, resolved by the routing peer on the Docker
 // host) → create a service targeting that resource. Any step failing tears down whatever
 // this call already created - nothing half-configured is left behind.
-async function exposeDockerService(cfg = {}) {
+async function exposeDockerService(cfg = {}, opts = {}) {
     const networkId = String(cfg.networkId || '').trim();
     if (!networkId) throw new Error('a network is required');
+    if (!(await networkEditPredicate(opts)(networkId))) throw networkEditForbidden();
     const address = String(cfg.containerDomain || '').trim().toLowerCase();
     if (!DOMAIN_RE.test(address)) throw new Error('the container address must be a domain name (e.g. app.internal)');
     const blocked = addressBlockedForNetwork(address, networkId, await getBlocklist());
