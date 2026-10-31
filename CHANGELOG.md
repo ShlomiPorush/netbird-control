@@ -92,6 +92,17 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   enabling the network resources a service targets now require an `edit` grant on that network,
   **Manage All Networks**, or admin, in addition to **Manage Reverse Proxy**. Without them the
   action is refused and nothing changes. Admins and Manage All Networks holders are unaffected.
+- **A user blocked in NetBird has no role, groups or permissions when signed in to the app.** This
+  includes admin rights through `ADMIN_GROUP_ID`, approval rights and feature permissions. Unblocking
+  restores them.
+- **Direct feature permissions and approval delegations apply only to an existing, unblocked NetBird
+  user.** Permissions granted through Entra groups and admin rights through `ADMIN_GROUP_ID` still
+  apply to people without a NetBird user.
+- **Deleting a user in the main account also removes them** from directly granted feature
+  permissions, approval delegations and the Telegram approver mapping.
+- **A Telegram approver acts only while their system user exists in NetBird and is not blocked.**
+  Button presses and denial replies from a blocked or deleted user are refused. An approver entry
+  that is not tied to a system user keeps working.
 
 ---
 
