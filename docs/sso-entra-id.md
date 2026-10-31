@@ -31,6 +31,8 @@ Group-based admin (`ADMIN_GROUP_ID`) and AD-group **network grants** work by rea
 | Object ID of your admin group (Entra → **Groups** → the group → *Object Id*) | `ADMIN_GROUP_ID` |
 | `openssl rand -hex 32` | `SESSION_SECRET` |
 
+**New requirement:** the first four are required together: if any `OIDC_*` variable is set and one of the four is missing, the app does not start and logs the missing names.
+
 The app derives the Graph tenant from `OIDC_ISSUER_BASE_URL` (it strips the trailing `/v2.0`) and requests the `openid profile email` scopes at login - **no separate Graph app registration is required.** `ADMIN_GROUP_ID` is optional: leave it blank to rely solely on the NetBird role, or set it to make a group's members admins.
 
 ## 4. Verify group resolution
