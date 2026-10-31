@@ -2137,9 +2137,13 @@ app.get('/api/request-targets', async (req, res) => {
 });
 
 // Create a request (any logged-in user).
+const { refreshAutoApprovalInventory } = require('./db');
 app.post('/api/access-requests', async (req, res) => {
     try {
-        res.json(await createAccessRequest(req.body || {}, await getViewer(req)));
+        const viewer = await getViewer(req);
+        // Auto-approval decides synchronously - load what blocked targets cover right before it.
+        if ((req.body || {}).kind !== 'bypass') await refreshAutoApprovalInventory().catch(() => { });
+        res.json(await createAccessRequest(req.body || {}, viewer));
     } catch (e) {
         console.error('Error creating access request:', e.message);
         res.status(400).json({ error: e.message || 'Failed to create request' });

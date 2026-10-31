@@ -11,6 +11,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **Blocked resources and networks of a trusted auto-approval entry also cover related targets.**
+  A blocked resource also sends its network and any access profile whose group contains it to
+  review. A blocked network also sends its resources and the access profiles that contain them to
+  review.
 - **Access requests use the server's catalogue for every target.** Only resources, networks and
   shared access profiles can be requested. When a request is submitted and again when it is
   approved, the server sets each target's name, network, profile group and port scope from the
@@ -22,6 +26,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   request. This also applies to a request that went to review after an auto-approval rule pinned
   its ports and the grant could not be created, if the request was pending before the upgrade.
   The user can submit that request again, and the rule approves it as before.
+
+### Changed
+- **New requirement:** a trusted entry with blocked targets reads the current networks and
+  resources from NetBird when a request is submitted. If NetBird can't be read completely, that
+  entry sends network, resource and access-profile requests to review instead of auto-approving
+  them.
 
 ---
 

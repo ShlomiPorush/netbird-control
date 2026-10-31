@@ -594,6 +594,71 @@ async function setAutoApprovalConfig({ trusted, rules } = {}) {
     await persistAutoApproval();
     return getAutoApprovalConfig();
 }
+// Blocked Targets cover what a grant reaches: a network grant covers all of its resources and a
+// profile grant every resource in the profile's group. autoApproveTargets is synchronous, so the
+// request route reads this inventory (network ↔ resource ↔ group membership) live from NetBird
+// right before deciding. Only entries WITH blocked targets need it; when it's missing, stale,
+// or inconsistent, their non-exact network/resource/profile matches fall back to review.
+const AA_INVENTORY_MAX_AGE_MS = 30 * 1000;
+let _aaInventory = null, _aaSeq = 0, _aaApplied = 0;
+async function refreshAutoApprovalInventory() {
+    if (!netbirdApiConfigured() || NETBIRD_READONLY) return;
+    if (!_autoApproval.trusted.some(tr => tr.enabled !== false && tr.excludedTargets.length)) return;
+    const seq = ++_aaSeq, startedAt = Date.now();
+    const [networks, resources] = await Promise.all([
+        netbirdGet('/api/networks').catch(() => null),
+        netbirdGet('/api/networks/resources').catch(() => null),
+    ]);
+    let next = null;
+    // Both lists must be readable and agree on the same resource ids. NetBird sends null for an
+    // empty list (a network without resources, a resource without groups).
+    const list = (v) => v == null ? [] : v;
+    if (Array.isArray(networks) && Array.isArray(resources) && resources.every(r => r && r.id && Array.isArray(list(r.groups)))
+        && networks.every(n => n && n.id && Array.isArray(list(n.resources)))) {
+        const networkIds = new Set(networks.map(n => String(n.id)));
+        const netOfResource = new Map();
+        for (const n of networks) for (const rid of list(n.resources)) netOfResource.set(String(rid), String(n.id));
+        // All-null groups can also mean group data wasn't readable - then profile membership is unknown.
+        const groupsKnown = resources.every(r => Array.isArray(r.groups)) || resources.some(r => Array.isArray(r.groups) && r.groups.length);
+        const resourcesOfGroup = new Map();
+        for (const r of resources) {
+            for (const g of list(r.groups)) {
+                const gid = String((g && g.id) || g || '');
+                if (!gid) continue;
+                if (!resourcesOfGroup.has(gid)) resourcesOfGroup.set(gid, []);
+                resourcesOfGroup.get(gid).push(String(r.id));
+            }
+        }
+        const resourceIds = new Set(resources.map(r => String(r.id)));
+        if (resourceIds.size === netOfResource.size && [...resourceIds].every(id => netOfResource.has(id))) {
+            next = { startedAt, tenant: currentTenantAccount(), networkIds, netOfResource, resourcesOfGroup: groupsKnown ? resourcesOfGroup : null };
+        }
+    }
+    // A newer attempt's outcome (success or failure) is never overwritten by an older one.
+    if (seq > _aaApplied) { _aaApplied = seq; _aaInventory = next; }
+}
+// Whether trusted entry `tr` must leave target `t` to review: an exact match, or (via the
+// inventory) a network/resource/profile that contains or is inside a blocked resource or network.
+function isBlockedForEntry(tr, t) {
+    const ex = tr.excludedTargets;
+    if (!ex.length) return false;
+    if (ex.some(x => x.type === t.type && x.id === String(t.id))) return true;
+    if (!['network', 'resource', 'profile'].includes(t.type)) return false;
+    const inv = _aaInventory;
+    if (!inv || inv.tenant !== currentTenantAccount() || Date.now() - inv.startedAt > AA_INVENTORY_MAX_AGE_MS) return true;
+    const blockedRes = new Set(ex.filter(x => x.type === 'resource').map(x => x.id));
+    const blockedNet = new Set(ex.filter(x => x.type === 'network').map(x => x.id));
+    const id = String(t.id);
+    if (t.type === 'resource') return !inv.netOfResource.has(id) || blockedNet.has(inv.netOfResource.get(id));
+    if (t.type === 'network') {
+        if (!inv.networkIds.has(id)) return true;
+        for (const [rid, nid] of inv.netOfResource) if (nid === id && blockedRes.has(rid)) return true;
+        return false;
+    }
+    if (!t.groupId || !inv.resourcesOfGroup) return true;
+    return (inv.resourcesOfGroup.get(String(t.groupId)) || []).some(rid => blockedRes.has(rid) || blockedNet.has(inv.netOfResource.get(rid)));
+}
+
 // Per-target decision for a requester with Entra groups `groups`:
 // { auto: [{ t, cap }], manual: [t…] } - cap is that target's effective max (0 = as requested).
 // A trusted entry does NOT apply to targets it excludes (those fall back to review, unless a
@@ -614,7 +679,7 @@ function autoApproveTargets(targets, groups) {
         let unrestricted = false;
         const specs = [];
         for (const tr of trustedEntries) {
-            if (tr.excludedTargets.some(x => x.type === t.type && x.id === String(t.id))) continue; // blocked for this entry
+            if (isBlockedForEntry(tr, t)) continue; // blocked for this entry
             const nid = netOf(t);
             if (tr.networkMode === 'allow' && !(nid && tr.networks.some(n => n.id === nid))) continue; // outside the approved networks
             if (tr.networkMode === 'block' && nid && tr.networks.some(n => n.id === nid)) continue;    // inside a blocked network
@@ -11415,7 +11480,8 @@ module.exports = {
     // Pure helpers exposed ONLY for unit tests (backend/test) - not part of the app API.
     _internal: { comboKey, combosForResource, ALL_COMBO, splitPortTokens, mergeRulePorts, normSecurityConfig, humanDuration, stableStringify, normDelegates, normEdrAutoBypass, edrOsKey, ruleForPut, carryRuleExtras, ruleHasUnmodeled, policiesSourcingResources, editorProtocol,
         normalizeTenantDefaults, nbShapeFromSettings, nbSettingsFromProfile, dropUnsupportedNbSettings, proxyAccessActionError,
-        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup },
+        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup, autoApproveTargets },
+    refreshAutoApprovalInventory,
     listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess,
     getSecurityConfig, setSecurityConfig,
     getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS,
