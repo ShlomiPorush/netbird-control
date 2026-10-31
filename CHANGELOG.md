@@ -80,6 +80,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   apply to people without a NetBird user.
 - **Deleting a user in the main account also removes them** from directly granted feature
   permissions, approval delegations and the Telegram approver mapping.
+- **A Telegram approver acts only while their system user exists in NetBird and is not blocked.**
+  Button presses and denial replies from a blocked or deleted user are refused. An approver entry
+  that is not tied to a system user keeps working.
 
 ---
 

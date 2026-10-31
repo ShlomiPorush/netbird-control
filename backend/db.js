@@ -5322,6 +5322,11 @@ async function setUserBlocked(id, blocked) {
     // Refresh the mirror now (bypassing the TTL) so is_blocked flips immediately on the Users page.
     // A refresh already in flight may have read the list before this change - let it land first.
     await settleUserRefreshes(acct);
+    // Record the new state in the mirror row itself, so it holds even if the refresh below fails.
+    await pool.query(
+        `UPDATE users SET raw_json = jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{is_blocked}', to_jsonb($3::boolean)) WHERE tenant = $2 AND user_id = $1`,
+        [id, acct, !!blocked]
+    ).catch(err => console.error('[UserResolve] block state update error:', err.message));
     _usersLastRefresh.set(acct, 0);
     await refreshUsersCache().catch(err => console.error('[UserResolve] post-block refresh error:', err.message));
     return { ok: true, name: row.display_name || '', email: row.email || '', label, blocked: !!blocked };
@@ -11454,6 +11459,20 @@ async function sendAccessReviewDigest({ force = false } = {}) {
     return { telegram: !!tgSent, emails: emailsSent };
 }
 
+// A Telegram approver acts only while the system user it maps to exists in NetBird and is not
+// blocked there. An entry without a user id is matched by its email; an entry with neither is not
+// tied to a person and keeps working. A failed lookup refuses.
+async function telegramApproverActive(approver) {
+    const id = approver.userId, email = String(approver.email || '').trim();
+    if (!id && !email) return true;
+    await ensureUsersFresh().catch(() => { });
+    const r = await pool.query(
+        `SELECT (raw_json->>'is_blocked') = 'true' AS is_blocked FROM users WHERE tenant = '' AND ${id ? 'user_id = $1' : 'LOWER(email) = LOWER($1)'}`,
+        [id || email]
+    ).catch(() => ({ rows: [] }));
+    return r.rows.length > 0 && r.rows.every(x => !x.is_blocked);
+}
+
 // Handle a Telegram update: either a button press (callback_query) or a reply carrying a denial
 // reason (message). The webhook is subscribed to both.
 async function handleTelegramCallback(update) {
@@ -11464,7 +11483,7 @@ async function handleTelegramCallback(update) {
     // Authorize by the Telegram id, and resolve it to the mapped SYSTEM user so the decision is
     // attributed to the real person in the audit log - not their Telegram handle.
     const approver = getApproverByTelegramId(from.id);
-    if (!approver) {
+    if (!approver || !(await telegramApproverActive(approver))) {
         await answerCallbackQuery(cq.id, '⛔ You are not authorized to approve access requests.');
         return;
     }
@@ -11541,7 +11560,7 @@ async function handleTelegramReplyMessage(msg) {
     const mk = reply.text.match(/DENY request #(\d+)/i);   // only our deny prompt qualifies
     if (!mk) return;
     const approver = getApproverByTelegramId((msg.from || {}).id);
-    if (!approver) return;                                  // silently ignore non-approvers
+    if (!approver || !(await telegramApproverActive(approver))) return; // silently ignore non-approvers
     const reason = String(msg.text || '').trim();
     if (!reason) return;
     const id = parseInt(mk[1], 10);

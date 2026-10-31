@@ -17,8 +17,10 @@ let liveUsers = [];   // what NetBird's user list answers
 let gateOnce = null;  // when set, a user-list read (after skipping gateSkip reads) takes its snapshot, then waits on it
 let gateSkip = 0;
 let gateHit = false;
+let listDown = false;  // NetBird answers the user-list reads with nothing
 nb.netbirdGet = async (path) => {
     if (path === '/api/users/current') return { id: 'svc' };
+    if (listDown && path.startsWith('/api/users')) return null;
     if (path === '/api/users?service_user=true') return [];
     if (path === '/api/users') {
         const snapshot = JSON.parse(JSON.stringify(liveUsers));
@@ -39,6 +41,13 @@ nb.netbirdPut = async (path, body) => {
 };
 nb.bustNbCaches = () => { };
 nb.refreshBypassedPeers = async () => { };
+
+// ── Telegram transport stubs, recorded per call ──
+const tg = require('../lib/telegram');
+const tgCalls = [];
+tg.telegramApi = async (method) => { tgCalls.push(method); return { ok: true }; };
+tg.answerCallbackQuery = async (id, text) => { tgCalls.push(`answer:${text}`); };
+tg.editTelegramReplyMarkup = async () => { tgCalls.push('editMarkup'); };
 
 // ── An in-memory stand-in for the users mirror and app_settings ──
 const core = require('../lib/core');
@@ -89,8 +98,17 @@ async function query(sql, params = []) {
     }
     if (/FROM users WHERE tenant = '' AND LOWER\(email\)/.test(sql)) {
         emailLookups++;
-        const r = [...users.values()].find(x => x.tenant === '' && String(x.email).toLowerCase() === String(params[0]).toLowerCase());
+        const rows = [...users.values()].filter(x => x.tenant === '' && String(x.email).toLowerCase() === String(params[0]).toLowerCase());
+        return { rows: rows.map(r => viewerRow(r, sql)) };
+    }
+    if (/FROM users WHERE tenant = '' AND user_id = \$1/.test(sql)) {
+        const r = users.get('|' + params[0]);
         return { rows: r ? [viewerRow(r, sql)] : [] };
+    }
+    if (/UPDATE users SET raw_json = jsonb_set/.test(sql)) {
+        const r = users.get(`${params[1]}|${params[0]}`);
+        if (r) r.raw_json = { ...r.raw_json, is_blocked: params[2] };
+        return { rows: [] };
     }
     return { rows: [] };
 }
@@ -126,7 +144,7 @@ function withNetbirdApi(fn) {
 
 beforeEach(async () => {
     users.clear(); settings.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
-    failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0;
+    failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0; listDown = false; tgCalls.length = 0;
     for (const k of Object.keys(adGroupsByOid)) delete adGroupsByOid[k];
     await db.setFeaturePermsConfig({
         'networks.manage': { users: [ME, OTHER], groupIds: [] },
@@ -347,4 +365,62 @@ test('a user-list refresh that started before a block does not leave the user un
     await Promise.all([refresh, blocking]);
     assert.equal(users.get('|u-me').raw_json.is_blocked, true);
     assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+}));
+
+// ── Telegram approvals: a mapped approver acts only while their NetBird user exists and is not blocked ──
+const press = (tgId) => db.handleTelegramCallback({
+    callback_query: { id: 'q', from: { id: tgId }, data: 'req:deny:7', message: { chat: { id: -1 }, message_id: 5 } },
+});
+const denyReply = (tgId) => db.handleTelegramCallback({
+    message: {
+        from: { id: tgId }, text: 'not now', chat: { id: -1 }, message_id: 9,
+        reply_to_message: { text: 'Reply to this message with a reason to DENY request #7.', message_id: 8 },
+    },
+});
+// Whether this Telegram user may act: a button press opens the deny menu, and a deny reply is
+// answered in the chat. Both must agree.
+async function tgActs(tgId) {
+    tgCalls.length = 0;
+    await press(tgId);
+    const pressed = tgCalls.includes('editMarkup');
+    assert.equal(pressed, !tgCalls.some(c => /not authorized/.test(c)), JSON.stringify(tgCalls));
+    tgCalls.length = 0;
+    await denyReply(tgId);
+    assert.equal(tgCalls.includes('sendMessage'), pressed, 'the deny reply and the button press disagree: ' + JSON.stringify(tgCalls));
+    return pressed;
+}
+
+test('a Telegram approver whose user is blocked in NetBird can neither press the buttons nor reply with a denial', async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: true });
+    assert.equal(await tgActs(1), false);
+    assert.equal(await tgActs(2), false); // an entry without a user id, matched by the blocked user's email
+    users.get('|u-me').raw_json.is_blocked = false;
+    assert.equal(await tgActs(1), true);
+    assert.equal(await tgActs(2), true);
+});
+
+test('a Telegram approver whose user no longer exists cannot act, and an entry tied to no user still can', async () => {
+    userRow(ME.id, ME.email, { role: 'user' });
+    assert.equal(await tgActs(1), true);
+    assert.equal(await tgActs(3), false); // mapped to a user with no NetBird user
+    assert.equal(await tgActs(4), true);  // no user id and no email
+    assert.equal(await tgActs(99), false); // not an approver at all
+});
+
+test('an entry matched by email is refused when any NetBird user with that email is blocked', async () => {
+    userRow(ME.id, ME.email, { role: 'user' });
+    userRow('u-twin', ME.email, { role: 'user', is_blocked: true });
+    assert.equal(await tgActs(2), false);
+    assert.equal(await tgActs(1), true); // the id-mapped entry checks only its own user
+});
+
+test('blocking a user in the app holds even when the user-list refresh after it fails', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+    db.resetNbCaches();
+    listDown = true;
+    await db.setUserBlocked(ME.id, true);
+    assert.equal(users.get('|u-me').raw_json.is_blocked, true);
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal(await tgActs(1), false);
 }));

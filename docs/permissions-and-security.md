@@ -8,7 +8,7 @@ How the app decides **who sees what** and **who can change what**, and how it pr
 - **Admin** = the NetBird `owner`/`admin` role, **or** membership in `ADMIN_GROUP_ID` (resolved from Microsoft Graph).
 - **Approver** (a scoped role, not full admin) = an admin **or** a member of a configured **Entra approver group** (Settings → Approvals). Approvers can approve/deny [Access Requests](access-requests.md) and see that page - nothing else admin-only. Like the admin group, it needs the Graph group-read permission to resolve membership.
 - **Restricted users** (everyone else) see only their **own** activity and peers, and only the networks they've been **granted** edit/view access to.
-- **Blocked users** - a user blocked in NetBird has **no role, groups or permissions** when signed in to the app: not admin (even as a member of `ADMIN_GROUP_ID`), not an approver, and no feature permissions. Unblocking restores them. The change applies on the user's next request once the user list syncs - at once when blocked from this app, otherwise within the 10-minute sync.
+- **Blocked users** - a user blocked in NetBird has **no role, groups or permissions** when signed in to the app: not admin (even as a member of `ADMIN_GROUP_ID`), not an approver (in the app or from Telegram), and no feature permissions. Unblocking restores them. The change applies on the user's next request once the user list syncs - at once when blocked from this app, otherwise within the 10-minute sync.
 - **Open mode** - if OIDC isn't configured, SSO is **disabled and the app is fully open** (everyone is admin). Only for a trusted/private network.
 
 ## Feature permissions (per-capability grants)
