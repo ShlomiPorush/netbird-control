@@ -26,5 +26,6 @@ If noise slipped in before a rule existed, the **purge tool** removes it - but i
 ## Gotchas
 
 - Filtering only affects **flow/traffic** noise; management/audit events are always kept.
+- **Regex rules have a time limit.** All regex rules for one event get 25 ms together. If they take longer, the event is kept, as if no regex rule matched (the purge tool leaves such a stored row in place too). A rule that is too slow twice is skipped for that account for 10 minutes, and the server log names it (`Filter rule #<id> … skipped`). Keep patterns simple, or use the other match types.
 - Purge acts on the **current** filter definition - widen or narrow the rules first to control exactly what it will match.
 - The scan is a preview; nothing is deleted until you confirm the purge.

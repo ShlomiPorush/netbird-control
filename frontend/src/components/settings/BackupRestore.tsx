@@ -154,14 +154,15 @@ function PlaintextExportCard() {
         confirmText: 'Restore',
       });
       if (!ok) return;
-      const result = await api.post<{ imported: number; tables?: Record<string, number>; skipped?: Record<string, number> }>('/api/settings-import', parsed);
+      const result = await api.post<{ imported: number; tables?: Record<string, number>; skipped?: Record<string, number>; skippedSettings?: { key: string; reason: string }[] }>('/api/settings-import', parsed);
       qc.invalidateQueries();
       const tableRows = Object.values(result.tables || {}).reduce((n, v) => n + (v || 0), 0);
       const skipped = Object.values(result.skipped || {}).reduce((n, v) => n + (v || 0), 0);
       setMsg(`Restored ${result.imported} settings`
         + (result.tables && Object.keys(result.tables).length ? ` plus ${tableRows} configuration rows` : '')
         + (skipped ? ` (${skipped} malformed rows skipped)` : '')
-        + ' - applied immediately.');
+        + ' - applied immediately.'
+        + (result.skippedSettings?.length ? ` Skipped: ${result.skippedSettings.map(s => `${s.key} (${s.reason})`).join('; ')}.` : ''));
     } catch (e) { setErr('Import failed: ' + (e as Error).message); }
     if (fileRef.current) fileRef.current.value = '';
   };
