@@ -323,12 +323,12 @@ app.get('/login-wait.js', (req, res) => {
 app.post('/api/integrations/telegram/callback', async (req, res) => {
     try {
         const secret = getTelegramWebhookSecret();
-        if (secret) {
-            if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
-            if (!safeEqual(req.headers['x-telegram-bot-api-secret-token'], secret)) {
-                noteAuthFail(req.ip);
-                return res.status(403).json({ error: 'forbidden' });
-            }
+        // No secret is stored until the webhook is registered, so nothing can prove the update came from Telegram.
+        if (!secret) return res.status(403).json({ error: 'forbidden' });
+        if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
+        if (!safeEqual(req.headers['x-telegram-bot-api-secret-token'], secret)) {
+            noteAuthFail(req.ip);
+            return res.status(403).json({ error: 'forbidden' });
         }
         await handleTelegramCallback(req.body || {});
     } catch (e) {
