@@ -21,7 +21,7 @@ How the app decides **who sees what** and **who can change what**, and how it pr
 | **View Audit Logs** | The **Admin** page: app change audit, NetBird admin activity, statistics, IP history, and the outbound notifications log (Admin → Notifications) - which now includes a full **Preview** of each sent email / Telegram message, rendered inside a sandboxed iframe. |
 | **Manage Temporary Access** | The **Temporary Access** page - create, extend, and revoke grants, including recurring rules (plus the user/group pickers it needs). |
 | **Manage All Networks** | Admin-grade access to **every** network: view/edit all resources, routing peers and per-resource policies, and create/rename/delete networks. Implies seeing **all peers** (needed to pick routing peers). |
-| **Manage Reverse Proxy** | The **Reverse Proxy** page (services + access logs) and creating/editing proxy services, including the Expose Docker Container wizard. |
+| **Manage Reverse Proxy** | The **Reverse Proxy** page (services + access logs) and creating/editing proxy services, including the Expose Docker Container wizard. A proxy action that changes a network also needs edit rights on that network (an `edit` grant, **Manage All Networks**, or admin): attaching a routing peer, creating the resource for a Docker container target, and deleting, disabling or enabling the network resources a service targets when the service is deleted, disabled or enabled. Without them the whole action is refused (403) and nothing changes. |
 | **Troubleshoot All Peers** | Support desk: pick **any** device on the **Troubleshoot** page and run diagnostics on it. Read-only - grants no management rights and does **not** unlock the Peers page. |
 | **Tenant Support** | MSP support desk: see the tenant switcher and manage any linked tenant *like an admin - but only inside the tenant* (all in-context pages incl. Troubleshoot). No admin rights on the main account, no tenant creation/edit/deletion. See [MSP Tenants - Support users](msp-tenants.md#support-users). |
 
@@ -54,7 +54,7 @@ Signed-in sessions are deliberately short to reduce exposure. All three limits a
 |---|---|---|
 | Idle Timeout | 1h | Everyone - signed out after this much **inactivity** (activity extends the session) |
 | User Session Cap | 6h | Regular users - **absolute** cap; re-login required this long after signing in, active or not |
-| Admin Session Cap | 2h | Admins - a **stricter absolute** cap |
+| Admin Session Cap | 2h | Admins, and Tenant Support users while they manage a tenant - a **stricter absolute** cap |
 
 The absolute caps are measured from the ID token's issue time - stamped at the actual login and *not* extended by activity - so past a cap the session cookie is dropped, the API answers 401 and the app redirects to sign-in. A stolen session cookie is therefore useful for at most the remaining window, and an admin cookie for at most the admin cap. (Note: if the user's Entra session is still alive, the re-login may complete silently via SSO - the protection targets the app's own cookie, not the IdP session.)
 

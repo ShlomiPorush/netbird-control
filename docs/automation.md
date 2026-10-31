@@ -7,6 +7,7 @@ Connect an **external HTTP source** that returns IP addresses and **auto-provisi
 ## Configuring an integration
 
 - **Connection** - endpoint URL + auth (`none` / `bearer` / custom `header`; the secret is **write-only**).
+  The source must send its **complete response within 30 seconds** and **at most 10 MiB** (10,485,760 bytes). A slower or larger response stops the request, and the run (or the test) fails with an error before any resource changes.
 - **Source format** -
   - **JSON**: an *items path* (dot-path to the array) + field mapping (**address**, name, description, and a **key** = stable external id used for dedupe; falls back to the address).
   - **Text**: one IP per line (`#` comments ignored), optional name prefix.

@@ -561,6 +561,9 @@ if (AUTH_ENABLED) {
                 return kill('Session expired - please sign in again');
             }
             if (sec.adminSessionMaxHours > 0 && ageHours > sec.adminSessionMaxHours) {
+                // Set before the role lookup (which may fail): the tenant middleware calls this
+                // instead of granting a Tenant Support user admin rights inside a tenant.
+                req.adminSessionExpired = () => kill('Admin session expired - please sign in again');
                 const viewer = await getViewer(req); // only resolved once past the admin threshold
                 if (viewer.isAdmin) return kill('Admin session expired - please sign in again');
             }
@@ -688,7 +691,11 @@ app.use('/api', async (req, res, next) => {
         // validated in-context request only. The flag is set ONLY after the allowlist check passes,
         // so it never covers TENANT_PLAIN_PREFIXES (e.g. /api/msp CRUD) or a headerless request -
         // getViewer returns an elevated per-request copy that keeps the real identity for audits.
-        if (!viewer.isAdmin) req.tenantSupportAdmin = true;
+        // Admin rights follow the Admin Session Cap, so past it the session ends as an admin's would.
+        if (!viewer.isAdmin) {
+            if (req.adminSessionExpired) return req.adminSessionExpired();
+            req.tenantSupportAdmin = true;
+        }
         // Validate against the SWITCHER list (the official dashboard's own switch source) plus
         // the tenants list (60s cache) - a stale/foreign id is refused. Any linked tenant is
         // manageable - including pending-verification ones; only 'invited' is not.
@@ -2770,19 +2777,31 @@ app.get('/api/reverse-proxy-domains', requirePerm('proxy.manage'), async (req, r
     }
 });
 
+// The canEditNetwork check the proxy helpers apply to every network they change. Grants are
+// read only when a restricted viewer actually touches a network.
+function networkEditCheck(viewer) {
+    let grants = null;
+    return async (networkId) => {
+        if (viewer.isAdmin || managesNetworks(viewer)) return true;
+        if (!grants) grants = await getAllGrants();
+        return canEditNetwork(viewer, String(networkId || ''), grants);
+    };
+}
+
 // Create a reverse-proxy service (Add Service).
 app.post('/api/reverse-proxy-services', requirePerm('proxy.manage'), async (req, res) => {
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const out = await createProxyService(req.body || {});
+        const viewer = await getViewer(req);
+        const out = await createProxyService(req.body || {}, { canEditNetwork: networkEditCheck(viewer) });
         const t = (req.body && req.body.target) || {};
-        audit(await getViewer(req), 'proxy.create', out.domain, {
+        audit(viewer, 'proxy.create', out.domain, {
             cluster: String((req.body && req.body.cluster) || ''), targetType: String(t.type || ''), port: t.port, protocol: t.protocol || 'http',
         });
         res.json(out);
     } catch (err) {
         console.error('Error creating reverse-proxy service:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to create service' });
+        res.status(err.status === 403 ? 403 : 502).json({ error: err.message || 'Failed to create service' });
     }
 });
 
@@ -2810,15 +2829,16 @@ app.get('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async (r
 app.put('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async (req, res) => {
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const out = await updateProxyService(req.params.id, req.body || {});
-        audit(await getViewer(req), 'proxy.update', String((req.body && req.body.domain) || req.params.id), {
+        const viewer = await getViewer(req);
+        const out = await updateProxyService(req.params.id, req.body || {}, { canEditNetwork: networkEditCheck(viewer) });
+        audit(viewer, 'proxy.update', String((req.body && req.body.domain) || req.params.id), {
             fields: Object.keys(req.body || {}).filter(k => k !== 'domain').join(', ') || 'nothing',
             ...(out.syncedResources && out.syncedResources.length ? { linkedResources: out.syncedResources.join(', ') } : {}),
         });
         res.json(out);
     } catch (err) {
         console.error('Error updating reverse-proxy service:', err.message);
-        res.status(err.status === 409 || err.status === 400 ? err.status : 502).json({ error: err.message || 'Failed to update service' });
+        res.status(err.status === 409 || err.status === 400 || err.status === 403 ? err.status : 502).json({ error: err.message || 'Failed to update service' });
     }
 });
 
@@ -2828,13 +2848,14 @@ app.delete('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async
         // Resolve the domain BEFORE deletion so the audit names the service, not an id.
         let label = req.params.id;
         try { label = (await getProxyServiceRaw(req.params.id)).domain || label; } catch { /* keep id */ }
-        const out = await deleteProxyService(req.params.id);
-        audit(await getViewer(req), 'proxy.delete', label,
+        const viewer = await getViewer(req);
+        const out = await deleteProxyService(req.params.id, { canEditNetwork: networkEditCheck(viewer) });
+        audit(viewer, 'proxy.delete', label,
             out.cleanedResources && out.cleanedResources.length ? { deletedResources: out.cleanedResources.join(', ') } : undefined);
         res.json(out);
     } catch (err) {
         console.error('Error deleting reverse-proxy service:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to delete service' });
+        res.status(err.status === 403 ? 403 : 502).json({ error: err.message || 'Failed to delete service' });
     }
 });
 
@@ -2842,8 +2863,9 @@ app.delete('/api/reverse-proxy-services/:id', requirePerm('proxy.manage'), async
 app.post('/api/reverse-proxy-services/expose-docker', requirePerm('proxy.manage'), async (req, res) => {
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const out = await exposeDockerService(req.body || {});
-        audit(await getViewer(req), 'proxy.expose', String((req.body && req.body.serviceDomain) || ''), {
+        const viewer = await getViewer(req);
+        const out = await exposeDockerService(req.body || {}, { canEditNetwork: networkEditCheck(viewer) });
+        audit(viewer, 'proxy.expose', String((req.body && req.body.serviceDomain) || ''), {
             container: String((req.body && req.body.containerDomain) || ''),
             network: await netLabel(String((req.body && req.body.networkId) || '')),
             routerAttached: req.body && req.body.routerPeerId ? 'yes' : 'no',
@@ -2851,7 +2873,7 @@ app.post('/api/reverse-proxy-services/expose-docker', requirePerm('proxy.manage'
         res.json(out);
     } catch (err) {
         console.error('Error exposing docker container:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to expose container' });
+        res.status(err.status === 403 ? 403 : 502).json({ error: err.message || 'Failed to expose container' });
     }
 });
 
