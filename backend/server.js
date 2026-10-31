@@ -3768,7 +3768,7 @@ app.get('/api/filter-rules/matching', requirePurgeAdmin, async (req, res) => {
             if (!rows.length) break;
             scanned += rows.length;
             for (const row of rows) {
-                if (eventMatchesFilters(row, cfg)) {
+                if (await eventMatchesFilters(row, cfg)) {
                     total++;
                     if (sample.length < SAMPLE) sample.push(row);
                 }
@@ -3792,7 +3792,8 @@ app.post('/api/filter-rules/purge', requirePurgeAdmin, async (req, res) => {
             const rows = await scanEvents(after, SCAN_BATCH);
             if (!rows.length) break;
             after = rows[rows.length - 1].id;
-            const ids = rows.filter(r => eventMatchesFilters(r, cfg)).map(r => r.id);
+            const ids = [];
+            for (const r of rows) if (await eventMatchesFilters(r, cfg)) ids.push(r.id);
             if (ids.length) deleted += await deleteEventsByIds(ids);
             if (rows.length < SCAN_BATCH) break;
         }
