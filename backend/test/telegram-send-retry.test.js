@@ -1,8 +1,8 @@
-// The Telegram send queue (lib/telegram.js): only a 2xx response counts as sent. Any other
-// result - a network failure (status 0), an API rejection (4xx), a server error (5xx) or a
-// thrown error - keeps the message at the head of the queue and retries it after a minute
-// (longer if a 429 asks for it), until TG_MAX_ATTEMPTS. The test connection check reports a
-// network failure as a failure.
+// The Telegram send queue (lib/telegram.js): only a 2xx response counts as sent. A temporary
+// failure - a network failure (status 0), a 429, a server error (5xx) or a thrown error -
+// keeps the message at the head of the queue and retries it after a minute (longer if a 429
+// asks for it), until TG_MAX_ATTEMPTS. Any other 4xx fails at once and the queue moves on.
+// The test connection check reports a network failure as a failure.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -43,11 +43,27 @@ test('a network failure (status 0) is retried after a minute, not counted as sen
     assert.deepEqual(observed, [{ ok: true, error: undefined }]);
 });
 
-test('an API rejection (400) is retried after a minute', async () => {
-    reset({ status: 400, raw: '{"ok":false,"description":"Bad Request"}' }, OK);
-    assert.deepEqual(await send(), { chatId: '-1001', messageId: '42' });
-    assert.equal(calls.length, 2);
-    assert.deepEqual(waits, [60_000]);
+test('a permanent rejection (400, 401, 403) fails at once, with no retry', async () => {
+    for (const [status, raw] of [
+        [400, '{"ok":false,"description":"Bad Request: can\'t parse entities"}'],
+        [401, '{"ok":false,"description":"Unauthorized"}'],
+        [403, '{"ok":false,"description":"Forbidden: bot was kicked from the supergroup chat"}'],
+    ]) {
+        reset({ status, raw }, OK);
+        assert.equal(await send(), null, `HTTP ${status}`);
+        assert.equal(calls.length, 1, `HTTP ${status}`);
+        assert.deepEqual(waits, [], `HTTP ${status}`);
+        assert.deepEqual(observed, [{ ok: false, error: raw }], `HTTP ${status}`);
+    }
+});
+
+test('a message behind a permanently rejected one is sent without waiting', async () => {
+    reset({ status: 400, raw: 'Bad Request: message thread not found' }, OK);
+    const [a, b] = await Promise.all([tg.sendTelegram('alerts', 'first'), tg.sendTelegram('alerts', 'second')]);
+    assert.equal(a, null);
+    assert.deepEqual(b, { chatId: '-1001', messageId: '42' });
+    assert.deepEqual(calls.map((c) => c.body.text), ['first', 'second']);
+    assert.deepEqual(waits, []);
 });
 
 test('a server error (500) and a thrown error are retried after a minute', async () => {

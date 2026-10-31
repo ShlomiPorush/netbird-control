@@ -151,11 +151,13 @@ function setTelegramObserver(fn) { _onSend = typeof fn === 'function' ? fn : nul
 // Messages are never posted straight to the Bot API: they enter a FIFO queue drained by a
 // single worker, so bursts (weekly digest, event storms) can't race each other into
 // Telegram's per-chat rate limit and get silently dropped. Only a 2xx response counts as
-// sent. ANY other result - a network error or timeout (httpJson returns status 0), an API
-// rejection (4xx, including 429), a server error (5xx) or a thrown error - pauses the WHOLE
-// queue for a minute (or Telegram's retry_after, if longer) and the message is retried in
-// place; it is only reported as failed after TG_MAX_ATTEMPTS. A timeout may hide a message
-// Telegram already accepted, so a retry can post it twice.
+// sent. A TEMPORARY failure - a network error or timeout (httpJson returns status 0), HTTP
+// 429, a server error (5xx) or a thrown error - pauses the WHOLE queue for a minute (or
+// Telegram's retry_after, if longer) and the message is retried in place; it is only
+// reported as failed after TG_MAX_ATTEMPTS. A timeout may hide a message Telegram already
+// accepted, so a retry can post it twice. Any other 4xx is PERMANENT - a bad message or a
+// bad config (wrong token, bot removed, unknown chat or topic) that a retry cannot fix - so
+// the message fails at once and the queue moves on.
 const TG_RETRY_WAIT_MS = 60_000;
 const TG_MAX_ATTEMPTS = 5;
 const TG_QUEUE_LIMIT = 1000; // runaway backstop - never expected in practice
@@ -206,8 +208,10 @@ async function drainTelegramQueue() {
                 if (r && r.status >= 200 && r.status < 300) {
                     outcome = { result: r.body && r.body.result };
                 } else {
+                    const status = (r && r.status) || 0;
+                    const permanent = status >= 400 && status < 500 && status !== 429;
                     const ra = Number(r && r.body && r.body.parameters && r.body.parameters.retry_after) || 0;
-                    outcome = { retry: true, waitMs: Math.max(ra * 1000, TG_RETRY_WAIT_MS), error: String((r && (r.raw || r.error || r.status)) || 'send failed') };
+                    outcome = { retry: !permanent, waitMs: Math.max(ra * 1000, TG_RETRY_WAIT_MS), error: String((r && (r.raw || r.error || r.status)) || 'send failed') };
                 }
             } catch (e) {
                 outcome = { retry: true, waitMs: TG_RETRY_WAIT_MS, error: e.message };
