@@ -561,6 +561,9 @@ if (AUTH_ENABLED) {
                 return kill('Session expired - please sign in again');
             }
             if (sec.adminSessionMaxHours > 0 && ageHours > sec.adminSessionMaxHours) {
+                // Set before the role lookup (which may fail): the tenant middleware calls this
+                // instead of granting a Tenant Support user admin rights inside a tenant.
+                req.adminSessionExpired = () => kill('Admin session expired - please sign in again');
                 const viewer = await getViewer(req); // only resolved once past the admin threshold
                 if (viewer.isAdmin) return kill('Admin session expired - please sign in again');
             }
@@ -688,7 +691,11 @@ app.use('/api', async (req, res, next) => {
         // validated in-context request only. The flag is set ONLY after the allowlist check passes,
         // so it never covers TENANT_PLAIN_PREFIXES (e.g. /api/msp CRUD) or a headerless request -
         // getViewer returns an elevated per-request copy that keeps the real identity for audits.
-        if (!viewer.isAdmin) req.tenantSupportAdmin = true;
+        // Admin rights follow the Admin Session Cap, so past it the session ends as an admin's would.
+        if (!viewer.isAdmin) {
+            if (req.adminSessionExpired) return req.adminSessionExpired();
+            req.tenantSupportAdmin = true;
+        }
         // Validate against the SWITCHER list (the official dashboard's own switch source) plus
         // the tenants list (60s cache) - a stale/foreign id is refused. Any linked tenant is
         // manageable - including pending-verification ones; only 'invited' is not.

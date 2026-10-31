@@ -54,7 +54,7 @@ Signed-in sessions are deliberately short to reduce exposure. All three limits a
 |---|---|---|
 | Idle Timeout | 1h | Everyone - signed out after this much **inactivity** (activity extends the session) |
 | User Session Cap | 6h | Regular users - **absolute** cap; re-login required this long after signing in, active or not |
-| Admin Session Cap | 2h | Admins - a **stricter absolute** cap |
+| Admin Session Cap | 2h | Admins, and Tenant Support users while they manage a tenant - a **stricter absolute** cap |
 
 The absolute caps are measured from the ID token's issue time - stamped at the actual login and *not* extended by activity - so past a cap the session cookie is dropped, the API answers 401 and the app redirects to sign-in. A stolen session cookie is therefore useful for at most the remaining window, and an admin cookie for at most the admin cap. (Note: if the user's Entra session is still alive, the re-login may complete silently via SSO - the protection targets the app's own cookie, not the IdP session.)
 
