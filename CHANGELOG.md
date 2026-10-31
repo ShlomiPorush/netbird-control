@@ -42,6 +42,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   cookie is refused, even after the idle timeout in Settings → Security is raised or turned off, and
   only a new sign-in gets back in. When a session ends, the response also removes the session
   cookie, and signing in again starts a new session.
+- **Restoring a settings file keeps the current NetBird API URL and SMTP server.** When the file
+  has a different NetBird API URL, or a different SMTP host, port, security or user, the restore
+  keeps the current values and lists those settings as skipped in its result. Change them in
+  Settings → NetBird API or Settings → Email (SMTP). On a new server, enter the NetBird API URL
+  there after the restore. The restore discards any Telegram callback secret in the file and
+  skips a Telegram config that is not a JSON object.
 
 ### Changed
 - **New requirement:** a trusted entry with blocked targets reads the current networks and
