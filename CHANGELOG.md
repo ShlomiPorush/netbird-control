@@ -10,7 +10,68 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- **Temporary access keeps the target's posture checks.** A grant to an Access Profile or a
+  resource now carries the profile's posture checks, or those of the resource policy it mirrors,
+  so only compliant devices get access during the grant. Targets with different posture checks
+  get separate temporary policies.
+- **New requirement:** a temporary grant to resources or networks is refused when the app
+  cannot read the existing policies or the resource list it mirrors, or when a chosen resource
+  is gone. A grant to a profile that no longer matches an Access Profile is refused too.
+- **Blocked resources and networks of a trusted auto-approval entry also cover related targets.**
+  A blocked resource also sends its network and any access profile whose group contains it to
+  review. A blocked network also sends its resources and the access profiles that contain them to
+  review.
+- **Access requests use the server's catalogue for every target.** Only resources, networks and
+  shared access profiles can be requested. When a request is submitted and again when it is
+  approved, the server sets each target's name, network, profile group and port scope from the
+  catalogue that the typeahead uses. A port scope must be one of the resource's port-policy
+  entries, or a scope that an auto-approval rule pinned on that request.
+- **New requirement on upgrade:** a pending request whose target or port scope is not in the
+  current catalogue can no longer be approved as it is. The approver gets "no longer offered -
+  pick it again from search". They can pick the target again in the review modal or deny the
+  request. This also applies to a request that went to review after an auto-approval rule pinned
+  its ports and the grant could not be created, if the request was pending before the upgrade.
+  The user can submit that request again, and the rule approves it as before.
+- **Editing or deleting a resource acts only on a resource of the network in the request.** A
+  resource from another network gets a 404 response, and nothing is changed, including its access
+  policies. When NetBird can't return the resource, the edit or delete stops with an error before
+  any change. Deleting a network then stops before the network is deleted, and an automation keeps
+  the resource and retries its removal on the next run.
+- **A session ended by the idle timeout stays ended.** Every later request with the same session
+  cookie is refused, even after the idle timeout in Settings → Security is raised or turned off, and
+  only a new sign-in gets back in. When a session ends, the response also removes the session
+  cookie, and signing in again starts a new session.
+- **Restoring a settings file keeps the current NetBird API URL and SMTP server.** When the file
+  has a different NetBird API URL, or a different SMTP host, port, security or user, the restore
+  keeps the current values and lists those settings as skipped in its result. Change them in
+  Settings → NetBird API or Settings → Email (SMTP). On a new server, enter the NetBird API URL
+  there after the restore. The restore discards any Telegram callback secret in the file and
+  skips a Telegram config that is not a JSON object.
+- **Saving Settings → Approvals saves the delegation list.** Adding a delegation now grants
+  approval rights, and removing one and saving ends it at once. A failed save no longer changes
+  who can approve.
+
 ### Changed
+- **New requirement:** a trusted entry with blocked targets reads the current networks and
+  resources from NetBird when a request is submitted. If NetBird can't be read completely, that
+  entry sends network, resource and access-profile requests to review instead of auto-approving
+  them.
+- **Only network editors can read the access profiles, posture checks and blocklist.** A network
+  editor is an admin, a Manage All Networks holder, or a member of a group with an edit grant on an
+  existing network. Manage Temporary Access holders can also read the access profiles. Other
+  signed-in users get `403` from these three lists. No screen they use changes.
+- **SSO settings are all or nothing.** **New requirement:** when any of `OIDC_ISSUER_BASE_URL`,
+  `OIDC_CLIENT_ID` or `OIDC_CLIENT_SECRET` is set, all three and `BASE_URL` must be set. Otherwise
+  the app does not start, and the log names the missing variables. **Check before you upgrade:**
+  set the missing variables, or clear every `OIDC_*` variable to keep running without SSO.
+  `BASE_URL` alone does not turn SSO on.
+- **The Telegram callback needs a registered webhook.** Approve and Deny presses and denial-reason
+  replies are accepted only after this deployment has registered the Telegram webhook, which
+  stores its secret. Until then every update is rejected. A deployment with Telegram enabled, a
+  bot token and `BASE_URL` registers the webhook on start, so nothing changes for it. After
+  importing settings into a new deployment, save **Settings → Telegram** in the main account to
+  register it. See [Telegram notifications](docs/telegram-notifications.md#inbound-approving-from-telegram).
 - **Regex event filter rules run with a time limit.** They are checked outside the main server
   thread, so a slow pattern no longer delays other work. When the regex rules for an event take
   longer than 25 ms, the event is kept. A rule that is too slow twice is skipped for that account
