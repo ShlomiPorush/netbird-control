@@ -9002,7 +9002,14 @@ async function formatConfiguredDate(date) {
 // ALL_COMBO, comboKey and combosForResource (least-privilege combo logic) now live in
 // lib/pure.js (imported at the top).
 
+// Grant ids whose creation is running in this process: the cleanup job and a manual delete leave
+// their 'creating' row alone, however long the creation takes.
+const _creatingGrants = new Set();
 async function createTemporaryAccessGrant(cfg, actor) {
+    const run = {};
+    try { return await createGrantTracked(cfg, actor, run); } finally { if (run.id) _creatingGrants.delete(run.id); }
+}
+async function createGrantTracked(cfg, actor, run) {
     const userId = String((cfg && cfg.userId) || '').trim();
     if (!userId) throw new Error('a user is required');
     const targets = Array.isArray(cfg.targets) ? cfg.targets.filter(t => t && t.id && t.type) : [];
@@ -9019,6 +9026,7 @@ async function createTemporaryAccessGrant(cfg, actor) {
     // Reserve the grant id up front so the NetBird group/policy names can be short and stable
     // (`#<id> (until <date>)`) - these objects are app-managed, so a long user label just clutters.
     const grantId = (await pool.query(`SELECT nextval(pg_get_serial_sequence('temporary_access_grants','id')) AS id`)).rows[0].id;
+    run.id = String(grantId); _creatingGrants.add(run.id);
     // Crash-safety: write a 'creating' placeholder BEFORE touching NetBird. If the process
     // dies mid-creation, this row (plus the "#<id>" embedded in every NetBird object name)
     // lets cleanupStuckCreatingGrants find and delete the orphaned groups/policies - without
@@ -9330,6 +9338,7 @@ async function deleteTemporaryAccessGrant(id, actor) {
         if (!r.rows[0].settled) throw new Error('This grant is still being set up. Try deleting it again in a few minutes.');
         if (NETBIRD_READONLY) throw new Error("NetBird is read-only here, so what this grant left in NetBird can't be removed. The row was kept.");
         const done = await removeCreatingGrant(id, actor);
+        if (done === 'running') throw new Error('This grant is still being set up. Try deleting it again in a few minutes.');
         if (done === null) return deleteTemporaryAccessGrant(id, actor); // no longer 'creating': decide on its new status
         if (done === false) throw new Error("Couldn't remove everything this grant left in NetBird, so the row was kept. Try again later. It is also retried automatically.");
         return { deleted: true };
@@ -9363,10 +9372,11 @@ async function cleanupStuckCreatingGrants() {
 
 // Remove what a 'creating' row's grant left in NetBird, then the row. One run per row at a time
 // (the cleanup job and a manual delete can meet), and the row is re-read inside the lock.
-// Returns null when the row is already gone, false when a leftover could not be removed (the row
-// is kept), true when the row was dropped.
+// Returns 'running' when its creation is still running here, null when the row is already gone,
+// false when a leftover could not be removed (the row is kept), true when the row was dropped.
 function removeCreatingGrant(id, actor) {
     return withKeyLock(`creating\u0000${tnt()}\u0000${id}`, async () => {
+        if (_creatingGrants.has(String(id))) return 'running';
         const r = await pool.query(`SELECT * FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [id, tnt()]);
         if (!r.rows.length) return null;
         const g = r.rows[0];

@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 
 const nb = require('../lib/netbird');
 const clone = (x) => JSON.parse(JSON.stringify(x));
-let nbUser, nbReads, deleteStatus, userPutStatus, policyPostStatus, otherActiveGrants, tempGroups, resourceReadStatus;
+let nbUser, nbReads, deleteStatus, userPutStatus, policyPostStatus, otherActiveGrants, tempGroups, resourceReadStatus, gatePut = null;
 nb.netbirdApiConfigured = () => true;
 nb.bustNbCaches = () => { };
 nb.ensureGroupsFresh = async () => { };
@@ -29,6 +29,7 @@ nb.netbirdReq = async (method, path, body) => {
     if (method === 'GET' && resourceReadStatus !== 200) return { status: resourceReadStatus, body: { message: 'forbidden', code: resourceReadStatus } };
     if (method === 'GET') return { status: nbReads ? 200 : 0, body: nbReads ? await nb.netbirdGet(path) : null };
     if (method === 'PUT' && path.startsWith('/api/users/')) {
+        if (gatePut) { const g = gatePut; gatePut = null; await g; } // a slow NetBird answer
         nbUser.auto_groups = body.auto_groups; // NetBird applies it...
         if (userPutStatus !== 200) return { status: userPutStatus, error: 'timeout' }; // ...but the answer is lost
         return { status: 200, body: clone(nbUser) };
@@ -144,4 +145,24 @@ test('a grant that may still be setting up cannot be deleted yet', async () => {
     rows.set(13, { id: 13, user_id: 'u1', user_label: 'U', status: 'creating', last_error: '', assigned_groups: [], targets: [{ type: 'group', id: 'g-target' }], fresh: true });
     await assert.rejects(deleteTemporaryAccessGrant(13, { name: 'admin' }), /still being set up/);
     assert.ok(rows.has(13), 'the creating row must be kept');
+});
+
+test('a creation still running is left alone by delete and by the cleanup job, however old its row', async () => {
+    reset();
+    let release; gatePut = new Promise(r => { release = r; });
+    const creating = createTemporaryAccessGrant(grantCfg([{ type: 'group', id: 'g-target', name: 'Target' }]), { name: 'admin' });
+    // Settles within 50 ms, or reports 'waiting' (for example on the grantee's user lock).
+    const settle = (p) => Promise.race([p.then(() => 'done', (e) => e), new Promise(r => setTimeout(() => r('waiting'), 50))]);
+    try {
+        await new Promise(r => setTimeout(r, 10)); // the row exists and is past the 15-minute window
+        const deleted = await settle(deleteTemporaryAccessGrant(42, { name: 'admin' }));
+        assert.match(String(deleted && deleted.message), /still being set up/);
+        assert.equal(await settle(cleanupStuckCreatingGrants()), 'done');
+        assert.ok(rows.has(42), 'the creating row must be kept');
+    } finally {
+        release();
+    }
+    await creating;
+    assert.equal(rows.get(42).status, 'active');
+    assert.ok(nbUser.auto_groups.includes('g-target'));
 });
