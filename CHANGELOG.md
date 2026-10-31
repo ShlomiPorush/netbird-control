@@ -10,6 +10,14 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- **An open page whose session ended goes to sign-in again** instead of stopping at "Too many
+  requests - try again in a moment". The API answered its requests with an internal server error
+  instead of `401`, so the page never started the sign-in and kept retrying until it was rate
+  limited. These requests now get `401` and are no longer logged as errors. They also no longer
+  count against the sign-in limit (30 per minute per address), so several open tabs can't use it
+  up before the sign-in starts.
+
 ---
 
 ## [1.1.0] - 2026-10-31

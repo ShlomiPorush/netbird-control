@@ -478,9 +478,11 @@ app.use(spaLimiter);
 
 if (AUTH_ENABLED) {
     // Equivalent to auth()'s authRequired: true - every route below requires login. A visitor who is
-    // not signed in is sent to login (HTML) or refused, and draws from the per-IP auth budget, so
-    // these automatic login starts can't bypass the /login limit.
-    app.use(authLimiter);
+    // not signed in is sent to login (HTML) or refused with 401 (see the error handler). Only a
+    // request that would start a login draws from the per-IP auth budget, so these automatic login
+    // starts can't bypass the /login limit. A refused JSON request is not charged: the 401s of
+    // several tabs whose session ended must not use up the budget of the login they lead to.
+    app.use((req, res, next) => (startsLogin(req) ? authLimiter(req, res, next) : next()));
     // One login at a time per browser (see above), wherever a login would start.
     app.use((req, res, next) => {
         if (!startsLogin(req)) return next();
@@ -4500,6 +4502,12 @@ app.use((err, req, res, next) => {
         // lets one finish first; the others then find a session at /login and go back to the app.
         setTimeout(() => res.redirect(`/login?retry=${tries + 1}&returnTo=${encodeURIComponent(returnTo)}`), crypto.randomInt(100, 900));
         return;
+    }
+    // requiresAuth() refusing a signed-out request that doesn't accept HTML (the SPA's API calls):
+    // a 401, which the SPA answers by signing in. Expected, so not logged.
+    if (err.name === 'UnauthorizedError' && err.status === 401) {
+        if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign in required' });
+        return res.status(401).type('text/plain').send('Sign in required');
     }
     console.error('Unhandled error on', req.method, req.path, '-', err);
     if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Internal server error' });
