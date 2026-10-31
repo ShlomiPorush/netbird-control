@@ -11,6 +11,26 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **Temporary access stays consistent with NetBird.** Changes to one NetBird user (grant,
+  revoke, the reconcile job, group edits, block and unblock) now run one at a time, from a fresh
+  read of the user. The reconcile job re-checks each grant first, so it never puts back a group
+  of a grant that was revoked or expired in the meantime.
+- **A NetBird call that gets no answer counts as failed.** A revoke whose membership removal or
+  delete got no answer leaves the grant active with the error, and the next run retries it.
+- **A failed grant creation keeps its recovery record** until every NetBird object it made is
+  confirmed removed. The cleanup job keeps the record when it cannot read NetBird, and it leaves
+  a group in place when another active grant of the same user holds it. Deleting such a row
+  first removes what it left in NetBird. If that fails, or the grant may still be setting up,
+  the row is kept and the delete request fails with the reason.
+- **A timed device bypass is not left on silently without its end time.** If the end time
+  cannot be saved, the approval fails, the bypass is removed again and the request stays pending.
+  If that removal fails too, the error says the device is still bypassed.
+- **Ending a recurring rule's window reports failures.** Disabling or deleting a rule, or
+  revoking it in Access Review, shows an error when the active window could not be torn down, and
+  the review item stays pending. A rule disabled while its window is opening ends that window.
+- **Access Review revokes the right auto-approval entry**, even after it was edited. Each
+  trusted-requester entry and self-service rule now has a stable `id` in the auto-approval
+  config.
 - **Telegram messages that fail to send for a temporary reason are retried.** A network error
   or a timeout no longer counts as sent. Only a 2xx answer from Telegram counts as sent. After a
   network error, a timeout, a rate limit or a Telegram server error, the queue waits 1 minute,

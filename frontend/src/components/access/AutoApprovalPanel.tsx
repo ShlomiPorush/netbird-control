@@ -325,6 +325,7 @@ function TrustedModal({ adGroups, busy, initial, onSubmit, onClose }: {
   const editing = !!initial;
 
   const submit = () => onSubmit({
+    ...(initial?.id ? { id: initial.id } : {}), // keeps the entry's identity across edits (Access Review matches on it)
     groupIds: groups, maxMinutes: hoursToMinutes(maxHours),
     excludedTargets: blocked.map((t) => ({ type: t.type, id: t.id, name: t.name })),
     networkMode: netIds.length ? networkMode : 'all',
@@ -403,6 +404,7 @@ function RuleModal({ adGroups, busy, initial, onSubmit, onClose }: {
   const customEmpty = accessMode === 'custom' && !tcpOn && !udpOn && !icmpOn;
 
   const submit = () => onSubmit({
+    ...(initial?.id ? { id: initial.id } : {}), // keeps the rule's identity across edits (Access Review matches on it)
     targets: targets.map((t) => ({ type: t.type, id: t.id, name: t.name })),
     groupIds: groups, maxMinutes: hoursToMinutes(maxHours),
     access: accessMode === 'custom' && !customEmpty

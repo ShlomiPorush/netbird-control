@@ -18,11 +18,13 @@ let gateOnce = null;  // when set, a user-list read (after skipping gateSkip rea
 let gateSkip = 0;
 let gateHit = false;
 let listDown = false;  // NetBird answers the user-list reads with nothing
+let refreshDown = false; // the same, except for the live read a user write starts with
 let listOnlyServiceUsers = false; // the regular list fails, the service-user list answers one user
 let serviceListDown = false; // the service-user list fails, the regular list answers
 nb.netbirdGet = async (path) => {
     if (path === '/api/users/current') return { id: 'svc' };
     if (listDown && path.startsWith('/api/users')) return null;
+    if (refreshDown && path.startsWith('/api/users') && !/liveUsersById/.test(new Error().stack)) return null;
     if (serviceListDown && path === '/api/users?service_user=true') return null;
     if (listOnlyServiceUsers && path === '/api/users') return null;
     if (listOnlyServiceUsers && path === '/api/users?service_user=true') return [{ id: 'svc-1', is_service_user: true }];
@@ -157,7 +159,7 @@ function withNetbirdApi(fn) {
 beforeEach(async () => {
     users.clear(); settings.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
     failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0; listDown = false; tgCalls.length = 0;
-    failUserUpdate = false; holdPut = null; listOnlyServiceUsers = false;
+    failUserUpdate = false; holdPut = null; refreshDown = false; listOnlyServiceUsers = false;
     serviceListDown = false;
     for (const k of Object.keys(adGroupsByOid)) delete adGroupsByOid[k];
     await db.setFeaturePermsConfig({
@@ -432,7 +434,7 @@ test('blocking a user in the app holds even when the user-list refresh after it 
     userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
     liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
     db.resetNbCaches();
-    listDown = true;
+    refreshDown = true; // the block reads the user first; the refresh after it fails
     await db.setUserBlocked(ME.id, true);
     assert.equal(users.get('|u-me').raw_json.is_blocked, true);
     assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
@@ -448,7 +450,7 @@ test('a block the mirror could not record still counts until a user-list refresh
     const open = holdListRead();
     const refresh = db.ensureUsersFresh();
     await untilHeld();
-    listDown = true; failUserUpdate = true;
+    refreshDown = true; failUserUpdate = true; // the block reads the user first
     const blocking = db.setUserBlocked(ME.id, true);
     while (!liveUsers[0].is_blocked) await tick();
     open();
@@ -458,7 +460,7 @@ test('a block the mirror could not record still counts until a user-list refresh
     assert.equal((await db.getAllUsers()).find(u => u.id === ME.id).is_blocked, true); // the Users page shows it
     assert.equal(await tgActs(1), false);
     // A refresh that returns only part of the list (here: just the service users) records nothing for me.
-    listDown = false; listOnlyServiceUsers = true; db.resetNbCaches();
+    refreshDown = false; listOnlyServiceUsers = true; db.resetNbCaches();
     assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
     assert.equal(await tgActs(1), false);
     // Once the list can be read, a refresh records NetBird's state.
@@ -473,7 +475,7 @@ test('a block the mirror could not record still counts until a user-list refresh
 test('an earlier unblock that answers late does not undo a newer block', withNetbirdApi(async () => {
     userRow(ME.id, ME.email, { role: 'admin', is_blocked: true });
     liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: true }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
-    listDown = true; // no refresh corrects the mirror
+    refreshDown = true; // no refresh corrects the mirror
     let answer; holdPut = new Promise(r => { answer = r; });
     const unblocking = db.setUserBlocked(ME.id, false);
     while (holdPut) await tick(); // NetBird applied the unblock, its answer is still on the way

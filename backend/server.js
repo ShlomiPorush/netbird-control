@@ -4027,7 +4027,7 @@ app.post('/api/temporary-access/:id/revoke', requirePerm('temp.manage'), async (
 
 app.delete('/api/temporary-access/:id', requirePerm('temp.manage'), async (req, res) => {
     try {
-        res.json(await deleteTemporaryAccessGrant(parseInt(req.params.id, 10)));
+        res.json(await deleteTemporaryAccessGrant(parseInt(req.params.id, 10), await getViewer(req)));
     } catch (e) {
         console.error('Error deleting temporary access grant:', e.message);
         res.status(400).json({ error: e.message || 'Failed to delete grant' });
