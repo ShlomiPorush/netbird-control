@@ -4498,7 +4498,7 @@ async function getAllUsers() {
             status: raw.status || '',
             last_login: raw.last_login || '',
             is_service_user: !!raw.is_service_user,
-            is_blocked: !!raw.is_blocked,
+            is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
             pending_approval: !!raw.pending_approval,
             // Auto-assigned groups (assigned to peers this user enrolls), resolved to {id,name}.
             groups: autoGroups.map(gid => ({ id: gid, name: getGroupsMap()[gid] || gid })),
@@ -5154,7 +5154,7 @@ async function getUserDetail(id) {
         role: raw.role || '',
         status: raw.status || '',
         last_login: raw.last_login || '',
-        is_blocked: !!raw.is_blocked,
+        is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
         is_service_user: !!raw.is_service_user,
         // Whether NetBird serves the cloud MFA reset endpoint on this API base (cached probe). The
         // Reset MFA button disables itself with a tooltip when false - like the Tenant Defaults MFA
@@ -5324,18 +5324,8 @@ async function applyUserBlocked(id, blocked) {
         auto_groups: Array.isArray(raw.auto_groups) ? raw.auto_groups : [],
         is_blocked: !!blocked,
     };
-    // A block is recorded in the mirror before NetBird is asked, so NetBird never holds a block the
-    // app does not know about - also across a restart. If it cannot be recorded, nothing changes.
-    if (blocked) {
-        await upsertUsers([{ ...raw, id, is_blocked: true }]).catch(err => {
-            console.error('[UserResolve] block record error:', err.message);
-            const e = new Error('The block could not be saved in the app, so the user was not blocked. Try again.');
-            e.status = 500; throw e;
-        });
-    }
     const resp = await asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(id), body));
     if (!resp || resp.status >= 300) {
-        _usersLastRefresh.set(acct, 0); // the next request re-reads the user's real state from NetBird
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to update the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
@@ -7934,7 +7924,7 @@ function fetchUsersFromApi() {
         for (const u of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
             if (u && u.id && !seen.has(u.id)) { seen.add(u.id); out.push(u); }
         }
-        out.complete = Array.isArray(a) && Array.isArray(b); // both lists answered
+        out.usersListed = Array.isArray(a); // the regular list, which holds every human user, answered
         return out;
     });
     // Runs in the active account's context (service token for a tenant) - that already lists users
@@ -7988,11 +7978,11 @@ async function pullUsersCache() {
         await upsertUsers(users);
         // Only a user the list returned now has NetBird's state in the mirror.
         for (const u of users) if (u && u.id) _unrecordedBlocks.delete(`${t}|${u.id}`);
-        // Prune users deleted in NetBird. Only when both lists answered and returned at least one
-        // user (an account always has its owner, so an empty result means a transient error - don't
-        // wipe; a missing list would drop every user it holds).
+        // Prune users deleted in NetBird. Only when the regular user list answered and at least one
+        // user came back (an account always has its owner, so an empty result means a transient
+        // error - don't wipe; without the regular list every human user would be dropped).
         const ids = users.map(u => u && u.id).filter(Boolean);
-        if (ids.length && users.complete) {
+        if (ids.length && users.usersListed) {
             // Prune only THIS account's rows - other accounts' rows must survive.
             await pool.query(`DELETE FROM users WHERE tenant = $2 AND user_id <> ALL($1)`, [ids, t])
                 .catch(e => console.error('[UserResolve] prune error:', e.message));

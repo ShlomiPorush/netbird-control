@@ -19,9 +19,11 @@ let gateSkip = 0;
 let gateHit = false;
 let listDown = false;  // NetBird answers the user-list reads with nothing
 let listOnlyServiceUsers = false; // the regular list fails, the service-user list answers one user
+let serviceListDown = false; // the service-user list fails, the regular list answers
 nb.netbirdGet = async (path) => {
     if (path === '/api/users/current') return { id: 'svc' };
     if (listDown && path.startsWith('/api/users')) return null;
+    if (serviceListDown && path === '/api/users?service_user=true') return null;
     if (listOnlyServiceUsers && path === '/api/users') return null;
     if (listOnlyServiceUsers && path === '/api/users?service_user=true') return [{ id: 'svc-1', is_service_user: true }];
     if (path === '/api/users?service_user=true') return [];
@@ -60,7 +62,6 @@ const users = new Map();    // `${tenant}|${user_id}` → { tenant, user_id, dis
 const settings = new Map(); // app_settings key → value
 let failSettingWrite = '';  // the next write to this key fails once
 let failUserUpdate = false; // the next direct mirror-row update fails once
-let failUserInsert = false; // the next mirror-row upsert fails once
 let holdWrites = false;     // settings writes wait until released (to reorder them)
 const heldWrites = [];
 let emailLookups = 0;
@@ -82,8 +83,7 @@ async function query(sql, params = []) {
         return { rows: settings.has(params[0]) ? [{ value: settings.get(params[0]) }] : [] };
     }
     if (/INSERT INTO users/.test(sql)) {
-        if (failUserInsert) { failUserInsert = false; throw new Error('mirror write failed'); }
-        const [id, name, email, raw, t] = params;
+            const [id, name, email, raw, t] = params;
         users.set(`${t}|${id}`, { tenant: t, user_id: id, display_name: name, email, raw_json: JSON.parse(raw) });
         return { rows: [] };
     }
@@ -112,6 +112,9 @@ async function query(sql, params = []) {
     if (/FROM users WHERE tenant = '' AND user_id = \$1/.test(sql)) {
         const r = users.get('|' + params[0]);
         return { rows: r ? [viewerRow(r, sql)] : [] };
+    }
+    if (/FROM users WHERE tenant = \$1 ORDER BY/.test(sql)) {
+        return { rows: [...users.values()].filter(x => x.tenant === params[0]) };
     }
     if (/UPDATE users SET raw_json = jsonb_set/.test(sql)) {
         if (failUserUpdate) { failUserUpdate = false; throw new Error('mirror update failed'); }
@@ -154,7 +157,8 @@ function withNetbirdApi(fn) {
 beforeEach(async () => {
     users.clear(); settings.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
     failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0; listDown = false; tgCalls.length = 0;
-    failUserUpdate = false; holdPut = null; listOnlyServiceUsers = false; failUserInsert = false;
+    failUserUpdate = false; holdPut = null; listOnlyServiceUsers = false;
+    serviceListDown = false;
     for (const k of Object.keys(adGroupsByOid)) delete adGroupsByOid[k];
     await db.setFeaturePermsConfig({
         'networks.manage': { users: [ME, OTHER], groupIds: [] },
@@ -439,8 +443,8 @@ test('a block the mirror could not record still counts until a user-list refresh
     userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
     liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
     db.resetNbCaches();
-    // A refresh reads the list (me still active) before the block and lands after the block was
-    // recorded; the update after NetBird's answer then fails, and later list reads fail.
+    // A refresh reads the list (me still active) before the block and lands after NetBird took it;
+    // the update after NetBird's answer then fails, and later list reads fail.
     const open = holdListRead();
     const refresh = db.ensureUsersFresh();
     await untilHeld();
@@ -449,8 +453,9 @@ test('a block the mirror could not record still counts until a user-list refresh
     while (!liveUsers[0].is_blocked) await tick();
     open();
     await Promise.all([refresh, blocking]);
-    assert.equal(users.get('|u-me').raw_json.is_blocked, false); // the stale list overwrote the record
+    assert.equal(users.get('|u-me').raw_json.is_blocked, false); // nothing was recorded
     assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal((await db.getAllUsers()).find(u => u.id === ME.id).is_blocked, true); // the Users page shows it
     assert.equal(await tgActs(1), false);
     // A refresh that returns only part of the list (here: just the service users) records nothing for me.
     listDown = false; listOnlyServiceUsers = true; db.resetNbCaches();
@@ -482,21 +487,6 @@ test('an earlier unblock that answers late does not undo a newer block', withNet
     assert.equal(await tgActs(1), false);
 }));
 
-test('a block is saved in the app before NetBird is asked, and is not sent when it cannot be saved', withNetbirdApi(async () => {
-    userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
-    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
-    db.resetNbCaches();
-    failUserInsert = true;
-    await assert.rejects(db.setUserBlocked(ME.id, true), (err) => err.status === 500 && /not blocked/.test(err.message));
-    assert.equal(liveUsers[0].is_blocked, false); // NetBird was not asked
-    // Saved first: the stored row holds the block even when every later write and read fails,
-    // so a restart does not lose it.
-    listDown = true; failUserUpdate = true;
-    await db.setUserBlocked(ME.id, true);
-    assert.equal(liveUsers[0].is_blocked, true);
-    assert.equal(users.get('|u-me').raw_json.is_blocked, true);
-}));
-
 test('a user list that answers only in part never drops a blocked user from the mirror', withNetbirdApi(async () => {
     userRow(ME.id, ME.email, { role: 'user', is_blocked: true });
     adGroupsByOid[ME.id] = ['admins'];
@@ -508,4 +498,15 @@ test('a user list that answers only in part never drops a blocked user from the 
     assert.equal(users.has('|svc-1'), true);
     assert.equal(v.isAdmin, false);
     assert.equal(v.canApprove, false);
+}));
+
+test('a user list without the service users still drops a user deleted in NetBird', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin' });
+    userRow(OTHER.id, OTHER.email, { role: 'owner' });
+    liveUsers = [{ id: OTHER.id, email: OTHER.email, role: 'owner' }]; // I was deleted in NetBird
+    serviceListDown = true;
+    db.resetNbCaches();
+    await db.ensureUsersFresh();
+    assert.equal(users.has('|u-me'), false);
+    assert.equal(await tgActs(1), false);
 }));
