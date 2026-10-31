@@ -198,15 +198,28 @@ test('static files, the app shell, API docs and /login?returnTo= still require l
     assert.equal(loginReturnTo(r), '/login?returnTo=/peers');
 });
 
-test('unauthenticated JSON requests are refused by the login gate, not served', async () => {
+test('unauthenticated JSON requests get 401 (the SPA then signs in), not served and not logged as errors', async () => {
     errors.length = 0;
-    for (const path of ['/api/me', '/api/logs', '/version.txt']) {
+    for (const path of ['/api/me', '/api/logs']) {
         const r = await call('GET', path, { accept: 'application/json' });
         assert.ok(!startsLogin(r), path);
-        assert.ok(r.status >= 400, `${path} → ${r.status}`);
+        assert.equal(r.status, 401, `${path}: ${r.text}`);
+        assert.deepEqual(JSON.parse(r.text), { error: 'Sign in required' });
     }
-    const unauthorized = errors.filter((args) => args.some((a) => a && a.name === 'UnauthorizedError' && a.status === 401));
-    assert.equal(unauthorized.length, 3);
+    const file = await call('GET', '/version.txt', { accept: 'application/json' });
+    assert.equal(file.status, 401, file.text);
+    assert.match(file.headers.get('content-type'), /^text\/plain/);
+    assert.equal(file.text, 'Sign in required');
+    assert.deepEqual(errors, []);
+});
+
+test('unauthenticated JSON requests do not use up the auth budget, so the login that follows still starts', async () => {
+    // Several open tabs whose session ended: each fires its queries at once before one of them
+    // reaches /login. Those 401s must not leave /login and /callback rate limited.
+    const ip = freshIp();
+    const statuses = await inBatches(Array.from({ length: 60 }, (_, i) => i), 20, async () => (await call('GET', '/api/me', { ip, accept: 'application/json' })).status);
+    assert.ok(statuses.every((s) => s === 401), statuses.join(','));
+    assert.ok(startsLogin(await call('GET', '/login?returnTo=/peers', { ip })));
 });
 
 test('a signed-in user reaches protected routes; /login returns them to the page', async () => {
@@ -293,9 +306,10 @@ test('auth budget: 30 per minute per IP across /login and automatic login starts
     for (let i = 0; i < 20; i++) await call('GET', '/login', { ip: b });
     for (let i = 0; i < 10; i++) assert.ok(startsLogin(await call('GET', i % 2 ? '/peers' : '/assets/index-abc.js', { ip: b })));
     assert.equal((await call('GET', '/peers', { ip: b })).status, 429);
+    // A JSON request can't start a login, so it is not charged or refused here: it gets the 401
+    // that sends the SPA to /login (which is refused while the budget is used up).
     const api = await call('GET', '/api/me', { ip: b, accept: 'application/json' });
-    assert.equal(api.status, 429);
-    assert.match(api.text, /Too many requests/);
+    assert.equal(api.status, 401);
 });
 
 test('auth budget covers /callback and /logout', async () => {
