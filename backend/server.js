@@ -2070,10 +2070,10 @@ app.get('/api/approver-config', requireAdmin, async (req, res) => {
 app.put('/api/approver-config', requireAdmin, async (req, res) => {
     try {
         const b = req.body || {};
-        const out = await setApproverConfig({ groupIds: b.groupIds, telegramChatId: b.telegramChatId, telegramApprovers: b.telegramApprovers });
+        const out = await setApproverConfig({ groupIds: b.groupIds, telegramChatId: b.telegramChatId, telegramApprovers: b.telegramApprovers, delegates: b.delegates });
         // Make sure the callback webhook is registered so Telegram approvals work.
         if (getTelegramConfig().enabled && getTelegramConfig().hasToken && process.env.BASE_URL) telegramSetWebhook(process.env.BASE_URL).catch(() => { });
-        audit(await getViewer(req), 'settings.approvers', '', { groups: out.groupIds.length, tgApprovers: out.telegramApprovers.length });
+        audit(await getViewer(req), 'settings.approvers', '', { groups: out.groupIds.length, tgApprovers: out.telegramApprovers.length, delegates: out.delegates.length });
         res.json({ ...out, webhookConfigured: !!getTelegramConfig().webhookConfigured });
     } catch (err) {
         console.error('Error saving approver config:', err.message);
