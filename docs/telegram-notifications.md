@@ -73,7 +73,7 @@ Telegram retries a rejected update for a limited time only, so presses made befo
 
 ## Gotchas
 
-- Messages are sent through an internal **FIFO queue**: on a rate limit (HTTP 429) or a network error the queue pauses (Telegram's `retry_after`, at least 30s) and the message is **retried in place** (up to 5 attempts) - bursts like the weekly digest are never dropped. Only hard rejections (bad request, bot kicked) fail immediately; every final outcome still lands in the [outbound log](README.md).
+- Messages are sent through an internal **FIFO queue**. A message counts as sent only when Telegram answers with a 2xx status. On a temporary failure (a network error or timeout, a rate limit, or a Telegram server error) the whole queue pauses for 1 minute, or for Telegram's `retry_after` if that is longer, and the message is **retried in place** (up to 5 attempts). Bursts like the weekly digest are never dropped. A message that keeps failing this way holds the messages behind it for at least 4 minutes (four waits of 1 minute or longer). After a timeout, Telegram may already have delivered the message, so a retry can post it twice. Any other rejection fails at once, with no retry, and the queue moves on. That covers both an invalid message (for example, broken HTML) and a configuration problem: a wrong bot token, a bot removed from the group, or a chat or topic that does not exist. Every final outcome lands in the [outbound log](README.md).
 - The bot token is **write-only** (never returned to the browser); an env value locks the field.
 - Topics require a **forum-type** Telegram group. "Auto-create topics" skips any that already exist.
 - Use **Send test** to verify connectivity + chat ID before relying on it.

@@ -11,6 +11,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **Telegram messages that fail to send for a temporary reason are retried.** A network error
+  or a timeout no longer counts as sent. Only a 2xx answer from Telegram counts as sent. After a
+  network error, a timeout, a rate limit or a Telegram server error, the queue waits 1 minute,
+  or longer if Telegram asks for it, and sends the message again, up to 5 attempts. An invalid
+  message or a configuration problem, such as a wrong bot token or a removed bot, still fails at
+  once. **Send test** now reports a network error as a failure. After a timeout, a retry can post
+  a message twice.
 - **An automation no longer enables a disabled resource that it adopts.** The resource stays
   disabled on later syncs until someone enables it in NetBird. A sync re-enables only the resources
   that its own removal mode disabled.
