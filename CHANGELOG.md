@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.1.0] - 2026-10-31
+
 ### Fixed
 - **Temporary access stays consistent with NetBird.** Changes to one NetBird user (grant,
   revoke, the reconcile job, group edits, block and unblock) now run one at a time, from a fresh
