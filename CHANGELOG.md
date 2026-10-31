@@ -19,7 +19,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   delete got no answer leaves the grant active with the error, and the next run retries it.
 - **A failed grant creation keeps its recovery record** until every NetBird object it made is
   confirmed removed. The cleanup job keeps the record when it cannot read NetBird, and it leaves
-  a group in place when another active grant of the same user holds it.
+  a group in place when another active grant of the same user holds it. Deleting such a row
+  first removes what it left in NetBird. If that fails, or the grant may still be setting up,
+  the row is kept and the delete request fails with the reason.
 - **A timed device bypass is not left on silently without its end time.** If the end time
   cannot be saved, the approval fails, the bypass is removed again and the request stays pending.
   If that removal fails too, the error says the device is still bypassed.

@@ -47,6 +47,13 @@ core.pool.query = async (sql, params = []) => {
         return { rows: [] };
     }
     if (/DELETE FROM temporary_access_grants WHERE id=\$1 AND status='creating'/.test(sql)) { rows.delete(params[0]); return { rows: [] }; }
+    if (/DELETE FROM temporary_access_grants WHERE id=\$1 AND tenant/.test(sql)) { rows.delete(params[0]); return { rows: [] }; }
+    if (/FROM temporary_access_grants WHERE id=\$1/.test(sql)) {
+        // A row is "settled" once it is older than the 15-minute creation window; `fresh` marks a newer one.
+        const r = rows.get(params[0]);
+        if (!r || (/status='creating'/.test(sql) && r.status !== 'creating')) return { rows: [] };
+        return { rows: [{ ...clone(r), settled: !r.fresh }] };
+    }
     if (/UPDATE temporary_access_grants SET assigned_groups=/.test(sql)) {
         const r = rows.get(params[0]);
         if (r) Object.assign(r, { assigned_groups: JSON.parse(params[1]), last_error: params[3] });
@@ -60,7 +67,7 @@ core.pool.query = async (sql, params = []) => {
     }
     return { rows: [] };
 };
-const { createTemporaryAccessGrant, cleanupStuckCreatingGrants } = require('../db');
+const { createTemporaryAccessGrant, cleanupStuckCreatingGrants, deleteTemporaryAccessGrant } = require('../db');
 
 function reset() {
     nbUser = { id: 'u1', role: 'user', is_blocked: false, auto_groups: ['g-base'] };
@@ -112,4 +119,29 @@ test('cleanup leaves a group that another active grant of the user holds', async
     await cleanupStuckCreatingGrants();
     assert.ok(nbUser.auto_groups.includes('g-target'));
     assert.ok(!rows.has(13));
+});
+
+test('deleting a creating row first removes what it left in NetBird', async () => {
+    reset();
+    nbUser.auto_groups = ['g-base', 'g-target'];
+    rows.set(13, { id: 13, user_id: 'u1', user_label: 'U', status: 'creating', last_error: 'creation failed', assigned_groups: ['g-target'], targets: [{ type: 'group', id: 'g-target' }] });
+    await deleteTemporaryAccessGrant(13, { name: 'admin' });
+    assert.ok(!nbUser.auto_groups.includes('g-target'), 'the leftover membership must be removed');
+    assert.ok(!rows.has(13));
+});
+
+test('deleting a creating row whose leftovers cannot be removed keeps the row', async () => {
+    reset();
+    nbUser.auto_groups = ['g-base', 'g-target'];
+    rows.set(13, { id: 13, user_id: 'u1', user_label: 'U', status: 'creating', last_error: 'creation failed', assigned_groups: ['g-target'], targets: [{ type: 'group', id: 'g-target' }] });
+    nbReads = false;
+    await assert.rejects(deleteTemporaryAccessGrant(13, { name: 'admin' }));
+    assert.ok(rows.has(13), 'the creating row must be kept');
+});
+
+test('a grant that may still be setting up cannot be deleted yet', async () => {
+    reset();
+    rows.set(13, { id: 13, user_id: 'u1', user_label: 'U', status: 'creating', last_error: '', assigned_groups: [], targets: [{ type: 'group', id: 'g-target' }], fresh: true });
+    await assert.rejects(deleteTemporaryAccessGrant(13, { name: 'admin' }), /still being set up/);
+    assert.ok(rows.has(13), 'the creating row must be kept');
 });

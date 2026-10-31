@@ -9321,9 +9321,19 @@ async function listTemporaryAccessGrants() {
 }
 
 // Remove a finished (revoked/expired/error) grant row from history. Active grants must be revoked first.
-async function deleteTemporaryAccessGrant(id) {
-    const r = await pool.query('SELECT status FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [id, tnt()]);
+// A 'creating' row is the record of what a half-finished grant may have left in NetBird, so deleting
+// it removes those leftovers first, the same way the cleanup job does.
+async function deleteTemporaryAccessGrant(id, actor) {
+    const r = await pool.query(`SELECT status, issued_at < NOW() - interval '15 minutes' AS settled FROM temporary_access_grants WHERE id=$1 AND tenant=$2`, [id, tnt()]);
     if (r.rows.length && r.rows[0].status === 'active') throw new Error('revoke the grant before deleting it');
+    if (r.rows.length && r.rows[0].status === 'creating') {
+        if (!r.rows[0].settled) throw new Error('This grant is still being set up. Try deleting it again in a few minutes.');
+        if (NETBIRD_READONLY) throw new Error("NetBird is read-only here, so what this grant left in NetBird can't be removed. The row was kept.");
+        const done = await removeCreatingGrant(id, actor);
+        if (done === null) return deleteTemporaryAccessGrant(id, actor); // no longer 'creating': decide on its new status
+        if (done === false) throw new Error("Couldn't remove everything this grant left in NetBird, so the row was kept. Try again later. It is also retried automatically.");
+        return { deleted: true };
+    }
     await pool.query('DELETE FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [id, tnt()]);
     return { deleted: true };
 }
@@ -9346,7 +9356,34 @@ async function cleanupStuckCreatingGrants() {
         `SELECT * FROM temporary_access_grants WHERE status='creating' AND issued_at < NOW() - interval '15 minutes' AND tenant=$1`,
         [tnt()]
     ).catch(() => ({ rows: [] }));
-    for (const g of r.rows) {
+    for (const row of r.rows) {
+        if (await removeCreatingGrant(row.id, null) === false) throw new Error(`grant #${row.id}: could not remove all orphaned NetBird objects (will retry)`);
+    }
+}
+
+// Remove what a 'creating' row's grant left in NetBird, then the row. One run per row at a time
+// (the cleanup job and a manual delete can meet), and the row is re-read inside the lock.
+// Returns null when the row is already gone, false when a leftover could not be removed (the row
+// is kept), true when the row was dropped.
+function removeCreatingGrant(id, actor) {
+    return withKeyLock(`creating\u0000${tnt()}\u0000${id}`, async () => {
+        const r = await pool.query(`SELECT * FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [id, tnt()]);
+        if (!r.rows.length) return null;
+        const g = r.rows[0];
+        if (!(await removeCreatingLeftovers(g))) return false;
+        await pool.query(`DELETE FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [g.id, tnt()]);
+        bustNbCaches('policies', 'gref', 'usage');
+        const left = g.last_error ? 'creation failed and its undo was incomplete' : 'creation crashed mid-way';
+        recordAudit({
+            actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || 'Scheduler',
+            action: 'grant.cleanup', target: g.user_label || g.user_id,
+            meta: { grant: g.id, reason: actor ? `deleted by hand (${left}) - removed the leftover NetBird objects first` : g.last_error ? `${left} - removed the leftover NetBird objects` : `${left} - removed the orphaned NetBird objects` },
+        }).catch(() => { });
+        return true;
+    });
+}
+
+async function removeCreatingLeftovers(g) {
         let ok = true;
         try {
             // Policies first - they reference the groups.
@@ -9402,18 +9439,7 @@ async function cleanupStuckCreatingGrants() {
             ok = false;
             console.error('[Grants] creating-cleanup error (#%s):', g.id, e.message);
         }
-        if (ok) {
-            await pool.query(`DELETE FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [g.id, tnt()]).catch(() => { });
-            bustNbCaches('policies', 'gref', 'usage');
-            recordAudit({
-                actorId: '', actorEmail: '', actorName: 'Scheduler',
-                action: 'grant.cleanup', target: g.user_label || g.user_id,
-                meta: { grant: g.id, reason: g.last_error ? 'creation failed and its undo was incomplete - removed the leftover NetBird objects' : 'creation crashed mid-way - removed the orphaned NetBird objects' },
-            }).catch(() => { });
-        } else {
-            throw new Error(`grant #${g.id}: could not remove all orphaned NetBird objects (will retry)`);
-        }
-    }
+        return ok;
 }
 
 // ─── Recurring access: standing schedules that spawn normal temporary grants ───
