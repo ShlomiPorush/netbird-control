@@ -48,6 +48,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   resources from NetBird when a request is submitted. If NetBird can't be read completely, that
   entry sends network, resource and access-profile requests to review instead of auto-approving
   them.
+- **Only network editors can read the access profiles, posture checks and blocklist.** A network
+  editor is an admin, a Manage All Networks holder, or a member of a group with an edit grant on an
+  existing network. Manage Temporary Access holders can also read the access profiles. Other
+  signed-in users get `403` from these three lists. No screen they use changes.
 
 ---
 

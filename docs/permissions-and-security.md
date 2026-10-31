@@ -42,6 +42,8 @@ Notes:
 
 A restricted user in an AD group that has an **edit** grant on a network can manage that network's resources in the app - but this changes nothing about their own device's connectivity.
 
+**Who can read the access profiles, posture checks and blocklist.** Network editors need these lists when they add or edit resources and their policies. A network editor is an admin, a **Manage All Networks** holder, or a member of a group with an **edit** grant on a network that still exists. **Manage Temporary Access** holders can also read the access profiles, because shared profiles are grant targets. Every other signed-in user gets `403` from `GET /api/access-profiles`, `GET /api/posture-checks` and `GET /api/blocklist`. Managing these lists stays admin-only.
+
 **Policy sources are a separate choice.** For each network, of the edit-granted groups you pick which are **Policy Source Groups** - only those are auto-added as sources of *new* policies created there (and offered to non-admin editors in the policy editor). An edit group left out can manage the network without its members being granted access by every new policy. Default: every edit group is a policy source (the legacy behavior).
 
 ## Session limits
