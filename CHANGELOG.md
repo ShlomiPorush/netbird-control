@@ -75,6 +75,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   bot token and `BASE_URL` registers the webhook on start, so nothing changes for it. After
   importing settings into a new deployment, save **Settings → Telegram** in the main account to
   register it. See [Telegram notifications](docs/telegram-notifications.md#inbound-approving-from-telegram).
+- **Regex event filter rules run with a time limit.** They are checked outside the main server
+  thread, so a slow pattern no longer delays other work. When the regex rules for an event take
+  longer than 25 ms, the event is kept. A rule that is too slow twice is skipped for that account
+  for 10 minutes, and the server log names the rule.
 
 ---
 

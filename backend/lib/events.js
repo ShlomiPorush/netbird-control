@@ -652,12 +652,14 @@ async function updateFilterRule(id, { field, operator, value, enabled }) {
         [id, field, operator, value, enabled, tnt()]
     );
     invalidateFilterCache();
+    regexStrikes.delete(regexRuleKey(tnt(), id));
     return r.rows[0];
 }
 
 async function deleteFilterRule(id) {
     await pool.query('DELETE FROM filter_rules WHERE id = $1 AND tenant = $2', [id, tnt()]);
     invalidateFilterCache();
+    regexStrikes.delete(regexRuleKey(tnt(), id));
 }
 
 // setSetting (lib/core.js) invalidates this cache after any settings write - the filter config is
@@ -688,21 +690,188 @@ function eventFields(payload) {
     };
 }
 
-// Does a single value satisfy a rule's operator?
+// Does a single value satisfy a rule's operator? (Regex rules run in a worker, see below.)
 function ruleMatchesValue(rule, value) {
     if (value == null) return false;
     const hay = String(value).toLowerCase();
     const needle = String(rule.value).toLowerCase();
-    if (!needle && rule.operator !== 'regex') return false;
+    if (!needle) return false;
     switch (rule.operator) {
         case 'equals': return hay === needle;
         case 'starts_with': return hay.startsWith(needle);
         case 'ends_with': return hay.endsWith(needle);
-        // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- the pattern is an admin-configured filter rule (not end-user input); input is length-bounded and the call is wrapped in try/catch so a bad/slow pattern can't run away.
-        case 'regex': try { return new RegExp(rule.value, 'i').test(String(value).slice(0, 2000)); } catch { return false; }
         case 'contains':
         default: return hay.includes(needle);
     }
+}
+
+// ─── Regex rules: compiled and run in a worker thread, under a time limit ───
+// A pattern can take very long to compile or match, and the main thread can't interrupt that,
+// so regex rules never run here. All regex rules for one event go to lib/regex-worker.js as a
+// single request; when the request runs over REGEX_BUDGET_MS the event counts as not matched
+// (it is kept), the worker is replaced, and the rule that was running gets a strike. A rule
+// with two strikes is skipped for that account for REGEX_SKIP_MS and logged once.
+const path = require('path');
+const { Worker } = require('worker_threads');
+
+const REGEX_BUDGET_MS = 25;            // per event, all of its regex rules together
+const REGEX_SLOW_MS = 10;              // one rule evaluation this slow is a strike
+const REGEX_STRIKES = 2;               // two, so a single pause (e.g. GC) never skips a rule
+const REGEX_SKIP_MS = 10 * 60 * 1000;
+const REGEX_MAX_QUEUE = 1000;          // waiting events beyond this count as not matched
+const REGEX_MAX_THREADS = 3;           // live worker threads, including ones still shutting down
+const REGEX_MAX_KNOWN = 2000;          // rule patterns cached by one worker before it is recycled
+const REGEX_START_MS = 5000;           // a worker not ready by then is replaced
+
+const regexRuleKey = (account, id) => `${account}\n${id}`;
+// Rule key -> Map(pattern -> { strikes, until }). Per pattern, so an evaluation from an older
+// rule snapshot can only add strikes to that older pattern.
+const regexStrikes = new Map();
+
+function regexSkipped(job) {
+    const e = regexStrikes.get(job.key)?.get(job.pattern);
+    return !!e && e.strikes >= REGEX_STRIKES && e.until > Date.now();
+}
+
+function regexStrike(job) {
+    const now = Date.now();
+    for (const [key, byPattern] of regexStrikes) {
+        for (const [p, e] of byPattern) if (e.until <= now) byPattern.delete(p);
+        if (!byPattern.size) regexStrikes.delete(key);
+    }
+    if (!regexStrikes.has(job.key)) regexStrikes.set(job.key, new Map());
+    const byPattern = regexStrikes.get(job.key);
+    const e = byPattern.get(job.pattern) || { strikes: 0, until: 0 };
+    e.strikes++;
+    e.until = now + REGEX_SKIP_MS;
+    byPattern.set(job.pattern, e);
+    if (e.strikes === REGEX_STRIKES) {
+        console.warn(`Filter rule #${job.id}${job.account ? ` (account ${job.account})` : ''}: the regex is too slow and is skipped for ${REGEX_SKIP_MS / 60000} minutes`);
+    }
+}
+
+let regexThreads = 0;   // live worker threads
+let regexWorker = null; // { worker, online, known: Map(rule key -> pattern sent) }
+let regexInflight = null;
+let regexSeq = 0;
+let regexQueueFullLoggedAt = 0;
+const regexQueue = [];
+
+function spawnRegexWorker() {
+    const worker = new Worker(path.join(__dirname, 'regex-worker.js'));
+    const rw = { worker, online: false, known: new Map() };
+    regexThreads++;
+    // A worker that never reports ready is replaced, so queued events are never stuck on it.
+    const startTimer = setTimeout(() => { if (!rw.online) retireRegexWorker(rw); }, REGEX_START_MS);
+    startTimer.unref();
+    worker.on('message', (m) => {
+        if (m.ready) {
+            rw.online = true;
+            clearTimeout(startTimer);
+            if (regexInflight && regexInflight.rw === rw) armRegexDeadline();
+        } else if (regexInflight && regexInflight.rw === rw && m.seq === regexInflight.seq) {
+            // The reply can be read after the time limit when the main thread was busy; it counts
+            // only if the worker's own run of the request stayed within the limit.
+            finishRegexRequest(m.hit && m.ms <= REGEX_BUDGET_MS);
+        }
+    });
+    worker.on('error', (err) => {
+        console.error('Regex filter worker error:', err.message);
+        retireRegexWorker(rw);
+    });
+    worker.on('exit', () => {
+        regexThreads--;
+        if (regexWorker === rw) regexWorker = null;
+        if (regexInflight && regexInflight.rw === rw) finishRegexRequest(false);
+        pumpRegexQueue();
+    });
+    worker.unref(); // only referenced while it has a request (see pumpRegexQueue)
+    return rw;
+}
+
+function retireRegexWorker(rw) {
+    if (regexWorker === rw) regexWorker = null;
+    rw.retired = true;
+    // terminate() keeps the worker referenced until it exits, so queued events waiting for a free
+    // thread are never abandoned.
+    rw.worker.terminate().catch(() => {});
+}
+
+// Strike every rule of the in-flight request that was slow: finished ones by duration, and the
+// one still running (if any) by how long it has been running.
+function strikeSlowRegexJobs(req) {
+    const counters = new Int32Array(req.state, 0, 2);
+    const times = new Float64Array(req.state, 8);
+    const started = Atomics.load(counters, 0);
+    const finished = Atomics.load(counters, 1);
+    for (let i = 0; i < finished; i++) if (times[2 * i + 1] >= REGEX_SLOW_MS) regexStrike(req.jobs[i]);
+    if (started > finished && Date.now() - times[2 * (started - 1)] >= REGEX_SLOW_MS) regexStrike(req.jobs[started - 1]);
+}
+
+function armRegexDeadline() {
+    const req = regexInflight;
+    req.timer = setTimeout(() => {
+        if (regexInflight !== req) return;
+        retireRegexWorker(req.rw);
+        finishRegexRequest(false);
+    }, REGEX_BUDGET_MS);
+}
+
+function finishRegexRequest(hit) {
+    const req = regexInflight;
+    regexInflight = null;
+    clearTimeout(req.timer);
+    strikeSlowRegexJobs(req);
+    if (!req.rw.retired) req.rw.worker.unref();
+    req.resolve(hit);
+    pumpRegexQueue();
+}
+
+function pumpRegexQueue() {
+    while (!regexInflight && regexQueue.length) {
+        if (regexWorker && regexWorker.known.size > REGEX_MAX_KNOWN) retireRegexWorker(regexWorker);
+        if (!regexWorker) {
+            if (regexThreads >= REGEX_MAX_THREADS) return; // resumes when a thread exits
+            try {
+                regexWorker = spawnRegexWorker();
+            } catch (err) {
+                console.error('Regex filter worker could not start:', err.message);
+                for (const waiting of regexQueue.splice(0)) waiting.resolve(false);
+                return;
+            }
+        }
+        const next = regexQueue.shift();
+        // Rules skipped while this event waited are left out.
+        const jobs = next.jobs.filter((j) => !regexSkipped(j));
+        if (!jobs.length) { next.resolve(false); continue; }
+        const rw = regexWorker;
+        const msg = jobs.map((j) => {
+            if (rw.known.get(j.key) === j.pattern) return { key: j.key, value: j.value };
+            rw.known.set(j.key, j.pattern);
+            return { key: j.key, pattern: j.pattern, value: j.value };
+        });
+        const state = new SharedArrayBuffer(8 + 16 * jobs.length);
+        regexInflight = { rw, seq: ++regexSeq, jobs, state, resolve: next.resolve, timer: null };
+        rw.worker.ref();
+        rw.worker.postMessage({ seq: regexInflight.seq, jobs: msg, state });
+        // Worker start-up never counts against a rule: the clock starts once it is ready.
+        if (rw.online) armRegexDeadline();
+    }
+}
+
+// Does any of these regex jobs match? Resolves false when the time limit is reached.
+function runRegexJobs(jobs) {
+    if (regexQueue.length >= REGEX_MAX_QUEUE) {
+        if (Date.now() - regexQueueFullLoggedAt > 60000) {
+            regexQueueFullLoggedAt = Date.now();
+            console.warn('Regex filter rules are falling behind; some events are kept without regex filtering');
+        }
+        return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+        regexQueue.push({ jobs, resolve });
+        pumpRegexQueue();
+    });
 }
 
 // Built-in broadcast / multicast noise (toggleable in Settings).
@@ -722,17 +891,23 @@ function isBuiltinNoise(dstAddr) {
 
 // Evaluate one rule set against the already-extracted fields. Shared by the live-payload check
 // and the stored-row check so "would this have been dropped?" is answered by one piece of code.
-function fieldsMatchFilters(f, cfg) {
+// The result is an OR over the rules, so regex rules can run after the others, in one request.
+async function fieldsMatchFilters(f, cfg) {
     if (cfg.builtinNoise && isBuiltinNoise(f.destination_addr)) return true;
+    const account = tnt();
+    const regexJobs = [];
     for (const rule of cfg.rules) {
         if (rule.enabled === false) continue;
-        if (rule.field === 'any_addr') {
-            if (ruleMatchesValue(rule, f.source_addr) || ruleMatchesValue(rule, f.destination_addr)) return true;
-        } else if (ruleMatchesValue(rule, f[rule.field])) {
+        const values = rule.field === 'any_addr' ? [f.source_addr, f.destination_addr] : [f[rule.field]];
+        if (rule.operator === 'regex') {
+            const job = { key: regexRuleKey(account, rule.id), account, id: rule.id, pattern: String(rule.value) };
+            if (regexSkipped(job)) continue;
+            for (const v of values) if (v != null) regexJobs.push({ ...job, value: String(v).slice(0, 2000) });
+        } else if (values.some((v) => ruleMatchesValue(rule, v))) {
             return true;
         }
     }
-    return false;
+    return regexJobs.length > 0 && runRegexJobs(regexJobs);
 }
 
 async function isNoiseTraffic(payload) {
