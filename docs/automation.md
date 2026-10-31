@@ -7,6 +7,7 @@ Connect an **external HTTP source** that returns IP addresses and **auto-provisi
 ## Configuring an integration
 
 - **Connection** - endpoint URL + auth (`none` / `bearer` / custom `header`; the secret is **write-only**).
+  The source must send its **complete response within 30 seconds** and **at most 10 MiB** (10,485,760 bytes). A slower or larger response stops the request, and the run (or the test) fails with an error before any resource changes.
 - **Source format** -
   - **JSON**: an *items path* (dot-path to the array) + field mapping (**address**, name, description, and a **key** = stable external id used for dedupe; falls back to the address).
   - **Text**: one IP per line (`#` comments ignored), optional name prefix.
@@ -20,8 +21,8 @@ Connect an **external HTTP source** that returns IP addresses and **auto-provisi
 1. Fetch + parse the source; map each item to `{ key, address, name, description }`.
 2. Apply the **safety floor** - bail out entirely if the response looks broken.
 3. Diff against the **ownership ledger** (`automation_resources` - every resource this automation created or adopted):
-   - **Known key** → keep in sync; re-enable if it had been disabled.
-   - **New key, address already exists (not ours)** → **adopt** it into management (from now on its lifecycle is managed).
+   - **Known key** → keep in sync; re-enable if the removal mode had disabled it.
+   - **New key, address already exists (not ours)** → **adopt** it into management (from now on its lifecycle is managed). A resource that is already disabled stays disabled until someone enables it in NetBird; after that, it is managed like any other.
    - **New key, new address** → **create** the resource (joined to the profile groups).
    - **On the blocklist** for the target network → **skip** (counted `blocked`).
    - **Name already taken** by a different resource → **conflict**, skipped.

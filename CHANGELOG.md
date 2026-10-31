@@ -11,6 +11,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **An automation no longer enables a disabled resource that it adopts.** The resource stays
+  disabled on later syncs until someone enables it in NetBird. A sync re-enables only the resources
+  that its own removal mode disabled.
 - **Temporary access keeps the target's posture checks.** A grant to an Access Profile or a
   resource now carries the profile's posture checks, or those of the resource policy it mirrors,
   so only compliant devices get access during the grant. Targets with different posture checks
@@ -51,6 +54,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **Saving Settings → Approvals saves the delegation list.** Adding a delegation now grants
   approval rights, and removing one and saving ends it at once. A failed save no longer changes
   who can approve.
+- **Tenant Support users follow the Admin Session Cap while they manage a tenant.** Inside a
+  tenant they act as admins, so once their sign-in is older than the Admin Session Cap
+  (Settings - Security), they are asked to sign in again, as admins are. Their use of the main
+  account still follows the User Session Cap.
 
 ### Changed
 - **New requirement:** a trusted entry with blocked targets reads the current networks and
@@ -72,6 +79,14 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   bot token and `BASE_URL` registers the webhook on start, so nothing changes for it. After
   importing settings into a new deployment, save **Settings → Telegram** in the main account to
   register it. See [Telegram notifications](docs/telegram-notifications.md#inbound-approving-from-telegram).
+- **New requirement: an automation source must send its complete response within 30 seconds
+  and at most 10 MiB.** A slower or larger response stops the request, and the run fails with an
+  error before any resource changes. Telegram API calls use the same limits. See
+  [Automation](docs/automation.md).
+- **Regex event filter rules run with a time limit.** They are checked outside the main server
+  thread, so a slow pattern no longer delays other work. When the regex rules for an event take
+  longer than 25 ms, the event is kept. A rule that is too slow twice is skipped for that account
+  for 10 minutes, and the server log names the rule.
 - **A user blocked in NetBird has no role, groups or permissions when signed in to the app.** This
   includes admin rights through `ADMIN_GROUP_ID`, approval rights and feature permissions. Unblocking
   restores them.
