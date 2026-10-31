@@ -54,6 +54,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **Saving Settings → Approvals saves the delegation list.** Adding a delegation now grants
   approval rights, and removing one and saving ends it at once. A failed save no longer changes
   who can approve.
+- **Tenant Support users follow the Admin Session Cap while they manage a tenant.** Inside a
+  tenant they act as admins, so once their sign-in is older than the Admin Session Cap
+  (Settings - Security), they are asked to sign in again, as admins are. Their use of the main
+  account still follows the User Session Cap.
 
 ### Changed
 - **New requirement:** a trusted entry with blocked targets reads the current networks and
