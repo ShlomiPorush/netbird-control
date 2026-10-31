@@ -7975,7 +7975,8 @@ async function pullUsersCache() {
     const users = await fetchUsersFromApi();
     if (users) {
         await upsertUsers(users);
-        for (const k of _unrecordedBlocks) if (k.startsWith(`${t}|`)) _unrecordedBlocks.delete(k);
+        // Only a user the list returned now has NetBird's state in the mirror.
+        for (const u of users) if (u && u.id) _unrecordedBlocks.delete(`${t}|${u.id}`);
         // Prune users deleted in NetBird. Only when the API returned at least one (an account
         // always has its owner, so an empty result means a transient error - don't wipe).
         const ids = users.map(u => u && u.id).filter(Boolean);

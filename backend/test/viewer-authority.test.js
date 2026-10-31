@@ -18,9 +18,11 @@ let gateOnce = null;  // when set, a user-list read (after skipping gateSkip rea
 let gateSkip = 0;
 let gateHit = false;
 let listDown = false;  // NetBird answers the user-list reads with nothing
+let listOnlyServiceUsers = false; // the regular list fails, the service-user list answers []
 nb.netbirdGet = async (path) => {
     if (path === '/api/users/current') return { id: 'svc' };
     if (listDown && path.startsWith('/api/users')) return null;
+    if (listOnlyServiceUsers && path === '/api/users') return null;
     if (path === '/api/users?service_user=true') return [];
     if (path === '/api/users') {
         const snapshot = JSON.parse(JSON.stringify(liveUsers));
@@ -149,7 +151,7 @@ function withNetbirdApi(fn) {
 beforeEach(async () => {
     users.clear(); settings.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
     failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0; listDown = false; tgCalls.length = 0;
-    failUserUpdate = false; holdPut = null;
+    failUserUpdate = false; holdPut = null; listOnlyServiceUsers = false;
     for (const k of Object.keys(adGroupsByOid)) delete adGroupsByOid[k];
     await db.setFeaturePermsConfig({
         'networks.manage': { users: [ME, OTHER], groupIds: [] },
@@ -439,8 +441,12 @@ test('a block the mirror could not record still counts until a user-list refresh
     assert.equal(users.get('|u-me').raw_json.is_blocked, false); // nothing was recorded
     assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
     assert.equal(await tgActs(1), false);
+    // A refresh that returns only part of the list (here: just the service users) records nothing for me.
+    listDown = false; listOnlyServiceUsers = true; db.resetNbCaches();
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal(await tgActs(1), false);
     // Once the list can be read, a refresh records NetBird's state.
-    listDown = false; db.resetNbCaches();
+    listOnlyServiceUsers = false; db.resetNbCaches();
     assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
     assert.equal(users.get('|u-me').raw_json.is_blocked, true);
     await db.setUserBlocked(ME.id, false);
