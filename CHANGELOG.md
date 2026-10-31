@@ -11,6 +11,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **An automation no longer enables a disabled resource that it adopts.** The resource stays
+  disabled on later syncs until someone enables it in NetBird. A sync re-enables only the resources
+  that its own removal mode disabled.
 - **Temporary access keeps the target's posture checks.** A grant to an Access Profile or a
   resource now carries the profile's posture checks, or those of the resource policy it mirrors,
   so only compliant devices get access during the grant. Targets with different posture checks
