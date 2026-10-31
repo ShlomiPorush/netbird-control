@@ -33,6 +33,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   request. This also applies to a request that went to review after an auto-approval rule pinned
   its ports and the grant could not be created, if the request was pending before the upgrade.
   The user can submit that request again, and the rule approves it as before.
+- **Editing or deleting a resource acts only on a resource of the network in the request.** A
+  resource from another network gets a 404 response, and nothing is changed, including its access
+  policies. When NetBird can't return the resource, the edit or delete stops with an error before
+  any change. Deleting a network then stops before the network is deleted, and an automation keeps
+  the resource and retries its removal on the next run.
 
 ### Changed
 - **New requirement:** a trusted entry with blocked targets reads the current networks and
