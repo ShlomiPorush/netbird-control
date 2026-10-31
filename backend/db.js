@@ -9525,27 +9525,12 @@ function decisionVia(actor) {
 
 // humanDuration now lives in lib/pure.js (imported at the top).
 
-// Typeahead over grantable things (resources / networks / shared profiles). NOT filtered by the
-// requester's own grants - they're asking for what they lack. Min 2 chars, capped.
-async function searchRequestTargets(q) {
-    const query = String(q || '').trim().toLowerCase();
-    if (query.length < 2) return { results: [] };
-    // Cap PER TYPE, not overall - with a shared cap, resources (scanned first) exhausted it
-    // and matching networks/profiles never showed up at all. Generous cap: the dropdown
-    // scrolls, so there's no reason to hide matches.
-    const CAP = 50;
-    const has = (s) => String(s || '').toLowerCase().includes(query);
-    const results = [];
-    const usage = await getUsageData();
-    const netName = new Map(), netOfResource = new Map();
-    for (const n of usage.networks || []) {
-        netName.set(n.id, n.name || n.id);
-        for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(rid, n.id);
-    }
-    // Per-resource PORT policies (destinationResource with a specific protocol) become
-    // requestable sub-entries: "resource · policy (TCP 8006)". The policy already carries the
-    // service's name and ports, so one merged resource with many port policies still offers
-    // per-service requests - and the grant opens ONLY that policy's ports (target.access).
+// Per-resource PORT policies (destinationResource with a specific protocol) become
+// requestable sub-entries: "resource · policy (TCP 8006)". The policy already carries the
+// service's name and ports, so one merged resource with many port policies still offers
+// per-service requests - and the grant opens ONLY that policy's ports (target.access).
+// Shared by the typeahead and resolveRequestTargets, so both see the same entries.
+function requestPortEntries(usage) {
     const polByResource = new Map();
     for (const p of usage.policies || []) {
         if (!p || p.enabled === false) continue;
@@ -9570,6 +9555,27 @@ async function searchRequestTargets(q) {
             });
         }
     }
+    return polByResource;
+}
+
+// Typeahead over grantable things (resources / networks / shared profiles). NOT filtered by the
+// requester's own grants - they're asking for what they lack. Min 2 chars, capped.
+async function searchRequestTargets(q) {
+    const query = String(q || '').trim().toLowerCase();
+    if (query.length < 2) return { results: [] };
+    // Cap PER TYPE, not overall - with a shared cap, resources (scanned first) exhausted it
+    // and matching networks/profiles never showed up at all. Generous cap: the dropdown
+    // scrolls, so there's no reason to hide matches.
+    const CAP = 50;
+    const has = (s) => String(s || '').toLowerCase().includes(query);
+    const results = [];
+    const usage = await getUsageData();
+    const netName = new Map(), netOfResource = new Map();
+    for (const n of usage.networks || []) {
+        netName.set(n.id, n.name || n.id);
+        for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(rid, n.id);
+    }
+    const polByResource = requestPortEntries(usage);
 
     let hits = 0;
     for (const r of usage.resources || []) {
@@ -9613,6 +9619,68 @@ async function searchRequestTargets(q) {
     return { results };
 }
 
+// Server-side view of access-request targets, from the same catalogue the typeahead offers
+// (resources in a network + their port entries, networks, shared profiles). Only what this
+// returns is stored and granted - name, network, profile group and port scope never come
+// from the request body. A port scope must be one of the resource's port entries, or (on
+// approval) the exact scope an auto-approval rule pinned on the request's stored row
+// (ruleSpecs, server-written). Anything else is rejected, never widened to full exposure.
+// Port order doesn't change what a scope opens, so the comparison key sorts the lists.
+function accessSpecKey(a) {
+    const n = normAccessSpec(a);
+    if (!n) return '';
+    return stableStringify({ ...n, ...(n.tcp ? { tcp: [...n.tcp].sort() } : {}), ...(n.udp ? { udp: [...n.udp].sort() } : {}) });
+}
+async function resolveRequestTargets(targets, ruleSpecs = []) {
+    const gone = () => new Error('a requested target or port scope is no longer offered - pick it again from search');
+    const usage = await getUsageData();
+    const networks = new Map((usage.networks || []).filter(n => n && n.id).map(n => [String(n.id), n]));
+    const netOfResource = new Map();
+    for (const [nid, n] of networks) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(String(rid), nid);
+    const resources = new Map((usage.resources || []).filter(r => r && r.id).map(r => [String(r.id), r]));
+    const portEntries = requestPortEntries(usage);
+    let profiles = null;
+    const out = [];
+    for (const t of targets) {
+        if (!t || (t.type !== 'resource' && t.type !== 'network' && t.type !== 'profile')) throw new Error('only resources, networks and access profiles can be requested');
+        if (typeof t.id !== 'string' && typeof t.id !== 'number') throw gone();
+        const type = t.type, id = String(t.id);
+        let r;
+        if (type === 'resource') {
+            const res = resources.get(id), nid = netOfResource.get(id);
+            if (!res || !nid) throw gone();
+            r = { type, id, name: String(res.name || res.address || res.id), networkId: nid, resourceType: res.type || '' };
+        } else if (type === 'network') {
+            const n = networks.get(id);
+            if (!n) throw gone();
+            r = { type, id, name: String(n.name || n.id) };
+        } else {
+            if (!profiles) profiles = new Map((await listAccessProfiles()).filter(p => p.shared).map(p => [String(p.id), p]));
+            const p = profiles.get(id);
+            if (!p) throw gone();
+            r = { type, id, name: String(p.name), groupId: p.groupId };
+        }
+        if (t.access !== undefined && t.access !== null) {
+            const k = accessSpecKey(t.access);
+            if (!k) throw gone();
+            const entries = type === 'resource' ? (portEntries.get(id) || []).filter(s => accessSpecKey(s.access) === k) : [];
+            const entryName = (s) => s.label || `${r.name} (${s.portsLabel})`;
+            if (entries.length) {
+                const s = entries.find(e => entryName(e) === t.name) || entries[0];
+                r.name = entryName(s);
+                r.access = normAccessSpec(s.access);
+            } else if (ruleSpecs.some(x => x && x.ruleAccess === true && x.type === type && String(x.id) === id && accessSpecKey(x.access) === k)) {
+                r.access = normAccessSpec(t.access);
+                r.ruleAccess = true;
+            } else {
+                throw gone();
+            }
+        }
+        out.push(r);
+    }
+    return out;
+}
+
 // System actor for auto-approved requests, so the decision is attributed to "Auto-approval".
 const AUTO_ACTOR = { name: 'Auto-approval', email: '', user_id: '', oid: '', isAdmin: true, auto: true };
 
@@ -9630,7 +9698,7 @@ async function createAccessRequest(cfg, requester) {
     // Temporary device (bypass only): delete the device automatically when the approved
     // bypass period ends. Recorded on the request so the approver sees it up front.
     const tempDevice = kind === 'bypass' && !!cfg.tempDevice;
-    const clean = targets.map(t => {
+    const clean = kind === 'access' ? await resolveRequestTargets(targets) : targets.map(t => {
         const access = normAccessSpec(t.access);
         return { type: t.type, id: String(t.id), name: String(t.name || t.id), networkId: t.networkId, resourceType: t.resourceType, groupId: t.groupId, ...(access ? { access } : {}) };
     });
@@ -9700,14 +9768,18 @@ async function createAccessRequest(cfg, requester) {
         for (const { t, cap, access } of auto) {
             const dur = cap ? Math.min(minutes || cap, cap) : (minutes || 60);
             if (!buckets.has(dur)) buckets.set(dur, []);
-            buckets.get(dur).push(access ? { ...t, access } : t);
+            // ruleAccess marks a server-pinned scope, so a later human approval keeps it. A pin
+            // that replaces a picked port entry also drops that entry's label for the target's own.
+            const relabel = access && t.access && accessSpecKey(access) !== accessSpecKey(t.access);
+            const name = relabel ? (await resolveRequestTargets([{ type: t.type, id: t.id }]))[0].name : t.name;
+            buckets.get(dur).push(access ? { ...t, name, access, ruleAccess: true } : t);
         }
         for (const [dur, bucketTargets] of buckets) {
             const req = await insertRow(bucketTargets);
             ids.push(req.id);
             try {
-                await approveAccessRequest(req.id, { durationMinutes: dur, actor: AUTO_ACTOR });
-                notifyAutoApprovedTelegram(req, dur).catch(() => { });
+                const res = await approveAccessRequest(req.id, { durationMinutes: dur, actor: AUTO_ACTOR });
+                notifyAutoApprovedTelegram({ ...req, targets: res.targets }, dur).catch(() => { });
                 autoApproved = 1;
             } catch (e) {
                 // Grant creation failed - don't lose the request: fall back to human review.
@@ -9827,19 +9899,16 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     const requested = Array.isArray(req.targets) ? req.targets : [];
     let effective = requested;
     if (Array.isArray(targets) && targets.length) {
-        effective = targets
-            .map(t => {
-                if (!t) return null;
-                const access = normAccessSpec(t.access);
-                return { type: String(t.type || ''), id: String(t.id || ''), name: String(t.name || t.id || ''), networkId: t.networkId, groupId: t.groupId, ...(access ? { access } : {}) };
-            })
-            .filter(t => t && t.type && t.id);
+        effective = targets.filter(t => t && t.type && t.id);
         if (!effective.length) throw new Error('at least one target is required');
     } else if (Array.isArray(req.excluded_targets) && req.excluded_targets.length) {
         const ex = new Set(req.excluded_targets.map(x => `${x.type}:${x.id}`));
         effective = requested.filter(t => !ex.has(`${t.type}:${t.id}`));
         if (!effective.length) throw new Error('all targets were removed - deny the request instead');
     }
+    // Every path grants only what the catalogue offers now; a port scope an auto-approval
+    // rule pinned on THIS row (ruleAccess, server-written) is kept as stored.
+    effective = await resolveRequestTargets(effective, requested.filter(t => t && t.ruleAccess === true));
     const changed = effective.length !== requested.length ||
         effective.some(t => !requested.some(r => r.type === t.type && r.id === t.id));
 
@@ -9871,7 +9940,7 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     if (req.tg_chat_id && req.tg_message_id) {
         editTelegramMessage(req.tg_chat_id, req.tg_message_id, accessRequestOutcomeHtml({ ...req, targets: effective }, 'approved', decidedBy, { grantedMinutes: approvedMin })).catch(() => { });
     }
-    return { id, grantId: grant.id };
+    return { id, grantId: grant.id, targets: effective };
 }
 
 async function denyAccessRequest(id, { reason, actor } = {}) {

@@ -15,6 +15,17 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   A blocked resource also sends its network and any access profile whose group contains it to
   review. A blocked network also sends its resources and the access profiles that contain them to
   review.
+- **Access requests use the server's catalogue for every target.** Only resources, networks and
+  shared access profiles can be requested. When a request is submitted and again when it is
+  approved, the server sets each target's name, network, profile group and port scope from the
+  catalogue that the typeahead uses. A port scope must be one of the resource's port-policy
+  entries, or a scope that an auto-approval rule pinned on that request.
+- **New requirement on upgrade:** a pending request whose target or port scope is not in the
+  current catalogue can no longer be approved as it is. The approver gets "no longer offered -
+  pick it again from search". They can pick the target again in the review modal or deny the
+  request. This also applies to a request that went to review after an auto-approval rule pinned
+  its ports and the grant could not be created, if the request was pending before the upgrade.
+  The user can submit that request again, and the rule approves it as before.
 
 ### Changed
 - **New requirement:** a trusted entry with blocked targets reads the current networks and
