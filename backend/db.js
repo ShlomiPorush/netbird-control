@@ -22,7 +22,7 @@ const {
 } = require('./lib/events');
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
-const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
+const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
 // notify*Email helpers stay in db.js and use the imported sendMail/mailLayout/mailRows/htmlEsc.
@@ -310,9 +310,8 @@ async function setFeaturePermsConfig(cfg) {
     await persistInOrder(() => setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig())));
     return getFeaturePermsConfig();
 }
-// Permission and approver settings are written one at a time, each from the CURRENT in-memory
-// state, so a save that finishes late can never overwrite a newer one (such as a deleted user's
-// removal).
+// Permission settings are written one at a time, each from the CURRENT in-memory state, so a save
+// that finishes late can never overwrite a newer one (such as a deleted user's removal).
 let _permSettingsWrites = Promise.resolve();
 function persistInOrder(write) {
     const p = _permSettingsWrites.then(write, write);
@@ -501,20 +500,31 @@ async function loadApproverConfig() {
         console.error('[Approver] config load error:', e.message);
     }
 }
-async function persistApprover() {
-    await persistInOrder(() => setSetting('approver_config', JSON.stringify({
-        groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates,
-    })));
+async function persistApprover(c = _approver) {
+    await setSetting('approver_config', JSON.stringify({
+        groupIds: c.groupIds, telegramChatId: c.telegramChatId, telegramApprovers: c.telegramApprovers, delegates: c.delegates,
+    }));
 }
 function getApproverConfig() {
     return { groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates };
 }
-async function setApproverConfig({ groupIds, telegramChatId, telegramApprovers, delegates } = {}) {
-    if (Array.isArray(groupIds)) _approver.groupIds = groupIds.map(s => String(s).trim()).filter(Boolean);
-    if (telegramChatId !== undefined) _approver.telegramChatId = String(telegramChatId || '').trim();
-    if (Array.isArray(telegramApprovers)) _approver.telegramApprovers = normApprovers(telegramApprovers);
-    if (Array.isArray(delegates)) _approver.delegates = normDelegates(delegates);
-    await persistApprover();
+// Saves run one at a time and the new config goes live only after it is stored, so a failed
+// write grants or revokes nothing, and a partial save never writes back a field another save
+// just changed. `input` may be a function of the current config, evaluated when the save runs.
+let _approverSaving = Promise.resolve();
+function setApproverConfig(input) {
+    const run = _approverSaving.then(() => saveApproverConfig(typeof input === 'function' ? input(getApproverConfig()) : input));
+    _approverSaving = run.catch(() => { });
+    return run;
+}
+async function saveApproverConfig({ groupIds, telegramChatId, telegramApprovers, delegates } = {}) {
+    const next = { ..._approver };
+    if (Array.isArray(groupIds)) next.groupIds = groupIds.map(s => String(s).trim()).filter(Boolean);
+    if (telegramChatId !== undefined) next.telegramChatId = String(telegramChatId || '').trim();
+    if (Array.isArray(telegramApprovers)) next.telegramApprovers = normApprovers(telegramApprovers);
+    if (Array.isArray(delegates)) next.delegates = normDelegates(delegates);
+    await persistApprover(next);
+    Object.assign(_approver, next);
     return getApproverConfig();
 }
 function getApproverGroupIds() { return _approver.groupIds; }
@@ -603,6 +613,71 @@ async function setAutoApprovalConfig({ trusted, rules } = {}) {
     await persistAutoApproval();
     return getAutoApprovalConfig();
 }
+// Blocked Targets cover what a grant reaches: a network grant covers all of its resources and a
+// profile grant every resource in the profile's group. autoApproveTargets is synchronous, so the
+// request route reads this inventory (network ↔ resource ↔ group membership) live from NetBird
+// right before deciding. Only entries WITH blocked targets need it; when it's missing, stale,
+// or inconsistent, their non-exact network/resource/profile matches fall back to review.
+const AA_INVENTORY_MAX_AGE_MS = 30 * 1000;
+let _aaInventory = null, _aaSeq = 0, _aaApplied = 0;
+async function refreshAutoApprovalInventory() {
+    if (!netbirdApiConfigured() || NETBIRD_READONLY) return;
+    if (!_autoApproval.trusted.some(tr => tr.enabled !== false && tr.excludedTargets.length)) return;
+    const seq = ++_aaSeq, startedAt = Date.now();
+    const [networks, resources] = await Promise.all([
+        netbirdGet('/api/networks').catch(() => null),
+        netbirdGet('/api/networks/resources').catch(() => null),
+    ]);
+    let next = null;
+    // Both lists must be readable and agree on the same resource ids. NetBird sends null for an
+    // empty list (a network without resources, a resource without groups).
+    const list = (v) => v == null ? [] : v;
+    if (Array.isArray(networks) && Array.isArray(resources) && resources.every(r => r && r.id && Array.isArray(list(r.groups)))
+        && networks.every(n => n && n.id && Array.isArray(list(n.resources)))) {
+        const networkIds = new Set(networks.map(n => String(n.id)));
+        const netOfResource = new Map();
+        for (const n of networks) for (const rid of list(n.resources)) netOfResource.set(String(rid), String(n.id));
+        // All-null groups can also mean group data wasn't readable - then profile membership is unknown.
+        const groupsKnown = resources.every(r => Array.isArray(r.groups)) || resources.some(r => Array.isArray(r.groups) && r.groups.length);
+        const resourcesOfGroup = new Map();
+        for (const r of resources) {
+            for (const g of list(r.groups)) {
+                const gid = String((g && g.id) || g || '');
+                if (!gid) continue;
+                if (!resourcesOfGroup.has(gid)) resourcesOfGroup.set(gid, []);
+                resourcesOfGroup.get(gid).push(String(r.id));
+            }
+        }
+        const resourceIds = new Set(resources.map(r => String(r.id)));
+        if (resourceIds.size === netOfResource.size && [...resourceIds].every(id => netOfResource.has(id))) {
+            next = { startedAt, tenant: currentTenantAccount(), networkIds, netOfResource, resourcesOfGroup: groupsKnown ? resourcesOfGroup : null };
+        }
+    }
+    // A newer attempt's outcome (success or failure) is never overwritten by an older one.
+    if (seq > _aaApplied) { _aaApplied = seq; _aaInventory = next; }
+}
+// Whether trusted entry `tr` must leave target `t` to review: an exact match, or (via the
+// inventory) a network/resource/profile that contains or is inside a blocked resource or network.
+function isBlockedForEntry(tr, t) {
+    const ex = tr.excludedTargets;
+    if (!ex.length) return false;
+    if (ex.some(x => x.type === t.type && x.id === String(t.id))) return true;
+    if (!['network', 'resource', 'profile'].includes(t.type)) return false;
+    const inv = _aaInventory;
+    if (!inv || inv.tenant !== currentTenantAccount() || Date.now() - inv.startedAt > AA_INVENTORY_MAX_AGE_MS) return true;
+    const blockedRes = new Set(ex.filter(x => x.type === 'resource').map(x => x.id));
+    const blockedNet = new Set(ex.filter(x => x.type === 'network').map(x => x.id));
+    const id = String(t.id);
+    if (t.type === 'resource') return !inv.netOfResource.has(id) || blockedNet.has(inv.netOfResource.get(id));
+    if (t.type === 'network') {
+        if (!inv.networkIds.has(id)) return true;
+        for (const [rid, nid] of inv.netOfResource) if (nid === id && blockedRes.has(rid)) return true;
+        return false;
+    }
+    if (!t.groupId || !inv.resourcesOfGroup) return true;
+    return (inv.resourcesOfGroup.get(String(t.groupId)) || []).some(rid => blockedRes.has(rid) || blockedNet.has(inv.netOfResource.get(rid)));
+}
+
 // Per-target decision for a requester with Entra groups `groups`:
 // { auto: [{ t, cap }], manual: [t…] } - cap is that target's effective max (0 = as requested).
 // A trusted entry does NOT apply to targets it excludes (those fall back to review, unless a
@@ -623,7 +698,7 @@ function autoApproveTargets(targets, groups) {
         let unrestricted = false;
         const specs = [];
         for (const tr of trustedEntries) {
-            if (tr.excludedTargets.some(x => x.type === t.type && x.id === String(t.id))) continue; // blocked for this entry
+            if (isBlockedForEntry(tr, t)) continue; // blocked for this entry
             const nid = netOf(t);
             if (tr.networkMode === 'allow' && !(nid && tr.networks.some(n => n.id === nid))) continue; // outside the approved networks
             if (tr.networkMode === 'block' && nid && tr.networks.some(n => n.id === nid)) continue;    // inside a blocked network
@@ -5156,8 +5231,8 @@ async function deleteUser(id) {
         } catch (err) {
             console.error('[Users] removing a deleted user from the permission settings failed:', err.message);
             const e = new Error("The user was deleted, but removing them from the app's permission settings failed. "
-                + 'Their direct permissions and approval delegations no longer apply because the user no longer exists; '
-                + 'check Settings - Approvals for a Telegram approver mapping.');
+                + 'Their direct permissions, approval delegations and Telegram approver mapping no longer apply because the user '
+                + 'no longer exists; you can remove the leftover entries in Settings - Permissions and Settings - Approvals.');
             e.status = 500; e.userDeleted = out; throw e;
         }
     }
@@ -5177,10 +5252,10 @@ async function removeUserFromAppSettings(id, email) {
     for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
     const results = await Promise.allSettled([
         setFeaturePermsConfig(perms),
-        setApproverConfig({
-            delegates: _approver.delegates.filter(d => !isUser(d.user.id, d.user.email)),
-            telegramApprovers: _approver.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
-        }),
+        setApproverConfig(c => ({
+            delegates: c.delegates.filter(d => !isUser(d.user.id, d.user.email)),
+            telegramApprovers: c.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
+        })),
     ]);
     const failed = results.find(r => r.status === 'rejected');
     if (failed) throw failed.reason;
@@ -5376,7 +5451,11 @@ async function deleteNetwork(id) {
     if (detail) {
         for (const r of (detail.resources || [])) {
             if (r && r.id) {
-                try { await deleteResource(id, r.id); } catch (e) { console.error('[deleteNetwork] resource:', e.message); }
+                try { await deleteResource(id, r.id); } catch (e) {
+                    // Keep the network (and the resource's policies) unless NetBird confirms the resource is gone.
+                    if (e.unconfirmed) throw new Error(`Couldn't remove resource "${r.name || r.id}", so the network was not deleted: ${e.message}`);
+                    console.error('[deleteNetwork] resource:', e.message);
+                }
             }
         }
         for (const rt of (detail.routers || [])) {
@@ -7594,7 +7673,7 @@ async function checkResourcePolicySync(resourceId, policies) {
     return dedicated;
 }
 async function syncResourcePolicies(networkId, resourceId, policies) {
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    const r = await getResourceInNetwork(networkId, resourceId);
     const name = (r && r.name) || 'resource';
     const resType = r && r.type;
 
@@ -7739,10 +7818,28 @@ async function setResourcePolicy(networkId, resourceId, protocol, ports) {
     bustNbCaches('policies');
 }
 
+// Read a resource through its network and confirm it belongs to that network. Run before any
+// write keyed on the resource id alone (its policies), so nothing changes for a resource of
+// another network. NetBird answers a mismatched network/resource pair with an error body.
+async function getResourceInNetwork(networkId, resourceId) {
+    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    if (r == null) {
+        const e = new Error("Couldn't read the resource from NetBird. Try again."); e.status = 502; e.unconfirmed = true; throw e;
+    }
+    if (typeof r !== 'object' || r.id !== resourceId) {
+        const e = new Error('Resource not found in this network'); e.status = 404;
+        // A mismatched pair comes back as a generic error, like an outage; only NetBird's own
+        // 404 confirms the resource is gone.
+        e.unconfirmed = r.code !== 404;
+        throw e;
+    }
+    return r;
+}
+
 // Delete a resource and best-effort clean up its auto-created policy + group
 async function deleteResource(networkId, resourceId) {
-    // Fetch the resource first to learn its groups
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    // Fetch the resource first to learn its groups (and that it is in this network)
+    const r = await getResourceInNetwork(networkId, resourceId);
     const groupIds = (r && Array.isArray(r.groups)) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
 
     // Delete policies that target this resource directly (NetBird blocks deleting a
@@ -9069,22 +9166,32 @@ async function createTemporaryAccessGrant(cfg, actor) {
             // ── Existing exposure per resource → combo buckets (pure logic: combosForResource) ──
             // Resource → groups lookup (one fetch per network; network targets were fetched above
             // but refetching here keeps this self-contained and cheap).
+            // An unreadable list stops the grant: treating it as empty would mirror no policy
+            // and no posture checks.
             const netResources = new Map();
             for (const rr of resourceRefs) {
                 if (netResources.has(rr.networkId)) continue;
                 const rs = await netbirdGet('/api/networks/' + encodeURIComponent(rr.networkId) + '/resources');
-                netResources.set(rr.networkId, Array.isArray(rs) ? rs : []);
+                if (!Array.isArray(rs)) throw new Error('could not read the resources of network ' + rr.networkId);
+                netResources.set(rr.networkId, rs);
             }
             // All enabled, non-temporary policies (other grants' temp policies must not leak
             // their 'all' back into new grants).
             const rawPolicies = await netbirdGet('/api/policies');
+            if (resourceRefs.length && !Array.isArray(rawPolicies)) throw new Error('could not read the existing policies');
             const polArr = (Array.isArray(rawPolicies) ? rawPolicies : [])
                 .filter(p => p && p.enabled !== false && !/^Temporary access #\d+/.test(p.name || ''));
             const combosFor = (rr) => {
-                if (rr.access) return accessSpecCombos(rr.access); // rule-pinned protocols/ports
                 const res = (netResources.get(rr.networkId) || []).find(x => x && x.id === rr.resourceId);
-                const rgroups = (res && Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
-                return combosForResource(polArr, rr.resourceId, rgroups);
+                if (!res) throw new Error('resource ' + rr.resourceId + ' was not found in network ' + rr.networkId);
+                const rgroups = (Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
+                const existing = combosForResource(polArr, rr.resourceId, rgroups);
+                if (!rr.access) return existing;
+                // Rule-pinned protocols/ports keep the posture checks of the exposure they overlap.
+                return accessSpecCombos(rr.access).map(c => {
+                    const pc = postureChecksFor(c, existing);
+                    return pc.length ? { ...c, postureChecks: pc } : c;
+                });
             };
 
             // bucket key → { combo, resources: [rr], profileGroups: [gid] }
@@ -9100,17 +9207,21 @@ async function createTemporaryAccessGrant(cfg, actor) {
             if (destGroupIds.size) {
                 const profByGid = new Map((await listAccessProfiles()).map(p => [p.groupId, p]));
                 for (const gid of destGroupIds) {
+                    const prof = profByGid.get(gid);
+                    if (!prof) throw new Error('access profile not found for group ' + gid);
+                    // The profile's posture checks gate the temp policy too.
+                    const pc = postureIds(prof.postureChecks);
+                    const gated = (c) => (pc.length ? { ...c, postureChecks: pc } : c);
                     const acc = destGroupAccess.get(gid);
                     if (acc) { // rule-pinned protocols/ports override the profile's definition
-                        for (const c of accessSpecCombos(acc)) bucketFor(c).profileGroups.push(gid);
+                        for (const c of accessSpecCombos(acc)) bucketFor(gated(c)).profileGroups.push(gid);
                         continue;
                     }
-                    const prof = profByGid.get(gid);
                     const ports = prof && (Array.isArray(prof.ports) ? prof.ports : String(prof.ports || '').split(',').map(s => s.trim()).filter(Boolean));
                     const c = prof && prof.protocol && prof.protocol !== 'all'
                         ? { protocol: prof.protocol, ...splitPortTokens(ports || []) }
                         : ALL_COMBO;
-                    bucketFor(c).profileGroups.push(gid);
+                    bucketFor(gated(c)).profileGroups.push(gid);
                 }
             }
 
@@ -9138,6 +9249,7 @@ async function createTemporaryAccessGrant(cfg, actor) {
                 if (b.combo.portRanges && b.combo.portRanges.length) rule.port_ranges = b.combo.portRanges;
                 const p = await netbirdPost('/api/policies', {
                     name: `Temporary access #${grantId}${suffix}`, description: `Auto-managed temporary access for ${label}`, enabled: true,
+                    source_posture_checks: b.combo.postureChecks || [],
                     rules: [rule],
                 });
                 if (p && p.status < 300 && p.body && p.body.id) policyIds.push(p.body.id);
@@ -9529,27 +9641,12 @@ function decisionVia(actor) {
 
 // humanDuration now lives in lib/pure.js (imported at the top).
 
-// Typeahead over grantable things (resources / networks / shared profiles). NOT filtered by the
-// requester's own grants - they're asking for what they lack. Min 2 chars, capped.
-async function searchRequestTargets(q) {
-    const query = String(q || '').trim().toLowerCase();
-    if (query.length < 2) return { results: [] };
-    // Cap PER TYPE, not overall - with a shared cap, resources (scanned first) exhausted it
-    // and matching networks/profiles never showed up at all. Generous cap: the dropdown
-    // scrolls, so there's no reason to hide matches.
-    const CAP = 50;
-    const has = (s) => String(s || '').toLowerCase().includes(query);
-    const results = [];
-    const usage = await getUsageData();
-    const netName = new Map(), netOfResource = new Map();
-    for (const n of usage.networks || []) {
-        netName.set(n.id, n.name || n.id);
-        for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(rid, n.id);
-    }
-    // Per-resource PORT policies (destinationResource with a specific protocol) become
-    // requestable sub-entries: "resource · policy (TCP 8006)". The policy already carries the
-    // service's name and ports, so one merged resource with many port policies still offers
-    // per-service requests - and the grant opens ONLY that policy's ports (target.access).
+// Per-resource PORT policies (destinationResource with a specific protocol) become
+// requestable sub-entries: "resource · policy (TCP 8006)". The policy already carries the
+// service's name and ports, so one merged resource with many port policies still offers
+// per-service requests - and the grant opens ONLY that policy's ports (target.access).
+// Shared by the typeahead and resolveRequestTargets, so both see the same entries.
+function requestPortEntries(usage) {
     const polByResource = new Map();
     for (const p of usage.policies || []) {
         if (!p || p.enabled === false) continue;
@@ -9574,6 +9671,27 @@ async function searchRequestTargets(q) {
             });
         }
     }
+    return polByResource;
+}
+
+// Typeahead over grantable things (resources / networks / shared profiles). NOT filtered by the
+// requester's own grants - they're asking for what they lack. Min 2 chars, capped.
+async function searchRequestTargets(q) {
+    const query = String(q || '').trim().toLowerCase();
+    if (query.length < 2) return { results: [] };
+    // Cap PER TYPE, not overall - with a shared cap, resources (scanned first) exhausted it
+    // and matching networks/profiles never showed up at all. Generous cap: the dropdown
+    // scrolls, so there's no reason to hide matches.
+    const CAP = 50;
+    const has = (s) => String(s || '').toLowerCase().includes(query);
+    const results = [];
+    const usage = await getUsageData();
+    const netName = new Map(), netOfResource = new Map();
+    for (const n of usage.networks || []) {
+        netName.set(n.id, n.name || n.id);
+        for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(rid, n.id);
+    }
+    const polByResource = requestPortEntries(usage);
 
     let hits = 0;
     for (const r of usage.resources || []) {
@@ -9617,6 +9735,68 @@ async function searchRequestTargets(q) {
     return { results };
 }
 
+// Server-side view of access-request targets, from the same catalogue the typeahead offers
+// (resources in a network + their port entries, networks, shared profiles). Only what this
+// returns is stored and granted - name, network, profile group and port scope never come
+// from the request body. A port scope must be one of the resource's port entries, or (on
+// approval) the exact scope an auto-approval rule pinned on the request's stored row
+// (ruleSpecs, server-written). Anything else is rejected, never widened to full exposure.
+// Port order doesn't change what a scope opens, so the comparison key sorts the lists.
+function accessSpecKey(a) {
+    const n = normAccessSpec(a);
+    if (!n) return '';
+    return stableStringify({ ...n, ...(n.tcp ? { tcp: [...n.tcp].sort() } : {}), ...(n.udp ? { udp: [...n.udp].sort() } : {}) });
+}
+async function resolveRequestTargets(targets, ruleSpecs = []) {
+    const gone = () => new Error('a requested target or port scope is no longer offered - pick it again from search');
+    const usage = await getUsageData();
+    const networks = new Map((usage.networks || []).filter(n => n && n.id).map(n => [String(n.id), n]));
+    const netOfResource = new Map();
+    for (const [nid, n] of networks) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(String(rid), nid);
+    const resources = new Map((usage.resources || []).filter(r => r && r.id).map(r => [String(r.id), r]));
+    const portEntries = requestPortEntries(usage);
+    let profiles = null;
+    const out = [];
+    for (const t of targets) {
+        if (!t || (t.type !== 'resource' && t.type !== 'network' && t.type !== 'profile')) throw new Error('only resources, networks and access profiles can be requested');
+        if (typeof t.id !== 'string' && typeof t.id !== 'number') throw gone();
+        const type = t.type, id = String(t.id);
+        let r;
+        if (type === 'resource') {
+            const res = resources.get(id), nid = netOfResource.get(id);
+            if (!res || !nid) throw gone();
+            r = { type, id, name: String(res.name || res.address || res.id), networkId: nid, resourceType: res.type || '' };
+        } else if (type === 'network') {
+            const n = networks.get(id);
+            if (!n) throw gone();
+            r = { type, id, name: String(n.name || n.id) };
+        } else {
+            if (!profiles) profiles = new Map((await listAccessProfiles()).filter(p => p.shared).map(p => [String(p.id), p]));
+            const p = profiles.get(id);
+            if (!p) throw gone();
+            r = { type, id, name: String(p.name), groupId: p.groupId };
+        }
+        if (t.access !== undefined && t.access !== null) {
+            const k = accessSpecKey(t.access);
+            if (!k) throw gone();
+            const entries = type === 'resource' ? (portEntries.get(id) || []).filter(s => accessSpecKey(s.access) === k) : [];
+            const entryName = (s) => s.label || `${r.name} (${s.portsLabel})`;
+            if (entries.length) {
+                const s = entries.find(e => entryName(e) === t.name) || entries[0];
+                r.name = entryName(s);
+                r.access = normAccessSpec(s.access);
+            } else if (ruleSpecs.some(x => x && x.ruleAccess === true && x.type === type && String(x.id) === id && accessSpecKey(x.access) === k)) {
+                r.access = normAccessSpec(t.access);
+                r.ruleAccess = true;
+            } else {
+                throw gone();
+            }
+        }
+        out.push(r);
+    }
+    return out;
+}
+
 // System actor for auto-approved requests, so the decision is attributed to "Auto-approval".
 const AUTO_ACTOR = { name: 'Auto-approval', email: '', user_id: '', oid: '', isAdmin: true, auto: true };
 
@@ -9634,7 +9814,7 @@ async function createAccessRequest(cfg, requester) {
     // Temporary device (bypass only): delete the device automatically when the approved
     // bypass period ends. Recorded on the request so the approver sees it up front.
     const tempDevice = kind === 'bypass' && !!cfg.tempDevice;
-    const clean = targets.map(t => {
+    const clean = kind === 'access' ? await resolveRequestTargets(targets) : targets.map(t => {
         const access = normAccessSpec(t.access);
         return { type: t.type, id: String(t.id), name: String(t.name || t.id), networkId: t.networkId, resourceType: t.resourceType, groupId: t.groupId, ...(access ? { access } : {}) };
     });
@@ -9704,14 +9884,18 @@ async function createAccessRequest(cfg, requester) {
         for (const { t, cap, access } of auto) {
             const dur = cap ? Math.min(minutes || cap, cap) : (minutes || 60);
             if (!buckets.has(dur)) buckets.set(dur, []);
-            buckets.get(dur).push(access ? { ...t, access } : t);
+            // ruleAccess marks a server-pinned scope, so a later human approval keeps it. A pin
+            // that replaces a picked port entry also drops that entry's label for the target's own.
+            const relabel = access && t.access && accessSpecKey(access) !== accessSpecKey(t.access);
+            const name = relabel ? (await resolveRequestTargets([{ type: t.type, id: t.id }]))[0].name : t.name;
+            buckets.get(dur).push(access ? { ...t, name, access, ruleAccess: true } : t);
         }
         for (const [dur, bucketTargets] of buckets) {
             const req = await insertRow(bucketTargets);
             ids.push(req.id);
             try {
-                await approveAccessRequest(req.id, { durationMinutes: dur, actor: AUTO_ACTOR });
-                notifyAutoApprovedTelegram(req, dur).catch(() => { });
+                const res = await approveAccessRequest(req.id, { durationMinutes: dur, actor: AUTO_ACTOR });
+                notifyAutoApprovedTelegram({ ...req, targets: res.targets }, dur).catch(() => { });
                 autoApproved = 1;
             } catch (e) {
                 // Grant creation failed - don't lose the request: fall back to human review.
@@ -9831,19 +10015,16 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     const requested = Array.isArray(req.targets) ? req.targets : [];
     let effective = requested;
     if (Array.isArray(targets) && targets.length) {
-        effective = targets
-            .map(t => {
-                if (!t) return null;
-                const access = normAccessSpec(t.access);
-                return { type: String(t.type || ''), id: String(t.id || ''), name: String(t.name || t.id || ''), networkId: t.networkId, groupId: t.groupId, ...(access ? { access } : {}) };
-            })
-            .filter(t => t && t.type && t.id);
+        effective = targets.filter(t => t && t.type && t.id);
         if (!effective.length) throw new Error('at least one target is required');
     } else if (Array.isArray(req.excluded_targets) && req.excluded_targets.length) {
         const ex = new Set(req.excluded_targets.map(x => `${x.type}:${x.id}`));
         effective = requested.filter(t => !ex.has(`${t.type}:${t.id}`));
         if (!effective.length) throw new Error('all targets were removed - deny the request instead');
     }
+    // Every path grants only what the catalogue offers now; a port scope an auto-approval
+    // rule pinned on THIS row (ruleAccess, server-written) is kept as stored.
+    effective = await resolveRequestTargets(effective, requested.filter(t => t && t.ruleAccess === true));
     const changed = effective.length !== requested.length ||
         effective.some(t => !requested.some(r => r.type === t.type && r.id === t.id));
 
@@ -9875,7 +10056,7 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     if (req.tg_chat_id && req.tg_message_id) {
         editTelegramMessage(req.tg_chat_id, req.tg_message_id, accessRequestOutcomeHtml({ ...req, targets: effective }, 'approved', decidedBy, { grantedMinutes: approvedMin })).catch(() => { });
     }
-    return { id, grantId: grant.id };
+    return { id, grantId: grant.id, targets: effective };
 }
 
 async function denyAccessRequest(id, { reason, actor } = {}) {
@@ -10386,19 +10567,37 @@ async function importAppSettings(payload, actor) {
     const entries = Object.entries(settings)
         .filter(([k, v]) => typeof k === 'string' && k.length <= 100 && typeof v === 'string' && !settingKeyExcluded(k));
     if (!entries.length) throw new Error('the backup contains no importable settings');
+    // A NetBird API URL or SMTP server (host, port, security, user) that differs from the stored one is
+    // skipped (reported in skippedSettings). A Telegram callback secret in the file is discarded, and a
+    // Telegram config that is not a JSON object is skipped.
+    const parseObject = (s) => { try { const j = JSON.parse(s); return j && typeof j === 'object' && !Array.isArray(j) ? j : null; } catch { return null; } };
+    const smtpServer = (c) => JSON.stringify([c.host || '', parseInt(c.port, 10) || 587, !!c.secure, c.user || '']); // as loadSmtp reads it
+    const importedKeys = [], skippedSettings = [];
     for (const [k, v] of entries) {
         let val = v;
+        if (k === 'netbird_api_url') {
+            if (v !== ((await getSetting(k)) || '')) { skippedSettings.push({ key: k, reason: 'kept the current NetBird API URL - change it in Settings > NetBird API' }); continue; }
+            importedKeys.push(k); continue; // unchanged - nothing to write
+        }
+        if (k === 'smtp_config') {
+            const imp = parseObject(v);
+            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            if (smtpServer(imp) !== smtpServer(parseObject((await getSetting(k)) || '') || {})) {
+                skippedSettings.push({ key: k, reason: 'kept the current SMTP server - change it in Settings > Email (SMTP)' }); continue;
+            }
+        }
         if (isTelegramConfigKey(k)) {
-            // Exports carry telegram_config WITHOUT its webhookSecret - keep this deployment's
-            // existing secret so the approvals callback keeps working after a restore.
-            try {
-                const cur = JSON.parse((await getSetting(k)) || 'null');
-                const imp = JSON.parse(v);
-                if (cur && cur.webhookSecret && !imp.webhookSecret) imp.webhookSecret = cur.webhookSecret;
-                val = JSON.stringify(imp);
-            } catch { /* keep the imported value as-is */ }
+            const imp = parseObject(v);
+            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            delete imp.webhookSecret;
+            // Keep the active main secret first (memory can hold one the stored row lacks), else the stored one.
+            const cur = parseObject((await getSetting(k)) || '');
+            const secret = (k === 'telegram_config' && getTelegramWebhookSecret()) || (cur && cur.webhookSecret);
+            if (secret) imp.webhookSecret = secret;
+            val = JSON.stringify(imp);
         }
         await setSetting(k, val);
+        importedKeys.push(k);
     }
     // Reload every config module state so the import applies without a restart.
     await loadNbApi(); await loadWebhook(); await loadTelegram(); await loadApproverConfig();
@@ -10413,9 +10612,9 @@ async function importAppSettings(payload, actor) {
     recordAudit({
         actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
         action: 'settings.import', target: 'app settings',
-        meta: { keys: entries.length, restored: entries.map(([k]) => k).join(', '), tables: tableResults, skipped: tableSkipped },
+        meta: { keys: importedKeys.length, restored: importedKeys.join(', '), skippedSettings: skippedSettings.map(s => s.key).join(', '), tables: tableResults, skipped: tableSkipped },
     }).catch(() => { });
-    return { imported: entries.length, keys: entries.map(([k]) => k), tables: tableResults, skipped: tableSkipped };
+    return { imported: importedKeys.length, keys: importedKeys, skippedSettings, tables: tableResults, skipped: tableSkipped };
 }
 
 // ─── Internal ENVELOPE-ENCRYPTED backup (tier 2) - full config + ALL secrets, written to a mounted
@@ -11362,7 +11561,7 @@ module.exports = {
     pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
     getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
-    getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
+    getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, getResourceInNetwork, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
     setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups,
     getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate,
     getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting,
@@ -11415,7 +11614,8 @@ module.exports = {
     // Pure helpers exposed ONLY for unit tests (backend/test) - not part of the app API.
     _internal: { comboKey, combosForResource, ALL_COMBO, splitPortTokens, mergeRulePorts, normSecurityConfig, humanDuration, stableStringify, normDelegates, normEdrAutoBypass, edrOsKey, ruleForPut, carryRuleExtras, ruleHasUnmodeled, policiesSourcingResources, editorProtocol,
         normalizeTenantDefaults, nbShapeFromSettings, nbSettingsFromProfile, dropUnsupportedNbSettings, proxyAccessActionError,
-        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup },
+        normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup, autoApproveTargets },
+    refreshAutoApprovalInventory,
     listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess,
     getSecurityConfig, setSecurityConfig,
     getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS,

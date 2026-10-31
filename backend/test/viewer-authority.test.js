@@ -239,7 +239,7 @@ test('deleting a user inside a tenant leaves the main-account settings alone', a
 });
 
 for (const key of ['feature_permissions', 'approver_config']) {
-    test(`a failed ${key} write is reported, both settings are still written, and the next delete persists the cleanup`, async () => {
+    test(`a failed ${key} write is reported, both settings are still written, and a leftover entry grants nothing`, async () => {
         userRow(ME.id, ME.email, { role: 'admin' });
         userRow('u-gone', 'gone@corp.com', { role: 'user' });
         const other = key === 'feature_permissions' ? 'approver_config' : 'feature_permissions';
@@ -253,11 +253,18 @@ for (const key of ['feature_permissions', 'approver_config']) {
         });
         assert.notEqual(settings.get(other), otherBefore); // the other document was still written
         // The deleted admin's mirror row is gone, so a new request does not get the old role.
-        assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+        await db.setApproverConfig({ groupIds: [] }); // leave only the delegation as a route to approving
+        const v = await viewerFor(ME.id, ME.email);
+        assert.equal(v.isAdmin, false);
+        assert.equal(v.canApprove, false);
+        assert.equal(v.perms['networks.manage'], false);
 
+        // A failed permissions write stays in memory, so the next save persists it. A failed
+        // approver save changes nothing, so that entry stays until an admin removes it.
         await db.deleteUser('u-gone');
         assert.deepEqual(savedJson('feature_permissions')['networks.manage'].users.map(u => u.id), [OTHER.id]);
-        assert.deepEqual(savedJson('approver_config').delegates.map(d => d.user.id), [OTHER.id]);
+        assert.deepEqual(savedJson('approver_config').delegates.map(d => d.user.id),
+            key === 'approver_config' ? [ME.id, OTHER.id] : [OTHER.id]);
     });
 }
 

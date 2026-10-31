@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { useApproverConfig, useAdGroups, useUsers } from '@/lib/queries';
 import { useSaveApproverConfig } from '@/lib/mutations';
-import type { TelegramApprover } from '@/lib/types';
+import type { ApproverDelegate, TelegramApprover } from '@/lib/types';
 import { Badge, Button, LoadingState, Input, SelectMenu, Field, IconButton, GroupMultiSelect } from '@/components/ui';
 
 export function Approvals() {
@@ -18,8 +18,8 @@ export function Approvals() {
   const [tgChat, setTgChat] = useState('');
   // Each row maps a Telegram user id to a system user, so we can attribute a Telegram approval.
   const [approvers, setApprovers] = useState<{ telegramId: string; userId: string }[]>([]);
-  // Time-boxed delegation rows: user + inclusive date window.
-  const [delegates, setDelegates] = useState<{ userId: string; from: string; until: string }[]>([]);
+  // Time-boxed delegation rows: user + inclusive date window. A loaded row also keeps its stored user.
+  const [delegates, setDelegates] = useState<{ userId: string; from: string; until: string; user?: ApproverDelegate['user'] }[]>([]);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
 
@@ -28,7 +28,7 @@ export function Approvals() {
       setGroupIds(data.groupIds || []);
       setTgChat(data.telegramChatId || '');
       setApprovers((data.telegramApprovers || []).map((a) => ({ telegramId: a.telegramId, userId: a.userId })));
-      setDelegates((data.delegates || []).map((d) => ({ userId: d.user.id, from: d.from, until: d.until })));
+      setDelegates((data.delegates || []).map((d) => ({ userId: d.user.id, from: d.from, until: d.until, user: d.user })));
     }
   }, [data]);
 
@@ -41,6 +41,14 @@ export function Approvals() {
     setDelegates((p) => p.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const addDeleg = () => setDelegates((p) => [...p, { userId: '', from: '', until: '' }]);
   const removeDeleg = (i: number) => setDelegates((p) => p.filter((_, idx) => idx !== i));
+  // The user a row stands for. A row whose user was not changed keeps its stored identity as is (it
+  // may hold only an email, or a user missing from the list), so saving never drops or alters it.
+  const delegUser = (d: (typeof delegates)[number]): ApproverDelegate['user'] | null => {
+    if (d.user && (d.userId ? d.user.id === d.userId : !d.user.id && !!d.user.email)) return d.user;
+    if (!d.userId) return null;
+    const u = userOpts.find((x) => x.id === d.userId);
+    return { id: d.userId, email: u?.email || '', name: u?.name || '' };
+  };
   const todayKey = new Date().toISOString().slice(0, 10);
   const delegActive = (d: { from: string; until: string }) => !!d.from && !!d.until && d.from <= todayKey && todayKey <= d.until;
 
@@ -52,14 +60,11 @@ export function Approvals() {
         const u = userOpts.find((x) => x.id === a.userId);
         return { telegramId: a.telegramId.trim(), userId: a.userId, name: u?.name || '', email: u?.email || '' };
       });
-    const bad = delegates.find((d) => d.userId && d.from && d.until && d.from > d.until);
+    const bad = delegates.find((d) => delegUser(d) && d.from && d.until && d.from > d.until);
     if (bad) { setError('A delegation ends before it starts - fix the dates.'); return; }
     const delegatesPayload = delegates
-      .filter((d) => d.userId && d.from && d.until && d.from <= d.until)
-      .map((d) => {
-        const u = userOpts.find((x) => x.id === d.userId);
-        return { user: { id: d.userId, email: u?.email || '', name: u?.name || '' }, from: d.from, until: d.until };
-      });
+      .filter((d) => delegUser(d) && d.from && d.until && d.from <= d.until)
+      .map((d) => ({ user: delegUser(d)!, from: d.from, until: d.until }));
     try {
       await save.mutateAsync({ groupIds, telegramChatId: tgChat.trim(), telegramApprovers, delegates: delegatesPayload });
       setSaved(true); setTimeout(() => setSaved(false), 2000);

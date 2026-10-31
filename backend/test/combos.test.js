@@ -5,6 +5,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { _internal } = require('../db');
 const { comboKey, combosForResource, ALL_COMBO } = _internal;
+const { postureChecksFor } = require('../lib/pure');
 
 const RES = 'res-1';
 
@@ -83,4 +84,43 @@ test('port_ranges are carried through as-is', () => {
 test('string group ids and object group refs both match', () => {
     const pols = [policy([rule({ destinations: ['grp-str'], ports: ['8080'] })])];
     assert.equal(combosForResource(pols, RES, ['grp-str']).length, 1);
+});
+
+test('posture checks of the mirrored policy travel with the combo, normalized', () => {
+    const src = [{ id: 'pc-b' }, 'pc-a', 'pc-b', null];
+    const pols = [policy([rule({ destinationResource: { id: RES }, ports: ['443'] })], { source_posture_checks: src })];
+    const [c] = combosForResource(pols, RES, []);
+    assert.deepEqual(c.postureChecks, ['pc-a', 'pc-b']);
+    assert.deepEqual(src, [{ id: 'pc-b' }, 'pc-a', 'pc-b', null]); // input untouched
+});
+
+test('same ports with different posture checks stay separate combos', () => {
+    const pols = [
+        policy([rule({ destinationResource: { id: RES }, ports: ['443'] })], { source_posture_checks: ['pc-a'] }),
+        policy([rule({ destinationResource: { id: RES }, ports: ['443'] })]),
+    ];
+    assert.equal(combosForResource(pols, RES, []).length, 2);
+});
+
+test('comboKey separates posture check sets', () => {
+    const base = { protocol: 'tcp', ports: ['443'], portRanges: [] };
+    assert.notEqual(comboKey(base), comboKey({ ...base, postureChecks: ['pc-a'] }));
+    assert.notEqual(comboKey({ ...base, postureChecks: ['pc-a'] }), comboKey({ ...base, postureChecks: ['pc-b'] }));
+});
+
+test('postureChecksFor takes the checks of the overlapping exposures only', () => {
+    const exp = [
+        { protocol: 'tcp', ports: ['22'], portRanges: [], postureChecks: ['pc-a'] },
+        { protocol: 'tcp', ports: [], portRanges: [{ start: 8000, end: 8100 }], postureChecks: ['pc-b'] },
+        { protocol: 'tcp', ports: ['443'], portRanges: [] },
+    ];
+    const pin = (ports, protocol = 'tcp') => ({ protocol, ports, portRanges: [] });
+    assert.deepEqual(postureChecksFor(pin(['443']), exp), []);
+    assert.deepEqual(postureChecksFor(pin(['22']), exp), ['pc-a']);
+    assert.deepEqual(postureChecksFor(pin(['8050']), exp), ['pc-b']);
+    assert.deepEqual(postureChecksFor(pin(['22', '8050']), exp), ['pc-a', 'pc-b']);
+    assert.deepEqual(postureChecksFor(pin([]), exp), ['pc-a', 'pc-b']); // every port
+    assert.deepEqual(postureChecksFor(pin(['22'], 'udp'), exp), ['pc-a', 'pc-b']); // no overlap → all
+    assert.deepEqual(postureChecksFor(pin(['22'], 'udp'), [{ protocol: 'all', ports: [], portRanges: [], postureChecks: ['pc-c'] }]), ['pc-c']);
+    assert.deepEqual(postureChecksFor(pin(['22']), [ALL_COMBO]), []); // no policy at all
 });

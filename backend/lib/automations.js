@@ -606,7 +606,8 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
                 if (seen.has(own.external_key)) continue;
                 try {
                     if (row.removal_mode === 'delete') {
-                        await deleteResource(networkId, own.resource_id).catch(() => { });
+                        // Keep tracking the resource (retried on the next run) unless NetBird confirms it is gone.
+                        await deleteResource(networkId, own.resource_id).catch((e) => { if (e.unconfirmed) throw e; });
                         await pool.query('DELETE FROM automation_resources WHERE automation_id=$1 AND external_key=$2 AND tenant=$3', [id, own.external_key, tnt()]);
                         counts.disabled++;
                     } else if (row.removal_mode === 'disable' && own.status !== 'disabled') {
