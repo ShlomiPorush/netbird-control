@@ -11,6 +11,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **Temporary access keeps the target's posture checks.** A grant to an Access Profile or a
+  resource now carries the profile's posture checks, or those of the resource policy it mirrors,
+  so only compliant devices get access during the grant. Targets with different posture checks
+  get separate temporary policies.
+- **New requirement:** a temporary grant to resources or networks is refused when the app
+  cannot read the existing policies or the resource list it mirrors, or when a chosen resource
+  is gone. A grant to a profile that no longer matches an Access Profile is refused too.
 - **Blocked resources and networks of a trusted auto-approval entry also cover related targets.**
   A blocked resource also sends its network and any access profile whose group contains it to
   review. A blocked network also sends its resources and the access profiles that contain them to
