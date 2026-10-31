@@ -5303,7 +5303,17 @@ async function guardProtectedUser(id, raw, acct, verb) {
 // only is_blocked changes here. The write routes through the MSP Provisioning Token when set
 // (asRealUser), matching the tenant service-user restriction on user writes. The owner and the
 // app's own service user cannot be blocked. The identity/label is resolved for the audit entry.
-async function setUserBlocked(id, blocked) {
+// Changes to one user run one at a time, so a slow earlier change never lands after a newer one.
+const _blockChanges = new Map(); // `${account}|${user id}` → the last queued change
+function setUserBlocked(id, blocked) {
+    const key = `${tnt()}|${id}`;
+    const run = (_blockChanges.get(key) || Promise.resolve()).then(() => applyUserBlocked(id, blocked));
+    const tail = run.catch(() => { });
+    _blockChanges.set(key, tail);
+    tail.then(() => { if (_blockChanges.get(key) === tail) _blockChanges.delete(key); });
+    return run;
+}
+async function applyUserBlocked(id, blocked) {
     const acct = tnt();
     const row = await resolveUserRow(id, acct);
     const raw = row.raw_json || {};
@@ -5323,10 +5333,13 @@ async function setUserBlocked(id, blocked) {
     // A refresh already in flight may have read the list before this change - let it land first.
     await settleUserRefreshes(acct);
     // Record the new state in the mirror row itself, so it holds even if the refresh below fails.
-    await pool.query(
+    // A block that cannot be recorded is held in memory until a user-list refresh records it.
+    const recorded = await pool.query(
         `UPDATE users SET raw_json = jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{is_blocked}', to_jsonb($3::boolean)) WHERE tenant = $2 AND user_id = $1`,
         [id, acct, !!blocked]
-    ).catch(err => console.error('[UserResolve] block state update error:', err.message));
+    ).then(() => true, err => { console.error('[UserResolve] block state update error:', err.message); return false; });
+    if (blocked && !recorded) _unrecordedBlocks.add(`${acct}|${id}`);
+    else _unrecordedBlocks.delete(`${acct}|${id}`);
     _usersLastRefresh.set(acct, 0);
     await refreshUsersCache().catch(err => console.error('[UserResolve] post-block refresh error:', err.message));
     return { ok: true, name: row.display_name || '', email: row.email || '', label, blocked: !!blocked };
@@ -7952,11 +7965,17 @@ async function settleUserRefreshes(acct) {
     await Promise.allSettled([...(_usersPulls.get(acct) || [])]);
 }
 
+// Users blocked from this app whose mirror row could not be updated (`${account}|${user id}`).
+// They count as blocked until a user-list refresh has written NetBird's state to the mirror.
+const _unrecordedBlocks = new Set();
+function blockUnrecorded(userId, acct = '') { return _unrecordedBlocks.has(`${acct}|${userId}`); }
+
 async function pullUsersCache() {
     const t = tnt();
     const users = await fetchUsersFromApi();
     if (users) {
         await upsertUsers(users);
+        for (const k of _unrecordedBlocks) if (k.startsWith(`${t}|`)) _unrecordedBlocks.delete(k);
         // Prune users deleted in NetBird. Only when the API returned at least one (an account
         // always has its owner, so an empty result means a transient error - don't wipe).
         const ids = users.map(u => u && u.id).filter(Boolean);
@@ -8132,14 +8151,17 @@ async function resolveUser(userId) {
 // A user blocked in NetBird resolves with `blocked: true`, no role and no groups - and an id match
 // is final, so a blocked user is never re-resolved by email.
 async function resolveViewer(oid, email) {
-    const mapRow = row => ({
-        user_id: row.user_id,
-        email: row.email,
-        name: row.display_name,
-        role: row.is_blocked ? '' : (row.role || ''),
-        auto_groups: !row.is_blocked && Array.isArray(row.auto_groups) ? row.auto_groups : [],
-        blocked: !!row.is_blocked,
-    });
+    const mapRow = row => {
+        const blocked = !!row.is_blocked || blockUnrecorded(row.user_id);
+        return {
+            user_id: row.user_id,
+            email: row.email,
+            name: row.display_name,
+            role: blocked ? '' : (row.role || ''),
+            auto_groups: !blocked && Array.isArray(row.auto_groups) ? row.auto_groups : [],
+            blocked,
+        };
+    };
     if (oid) {
         const r = await pool.query(
             `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
@@ -11467,10 +11489,10 @@ async function telegramApproverActive(approver) {
     if (!id && !email) return true;
     await ensureUsersFresh().catch(() => { });
     const r = await pool.query(
-        `SELECT (raw_json->>'is_blocked') = 'true' AS is_blocked FROM users WHERE tenant = '' AND ${id ? 'user_id = $1' : 'LOWER(email) = LOWER($1)'}`,
+        `SELECT user_id, (raw_json->>'is_blocked') = 'true' AS is_blocked FROM users WHERE tenant = '' AND ${id ? 'user_id = $1' : 'LOWER(email) = LOWER($1)'}`,
         [id || email]
     ).catch(() => ({ rows: [] }));
-    return r.rows.length > 0 && r.rows.every(x => !x.is_blocked);
+    return r.rows.length > 0 && r.rows.every(x => !x.is_blocked && !blockUnrecorded(x.user_id));
 }
 
 // Handle a Telegram update: either a button press (callback_query) or a reply carrying a denial

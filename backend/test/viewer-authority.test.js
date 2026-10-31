@@ -34,9 +34,11 @@ nb.netbirdReq = async (method, path) => {
     liveUsers = liveUsers.filter(u => `/api/users/${encodeURIComponent(u.id)}` !== path);
     return { status: 200, body: {} };
 };
+let holdPut = null;   // when set, the next user write is applied in NetBird but answers only when this resolves
 nb.netbirdPut = async (path, body) => {
     const u = liveUsers.find(x => `/api/users/${encodeURIComponent(x.id)}` === path);
     if (u) Object.assign(u, body);
+    if (holdPut) { const h = holdPut; holdPut = null; await h; }
     return { status: 200, body: {} };
 };
 nb.bustNbCaches = () => { };
@@ -54,6 +56,7 @@ const core = require('../lib/core');
 const users = new Map();    // `${tenant}|${user_id}` → { tenant, user_id, display_name, email, raw_json }
 const settings = new Map(); // app_settings key → value
 let failSettingWrite = '';  // the next write to this key fails once
+let failUserUpdate = false; // the next direct mirror-row update fails once
 let holdWrites = false;     // settings writes wait until released (to reorder them)
 const heldWrites = [];
 let emailLookups = 0;
@@ -106,6 +109,7 @@ async function query(sql, params = []) {
         return { rows: r ? [viewerRow(r, sql)] : [] };
     }
     if (/UPDATE users SET raw_json = jsonb_set/.test(sql)) {
+        if (failUserUpdate) { failUserUpdate = false; throw new Error('mirror update failed'); }
         const r = users.get(`${params[1]}|${params[0]}`);
         if (r) r.raw_json = { ...r.raw_json, is_blocked: params[2] };
         return { rows: [] };
@@ -145,6 +149,7 @@ function withNetbirdApi(fn) {
 beforeEach(async () => {
     users.clear(); settings.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
     failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0; listDown = false; tgCalls.length = 0;
+    failUserUpdate = false; holdPut = null;
     for (const k of Object.keys(adGroupsByOid)) delete adGroupsByOid[k];
     await db.setFeaturePermsConfig({
         'networks.manage': { users: [ME, OTHER], groupIds: [] },
@@ -420,6 +425,41 @@ test('blocking a user in the app holds even when the user-list refresh after it 
     db.resetNbCaches();
     listDown = true;
     await db.setUserBlocked(ME.id, true);
+    assert.equal(users.get('|u-me').raw_json.is_blocked, true);
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal(await tgActs(1), false);
+}));
+
+test('a block the mirror could not record still counts until a user-list refresh records it', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+    db.resetNbCaches();
+    listDown = true; failUserUpdate = true;
+    await db.setUserBlocked(ME.id, true);
+    assert.equal(users.get('|u-me').raw_json.is_blocked, false); // nothing was recorded
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal(await tgActs(1), false);
+    // Once the list can be read, a refresh records NetBird's state.
+    listDown = false; db.resetNbCaches();
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal(users.get('|u-me').raw_json.is_blocked, true);
+    await db.setUserBlocked(ME.id, false);
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, true);
+    assert.equal(await tgActs(1), true);
+}));
+
+test('an earlier unblock that answers late does not undo a newer block', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: true });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: true }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+    listDown = true; // no refresh corrects the mirror
+    let answer; holdPut = new Promise(r => { answer = r; });
+    const unblocking = db.setUserBlocked(ME.id, false);
+    while (holdPut) await tick(); // NetBird applied the unblock, its answer is still on the way
+    const blocking = db.setUserBlocked(ME.id, true);
+    for (let i = 0; i < 30; i++) await tick();
+    answer();
+    await Promise.all([unblocking, blocking]);
+    assert.equal(liveUsers[0].is_blocked, true);
     assert.equal(users.get('|u-me').raw_json.is_blocked, true);
     assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
     assert.equal(await tgActs(1), false);
