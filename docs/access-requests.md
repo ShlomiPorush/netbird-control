@@ -16,7 +16,7 @@ The requester uses a **typeahead** to find what they need - resources, networks,
 
 Approving is **not** limited to full admins. An **approver** is either an admin **or** a member of a configured **Entra (Azure AD) approver group** - so you can give people the ability to approve requests **without** granting them admin. Approvers see the **Access Requests** page (with a pending-count badge) and can act on the Telegram buttons, but nothing else admin-only. Configured in **Settings → Approvals** (admin-only). Entra-group approval relies on the app's Microsoft Graph group-read permission (see [Permissions & Security](permissions-and-security.md)).
 
-**Delegation** - to cover an approver's absence, **Settings → Approvals → Approval Delegation** grants a chosen user **time-boxed** approval rights: active from the start date through the end date (both inclusive, app time zone), then it **expires by itself** - nothing to remember to undo. To end a delegation early, remove its row and save: the delegation ends at once. A delegate gets exactly what a group approver gets (the Access Requests page and its actions), no admin rights. Malformed entries (missing user, bad or reversed dates) are rejected server-side, and active delegations are listed in the weekly review digest so they stay visible.
+**Delegation** - to cover an approver's absence, **Settings → Approvals → Approval Delegation** grants a chosen user **time-boxed** approval rights: active from the start date through the end date (both inclusive, app time zone), then it **expires by itself** - nothing to remember to undo. To end a delegation early, remove its row and save: the delegation ends at once. A delegate gets exactly what a group approver gets (the Access Requests page and its actions), no admin rights. A delegation applies only while the delegate is an existing, unblocked NetBird user, and deleting the user removes it. Malformed entries (missing user, bad or reversed dates) are rejected server-side, and active delegations are listed in the weekly review digest so they stay visible.
 
 ## Approving
 
@@ -36,7 +36,7 @@ When a request is created, the bot posts a message to the **Access requests** to
 Every press/reply:
 
 1. Reaches the app via the **Telegram webhook** (a public endpoint, `POST /api/integrations/telegram/callback`).
-2. Is authenticated two ways: the **secret token** Telegram echoes in a header (set when the webhook is registered), **and** the presser's/replier's Telegram user id must be **mapped to a system user** in the approver list. Until the webhook is registered, every press and reply is rejected (see [Telegram](telegram-notifications.md#inbound-approving-from-telegram)).
+2. Is authenticated two ways: the **secret token** Telegram echoes in a header (set when the webhook is registered), **and** the presser's/replier's Telegram user id must be **mapped to a system user** in the approver list, and that user must exist in NetBird and not be blocked there. Until the webhook is registered, every press and reply is rejected (see [Telegram](telegram-notifications.md#inbound-approving-from-telegram)).
 3. On a final decision the original message is **edited** to show the outcome and the button press is answered. It's idempotent - a second press or an already-decided request just re-shows the result.
 
 The decision is **attributed to the mapped system user** - both the audit log (`request.approve` / `request.deny`) and the grant's `access.grant` record that person, not the Telegram handle. The message still shows `via: Telegram`.
@@ -47,7 +47,7 @@ Everything about *who can approve and where* lives on the **Approvals** tab (adm
 
 - **In-app approvers** - one or more **Entra group Object IDs**; members can approve in the app without admin.
 - **Approvals group chat ID** *(optional)* - post the buttons to a **separate group** to keep approvals out of the noisy logs group (add the bot there too; it posts to that group's default thread). Empty = the main group's *Access requests* topic (enable it on the Telegram tab).
-- **Approver Telegram users** - a list mapping each approver's **Telegram user ID** (from `@userinfobot`) to a **system user**. Only mapped IDs may act on the buttons, and each approval is logged under the mapped system user. No rows = nobody can approve from Telegram.
+- **Approver Telegram users** - a list mapping each approver's **Telegram user ID** (from `@userinfobot`) to a **system user**. Only mapped IDs may act on the buttons, and each approval is logged under the mapped system user. No rows = nobody can approve from Telegram. A row whose system user is blocked in NetBird or no longer exists cannot act.
 
 The **webhook** registers automatically when Telegram is enabled with a bot token and a public **`BASE_URL`**; its status is shown on the tab.
 
@@ -106,7 +106,7 @@ Telegram notifies the *approvers*; to close the loop with the *requester*, confi
 
 ## Security & gotchas
 
-- The callback endpoint is **public** (Telegram can't log in) but gated by the secret token **and** the Telegram-id→user mapping - a forged POST fails the secret; a press from an unmapped Telegram id is refused.
+- The callback endpoint is **public** (Telegram can't log in) but gated by the secret token **and** the Telegram-id→user mapping - a forged POST fails the secret; a press from an unmapped Telegram id, or from one mapped to a blocked or deleted user, is refused.
 - In-app approve/deny require the **approver** role (admin or Entra approver group) and are **blocked in read-only mode** (`NETBIRD_READONLY`); a Telegram approve in read-only answers with a "cannot approve" notice. Configuring *who* the approvers are is admin-only.
 - The webhook needs a **public HTTPS `BASE_URL`** (already required for SSO). A Telegram bot can have only one webhook - this uses it for `callback_query` updates.
 - Approval assigns users to groups, so the NetBird API token must be **Admin/Owner** (same as Temporary Access).

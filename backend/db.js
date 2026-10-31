@@ -307,8 +307,16 @@ async function setFeaturePermsConfig(cfg) {
     for (const k of PERMISSION_KEYS) {
         if (cfg && cfg[k] !== undefined) _featurePerms[k] = normPermEntry(cfg[k]);
     }
-    await setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig()));
+    await persistInOrder(() => setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig())));
     return getFeaturePermsConfig();
+}
+// Permission settings are written one at a time, each from the CURRENT in-memory state, so a save
+// that finishes late can never overwrite a newer one (such as a deleted user's removal).
+let _permSettingsWrites = Promise.resolve();
+function persistInOrder(write) {
+    const p = _permSettingsWrites.then(write, write);
+    _permSettingsWrites = p.catch(() => { });
+    return p;
 }
 // The viewer's effective permission map. Matches a user by NetBird user id / oid tail / email,
 // and groups against the viewer's FULL group union (same semantics as network grants).
@@ -502,10 +510,10 @@ function getApproverConfig() {
 }
 // Saves run one at a time and the new config goes live only after it is stored, so a failed
 // write grants or revokes nothing, and a partial save never writes back a field another save
-// just changed.
+// just changed. `input` may be a function of the current config, evaluated when the save runs.
 let _approverSaving = Promise.resolve();
 function setApproverConfig(input) {
-    const run = _approverSaving.then(() => saveApproverConfig(input));
+    const run = _approverSaving.then(() => saveApproverConfig(typeof input === 'function' ? input(getApproverConfig()) : input));
     _approverSaving = run.catch(() => { });
     return run;
 }
@@ -4562,7 +4570,7 @@ async function getAllUsers() {
             status: raw.status || '',
             last_login: raw.last_login || '',
             is_service_user: !!raw.is_service_user,
-            is_blocked: !!raw.is_blocked,
+            is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
             pending_approval: !!raw.pending_approval,
             // Auto-assigned groups (assigned to peers this user enrolls), resolved to {id,name}.
             groups: autoGroups.map(gid => ({ id: gid, name: getGroupsMap()[gid] || gid })),
@@ -5218,7 +5226,7 @@ async function getUserDetail(id) {
         role: raw.role || '',
         status: raw.status || '',
         last_login: raw.last_login || '',
-        is_blocked: !!raw.is_blocked,
+        is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
         is_service_user: !!raw.is_service_user,
         // Whether NetBird serves the cloud MFA reset endpoint on this API base (cached probe). The
         // Reset MFA button disables itself with a tooltip when false - like the Tenant Defaults MFA
@@ -5278,13 +5286,51 @@ async function deleteUser(id) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to delete the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
+    // A user-list refresh already in flight may have read the list before this delete - let it
+    // land first, so it cannot write the deleted user back into the mirror.
+    await settleUserRefreshes(acct);
     // Drop the mirror row so the user disappears at once, then force a re-pull of BOTH
     // mirrors for THIS account - the user's peers died with them.
     await pool.query('DELETE FROM users WHERE tenant = $2 AND user_id = $1', [id, acct]).catch(() => { });
     _usersLastRefresh.set(acct, 0);
     _peersLastRefresh.set(acct, 0);
     bustNbCaches('gref', 'usage');
-    return { ok: true, name: row.display_name || '', email: row.email || '', label };
+    const out = { ok: true, name: row.display_name || '', email: row.email || '', label };
+    // The permission settings are main-account only, so a tenant user's delete never touches them.
+    if (!acct) {
+        try {
+            await removeUserFromAppSettings(id, row.email);
+        } catch (err) {
+            console.error('[Users] removing a deleted user from the permission settings failed:', err.message);
+            const e = new Error("The user was deleted, but removing them from the app's permission settings failed. "
+                + 'Their direct permissions, approval delegations and Telegram approver mapping no longer apply because the user '
+                + 'no longer exists; you can remove the leftover entries in Settings - Permissions and Settings - Approvals.');
+            e.status = 500; e.userDeleted = out; throw e;
+        }
+    }
+    return out;
+}
+
+// A user deleted in the main account loses the app authority recorded for them: their direct
+// feature-permission entries, approval delegations and Telegram approver mappings. An entry with
+// an id matches the exact NetBird user id only; an entry without an id matches by email. Always
+// writes both settings, so a cleanup whose write failed earlier is persisted by the next one.
+async function removeUserFromAppSettings(id, email) {
+    const em = String(email || '').trim().toLowerCase();
+    const isUser = (entryId, entryEmail) => entryId
+        ? entryId === id
+        : !!em && String(entryEmail || '').trim().toLowerCase() === em;
+    const perms = getFeaturePermsConfig();
+    for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
+    const results = await Promise.allSettled([
+        setFeaturePermsConfig(perms),
+        setApproverConfig(c => ({
+            delegates: c.delegates.filter(d => !isUser(d.user.id, d.user.email)),
+            telegramApprovers: c.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
+        })),
+    ]);
+    const failed = results.find(r => r.status === 'rejected');
+    if (failed) throw failed.reason;
 }
 
 // Resolve one user to a mirror-shaped row {user_id, display_name, email, raw_json} for the write
@@ -5329,7 +5375,17 @@ async function guardProtectedUser(id, raw, acct, verb) {
 // only is_blocked changes here. The write routes through the MSP Provisioning Token when set
 // (asRealUser), matching the tenant service-user restriction on user writes. The owner and the
 // app's own service user cannot be blocked. The identity/label is resolved for the audit entry.
-async function setUserBlocked(id, blocked) {
+// Changes to one user run one at a time, so a slow earlier change never lands after a newer one.
+const _blockChanges = new Map(); // `${account}|${user id}` → the last queued change
+function setUserBlocked(id, blocked) {
+    const key = `${tnt()}|${id}`;
+    const run = (_blockChanges.get(key) || Promise.resolve()).then(() => applyUserBlocked(id, blocked));
+    const tail = run.catch(() => { });
+    _blockChanges.set(key, tail);
+    tail.then(() => { if (_blockChanges.get(key) === tail) _blockChanges.delete(key); });
+    return run;
+}
+async function applyUserBlocked(id, blocked) {
     const acct = tnt();
     const row = await resolveUserRow(id, acct);
     const raw = row.raw_json || {};
@@ -5346,6 +5402,16 @@ async function setUserBlocked(id, blocked) {
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
     // Refresh the mirror now (bypassing the TTL) so is_blocked flips immediately on the Users page.
+    // A refresh already in flight may have read the list before this change - let it land first.
+    await settleUserRefreshes(acct);
+    // Record the new state in the mirror row itself, so it holds even if the refresh below fails.
+    // A block that cannot be recorded is held in memory until a user-list refresh records it.
+    const recorded = await pool.query(
+        `UPDATE users SET raw_json = jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{is_blocked}', to_jsonb($3::boolean)) WHERE tenant = $2 AND user_id = $1`,
+        [id, acct, !!blocked]
+    ).then(() => true, err => { console.error('[UserResolve] block state update error:', err.message); return false; });
+    if (blocked && !recorded) _unrecordedBlocks.add(`${acct}|${id}`);
+    else _unrecordedBlocks.delete(`${acct}|${id}`);
     _usersLastRefresh.set(acct, 0);
     await refreshUsersCache().catch(err => console.error('[UserResolve] post-block refresh error:', err.message));
     return { ok: true, name: row.display_name || '', email: row.email || '', label, blocked: !!blocked };
@@ -7930,6 +7996,7 @@ function fetchUsersFromApi() {
         for (const u of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
             if (u && u.id && !seen.has(u.id)) { seen.add(u.id); out.push(u); }
         }
+        out.usersListed = Array.isArray(a); // the regular list, which holds every human user, answered
         return out;
     });
     // Runs in the active account's context (service token for a tenant) - that already lists users
@@ -7956,15 +8023,38 @@ async function upsertUsers(users) {
     }
 }
 
-async function refreshUsersCache() {
+// Every running refresh per account, whoever started it. A delete or block waits for them, so a
+// list read before the change is never written back after it.
+const _usersPulls = new Map(); // account id → Set of refresh promises
+function refreshUsersCache() {
+    const t = tnt();
+    const p = pullUsersCache();
+    if (!_usersPulls.has(t)) _usersPulls.set(t, new Set());
+    _usersPulls.get(t).add(p);
+    p.catch(() => { }).finally(() => _usersPulls.get(t).delete(p));
+    return p;
+}
+async function settleUserRefreshes(acct) {
+    await Promise.allSettled([...(_usersPulls.get(acct) || [])]);
+}
+
+// Users blocked from this app whose mirror row could not be updated (`${account}|${user id}`).
+// They count as blocked until a user-list refresh has written NetBird's state to the mirror.
+const _unrecordedBlocks = new Set();
+function blockUnrecorded(userId, acct = '') { return _unrecordedBlocks.has(`${acct}|${userId}`); }
+
+async function pullUsersCache() {
     const t = tnt();
     const users = await fetchUsersFromApi();
     if (users) {
         await upsertUsers(users);
-        // Prune users deleted in NetBird. Only when the API returned at least one (an account
-        // always has its owner, so an empty result means a transient error - don't wipe).
+        // Only a user the list returned now has NetBird's state in the mirror.
+        for (const u of users) if (u && u.id) _unrecordedBlocks.delete(`${t}|${u.id}`);
+        // Prune users deleted in NetBird. Only when the regular user list answered and at least one
+        // user came back (an account always has its owner, so an empty result means a transient
+        // error - don't wipe; without the regular list every human user would be dropped).
         const ids = users.map(u => u && u.id).filter(Boolean);
-        if (ids.length) {
+        if (ids.length && users.usersListed) {
             // Prune only THIS account's rows - other accounts' rows must survive.
             await pool.query(`DELETE FROM users WHERE tenant = $2 AND user_id <> ALL($1)`, [ids, t])
                 .catch(e => console.error('[UserResolve] prune error:', e.message));
@@ -8133,17 +8223,24 @@ async function resolveUser(userId) {
 
 // Resolve a logged-in SSO user (by Azure oid and/or email) to their cached
 // NetBird identity + role. Used for access control. Returns null if unknown.
+// A user blocked in NetBird resolves with `blocked: true`, no role and no groups - and an id match
+// is final, so a blocked user is never re-resolved by email.
 async function resolveViewer(oid, email) {
-    const mapRow = row => ({
-        user_id: row.user_id,
-        email: row.email,
-        name: row.display_name,
-        role: row.role || '',
-        auto_groups: Array.isArray(row.auto_groups) ? row.auto_groups : [],
-    });
+    const mapRow = row => {
+        const blocked = !!row.is_blocked || blockUnrecorded(row.user_id);
+        return {
+            user_id: row.user_id,
+            email: row.email,
+            name: row.display_name,
+            role: blocked ? '' : (row.role || ''),
+            auto_groups: !blocked && Array.isArray(row.auto_groups) ? row.auto_groups : [],
+            blocked,
+        };
+    };
     if (oid) {
         const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups
+            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
+                    (raw_json->>'is_blocked') = 'true' AS is_blocked
              FROM users WHERE tenant = '' AND (user_id = $1 OR user_id LIKE '%|' || $1) LIMIT 1`,
             [oid]
         );
@@ -8151,7 +8248,8 @@ async function resolveViewer(oid, email) {
     }
     if (email) {
         const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups
+            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
+                    (raw_json->>'is_blocked') = 'true' AS is_blocked
              FROM users WHERE tenant = '' AND LOWER(email) = LOWER($1) LIMIT 1`,
             [email]
         );
@@ -11458,6 +11556,20 @@ async function sendAccessReviewDigest({ force = false } = {}) {
     return { telegram: !!tgSent, emails: emailsSent };
 }
 
+// A Telegram approver acts only while the system user it maps to exists in NetBird and is not
+// blocked there. An entry without a user id is matched by its email; an entry with neither is not
+// tied to a person and keeps working. A failed lookup refuses.
+async function telegramApproverActive(approver) {
+    const id = approver.userId, email = String(approver.email || '').trim();
+    if (!id && !email) return true;
+    await ensureUsersFresh().catch(() => { });
+    const r = await pool.query(
+        `SELECT user_id, (raw_json->>'is_blocked') = 'true' AS is_blocked FROM users WHERE tenant = '' AND ${id ? 'user_id = $1' : 'LOWER(email) = LOWER($1)'}`,
+        [id || email]
+    ).catch(() => ({ rows: [] }));
+    return r.rows.length > 0 && r.rows.every(x => !x.is_blocked && !blockUnrecorded(x.user_id));
+}
+
 // Handle a Telegram update: either a button press (callback_query) or a reply carrying a denial
 // reason (message). The webhook is subscribed to both.
 async function handleTelegramCallback(update) {
@@ -11468,7 +11580,7 @@ async function handleTelegramCallback(update) {
     // Authorize by the Telegram id, and resolve it to the mapped SYSTEM user so the decision is
     // attributed to the real person in the audit log - not their Telegram handle.
     const approver = getApproverByTelegramId(from.id);
-    if (!approver) {
+    if (!approver || !(await telegramApproverActive(approver))) {
         await answerCallbackQuery(cq.id, '⛔ You are not authorized to approve access requests.');
         return;
     }
@@ -11545,7 +11657,7 @@ async function handleTelegramReplyMessage(msg) {
     const mk = reply.text.match(/DENY request #(\d+)/i);   // only our deny prompt qualifies
     if (!mk) return;
     const approver = getApproverByTelegramId((msg.from || {}).id);
-    if (!approver) return;                                  // silently ignore non-approvers
+    if (!approver || !(await telegramApproverActive(approver))) return; // silently ignore non-approvers
     const reason = String(msg.text || '').trim();
     if (!reason) return;
     const id = parseInt(mk[1], 10);

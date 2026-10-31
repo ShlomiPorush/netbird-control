@@ -103,7 +103,8 @@ covers the database, SSO and a few locked values:
 - **SSO** - with the three `OIDC_*` variables and `BASE_URL` set, every page requires login. Admins are
   NetBird owners and admins, or members of `ADMIN_GROUP_ID`; everyone else sees only their own data
   and what they were granted. If any `OIDC_*` variable is set but one of the four is missing, the
-  app does not start and logs which ones are missing.
+  app does not start and logs which ones are missing. A user blocked in NetBird has no role or
+  permissions when signed in to the app.
 - **Rate limits** apply to everything except the webhook receivers (sign-in 30 requests a minute per
   client address, the API 600 and pages 300 a minute per user). The receivers are not rate limited, so
   any deployment that others can reach should set `WEBHOOK_AUTH_TOKEN` (and the notifications token

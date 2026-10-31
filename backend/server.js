@@ -755,9 +755,13 @@ async function getViewer(req) {
     const email = claims.email || claims.preferred_username || claims.upn || '';
     await Promise.all([ensureUsersFresh().catch(() => { }), ensurePeersFresh().catch(() => { })]);
     const v = await resolveViewer(oid, email);
+    // A user blocked in NetBird holds no role, groups or permissions here. Direct per-user grants
+    // and delegations count only for an existing, unblocked NetBird user (`live`).
+    const blocked = !!(v && v.blocked);
+    const live = v && !blocked ? v : null;
     const role = v ? (v.role || '') : '';
     // AD group membership (Microsoft Graph) - admin if in the configured admin group
-    const adGroups = await fetchUserGroups(oid).catch(() => []);
+    const adGroups = blocked ? [] : await fetchUserGroups(oid).catch(() => []);
     const isAdmin = role === 'owner' || role === 'admin' || (!!ADMIN_GROUP_ID && adGroups.includes(ADMIN_GROUP_ID));
 
     // Groups used for network-edit grants AND approver / auto-approval matching. Grants and rules
@@ -768,7 +772,7 @@ async function getViewer(req) {
     //   2. their NetBird user.auto_groups (IdP-synced groups)
     //   3. groups their PEERS belong to (native groups like a Support Department)
     const netbirdGroups = (v && v.auto_groups) || [];
-    const peerGroups = await getUserPeerGroupIds(v ? v.user_id : null, oid).catch(() => []);
+    const peerGroups = blocked ? [] : await getUserPeerGroupIds(v ? v.user_id : null, oid).catch(() => []);
     const allNb = [...netbirdGroups, ...peerGroups];
     const groups = [...new Set([
         ...adGroups,
@@ -781,7 +785,7 @@ async function getViewer(req) {
     // A time-boxed DELEGATION (Settings → Approvals → Delegation) also grants approval rights
     // while its date window is active - for covering an approver's vacation.
     const canApprove = isAdmin || getApproverGroupIds().some(g => groups.includes(g))
-        || await isActiveDelegate({ oid, userId: v ? v.user_id : '', email });
+        || (!!live && await isActiveDelegate({ oid, userId: live.user_id, email }));
 
     req._viewer = {
         authEnabled: true,
@@ -797,7 +801,7 @@ async function getViewer(req) {
         netbirdGroups,
         peerGroups,
         // Fine-grained feature permissions (admins get everything).
-        perms: resolveFeaturePerms({ isAdmin, userId: v ? v.user_id : null, oid, email: (v && v.email) || email, groups }),
+        perms: resolveFeaturePerms({ isAdmin, userId: live ? live.user_id : null, oid: live ? oid : '', email: live ? (live.email || email) : '', groups }),
     };
     return elevate(req._viewer);
 }
@@ -3081,6 +3085,8 @@ app.delete('/api/users/:id', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error deleting user:', err.message);
+        // The user is gone from NetBird even though the cleanup after it failed - audit the delete.
+        if (err.userDeleted) audit(await getViewer(req).catch(() => null), 'user.delete', err.userDeleted.label, { cleanupFailed: true });
         res.status(err.status || 502).json({ error: err.message || 'Failed to delete the user' });
     }
 });
@@ -4695,4 +4701,4 @@ async function start() {
 // Tests load the app without starting it (no database, schedulers or listener).
 if (require.main === module) start();
 
-module.exports = { app };
+module.exports = { app, getViewer };
