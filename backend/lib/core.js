@@ -10,7 +10,8 @@ const pool = new Pool({
     port: parseInt(process.env.DB_PORT, 10) || 5432,
     database: process.env.DB_NAME || 'netbird_logs',
     user: process.env.DB_USER || 'netbird',
-    password: process.env.DB_PASSWORD || 'netbird',
+    // No default: server.js refuses to start without DB_PASSWORD (lib/db-config.js).
+    password: process.env.DB_PASSWORD,
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,

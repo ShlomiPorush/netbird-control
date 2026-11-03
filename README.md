@@ -55,8 +55,34 @@ The full list is in [docs/features.md](docs/features.md), and each feature's mec
 ```bash
 git clone https://github.com/shlomiporush/netbird-control.git
 cd netbird-control
-cp .env.example .env   # set at least DB_PASSWORD
-docker compose up -d
+# Create .env once, readable only by you, with a newly generated database password
+(umask 077 && set -C && pw="$(openssl rand -hex 32)" && [ "${#pw}" -eq 64 ] && : > .env &&
+  { { chmod 600 .env &&
+      PW="$pw" awk '/^DB_PASSWORD=/ { print "DB_PASSWORD=" ENVIRON["PW"]; next } { print }' .env.example >> .env; } ||
+    { rm -f .env; false; }; }) &&
+  echo "Created .env with a new DB_PASSWORD" &&
+  docker compose up -d
+```
+
+The command is for a Linux or macOS Docker host, where `chmod 600` limits the file to you. It never
+overwrites an existing `.env`: if you already have one, set `DB_PASSWORD` in it yourself (see
+[Upgrading](#upgrading)), then run `docker compose up -d`. If a step fails after `.env` was
+created, the command deletes that new `.env` and starts nothing, so you can run it again. The app
+does not start without `DB_PASSWORD`.
+
+On Windows, create `.env` yourself and limit it to your account before you put the password in it.
+In PowerShell 7, this replaces its access list in one step with one entry for you, and stops if the
+file belongs to another account (then create a new `.env` as yourself). Check that `icacls` lists
+only your account:
+
+```powershell
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+if ((Get-Acl .env -ErrorAction Stop).GetOwner([Security.Principal.SecurityIdentifier]) -ne $me) { throw '.env belongs to another account' }
+$acl = New-Object Security.AccessControl.FileSecurity
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
+[IO.FileSystemAclExtensions]::SetAccessControl((Get-Item .env), $acl)
+icacls .env
 ```
 
 `docker compose` runs `ghcr.io/shlomiporush/nbcontrol` and PostgreSQL. Open
@@ -85,7 +111,7 @@ covers the database, SSO and a few locked values:
 | Variable | Description |
 |---|---|
 | `PORT`, `TAG` | The host port to publish (the app listens on 3000 inside the container), and the image tag to run (`latest` or a version) |
-| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | PostgreSQL connection (**change the password**) |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | PostgreSQL connection. `DB_PASSWORD` is required and has no default: the app does not start when it is empty or the old example value `change-me-to-a-strong-password` (see [Upgrading](#upgrading)) |
 | `OIDC_ISSUER_BASE_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `BASE_URL` | SSO with Entra ID; setting all four turns SSO on ([setup guide](docs/sso-entra-id.md)). **New requirement:** if any `OIDC_*` variable is set, all four are required, or the app does not start. `BASE_URL` alone does not turn SSO on, and is also needed for the one-click NetBird setup |
 | `SESSION_SECRET` | A fixed session secret (`openssl rand -hex 32`). Without it, every restart signs everyone out |
 | `ADMIN_GROUP_ID` | Entra group whose members are admins, in addition to NetBird owners and admins |
@@ -97,6 +123,34 @@ covers the database, SSO and a few locked values:
 | `EVENT_PURGE_ADMINS` | Emails allowed to delete stored events |
 
 [`.env.example`](.env.example) documents every variable.
+
+## Upgrading
+
+**The database password no longer has a default.** If your `.env` sets its own `DB_PASSWORD`,
+nothing changes. Two kinds of installs stop starting:
+
+- `DB_PASSWORD` is not set and the database user really has the password `netbird` (the old
+  built-in default, typically a setup without this `docker-compose.yml`).
+- `.env` still holds the old example value `change-me-to-a-strong-password`. With
+  `docker compose`, the database container does not start either.
+
+Both values were public, so replace them. Changing `.env` alone does not change the password of an
+existing database: PostgreSQL uses `DB_PASSWORD` only when it creates the database. With
+`docker compose`:
+
+1. Make `.env` readable only by you before you put a new secret in it: check with `ls -l .env`
+   that you own it, then run `chmod 600 .env` (an `.env` copied with the old quick start is often
+   readable by everyone on the host). On Windows, use the PowerShell 7 commands from the quick
+   start instead.
+2. Put a new password in `.env` as `DB_PASSWORD` (generate one with `openssl rand -hex 32`).
+3. Start the database: `docker compose up -d --wait db`. Go on only if it succeeds.
+4. Set the same password in PostgreSQL:
+   `docker compose exec db psql -U <DB_USER> -d <DB_NAME> -c "\password <DB_USER>"`, and enter it
+   when asked. Inside the container this connection needs no password.
+5. Start the app: `docker compose up -d`.
+
+With your own PostgreSQL server, change the user's password there as a superuser, then set the
+same value in `.env` (after `chmod 600 .env`).
 
 ## Security
 
@@ -123,7 +177,8 @@ More in [docs/permissions-and-security.md](docs/permissions-and-security.md).
 
 You need Node.js 24 (the version the image uses; 22.12+ also works) and a PostgreSQL database the
 backend can reach. The backend reads `.env` from its working directory, so put the `DB_*` settings in
-`backend/.env` (or export them).
+`backend/.env` (or export them). `DB_PASSWORD` is required; generate it for your database rather
+than reusing a value from the documentation.
 
 ```bash
 cd frontend && npm install && npm run build   # Vite builds into backend/public
