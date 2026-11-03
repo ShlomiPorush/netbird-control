@@ -3,6 +3,7 @@
 // can block a path) and unknown `options` keys must survive a save on targets that already existed.
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
 
 // Stub the NetBird client BEFORE db.js loads (it destructures these at require time), so the
 // real update path runs end-to-end without touching a live account.
@@ -101,11 +102,12 @@ test('deleting a disabled bypass twin never moves bypass onto the live target: r
 });
 
 test('a cluster target moved to another host is a new target (custom headers never follow it)', () => {
-    const e = { target_type: 'cluster', target_id: 'c.example', host: 'a.internal', port: 443, custom_headers: { Authorization: 'x' } };
+    const auth = crypto.randomBytes(32).toString('hex'); // generated for each run
+    const e = { target_type: 'cluster', target_id: 'c.example', host: 'a.internal', port: 443, custom_headers: { Authorization: auth } };
     const out = mergeProxyTargets([e], [{ target_type: 'cluster', target_id: 'c.example', host: 'b.internal', port: 443 }]);
     assert.equal('custom_headers' in out[0], false);
     const same = mergeProxyTargets([e], [{ target_type: 'cluster', target_id: 'c.example', host: 'A.internal', port: 8443 }]);
-    assert.deepEqual(same[0].custom_headers, { Authorization: 'x' });
+    assert.deepEqual(same[0].custom_headers, { Authorization: auth });
 });
 
 test('no existing targets (or junk) is handled', () => {
