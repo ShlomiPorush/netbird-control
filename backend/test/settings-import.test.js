@@ -3,6 +3,12 @@
 // are kept are reported as skipped; every other setting restores as before.
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
+
+// The stored secrets are generated for each run; none is fixed in the repository.
+const NB_TOKEN = crypto.randomBytes(32).toString('hex');
+const SMTP_PASS = crypto.randomBytes(32).toString('hex');
+const WEBHOOK_SECRET = crypto.randomBytes(32).toString('hex');
 
 // The connection modules read their env at require time - none of it may be set here.
 for (const k of ['NETBIRD_API_URL', 'NETBIRD_API_TOKEN', 'SMTP_HOST', 'SMTP_PASS', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
@@ -29,10 +35,10 @@ const TG = { enabled: false, chatId: '-100', categories: {}, netbirdEvents: [] }
 async function seed() {
     store.clear();
     store.set('netbird_api_url', 'https://nb.example.com');
-    store.set('netbird_api_token', 'tok');
+    store.set('netbird_api_token', NB_TOKEN);
     store.set('smtp_config', JSON.stringify(SMTP));
-    store.set('smtp_pass', 'pw');
-    store.set('telegram_config', JSON.stringify({ ...TG, webhookSecret: 'current-secret' }));
+    store.set('smtp_pass', SMTP_PASS);
+    store.set('telegram_config', JSON.stringify({ ...TG, webhookSecret: WEBHOOK_SECRET }));
     await importAppSettings({ settings: { retention_days: '30' } });
 }
 const skippedKeys = (r) => (r.skippedSettings || []).map(s => s.key);
@@ -87,7 +93,7 @@ test('a Telegram config never takes the callback secret from the file', async ()
     await seed();
     const r = await importAppSettings({ settings: { telegram_config: JSON.stringify({ ...TG, chatId: '-200', webhookSecret: 'X' }) } });
     assert.deepEqual(skippedKeys(r), []);
-    assert.equal(getTelegramWebhookSecret(), 'current-secret');
+    assert.equal(getTelegramWebhookSecret(), WEBHOOK_SECRET);
     assert.equal(JSON.parse(store.get('telegram_config')).chatId, '-200');
 });
 
@@ -101,11 +107,11 @@ test('a Telegram callback secret in the file is dropped when none is configured'
 });
 
 test('the active Telegram callback secret is kept even when the stored config lacks it', async () => {
-    await seed(); // active secret in memory: current-secret
+    await seed(); // active secret in memory: WEBHOOK_SECRET
     store.set('telegram_config', JSON.stringify(TG));
     await importAppSettings({ settings: { telegram_config: JSON.stringify({ ...TG, chatId: '-300' }) } });
-    assert.equal(getTelegramWebhookSecret(), 'current-secret');
-    assert.equal(JSON.parse(store.get('telegram_config')).webhookSecret, 'current-secret');
+    assert.equal(getTelegramWebhookSecret(), WEBHOOK_SECRET);
+    assert.equal(JSON.parse(store.get('telegram_config')).webhookSecret, WEBHOOK_SECRET);
 });
 
 test('a Telegram config that is not an object is reported as skipped', async () => {
@@ -113,8 +119,8 @@ test('a Telegram config that is not an object is reported as skipped', async () 
         await seed();
         const r = await importAppSettings({ settings: { telegram_config: bad, retention_days: '60' } });
         assert.deepEqual(skippedKeys(r), ['telegram_config'], bad);
-        assert.equal(getTelegramWebhookSecret(), 'current-secret');
-        assert.equal(JSON.parse(store.get('telegram_config')).webhookSecret, 'current-secret');
+        assert.equal(getTelegramWebhookSecret(), WEBHOOK_SECRET);
+        assert.equal(JSON.parse(store.get('telegram_config')).webhookSecret, WEBHOOK_SECRET);
     }
 });
 

@@ -8,6 +8,10 @@ const assert = require('node:assert/strict');
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
+// Credentials are generated for each run; none is fixed in the repository.
+const CLIENT_SECRET = crypto.randomBytes(32).toString('hex');
+const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+const ACCESS_TOKEN = crypto.randomBytes(32).toString('hex');
 
 const CLIENT_ID = 'test-client';
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -40,7 +44,7 @@ const issuer = http.createServer((req, res) => {
             if (!claims) { res.statusCode = 400; return send({ error: 'invalid_grant' }); }
             const input = `${b64url({ alg: 'RS256', kid: 'k1', typ: 'JWT' })}.${b64url(claims)}`;
             const idToken = `${input}.${crypto.sign('RSA-SHA256', Buffer.from(input), privateKey).toString('base64url')}`;
-            send({ access_token: 'at', token_type: 'Bearer', expires_in: 3600, id_token: idToken });
+            send({ access_token: ACCESS_TOKEN, token_type: 'Bearer', expires_in: 3600, id_token: idToken });
         });
         return;
     }
@@ -91,9 +95,9 @@ before(async () => {
     Object.assign(process.env, {
         OIDC_ISSUER_BASE_URL: ISSUER,
         OIDC_CLIENT_ID: CLIENT_ID,
-        OIDC_CLIENT_SECRET: 'test-secret',
+        OIDC_CLIENT_SECRET: CLIENT_SECRET,
         BASE_URL: BASE,
-        SESSION_SECRET: 'a-fixed-test-session-secret-0123456789',
+        SESSION_SECRET,
         TRUST_PROXY: '',
         WEBHOOK_AUTH_TOKEN: '',
         DB_HOST: '127.0.0.1',

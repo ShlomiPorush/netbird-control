@@ -60,7 +60,7 @@ const CORRUPT = /Wrong passphrase or corrupted file/;
 let fixture;
 function backupFixture() {
     if (fixture) return fixture;
-    const passphrase = 'correct horse battery staple';
+    const passphrase = crypto.randomBytes(32).toString('hex');
     const kp = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
     const pub = kp.publicKey.export({ type: 'spki', format: 'pem' });
     const privBlob = Buffer.from(encryptPrivateKey(kp.privateKey.export({ type: 'pkcs8', format: 'der' }), passphrase), 'base64');
