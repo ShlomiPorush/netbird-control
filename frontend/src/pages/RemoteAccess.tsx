@@ -22,6 +22,72 @@ const STEP_LABELS: Record<StepKey, string> = {
 const DEFAULT_PORT: Record<RemoteProtocol, number> = { rdp: 3389, ssh: 22 };
 const ARG_LABELS: Record<string, string> = { username: 'User Name', password: 'Password', domain: 'Domain' };
 
+// Short names for the one-line summary shown once the checks are behind the user.
+const STEP_SHORT: Record<StepKey, string> = {
+  access: 'Permissions',
+  path: 'Path',
+  channel: 'Secure Channel',
+  server: 'Server',
+  signin: 'Sign In',
+};
+
+// Each running step stays on screen for at least this long, so the user can follow the checks.
+// The first connection in a browser tab moves slower; later ones move quicker.
+const PACE_FIRST_MS = 850;
+const PACE_MS = 450;
+const PACE_KEY = 'nbc.remoteAccess.pacedOnce';
+
+function pickDwell(): number {
+  if (typeof window === 'undefined') return 0;
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return 0;
+  try { return sessionStorage.getItem(PACE_KEY) ? PACE_MS : PACE_FIRST_MS; } catch { return PACE_MS; }
+}
+
+const sameStep = (a: Step, b: Step) => a.key === b.key && a.state === b.state && a.detail === b.detail;
+const RANK: Record<StepState, number> = { pending: 0, running: 1, pass: 2, fail: 2 };
+
+// Display-only pacing: the real checks run at full speed, and the list on screen follows them one
+// change at a time, holding each running step for `dwellMs`. `caughtUp` tells the caller that the
+// screen shows the real state, so a result (a failure, a sign-in form) never appears before its step.
+function usePacedSteps(target: Step[], dwellMs: number): { shown: Step[]; caughtUp: boolean } {
+  const [shown, setShown] = useState<Step[]>(target);
+  const since = useRef<Partial<Record<StepKey, number>>>({});
+  useEffect(() => {
+    const byKey = new Map(target.map((t) => [t.key, t]));
+    // A reset (or anything the screen is ahead of) snaps to the real state.
+    const reset = shown.some((s) => { const t = byKey.get(s.key); return !t || RANK[s.state] > RANK[t.state]; });
+    if (reset) {
+      const now = Date.now();
+      for (const t of target) if (t.state === 'running') since.current[t.key] = now;
+      setShown(target);
+      return;
+    }
+    const missing = target.filter((t) => !shown.some((s) => s.key === t.key));
+    if (missing.length) { setShown([...shown, ...missing.map((t) => ({ ...t, state: 'pending' as StepState, detail: undefined }))]); return; }
+    const i = shown.findIndex((s) => !sameStep(s, byKey.get(s.key)!));
+    if (i < 0) return;
+    const cur = shown[i];
+    const want = byKey.get(cur.key)!;
+    let next: Step;
+    let delay = 0;
+    if (cur.state === 'pending' && want.state !== 'pending') {
+      next = { ...cur, state: 'running', detail: want.state === 'running' ? want.detail : undefined };
+    } else if (cur.state === 'running' && want.state !== 'running') {
+      next = want;
+      delay = Math.max(0, dwellMs - (Date.now() - (since.current[cur.key] ?? 0)));
+    } else {
+      next = want;
+    }
+    const t = setTimeout(() => {
+      if (next.state === 'running' && cur.state !== 'running') since.current[cur.key] = Date.now();
+      setShown((prev) => prev.map((s) => (s.key === next.key ? next : s)));
+    }, delay);
+    return () => clearTimeout(t);
+  }, [target, shown, dwellMs]);
+  const caughtUp = shown.length === target.length && shown.every((s, i) => sameStep(s, target[i]));
+  return { shown, caughtUp };
+}
+
 const freshSteps = (): Step[] => (['access', 'path', 'channel', 'server'] as StepKey[]).map((key) => ({ key, label: STEP_LABELS[key], state: 'pending' }));
 
 type Phase = 'form' | 'checking' | 'ssh-creds' | 'connecting' | 'live' | 'ended';
@@ -48,6 +114,19 @@ function StepList({ steps }: { steps: Step[] }) {
         </li>
       ))}
     </ol>
+  );
+}
+
+// The checks that already passed, on one line - used once the user has something to fill in.
+function StepSummary({ steps }: { steps: Step[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
+      {steps.filter((s) => s.state === 'pass').map((s) => (
+        <span key={s.key} className="inline-flex items-center gap-1">
+          <CheckCircle2 size={13} className="shrink-0 text-green-500" />{STEP_SHORT[s.key]}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -95,6 +174,8 @@ export default function RemoteAccess() {
   const [portTouched, setPortTouched] = useState(false);
   const [phase, setPhase] = useState<Phase>('form');
   const [steps, setSteps] = useState<Step[]>(freshSteps);
+  const [dwell, setDwell] = useState(pickDwell);
+  const { shown, caughtUp } = usePacedSteps(steps, dwell);
   const [failure, setFailure] = useState<Failure | null>(null);
   const [targetLabel, setTargetLabel] = useState('');
   const [session, setSession] = useState<RemoteSession | null>(null);
@@ -136,12 +217,15 @@ export default function RemoteAccess() {
 
   const portNum = parseInt(port, 10);
   // The target form is locked while a check or session is under way; after a failure it is free again.
-  const locked = (phase === 'checking' && !failure) || phase === 'ssh-creds' || phase === 'connecting';
+  // It also stays locked while the paced list is still catching up with a result.
+  const locked = (phase === 'checking' && !failure) || phase === 'ssh-creds' || phase === 'connecting' || (phase === 'checking' && !caughtUp);
 
   const start = async (e: FormEvent) => {
     e.preventDefault();
     setFailure(null);
     setSteps(freshSteps());
+    setDwell(pickDwell());
+    try { sessionStorage.setItem(PACE_KEY, '1'); } catch { /* private mode: every connection is paced as the first */ }
     setPhase('checking');
     setStep('access', 'running');
     try {
@@ -258,15 +342,16 @@ export default function RemoteAccess() {
   const stepCard = (
     <Card>
       <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1">{targetLabel || 'Connecting'}</div>
-      <StepList steps={steps} />
-      {failure && <FailureBox failure={failure} onRetry={reset} />}
+      <StepList steps={shown} />
+      {failure && caughtUp && <FailureBox failure={failure} onRetry={reset} />}
     </Card>
   );
 
   const requiredForm = required && (
     <Card>
-      <StepList steps={steps} />
-      <form onSubmit={submitRequired} className="mt-3 flex flex-col gap-3">
+      <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1.5">{targetLabel || 'Sign In'}</div>
+      <StepSummary steps={shown} />
+      <form onSubmit={submitRequired} className="mt-4 flex flex-col gap-3">
         <p className="text-[0.82rem] text-nb-gray-500 dark:text-nb-gray-400">The server asks you to sign in. Your password goes to the server only and is never stored.</p>
         {required.map((p) => (
           <Field key={p} label={ARG_LABELS[p] || p}>
@@ -297,9 +382,10 @@ export default function RemoteAccess() {
     </Card>
   );
 
-  const viewerOverlay = required ? requiredForm
+  // Until the paced list has caught up, the step card stays on top (also over a screen that already drew).
+  const viewerOverlay = required && caughtUp ? requiredForm
     : phase === 'ended' && endError ? endedCard
-    : phase === 'connecting' ? stepCard
+    : phase === 'connecting' || required || (phase === 'live' && !caughtUp) ? stepCard
       : phase === 'ended' && failure ? stepCard
         : undefined;
 
@@ -338,8 +424,9 @@ export default function RemoteAccess() {
           {phase !== 'form' && (
             <div className="mt-5 border-t border-nb-gray-100 dark:border-nb-gray-900 pt-4">
               {/* After a session that ran, the steps are history - only the outcome matters. */}
-              {!(phase === 'ended' && !failure) && <StepList steps={steps} />}
-              {failure && <FailureBox failure={failure} onRetry={reset} />}
+              {phase === 'ssh-creds' && caughtUp ? <StepSummary steps={shown} />
+                : !(phase === 'ended' && !failure) && <StepList steps={shown} />}
+              {failure && caughtUp && <FailureBox failure={failure} onRetry={reset} />}
               {phase === 'ended' && !failure && endNote && (
                 <div className="mt-3 flex items-center gap-3">
                   <span className="text-sm text-nb-gray-600 dark:text-nb-gray-300">{endNote}</span>
@@ -349,7 +436,7 @@ export default function RemoteAccess() {
             </div>
           )}
 
-          {phase === 'ssh-creds' && (
+          {phase === 'ssh-creds' && caughtUp && (
             <form
               className="mt-4 flex flex-col gap-3 border-t border-nb-gray-100 dark:border-nb-gray-900 pt-4"
               onSubmit={(e) => { e.preventDefault(); void openSession({ username: sshUser.trim(), password: sshPass, privateKey: sshKey, passphrase: sshPassphrase }); }}
