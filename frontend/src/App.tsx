@@ -25,6 +25,7 @@ const RequestAccess = lazy(() => import('@/pages/RequestAccess'));
 const AccessManagement = lazy(() => import('@/pages/AccessManagement'));
 const ReverseProxy = lazy(() => import('@/pages/ReverseProxy'));
 const Troubleshoot = lazy(() => import('@/pages/Troubleshoot'));
+const RemoteAccess = lazy(() => import('@/pages/RemoteAccess'));
 const Tenants = lazy(() => import('@/pages/Tenants'));
 
 // Admin-only pages: non-admins are bounced. `tenantAdmin` lets a Tenant Support holder
@@ -78,6 +79,7 @@ export default function App() {
         {/* Old standalone pages now live under Operations - keep deep links alive. */}
         <Route path="automation" element={<Navigate to="/operations?tab=automation" replace />} />
         <Route path="request-access" element={<TenantSafeRoute><RequestAccess /></TenantSafeRoute>} />
+        <Route path="remote-access" element={<TenantSafeRoute><RemoteAccess /></TenantSafeRoute>} />
         {/* Troubleshoot works in tenant mode too - a support user diagnoses the tenant's devices. */}
         <Route path="troubleshoot" element={<Troubleshoot />} />
         <Route path="access" element={<AccessMgmtRoute><AccessManagement /></AccessMgmtRoute>} />

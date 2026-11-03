@@ -1,0 +1,76 @@
+# Browser Remote Access (optional) - the Browser Gateway, added on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.remote-access.yml up -d
+#
+# Without this file nothing changes for an existing deployment. Setup, the REQUIRED host
+# firewall rules and the security model are in docs/remote-access.md.
+services:
+  app:
+    networks:
+      # The app reaches guacd only over this internal network.
+      remote-access: { }
+
+  # The Browser Gateway: a NetBird peer (this container) with guacd in its network namespace.
+  # Browser RDP/SSH sessions leave through this peer, so they reach internal servers ONLY
+  # through NetBird. Enroll it with a setup key from Settings → Remote Access.
+  remote-gateway:
+    image: netbirdio/netbird:${REMOTE_GATEWAY_NETBIRD_TAG:-0.82.0}
+    container_name: netbird-control-remote-gateway
+    hostname: netbird-control-browser-gateway
+    restart: unless-stopped
+    environment:
+      - NB_SETUP_KEY=${REMOTE_GATEWAY_SETUP_KEY:-}
+      - NB_MANAGEMENT_URL=${REMOTE_GATEWAY_MANAGEMENT_URL:-https://api.netbird.io:443}
+      # No peer may open a connection TO the gateway, whatever the policies say (guacd has
+      # no authentication of its own).
+      - NB_BLOCK_INBOUND=true
+      # No NetBird DNS: domain-based routes are never installed on the gateway.
+      - NB_DISABLE_DNS=true
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    volumes:
+      - ./remote-gateway:/var/lib/netbird
+    networks:
+      remote-egress: { }
+      remote-access:
+        ipv4_address: 172.31.250.2
+    mem_limit: 256m
+    pids_limit: 256
+
+  # guacd shares the gateway's network namespace and listens ONLY on the gateway's address on the
+  # internal network the app also sits on - never on 0.0.0.0 (the image's default entrypoint).
+  remote-guacd:
+    image: guacamole/guacd:${REMOTE_GUACD_TAG:-1.6.0}
+    container_name: netbird-control-remote-guacd
+    restart: unless-stopped
+    network_mode: "service:remote-gateway"
+    depends_on:
+      - remote-gateway
+    entrypoint: [ "/opt/guacamole/sbin/guacd", "-f", "-b", "172.31.250.2", "-l", "4822", "-L", "info" ]
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 512
+
+# Both subnets are pinned: guacd binds to the gateway's fixed address, and the host's DOCKER-USER
+# rules (docs/remote-access.md) are keyed to them. If either overlaps a network on your host,
+# change it here AND in those rules.
+networks:
+  # App <-> guacd only. internal: no route out of the host through this network.
+  remote-access:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          # Dynamic addresses (the app) come only from the upper half, so the gateway's fixed
+          # 172.31.250.2 can never be taken.
+          ip_range: 172.31.250.128/25
+  # The gateway's way out (to the NetBird relays and peers).
+  remote-egress:
+    name: netbird-control-remote-egress
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.251.0/24

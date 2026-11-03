@@ -14,6 +14,8 @@ export interface Viewer {
   email?: string;
   role?: string;
   netbirdConfigured?: boolean;
+  /** Browser remote access (RDP/SSH) is on and this viewer may use it. */
+  remoteAccess?: boolean;
 }
 
 // Fine-grained feature permissions: who (users and/or groups) gets each capability.
@@ -336,6 +338,7 @@ export interface SystemHealth {
     netbird: { configured: boolean; lastOkAt: string | null; readonly: boolean };
     telegram: { enabled: boolean; hasToken: boolean; queue: TelegramQueueStats };
     smtp: { enabled: boolean };
+    remoteAccess?: { enabled: boolean; activeSessions: number };
   };
   db: {
     events: { rows: number; bytes: number; oldest: string | null };
@@ -354,7 +357,7 @@ export interface SystemHealth {
   };
 }
 
-export type FeaturePermKey = 'activity.all' | 'peers.all' | 'audit.view' | 'temp.manage' | 'networks.manage' | 'proxy.manage' | 'troubleshoot.all' | 'tenants.support';
+export type FeaturePermKey = 'activity.all' | 'peers.all' | 'audit.view' | 'temp.manage' | 'networks.manage' | 'proxy.manage' | 'troubleshoot.all' | 'tenants.support' | 'remote.connect';
 export interface FeaturePermUser { id: string; email: string; name: string }
 export interface FeaturePermEntry { users: FeaturePermUser[]; groupIds: string[] }
 export type FeaturePermsConfig = Record<string, FeaturePermEntry>;
@@ -918,6 +921,8 @@ export interface ProxyLogsResponse {
 // One aggregated "conversation" row in the traffic Summary view (per source→destination pair).
 export interface TrafficSummaryRow {
   sourceName: string;
+  /** BROWSER_GATEWAY for browser remote sessions (paired per user, not per address). */
+  sourceType?: string;
   /** Display label (ingress "proxy-<id>" peers resolved to readable names); filter by sourceName. */
   sourceLabel?: string;
   destinationLabel?: string;

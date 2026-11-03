@@ -13,6 +13,7 @@ const FEATURE_PERMS: { key: FeaturePermKey; label: string; description: string }
   { key: 'networks.manage', label: 'Manage All Networks', description: 'Admin-grade access to every network: view and edit all resources, routing peers and per-resource policies, and create, rename or delete networks. Includes seeing all peers (needed to pick routing peers).' },
   { key: 'proxy.manage', label: 'Manage Reverse Proxy', description: 'Open the Reverse Proxy page (services, access logs) and create new proxy services, including the Expose Docker Container wizard.' },
   { key: 'troubleshoot.all', label: 'Troubleshoot All Peers', description: 'Support desk: pick ANY device on the Troubleshoot page and run diagnostics on it. Read-only - grants no management rights and does not unlock the Peers page.' },
+  { key: 'remote.connect', label: 'Browser Remote Access', description: "Open RDP and SSH sessions from the browser (Remote Access page) - only to servers the user's own NetBird access already reaches. Not needed when Remote Access is open to every signed-in user." },
   { key: 'tenants.support', label: 'Tenant Support', description: 'Switch into MSP tenants and fully manage them - like an admin, but only inside a tenant. No admin rights on the main account, no tenant creation or deletion.' },
 ];
 

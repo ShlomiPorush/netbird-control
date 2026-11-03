@@ -10,6 +10,22 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **Browser Remote Access (RDP and SSH).** Users open sessions from the new Remote Access page,
+  with no NetBird client on their device or on the server. Sessions go through the Browser Gateway,
+  a NetBird peer with Apache Guacamole's guacd that runs next to the app
+  (`docker-compose.remote-access.yml`, added on top of the main compose file; existing
+  deployments are unchanged without it). A user reaches only servers their own NetBird access
+  already reaches, on ports their policies open. Policies with posture checks do not count. Every
+  open session is checked again each minute and closes when access ends. Sessions appear on the
+  Activity page. Off by default; turn it on in **Settings → Remote Access**. The host firewall rules
+  in [docs/remote-access.md](docs/remote-access.md) are required.
+
+### Changed
+- **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
+  cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
+  revoke fails. On upgrade, active grants with a recorded error are marked once.
+
 ---
 
 ## [1.1.1] - 2026-10-31

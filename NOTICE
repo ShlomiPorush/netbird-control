@@ -20,3 +20,12 @@ This project includes third-party material:
 - The look and feel of the UI is derived from the NetBird dashboard,
   https://github.com/netbirdio/dashboard, licensed under AGPL-3.0.
   See the License section of README.md.
+
+- Apache Guacamole client library (guacamole-common-js 1.6.0),
+  frontend/public/vendor/guacamole-common-js-1.6.0/
+  https://guacamole.apache.org - the official release artifact
+  org.apache.guacamole:guacamole-common-js:1.6.0 from Maven Central, unmodified.
+  Copyright 2020 The Apache Software Foundation. Apache License 2.0; the full
+  text is in frontend/public/licenses/apache-2.0.txt, and the upstream NOTICE
+  is next to the library. The Browser Gateway also runs the official
+  guacamole/guacd image (Apache License 2.0) as a separate container.

@@ -23,6 +23,9 @@ const {
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
 const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
+// Browser remote access (one-way: db.js -> lib/remote-access.js). Only the managed-policy check is
+// needed here: exposure-mirroring code must skip the Browser Gateway's standing policy.
+const { isRemoteAccessManagedPolicy, loadRemoteAccessConfig } = require('./lib/remote-access');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
 // notify*Email helpers stay in db.js and use the imported sendMail/mailLayout/mailRows/htmlEsc.
@@ -133,7 +136,7 @@ async function getWebhookConfig() {
     // arrive via the API pull, so their presence is not proof the streaming integration exists. The
     // authoritative on/off signal comes from getNetbirdWebhookStatus (reads NetBird itself).
     const evLast = await pool.query(
-        `SELECT MAX(timestamp) AS at FROM events WHERE tenant = $1`, [tnt()]).catch(() => ({ rows: [] }));
+        `SELECT MAX(timestamp) AS at FROM events WHERE tenant = $1 AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY'`, [tnt()]).catch(() => ({ rows: [] }));
     const nLast = await pool.query(
         `SELECT MAX(received_at) AS at FROM nb_notifications WHERE tenant = $1`, [tnt()]).catch(() => ({ rows: [] }));
     return {
@@ -278,7 +281,7 @@ async function autoConfigureNbEventStreaming(url) {
 // Each key unlocks one admin-gated capability for the listed users and/or Entra/NetBird
 // groups (admins always have everything). Adding a capability = one entry here + a
 // requirePerm(...) (or perm-aware check) on its routes.
-const PERMISSION_KEYS = ['activity.all', 'peers.all', 'audit.view', 'temp.manage', 'networks.manage', 'proxy.manage', 'troubleshoot.all', 'tenants.support'];
+const PERMISSION_KEYS = ['activity.all', 'peers.all', 'audit.view', 'temp.manage', 'networks.manage', 'proxy.manage', 'troubleshoot.all', 'tenants.support', 'remote.connect'];
 const _featurePerms = {}; // key → { users: [{id,email,name}], groupIds: [] }
 
 function normPermEntry(e) {
@@ -1992,7 +1995,7 @@ async function getFleetReport() {
     const lastEvent = new Map();
     const mergeMax = (t, v) => { if (!v) return; const cur = lastEvent.get(t); if (!cur || new Date(v) > new Date(cur)) lastEvent.set(t, v); };
     if (ids.length) {
-        const ev = await pool.query(`SELECT tenant, MAX(timestamp) AS m FROM events WHERE tenant = ANY($1) GROUP BY tenant`, [ids]).catch(() => ({ rows: [] }));
+        const ev = await pool.query(`SELECT tenant, MAX(timestamp) AS m FROM events WHERE tenant = ANY($1) AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY' GROUP BY tenant`, [ids]).catch(() => ({ rows: [] }));
         for (const row of ev.rows) mergeMax(row.tenant, row.m);
         const ae = await pool.query(`SELECT tenant, MAX(timestamp) AS m FROM admin_events WHERE tenant = ANY($1) GROUP BY tenant`, [ids]).catch(() => ({ rows: [] }));
         for (const row of ae.rows) mergeMax(row.tenant, row.m);
@@ -3956,6 +3959,51 @@ async function initializeDatabase() {
         // A grant may create SEVERAL destination groups - one per protocol/ports combo mirrored
         // from the targets' existing policies (dest_group_id keeps the first for legacy rows).
         await client.query(`ALTER TABLE temporary_access_grants ADD COLUMN IF NOT EXISTS dest_group_ids JSONB DEFAULT '[]'::jsonb`);
+        // A revoke attempt is recorded BEFORE any NetBird call and never cleared (not by recovery,
+        // not by retries), so a crash mid-revoke can't leave a grant that still looks valid.
+        // Browser remote access counts a grant only while this is NULL.
+        await client.query(`ALTER TABLE temporary_access_grants ADD COLUMN IF NOT EXISTS revoke_requested_at TIMESTAMPTZ`);
+        // Rows written before the column existed: an active grant carrying any trace of a failed or
+        // in-flight operation is marked once, here - before resetStuckGrants clears last_status on
+        // this boot and the trace is gone.
+        // One transaction: the run-once marker exists only if the marking committed too.
+        await client.query('BEGIN');
+        try {
+            const markOnce = await client.query(
+                `INSERT INTO app_settings (key, value) VALUES ('migration_grant_revoke_marker', '1') ON CONFLICT (key) DO NOTHING RETURNING key`);
+            if (markOnce.rows.length) {
+                await client.query(
+                    `UPDATE temporary_access_grants SET revoke_requested_at = NOW()
+                     WHERE status = 'active' AND revoke_requested_at IS NULL
+                       AND (COALESCE(last_error, '') <> '' OR COALESCE(last_status, '') <> '')`);
+            }
+            await client.query('COMMIT');
+        } catch (e) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw e;
+        }
+
+        // Browser remote sessions (RDP/SSH through the Browser Gateway): open sessions only. A row is
+        // deleted once the session's end record is in `events` (the displayed history); a row left by
+        // a crash or restart is closed on the next start-up. Retention and purge never touch it.
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS remote_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            user_email TEXT DEFAULT '',
+            user_name TEXT DEFAULT '',
+            client_ip TEXT DEFAULT '',
+            protocol TEXT NOT NULL,
+            target_addr TEXT NOT NULL,
+            target_port INTEGER NOT NULL,
+            resource_id TEXT DEFAULT '',
+            resource_name TEXT DEFAULT '',
+            network_id TEXT DEFAULT '',
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            rx_bytes BIGINT DEFAULT 0,
+            tx_bytes BIGINT DEFAULT 0
+          );
+        `);
 
         // Access requests - a (usually non-admin) user asks for access; an admin approves it
         // (in-app or via Telegram buttons), which creates a temporary_access_grants row.
@@ -4289,6 +4337,7 @@ async function initializeDatabase() {
         await loadSmtp();
         await loadFeaturePerms();
         await loadSecurityConfig();
+        await loadRemoteAccessConfig();
 
         // Log NetBird Management API configuration status (resolves users + router names)
         if (_nbApi.url && _nbApi.token) {
@@ -7230,7 +7279,7 @@ async function diagnoseTarget(peerId, { type, id, port, probeHost, probePort } =
         for (const r of (usage.resources || [])) if (resIds.has(r.id)) for (const g of (r.groups || [])) { const i = gid(g); if (i) resGroupIds.add(i); }
         const granting = [];
         for (const p of (usage.policies || [])) {
-            if (p.enabled === false) continue;
+            if (p.enabled === false || isRemoteAccessManagedPolicy(p)) continue; // the gateway policy is infrastructure, not user access
             for (const rule of (p.rules || [])) {
                 if (rule.enabled === false) continue;
                 const dr = rule.destinationResource && gid(rule.destinationResource);
@@ -7258,7 +7307,7 @@ async function diagnoseTarget(peerId, { type, id, port, probeHost, probePort } =
     const granting = [];
     const otherPolicies = [];
     for (const p of (usage.policies || [])) {
-        if (p.enabled === false) continue;
+        if (p.enabled === false || isRemoteAccessManagedPolicy(p)) continue; // the gateway policy is infrastructure, not user access
         for (const rule of (p.rules || [])) {
             if (rule.enabled === false) continue;
             const dr = rule.destinationResource && gid(rule.destinationResource);
@@ -7948,7 +7997,7 @@ async function setResourcePolicy(networkId, resourceId, protocol, ports) {
     if (!groupIds.length) return;
     const pols = await netbirdGet('/api/policies');
     if (!Array.isArray(pols)) return;
-    const pol = pols.find(p => (p.rules || []).some(rule => (rule.destinations || []).some(d => groupIds.includes((d && d.id) || d))));
+    const pol = pols.find(p => !isRemoteAccessManagedPolicy(p) && (p.rules || []).some(rule => (rule.destinations || []).some(d => groupIds.includes((d && d.id) || d))));
     if (!pol) return;
     const rules = (pol.rules || []).map(rule => ({
         id: rule.id, name: rule.name, enabled: rule.enabled !== false, action: rule.action || 'accept',
@@ -8794,12 +8843,13 @@ async function checkTrafficAnomalies() {
             SELECT source_name AS src, SUM(rx_bytes + tx_bytes)::bigint AS b
             FROM events
             WHERE tenant = $3 AND timestamp >= NOW() - interval '1 hour' AND COALESCE(source_name, '') <> ''
+              AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY'
             GROUP BY 1
         ), baseline AS (
             SELECT source_name AS src, SUM(rx_bytes + tx_bytes)::numeric / 168 AS avg_b
             FROM events
             WHERE tenant = $3 AND timestamp >= NOW() - interval '8 days' AND timestamp < NOW() - interval '1 hour'
-              AND COALESCE(source_name, '') <> ''
+              AND COALESCE(source_name, '') <> '' AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY'
             GROUP BY 1
         )
         SELECT l.src, l.b, COALESCE(bs.avg_b, 0)::bigint AS avg_b
@@ -9017,6 +9067,20 @@ async function fetchUserGroups(oid) {
         console.error('[Graph] transitiveMemberOf for %s failed: %s', oid, errMsg);
         groups = cached ? cached.groups : []; // keep stale on failure
     }
+    _userGroupsCache[oid] = { groups, at: Date.now() };
+    return groups;
+}
+
+// Uncached Graph lookup for checks that must never act on stale membership (the browser remote
+// access re-check): the groups on success (the cache is refreshed too), [] when Graph is not
+// configured, and null when Graph is configured but the lookup failed - callers fail closed.
+async function fetchUserGroupsFresh(oid) {
+    if (!oid || !graphConfigured()) return [];
+    const token = await getGraphToken();
+    if (!token) return null;
+    const json = await graphGet(token, `/users/${encodeURIComponent(oid)}/transitiveMemberOf/microsoft.graph.group?$select=id&$top=999`);
+    if (!json || !Array.isArray(json.value)) return null;
+    const groups = json.value.map(g => g.id).filter(Boolean);
     _userGroupsCache[oid] = { groups, at: Date.now() };
     return groups;
 }
@@ -9397,7 +9461,10 @@ async function createGrantTracked(cfg, actor, run) {
             const rawPolicies = await netbirdGet('/api/policies');
             if (resourceRefs.length && !Array.isArray(rawPolicies)) throw new Error('could not read the existing policies');
             const polArr = (Array.isArray(rawPolicies) ? rawPolicies : [])
-                .filter(p => p && p.enabled !== false && !/^Temporary access #\d+/.test(p.name || ''));
+                .filter(p => p && p.enabled !== false && !/^Temporary access #\d+/.test(p.name || '')
+                    // The Browser Gateway's standing policy is infrastructure, not exposure: mirroring
+                    // its all-ports, posture-free rule would widen every grant to a gateway target.
+                    && !isRemoteAccessManagedPolicy(p));
             const combosFor = (rr) => {
                 const res = (netResources.get(rr.networkId) || []).find(x => x && x.id === rr.resourceId);
                 if (!res) throw new Error('resource ' + rr.resourceId + ' was not found in network ' + rr.networkId);
@@ -9534,7 +9601,9 @@ async function revokeGrantLocked(id, { trigger = 'manual', actor = null } = {}) 
     _runningGrants.add(id);
     let err = '';
     try {
-        await pool.query(`UPDATE temporary_access_grants SET last_status='running' WHERE id=$1 AND tenant=$2`, [id, tnt()]);
+        // revoke_requested_at is written before any NetBird call and never cleared: once a revoke
+        // has started, the grant no longer counts for browser remote access, even if this run fails.
+        await pool.query(`UPDATE temporary_access_grants SET last_status='running', revoke_requested_at=COALESCE(revoke_requested_at, NOW()) WHERE id=$1 AND tenant=$2`, [id, tnt()]);
         for (const pid of (Array.isArray(g.policy_ids) ? g.policy_ids : [])) {
             const resp = await netbirdReq('DELETE', '/api/policies/' + encodeURIComponent(pid));
             if (!nbWriteOk(resp, true)) throw new Error('policy delete failed: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
@@ -10769,6 +10838,8 @@ const SETTINGS_EXPORT_EXCLUDE = new Set([
     // backup_public_key is harmless on its own, but BOTH are kept out of the PLAINTEXT export -
     // defense in depth, and they are meaningless outside the internal-backup file that carries them.
     'backup_private_key_enc', 'backup_public_key',
+    // NetBird object ids of this account's Browser Gateway, and a one-time migration marker.
+    'remote_access_nb', 'migration_grant_revoke_marker',
 ]);
 // Prefixed/MSP keys - excluded by prefix (tokens are secrets; service-user metadata is
 // install-specific and meaningless in another deployment). Plus the provisioning token.
@@ -10949,7 +11020,7 @@ async function importAppSettings(payload, actor) {
     }
     // Reload every config module state so the import applies without a restart.
     await loadNbApi(); await loadWebhook(); await loadTelegram(); await loadApproverConfig();
-    await loadAutoApproval(); await loadSmtp(); await loadFeaturePerms(); await loadSecurityConfig();
+    await loadAutoApproval(); await loadSmtp(); await loadFeaturePerms(); await loadSecurityConfig(); await loadRemoteAccessConfig();
     // Config TABLES: only touched when the file carries them (older backups skip this untouched).
     const tableResults = {}, tableSkipped = {};
     if (payload.tables && typeof payload.tables === 'object' && !Array.isArray(payload.tables)) {
@@ -11180,7 +11251,7 @@ async function importInternalBackupPayload(payload) {
     }
     // Reload every config module so the restore applies without a restart.
     await loadNbApi(); await loadTenantTokens(); await loadWebhook(); await loadTelegram(); await loadApproverConfig();
-    await loadAutoApproval(); await loadSmtp(); await loadFeaturePerms(); await loadSecurityConfig();
+    await loadAutoApproval(); await loadSmtp(); await loadFeaturePerms(); await loadSecurityConfig(); await loadRemoteAccessConfig();
     const tableResults = {}, tableSkipped = {};
     if (payload.tables && typeof payload.tables === 'object' && !Array.isArray(payload.tables)) {
         await importConfigTables(payload.tables, tableResults, tableSkipped, true); // full: secrets + runtime restored
@@ -11340,6 +11411,7 @@ const RECERT_PERM_INFO = {
     'networks.manage': { label: 'Manage All Networks', desc: 'admin-grade access to every network: resources, routing peers, policies, create/rename/delete (implies seeing all peers)' },
     'proxy.manage': { label: 'Manage Reverse Proxy', desc: 'can open the Reverse Proxy page (services + access logs) and create new proxy services' },
     'troubleshoot.all': { label: 'Troubleshoot All Peers', desc: 'can pick ANY device on the Troubleshoot page and run diagnostics on it (support desk) - read-only, grants no management rights and not the Peers page' },
+    'remote.connect': { label: 'Browser Remote Access', desc: 'can open RDP and SSH sessions from the browser - only to servers their own NetBird access already reaches' },
     'tenants.support': { label: 'Tenant Support', desc: 'can switch into MSP tenants and fully manage them - no admin rights on the main account, no tenant creation or deletion' },
 };
 const RECERT_DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -11936,6 +12008,7 @@ async function handleTelegramReplyMessage(msg) {
 }
 
 module.exports = {
+    addResourceGroups, removeResourceGroups, fetchUserGroupsFresh, // used by browser remote access (server.js)
     pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
     getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
