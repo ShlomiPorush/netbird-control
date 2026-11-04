@@ -45,15 +45,15 @@ function hasContent(canvas: HTMLCanvasElement): boolean {
   return false;
 }
 
-// The largest screen the server accepts (MAX_WIDTH / MAX_HEIGHT in the backend).
-const MAX_W = 7680, MAX_H = 4320;
+// The largest screen and scaling the server accepts (MAX_WIDTH / MAX_HEIGHT, and 480 DPI = 500%).
+const MAX_W = 7680, MAX_H = 4320, MAX_DPR = 5;
 
 /**
  * A box of CSS pixels as the remote screen to ask for: device pixels and the matching DPI, like the
  * official Guacamole client. The scaling is lowered when it would go past the server's limit.
  */
 export function deviceSize(w: number, h: number) {
-  const dpr = Math.min(window.devicePixelRatio || 1, MAX_W / w, MAX_H / h);
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR, MAX_W / w, MAX_H / h);
   return { width: Math.round(w * dpr), height: Math.round(h * dpr), dpi: Math.round(96 * dpr) };
 }
 

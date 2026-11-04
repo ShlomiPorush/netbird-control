@@ -492,7 +492,8 @@ async function createSession(viewer, body, clientIp) {
 
     const width = clampInt(body.width, 320, MAX_WIDTH, 1280);
     const height = clampInt(body.height, 240, MAX_HEIGHT, 720);
-    const dpi = clampInt(body.dpi, 72, 300, 96);
+    // Up to Windows' largest scaling (500%).
+    const dpi = clampInt(body.dpi, 72, 480, 96);
     const timezone = /^[A-Za-z0-9_+\-/]{1,64}$/.test(String(body.timezone || '')) ? String(body.timezone) : '';
     const creds = {};
     if (protocol === 'ssh') {
@@ -631,6 +632,9 @@ function connectArgs(s, argNames) {
         hostname: guacdHostname(s), port: String(s.port),
         security: 'any', 'ignore-cert': 'true',
         'resize-method': 'display-update',
+        // The browser's DPI. Without it guacd picks 96 DPI and shrinks the size the browser asked
+        // for to match, so a scaled screen (150%) would get a smaller, upscaled desktop.
+        dpi: String(s.dpi || 96),
         'color-depth': String(look.colorDepth),
         // guacd's graphics pipeline (GFX, on by default) always runs at 32-bit and ignores
         // color-depth, so a lower depth turns it off.

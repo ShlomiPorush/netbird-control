@@ -207,7 +207,8 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           {active?.clipboard && (
             <Button size="sm" variant="ghost" onClick={() => setClipOpen((v) => !v)} title="Clipboard"><ClipboardPaste size={15} /></Button>
           )}
-          <Button size="sm" variant="ghost" onClick={fullscreen} title="Full Screen"><Maximize2 size={15} /></Button>
+          {/* The narrowest phones have no room for it. */}
+          <span className="hidden min-[360px]:inline-flex"><Button size="sm" variant="ghost" onClick={fullscreen} title="Full Screen"><Maximize2 size={15} /></Button></span>
           <Button size="sm" variant="ghost" onClick={togglePin} title={pinned ? 'Let The Bar Hide' : 'Keep The Bar Open'}>{pinned ? <PinOff size={15} /> : <Pin size={15} />}</Button>
           <Button size="sm" variant="ghost" onClick={leave} title="Back To The Portal (Sessions Keep Running)"><Minimize2 size={15} /></Button>
           {active && <Button size="sm" variant="danger" onClick={() => disconnect(active.sessionId)}><Power size={15} /><span className="hidden md:inline"> Disconnect</span></Button>}

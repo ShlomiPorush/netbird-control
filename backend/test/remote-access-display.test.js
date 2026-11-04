@@ -27,6 +27,12 @@ test('the saved settings are what guacd gets', () => {
     setConfigForTest({});
 });
 
+test('RDP gets the browser DPI, so guacd keeps the device-pixel size instead of shrinking it to 96 DPI', () => {
+    setConfigForTest({});
+    assert.deepEqual(connectArgs({ ...rdpSession, dpi: 144 }, ['dpi']), ['144']);
+    assert.deepEqual(connectArgs(rdpSession, ['dpi']), ['96']);
+});
+
 test('values guacd does not know fall back to the defaults', () => {
     const c = normConfig({ rdp: { colorDepth: 15, serverLayout: 'he-il-qwerty', wallpaper: 'yes' }, ssh: { fontSize: 99, colorScheme: 'solarized' } });
     assert.equal(c.rdp.colorDepth, 32);
