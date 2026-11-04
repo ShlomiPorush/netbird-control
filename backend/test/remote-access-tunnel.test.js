@@ -19,7 +19,7 @@ core.pool.query = async (sql, params) => { queries.push({ sql, params }); order.
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
 const snapshot = {
-    '/api/users': [{ id: 'u1', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u2', auto_groups: ['g-staff'], is_blocked: false }],
+    '/api/users': [{ id: 'u1', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u2', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u3', auto_groups: [], is_blocked: false }],
     '/api/peers': [{ id: 'p-gw', name: 'gw', groups: [{ id: 'g-gw' }], connected: true }, { id: 'p-ngw', name: 'ngw', groups: [{ id: 'g-ngw' }], connected: true }, { id: 'p-r', name: 'r', groups: [], connected: true }],
     '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-ngw', name: 'Browser Gateway Names' }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets' }, { id: 'g-staff', name: 'Staff' }],
     '/api/policies': [
@@ -201,6 +201,31 @@ test('a session is not created while no routing peer is online', async () => {
     try {
         await assert.rejects(ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' }, '203.0.113.9'), (e) => e.code === 'NO_ROUTER_ONLINE');
     } finally { snapshot['/api/networks/n1/routers'] = routers; }
+});
+
+test("one user's open session gives nothing to another user", async () => {
+    const bob = { ...viewer, user_id: 'u2', email: 'bob@example.test', name: 'Bob', oid: 'oid-2' };
+    const carol = { ...viewer, user_id: 'u3', email: 'carol@example.test', name: 'Carol', oid: 'oid-3' };
+    const a = await ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' }, '203.0.113.9');
+    try {
+        // Carol has no policy to the server: Alice's session doesn't change that. The denial
+        // names the resource, so the page can offer a request for exactly it.
+        const r = await ra.checkAccess(carol, { protocol: 'ssh', address: '10.0.0.5', port: 22 });
+        const access = r.steps.find(s => s.key === 'access');
+        assert.equal(access.status, 'fail');
+        assert.equal(access.code, 'NO_ACCESS');
+        assert.equal(access.requestable, true);
+        assert.equal(r.target.resource.id, 'r1');
+        assert.equal(r.target.network.id, 'n1');
+        await assert.rejects(ra.createSession(carol, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'carol' }, '203.0.113.11'), (e) => e.code === 'NO_ACCESS');
+        // Bob may reach the server himself, but never through Alice's session or its id.
+        assert.equal(ra.renewLease(bob, a.sessionId), false);
+        assert.equal(ra.endSession(bob, a.sessionId), false);
+        assert.equal(ra.endSession(carol, a.sessionId), false);
+        assert.equal(ra.renewLease(viewer, a.sessionId), true, "Alice's session is untouched");
+    } finally {
+        ra.endSession(viewer, a.sessionId);
+    }
 });
 
 test('an unknown token is refused', async () => {

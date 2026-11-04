@@ -78,6 +78,11 @@ close a session by itself: the connection simply stops working until it comes ba
 close when access cannot be verified with NetBird for 2.5 minutes, when the user's sign-in ends,
 after the idle timeout, and after the maximum session length.
 
+Every check is for one user. A session that another user opened to the same server gives nobody
+else access, and only the user who opened a session can keep it alive or end it. When the check
+refuses a user because no policy opens the server or its port, **Request Access** opens with that
+server's resource already chosen.
+
 ## Known limits and accepted risks
 
 - **RDP server certificates are not verified.** Most internal Windows servers use self-signed

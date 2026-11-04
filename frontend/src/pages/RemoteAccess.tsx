@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQuery } from '@tanstack/react-query';
 import { MonitorPlay, Terminal } from 'lucide-react';
 import { ApiError } from '@/lib/api';
+import { requestAccessLink } from '@/lib/requestAccess';
 import { remoteApi, cleanAddressInput, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
 import { Button, Field, Input, LoadingState, PageHeader, PasswordInput, Select, Textarea } from '@/components/ui';
 import { sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
@@ -95,7 +96,17 @@ export default function RemoteAccess() {
       const t = r.target;
       const where = t?.name && t.gateway === 'ip' && t.address && t.address !== t.name ? `${t.name} → ${t.address}` : (t?.name || target);
       checked.current = { label: t?.resource ? `${t.resource.name} (${where}:${targetPort})` : `${where}:${targetPort}` };
-      if (!access || access.status === 'fail') { fail('access', { message: access?.message || 'Access was denied.', requestable: access?.requestable }); return; }
+      if (!access || access.status === 'fail') {
+        // The denied resource goes along, so the request page opens with it chosen.
+        const requestLink = access?.requestable
+          ? requestAccessLink(t?.resource ? {
+            type: 'resource', id: t.resource.id, name: t.resource.name,
+            networkId: t.network?.id, resourceType: t.resource.type || undefined,
+          } : null)
+          : undefined;
+        fail('access', { message: access?.message || 'Access was denied.', requestLink });
+        return;
+      }
       setStep('access', 'pass', access.detail);
       checked.current.access = access.detail;
       if (!path || path.status === 'fail') { fail('path', { message: path?.message || 'The path could not be checked.', troubleshoot: path?.troubleshoot }); return; }

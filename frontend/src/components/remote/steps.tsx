@@ -11,7 +11,8 @@ import { Button } from '@/components/ui';
 export type StepKey = 'access' | 'path' | 'channel' | 'server' | 'signin';
 export type StepState = 'pending' | 'running' | 'pass' | 'fail';
 export interface Step { key: StepKey; label: string; state: StepState; detail?: string }
-export interface Failure { message: string; requestable?: boolean; troubleshoot?: boolean }
+/** requestLink: where "Request Access" leads (with the denied resource chosen); no button without it. */
+export interface Failure { message: string; requestLink?: string; troubleshoot?: boolean }
 
 export const STEP_LABELS: Record<StepKey, string> = {
   access: 'Checking Permissions',
@@ -147,7 +148,7 @@ export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave
   return (
     <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
       <div className="flex flex-wrap gap-2">
-        {failure.requestable && <Link to="/request-access" onClick={onLeave}><Button size="sm" variant="primary">Request Access</Button></Link>}
+        {failure.requestLink && <Link to={failure.requestLink} onClick={onLeave}><Button size="sm" variant="primary">Request Access</Button></Link>}
         {failure.troubleshoot && <Link to="/troubleshoot" onClick={onLeave}><Button size="sm">Open Troubleshoot</Button></Link>}
         <Button size="sm" onClick={onRetry}>{retryLabel}</Button>
       </div>
