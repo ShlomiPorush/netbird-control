@@ -109,6 +109,12 @@ after the idle timeout, and after the maximum session length.
 - **Copy and paste.** Text copied on the remote side goes to the local clipboard, and the local
   clipboard is offered to the remote side when the session comes into use. Browsers that ask before
   every read (Firefox) use the Clipboard panel instead. Text only; file transfer is off.
+- **A failed sign-in asks again.** When the server refuses the user name or password (RDP with
+  Network Level Authentication, or SSH), the tab shows the sign-in form again with the user name
+  kept. Signing in opens a new session to the same server, checked like any other, and the
+  Activity page keeps a record of each attempt. A locked, disabled or expired account ends the
+  session instead. SSH asks for a user name and password only; to use a private key, connect again
+  from the Remote Access page. Every password field has a button that shows what was typed.
 - **The session bar.** It hides itself a few seconds after a session comes to the front. A click
   on its handle at the top of the screen, or the pointer resting there for half a second, brings it
   back. Pinned, it stays, and the session moves down below it and is resized to the space left.

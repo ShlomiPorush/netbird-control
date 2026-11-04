@@ -28,6 +28,8 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     user moves around the portal. The session bar hides itself and comes back from its handle at
     the top; pinned, it stays and the session moves down below it. Copy and paste work both ways
     where the browser allows it. Sessions Per User defaults to 5.
+  - **Sign-in retry.** A wrong user name or password shows the sign-in form again in the same tab
+    instead of ending there. Password fields can show what was typed.
   - **Display settings.** Settings → Remote Access sets the RDP colors, keyboard layout, font
     smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
     color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's

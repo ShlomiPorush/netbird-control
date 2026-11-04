@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { MonitorPlay, Terminal } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { remoteApi, cleanAddressInput, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
-import { Button, Field, Input, LoadingState, PageHeader, Select, Textarea } from '@/components/ui';
+import { Button, Field, Input, LoadingState, PageHeader, PasswordInput, Select, Textarea } from '@/components/ui';
 import { sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
 import {
   FailureBox, PACE_KEY, StepList, StepSummary, freshSteps, pickDwell, usePacedSteps, withStep,
@@ -124,6 +124,7 @@ export default function RemoteAccess() {
       sessions.add({
         sessionId: s.sessionId, token: s.token, protocol, title: sessionTitle(s, targetRef.current.port) || c.label || `${targetRef.current.address}:${targetRef.current.port}`,
         clipboard: !!info.data?.clipboard, steps: handoff, dwell,
+        target: { ...targetRef.current }, user: creds?.username,
       });
       reset();
     } catch (err) {
@@ -221,10 +222,10 @@ export default function RemoteAccess() {
             <p className="text-[0.82rem] text-nb-gray-500 dark:text-nb-gray-400">Sign in to the SSH server. Your password or key goes to the server only and is never stored.</p>
             <Field label="User Name"><Input value={sshUser} onChange={(e) => setSshUser(e.target.value)} autoComplete="username" autoFocus required /></Field>
             <Field label="Password" hint="Leave empty to use a private key, or to type the password in the terminal.">
-              <Input type="password" value={sshPass} onChange={(e) => setSshPass(e.target.value)} autoComplete="current-password" />
+              <PasswordInput value={sshPass} onChange={(e) => setSshPass(e.target.value)} autoComplete="current-password" />
             </Field>
             <Field label="Private Key (Optional)"><Textarea value={sshKey} onChange={(e) => setSshKey(e.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows={3} /></Field>
-            {sshKey.trim() && <Field label="Key Passphrase (Optional)"><Input type="password" value={sshPassphrase} onChange={(e) => setSshPassphrase(e.target.value)} /></Field>}
+            {sshKey.trim() && <Field label="Key Passphrase (Optional)"><PasswordInput value={sshPassphrase} onChange={(e) => setSshPassphrase(e.target.value)} /></Field>}
             <div className="flex gap-2">
               <Button type="submit" variant="primary">Connect</Button>
               <Button onClick={reset}>Cancel</Button>

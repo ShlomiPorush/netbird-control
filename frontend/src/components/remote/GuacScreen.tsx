@@ -103,7 +103,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
   const onClipRef = useRef(onRemoteClipboard);
   onClipRef.current = onRemoteClipboard;
   // Set while the session runs; called when it becomes inactive or visible again.
-  const hooks = useRef<{ release: () => void; refit: () => void; syncLocal: () => void } | null>(null);
+  const hooks = useRef<{ release: () => void; resume: () => void; refit: () => void; syncLocal: () => void } | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -211,16 +211,21 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
 
       // Keyboard: keys go to the session in front, except while typing in our own fields. A key
       // the remote saw go down always gets its release, even if focus or the tab changed.
+      // The keyboard listens to the whole page, so its handlers are set only while this session is
+      // in front: with a handler set, Guacamole.Keyboard cancels every keyup, and Space on a
+      // button or checkbox (which acts on keyup) would do nothing anywhere in the portal.
       keyboard = new G.Keyboard(document);
       const kb = keyboard;
       const pressed = new Set<number>();
-      kb.onkeydown = (keysym: number) => {
+      const keyDown = (keysym: number) => {
         if (!activeRef.current || isTyping()) return true;
         pressed.add(keysym);
         c.sendKeyEvent(1, keysym);
         return false;
       };
-      kb.onkeyup = (keysym: number) => { if (pressed.delete(keysym)) c.sendKeyEvent(0, keysym); };
+      const keyUp = (keysym: number) => { if (pressed.delete(keysym)) c.sendKeyEvent(0, keysym); };
+      const listen = (on: boolean) => { kb.onkeydown = on ? keyDown : null; kb.onkeyup = on ? keyUp : null; };
+      listen(activeRef.current);
       // Lost focus (another window, a field of ours, another tab): release everything held, so
       // nothing stays pressed or auto-repeats on the remote side.
       releaseKeys = () => {
@@ -264,7 +269,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       // The box changes with the window, full screen, and the session bar being pinned.
       const boxWatch = new ResizeObserver(refit);
       boxWatch.observe(host);
-      hooks.current = { release: releaseKeys, refit, syncLocal };
+      hooks.current = { release: () => { releaseKeys(); listen(false); }, resume: () => listen(true), refit, syncLocal };
 
       c.connect('token=' + encodeURIComponent(token));
 
@@ -305,7 +310,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
   // of every held key.
   useEffect(() => {
     activeRef.current = active;
-    if (active) { hooks.current?.refit(); hooks.current?.syncLocal(); }
+    if (active) { hooks.current?.resume(); hooks.current?.refit(); hooks.current?.syncLocal(); }
     else hooks.current?.release();
   }, [active]);
 

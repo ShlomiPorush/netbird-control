@@ -4,8 +4,9 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown, ClipboardPaste, Keyboard, Maximize2, Minimize2, MonitorPlay, Pin, PinOff, Plus, Power, Terminal, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useScrollLock } from '@/lib/useScrollLock';
-import { remoteApi, PORTAL_MESSAGE_CODES, type RemoteProtocol } from '@/lib/remoteAccess';
-import { Button, Field, Input, Textarea } from '@/components/ui';
+import { ApiError } from '@/lib/api';
+import { remoteApi, GUAC, PORTAL_MESSAGE_CODES, type RemoteProtocol } from '@/lib/remoteAccess';
+import { Button, Field, Input, PasswordInput, Textarea } from '@/components/ui';
 import { GuacScreen, deviceSize, type ScreenApi, type ViewerEvent } from './GuacScreen';
 import { ARG_LABELS, Card, FailureBox, StepList, StepSummary, explain, usePacedSteps, withStep, type Failure, type Step } from './steps';
 
@@ -22,6 +23,10 @@ export interface SessionEntry {
   /** The steps so far (the checks passed on the Remote Access page). */
   steps: Step[];
   dwell: number;
+  /** Where the session goes: a failed sign-in is tried again there, in the same tab. */
+  target: { address: string; port: number };
+  /** SSH: the user name typed on the Remote Access page. */
+  user?: string;
 }
 
 type TabStatus = 'connecting' | 'live' | 'ended';
@@ -128,8 +133,11 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const barVisible = barShown || keepBar;
   const togglePin = () => setPinned((p) => { const n = !p; try { localStorage.setItem(PIN_KEY, n ? '1' : '0'); } catch { /* ignore */ } return n; });
 
+  // Tabs are keyed by their first session; after a sign-in retry the tab runs a newer one.
+  const current = useRef<Record<string, string>>({});
   const disconnect = (id: string) => {
-    remoteApi.end(id).catch(() => { });
+    remoteApi.end(current.current[id] || id).catch(() => { });
+    delete current.current[id];
     onRemove(id);
   };
   const leave = () => {
@@ -160,6 +168,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             onStatus={(st) => setStatus((m) => (m[s.sessionId] === st ? m : { ...m, [s.sessionId]: st }))}
             onRemoteClipboard={(t) => setClips((m) => ({ ...m, [s.sessionId]: t }))}
             onClose={() => disconnect(s.sessionId)}
+            onSession={(id) => { current.current[s.sessionId] = id; }}
             onLeave={leave}
           />
         </div>
@@ -258,13 +267,24 @@ function ClipboardPanel({ initial, onSend, onClose }: { initial: string; onSend:
 
 type PanePhase = 'connecting' | 'live' | 'ended';
 
+// The sign-in form: what the server asked for (RDP) or the SSH user name and password.
+const SSH_FIELDS = ['username', 'password'];
+const SIGNIN_FAILED = 'Sign-in failed. Check the user name and password and try again.';
+const SSH_KEY_NOTE = 'To sign in with a private key instead, close this tab and connect again.';
+
 // One session: its screen, and on top of it the remaining steps, the sign-in form the server
-// asks for, or how it ended.
-function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClose, onLeave }: {
+// asks for, or how it ended. A failed sign-in asks again in the same tab: a new session to the
+// same server, which the portal checks again like any other.
+function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClose, onSession, onLeave }: {
   entry: SessionEntry; active: boolean; apiRef: { current: ScreenApi | null };
   onStatus: (s: TabStatus) => void; onRemoteClipboard: (t: string) => void;
-  onClose: () => void; onLeave: () => void;
+  onClose: () => void;
+  /** The session this tab runs now (a new one after a sign-in retry). */
+  onSession: (sessionId: string) => void;
+  onLeave: () => void;
 }) {
+  const ssh = entry.protocol === 'ssh';
+  const [conn, setConn] = useState({ sessionId: entry.sessionId, token: entry.token });
   const [steps, setSteps] = useState<Step[]>(entry.steps);
   const { shown, caughtUp } = usePacedSteps(steps, entry.dwell);
   const [phase, setPhase] = useState<PanePhase>('connecting');
@@ -275,26 +295,65 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
   const [argValues, setArgValues] = useState<Record<string, string>>({});
   const [failure, setFailure] = useState<Failure | null>(null);
   const [ended, setEnded] = useState('');
+  // Sign-in retry: the form again after wrong credentials.
+  const [retry, setRetry] = useState<string[] | null>(null);
+  const retryRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  // RDP: credentials were sent in this attempt (only then is a refusal a failed sign-in).
+  const sentCreds = useRef(false);
+  // RDP: what guacd asked for, and the user name and domain to keep for a retry.
+  const askedFor = useRef<string[]>([]);
+  const kept = useRef<Record<string, string>>({ username: entry.user || '' });
+  // RDP: what was typed in the retry form, sent when the new session asks for it. Cleared on
+  // every way the attempt ends.
+  const pending = useRef<Record<string, string> | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; pending.current = null; };
+  }, []);
   const setStep = useCallback((key: Step['key'], state: Step['state'], detail?: string) => setSteps((p) => withStep(p, key, state, detail)), []);
 
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
   useEffect(() => { onStatusRef.current(phase); }, [phase]);
 
+  const showRetry = (fields: string[]) => {
+    pending.current = null;
+    retryRef.current = true;
+    setRequired(null);
+    setRetry(fields);
+    setArgValues(Object.fromEntries(fields.map((f) => [f, f === 'password' ? '' : kept.current[f] || ''])));
+    setPhase('connecting');
+  };
+
   const onEvent = useCallback((ev: ViewerEvent) => {
+    // The failed attempt's tunnel still reports its end; the retry form stays.
+    if (retryRef.current) return;
     switch (ev.type) {
       case 'channel-open':
         setStep('channel', 'pass');
         setStep('server', 'running');
         break;
-      case 'required':
+      case 'required': {
         // Only an NLA server asks for credentials at this point - proof it was reached.
         setStep('server', 'pass');
         setStep('signin', 'running');
         stageRef.current = 'signin';
+        askedFor.current = ev.params;
+        const typed = pending.current;
+        pending.current = null;
+        if (typed && ev.params.every((p) => p in typed)) {
+          // The retry form already has them.
+          apiRef.current?.submit(Object.fromEntries(ev.params.map((p) => [p, typed[p]])));
+          sentCreds.current = true;
+          setPhase('live');
+          break;
+        }
         setRequired(ev.params);
-        setArgValues(Object.fromEntries(ev.params.map((p) => [p, ''])));
+        setArgValues(Object.fromEntries(ev.params.map((p) => [p, p === 'password' ? '' : kept.current[p] || ''])));
         break;
+      }
       case 'connected':
         // The first sync arrives before the remote side has drawn anything - not proof yet.
         break;
@@ -307,6 +366,13 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
         setPhase((p) => (p === 'connecting' ? 'live' : p));
         break;
       case 'error': {
+        pending.current = null;
+        // Wrong credentials: SSH refuses them only at sign-in (also a password typed in the
+        // terminal); RDP after the user sent them. Locked or expired accounts are a different code.
+        if (ev.status.code === GUAC.CLIENT_UNAUTHORIZED && (ssh || sentCreds.current)) {
+          showRetry(ssh ? SSH_FIELDS : askedFor.current.length ? askedFor.current : ['username', 'password']);
+          break;
+        }
         const x = explain(ev.status, stageRef.current);
         setRequired(null);
         if (phaseRef.current === 'live') {
@@ -319,70 +385,140 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
         break;
       }
       case 'closed':
+        pending.current = null;
         setEnded((m) => m || 'The session ended.');
         setPhase('ended');
         break;
     }
-  }, [setStep]);
+  }, [setStep, ssh, apiRef]);
+
+  const keep = (values: Record<string, string>) => {
+    kept.current = { ...kept.current, ...(values.username !== undefined ? { username: values.username } : {}), ...(values.domain !== undefined ? { domain: values.domain } : {}) };
+  };
 
   const submitRequired = (e: FormEvent) => {
     e.preventDefault();
+    keep(argValues);
     apiRef.current?.submit(argValues);
+    sentCreds.current = true;
     setRequired(null);
     setArgValues({});
     setPhase('live');
   };
 
+  // A new session to the same server; the typed values go with it (SSH) or when it asks (RDP).
+  const submitRetry = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    const values = argValues;
+    keep(values);
+    setBusy(true);
+    try {
+      const s = await remoteApi.createSession({
+        protocol: entry.protocol, address: entry.target.address, port: entry.target.port,
+        ...sessionScreenSize(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        ...(ssh ? { username: (values.username || '').trim(), password: values.password || '' } : {}),
+      });
+      // Closed while the request ran: end the session nobody will use.
+      if (!mounted.current) { remoteApi.end(s.sessionId).catch(() => { }); return; }
+      onSession(s.sessionId);
+      pending.current = ssh ? null : values;
+      sentCreds.current = false;
+      stageRef.current = 'server';
+      retryRef.current = false;
+      setRetry(null);
+      setArgValues({});
+      setSteps(entry.steps);
+      setFailure(null);
+      setEnded('');
+      setPhase('connecting');
+      setConn({ sessionId: s.sessionId, token: s.token });
+    } catch (err) {
+      if (!mounted.current) return;
+      const message = err instanceof ApiError ? err.message : 'The session could not be opened. Try again.';
+      retryRef.current = false;
+      setRetry(null);
+      setArgValues({});
+      setStep('channel', 'fail', message);
+      setFailure({ message });
+      setPhase('ended');
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const fieldsFor = (params: string[]) => params.map((p) => (
+    <Field key={p} label={ARG_LABELS[p] || p}>
+      {p === 'password' ? (
+        <PasswordInput autoComplete="current-password" autoFocus={active && (p === params[0] || !!argValues.username)}
+          value={argValues[p] || ''} onChange={(e) => setArgValues((v) => ({ ...v, [p]: e.target.value }))} />
+      ) : (
+        <Input autoComplete={p === 'username' ? 'username' : 'off'} autoFocus={active && p === params[0] && !argValues[p]}
+          value={argValues[p] || ''} onChange={(e) => setArgValues((v) => ({ ...v, [p]: e.target.value }))} />
+      )}
+    </Field>
+  ));
+
   const overlay =
-    required && caughtUp ? (
+    retry ? (
       <Card>
         <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1.5">{entry.title}</div>
         <StepSummary steps={shown} />
-        <form onSubmit={submitRequired} className="mt-4 flex flex-col gap-3">
-          <p className="text-[0.82rem] text-nb-gray-500 dark:text-nb-gray-400">The server asks you to sign in. Your password goes to the server only and is never stored.</p>
-          {required.map((p) => (
-            <Field key={p} label={ARG_LABELS[p] || p}>
-              <Input
-                type={p === 'password' ? 'password' : 'text'}
-                autoComplete={p === 'password' ? 'current-password' : p === 'username' ? 'username' : 'off'}
-                autoFocus={active && p === required[0]}
-                value={argValues[p] || ''}
-                onChange={(e) => setArgValues((v) => ({ ...v, [p]: e.target.value }))}
-              />
-            </Field>
-          ))}
+        <form key={conn.sessionId} onSubmit={submitRetry} className="mt-4 flex flex-col gap-3">
+          <p className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-[0.82rem] text-nb-gray-700 dark:text-nb-gray-200">
+            {SIGNIN_FAILED}{ssh && <> {SSH_KEY_NOTE}</>}
+          </p>
+          {fieldsFor(retry)}
+          {ssh && <p className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">Leave the password empty to type it in the terminal.</p>}
           <div className="flex gap-2">
-            <Button type="submit" variant="primary">Sign In</Button>
+            <Button type="submit" variant="primary" disabled={busy}>{busy ? 'Signing In…' : 'Sign In'}</Button>
             <Button onClick={onClose}>Cancel</Button>
           </div>
         </form>
       </Card>
     )
-      : phase === 'ended' && failure ? (
+      : required && caughtUp ? (
         <Card>
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1">{entry.title}</div>
-          <StepList steps={shown} />
-          {caughtUp && <FailureBox failure={failure} onRetry={onClose} retryLabel="Close" onLeave={onLeave} />}
+          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1.5">{entry.title}</div>
+          <StepSummary steps={shown} />
+          <form key={conn.sessionId} onSubmit={submitRequired} className="mt-4 flex flex-col gap-3">
+            <p className="text-[0.82rem] text-nb-gray-500 dark:text-nb-gray-400">The server asks you to sign in. Your password goes to the server only and is never stored.</p>
+            {fieldsFor(required)}
+            <div className="flex gap-2">
+              <Button type="submit" variant="primary">Sign In</Button>
+              <Button onClick={onClose}>Cancel</Button>
+            </div>
+          </form>
         </Card>
       )
-        : phase === 'ended' ? (
+        : phase === 'ended' && failure ? (
           <Card>
-            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Session Ended</div>
-            <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">{ended}</p>
-            <div className="flex gap-2 mt-4"><Button size="sm" variant="primary" onClick={onClose}>Close</Button></div>
+            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1">{entry.title}</div>
+            <StepList steps={shown} />
+            {caughtUp && <FailureBox failure={failure} onRetry={onClose} retryLabel="Close" onLeave={onLeave} />}
           </Card>
         )
-          // Until the paced list has caught up, the step card stays on top (also over a screen that already drew).
-          : phase === 'connecting' || required || !caughtUp ? (
+          : phase === 'ended' ? (
             <Card>
-              <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1">{entry.title}</div>
-              <StepList steps={shown} />
+              <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Session Ended</div>
+              <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">{ended}</p>
+              <div className="flex gap-2 mt-4"><Button size="sm" variant="primary" onClick={onClose}>Close</Button></div>
             </Card>
-          ) : null;
+          )
+            // Until the paced list has caught up, the step card stays on top (also over a screen that already drew).
+            : phase === 'connecting' || required || !caughtUp ? (
+              <Card>
+                <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1">{entry.title}</div>
+                <StepList steps={shown} />
+              </Card>
+            ) : null;
 
+  // While a sign-in form is up, keys go to the form (and its buttons), not to the remote.
+  const formUp = !!retry || (!!required && caughtUp);
   return (
     <>
-      <GuacScreen sessionId={entry.sessionId} token={entry.token} active={active} clipboard={entry.clipboard}
+      <GuacScreen sessionId={conn.sessionId} token={conn.token} active={active && !formUp} clipboard={entry.clipboard}
         onEvent={onEvent} onRemoteClipboard={onRemoteClipboard} apiRef={apiRef} />
       {overlay && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-nb-gray-950/80 backdrop-blur-xs p-4">
