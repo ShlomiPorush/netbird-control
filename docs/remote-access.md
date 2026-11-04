@@ -265,7 +265,7 @@ that the real end time is unknown.
 | Idle Timeout | 30 minutes | No keyboard or mouse input. A session in a background tab gets none. |
 | Maximum Session Length | 8 hours | |
 | Allow Clipboard | On | Text only. File transfer is always off. |
-| RDP Display: Colors | 32-bit | 8, 16, 24 or 32-bit. |
+| RDP Display: Colors | 32-bit | 8, 16, 24 or 32-bit. guacd's graphics pipeline (GFX) always runs at 32-bit, so a lower depth turns it off. |
 | RDP Display: Keyboard Layout | English (US) | The remote server's layout, from guacd's built-in list. Characters it doesn't have, such as Hebrew, are sent as Unicode text. |
 | RDP Display: Font Smoothing | On | ClearType. |
 | RDP Display: Wallpaper, Themes, Window Contents While Dragging, Desktop Composition, Menu Animations | Off | Each costs bandwidth. |

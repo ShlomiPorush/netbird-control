@@ -228,7 +228,7 @@ export function RemoteAccessSettings() {
           <div className="text-[0.8rem] text-nb-gray-500">Applies to sessions opened after saving.</div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Field label="Colors">
+          <Field label="Colors" hint="Below 32-bit, the RDP graphics pipeline (GFX) is turned off.">
             <Select value={String(form.rdp.colorDepth)} onChange={(e) => setRdp('colorDepth', Number(e.target.value))}>
               {opts.rdpColorDepths.map((d) => <option key={d} value={d}>{DEPTH_NAMES[d] || `${d}-Bit`}</option>)}
             </Select>

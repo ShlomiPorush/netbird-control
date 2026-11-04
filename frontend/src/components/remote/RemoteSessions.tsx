@@ -6,7 +6,7 @@ import { cn } from '@/lib/cn';
 import { useScrollLock } from '@/lib/useScrollLock';
 import { remoteApi, PORTAL_MESSAGE_CODES, type RemoteProtocol } from '@/lib/remoteAccess';
 import { Button, Field, Input, Textarea } from '@/components/ui';
-import { GuacScreen, type ScreenApi, type ViewerEvent } from './GuacScreen';
+import { GuacScreen, deviceSize, type ScreenApi, type ViewerEvent } from './GuacScreen';
 import { ARG_LABELS, Card, FailureBox, StepList, StepSummary, explain, usePacedSteps, withStep, type Failure, type Step } from './steps';
 
 // Open browser sessions live here, above the routes: moving to another page of the portal keeps
@@ -45,13 +45,7 @@ const readPinned = () => { try { return localStorage.getItem(PIN_KEY) === '1'; }
 
 /** The size a new session asks for: the session box in device pixels, and the screen's DPI. */
 export function sessionScreenSize() {
-  const dpr = window.devicePixelRatio || 1;
-  const top = readPinned() ? BAR_PX : 0;
-  return {
-    width: Math.round(window.innerWidth * dpr),
-    height: Math.round((window.innerHeight - top) * dpr),
-    dpi: Math.round(96 * dpr),
-  };
+  return deviceSize(window.innerWidth, window.innerHeight - (readPinned() ? BAR_PX : 0));
 }
 
 export function RemoteSessionsProvider({ children }: { children: ReactNode }) {
@@ -200,7 +194,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
         </div>
         <div className="sm:hidden flex min-w-0 flex-1 items-center gap-1">
           <select value={active?.sessionId} onChange={(e) => onActivate(e.target.value)} aria-label="Session"
-            className="min-w-28 flex-1 rounded-md border border-nb-gray-700 bg-nb-gray-900 px-2 py-1 text-sm text-white">
+            className="min-w-16 flex-1 rounded-md border border-nb-gray-700 bg-nb-gray-900 px-2 py-1 text-sm text-white">
             {sessions.map((s) => <option key={s.sessionId} value={s.sessionId}>{s.title}</option>)}
           </select>
           <Button size="sm" variant="ghost" onClick={newSession} title="New Session"><Plus size={15} /></Button>

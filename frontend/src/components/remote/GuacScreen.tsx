@@ -45,6 +45,18 @@ function hasContent(canvas: HTMLCanvasElement): boolean {
   return false;
 }
 
+// The largest screen the server accepts (MAX_WIDTH / MAX_HEIGHT in the backend).
+const MAX_W = 7680, MAX_H = 4320;
+
+/**
+ * A box of CSS pixels as the remote screen to ask for: device pixels and the matching DPI, like the
+ * official Guacamole client. The scaling is lowered when it would go past the server's limit.
+ */
+export function deviceSize(w: number, h: number) {
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_W / w, MAX_H / h);
+  return { width: Math.round(w * dpr), height: Math.round(h * dpr), dpi: Math.round(96 * dpr) };
+}
+
 const isTyping = () => {
   const el = document.activeElement;
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el as HTMLElement).isContentEditable);
@@ -122,8 +134,10 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       c.onstatechange = (st: number) => {
         if (st === G.Client.State.CONNECTED) {
           connected = true;
-          // The session can take client instructions now: offer the local clipboard.
+          // The session can take client instructions now: offer the local clipboard, and send
+          // the box size again (a change while connecting, such as pinning the bar, was dropped).
           syncLocal();
+          refit();
           emit({ type: 'connected' });
           const started = Date.now();
           window.clearInterval(paintTimer);
@@ -231,8 +245,10 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       const refit = () => {
         window.clearTimeout(resizeTimer);
         resizeTimer = window.setTimeout(() => {
-          const dpr = window.devicePixelRatio || 1;
-          if (host.clientWidth && host.clientHeight) c.sendSize(Math.round(host.clientWidth * dpr), Math.round(host.clientHeight * dpr));
+          if (host.clientWidth && host.clientHeight) {
+            const s = deviceSize(host.clientWidth, host.clientHeight);
+            c.sendSize(s.width, s.height);
+          }
           fit();
         }, 250);
       };

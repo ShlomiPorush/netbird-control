@@ -5,14 +5,14 @@ const assert = require('node:assert/strict');
 const ra = require('../lib/remote-access');
 const { connectArgs, normConfig, setConfigForTest } = ra._internal;
 
-const RDP_NAMES = ['color-depth', 'server-layout', 'enable-font-smoothing', 'enable-wallpaper', 'enable-theming',
+const RDP_NAMES = ['color-depth', 'disable-gfx', 'server-layout', 'enable-font-smoothing', 'enable-wallpaper', 'enable-theming',
     'enable-full-window-drag', 'enable-desktop-composition', 'enable-menu-animations'];
 const rdpSession = { protocol: 'rdp', gateway: 'ip', address: '10.0.0.5', port: 3389, creds: {}, timezone: '' };
 const sshSession = { protocol: 'ssh', gateway: 'ip', address: '10.0.0.5', port: 22, creds: {}, timezone: '' };
 
 test('defaults: full color, ClearType on, desktop effects off, US layout, SSH 12pt gray on black', () => {
     setConfigForTest({});
-    assert.deepEqual(connectArgs(rdpSession, RDP_NAMES), ['32', 'en-us-qwerty', 'true', '', '', '', '', '']);
+    assert.deepEqual(connectArgs(rdpSession, RDP_NAMES), ['32', '', 'en-us-qwerty', 'true', '', '', '', '', '']);
     assert.deepEqual(connectArgs(sshSession, ['font-size', 'color-scheme']), ['12', 'gray-black']);
 });
 
@@ -21,7 +21,8 @@ test('the saved settings are what guacd gets', () => {
         rdp: { colorDepth: 16, serverLayout: 'de-de-qwertz', fontSmoothing: false, wallpaper: true, theming: true, fullWindowDrag: true, desktopComposition: true, menuAnimations: true },
         ssh: { fontSize: 16, colorScheme: 'white-black' },
     });
-    assert.deepEqual(connectArgs(rdpSession, RDP_NAMES), ['16', 'de-de-qwertz', '', 'true', 'true', 'true', 'true', 'true']);
+    // Below 32-bit the graphics pipeline is off, or guacd would ignore the depth.
+    assert.deepEqual(connectArgs(rdpSession, RDP_NAMES), ['16', 'true', 'de-de-qwertz', '', 'true', 'true', 'true', 'true', 'true']);
     assert.deepEqual(connectArgs(sshSession, ['font-size', 'color-scheme']), ['16', 'white-black']);
     setConfigForTest({});
 });

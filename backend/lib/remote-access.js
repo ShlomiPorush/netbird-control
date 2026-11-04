@@ -632,6 +632,9 @@ function connectArgs(s, argNames) {
         security: 'any', 'ignore-cert': 'true',
         'resize-method': 'display-update',
         'color-depth': String(look.colorDepth),
+        // guacd's graphics pipeline (GFX, on by default) always runs at 32-bit and ignores
+        // color-depth, so a lower depth turns it off.
+        'disable-gfx': flag(look.colorDepth < 32),
         'server-layout': look.serverLayout,
         'enable-font-smoothing': flag(look.fontSmoothing),
         'enable-wallpaper': flag(look.wallpaper),
