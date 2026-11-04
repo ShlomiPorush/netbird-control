@@ -20,6 +20,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   open session is checked again each minute and closes when access ends. Sessions appear on the
   Activity page. Off by default; turn it on in **Settings → Remote Access**. The host firewall rules
   in [docs/remote-access.md](docs/remote-access.md) are required.
+  - **Host names.** A user can type a host name. A name of a NetBird domain resource is checked
+    against that resource's policies and connects through the optional names gateway (profile
+    `remote-names`); any other name is looked up and each address is checked like a typed one.
+    A pasted link keeps only its host, and its port moves to the port field.
+  - **Tabs.** Several sessions stay open as tabs in one full-screen view and keep running while the
+    user moves around the portal. The session bar hides itself and comes back at the top edge.
+    Copy and paste work both ways where the browser allows it. Sessions Per User defaults to 5.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is

@@ -135,7 +135,7 @@ export function RemoteAccessSettings() {
             {st.conflicts.length > 0 && (
               <>
                 <StatusLine ok={false} warn label="Address Conflicts In The Selected Networks"
-                  detail={`The same address is a resource in more than one network: ${st.conflicts.slice(0, 4).map((c) => `${c.address} (${c.networks.join(', ')})`).join('; ')}${st.conflicts.length > 4 ? ` and ${st.conflicts.length - 4} more` : ''}. Sessions to such an address are refused until the conflict is fixed.`} />
+                  detail={`The same address is a resource in more than one network: ${st.conflicts.slice(0, 4).map((c) => `${c.address} (${c.networks.join(', ')})`).join('; ')}${st.conflicts.length > 4 ? ` and ${st.conflicts.length - 4} more` : ''}. Sessions to such an address are refused while the gateways can reach more than one of them. Fix it on the Networks page.`} />
                 <div className="text-[0.8rem] ml-6"><Link className="text-netbird hover:underline" to="/networks">Open Networks</Link></div>
               </>
             )}
