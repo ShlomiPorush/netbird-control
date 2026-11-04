@@ -59,7 +59,7 @@ const DEFAULTS = {
     namesGuacdHost: 'remote-names-gateway',
     namesGuacdPort: 4822,
     networks: [],
-    maxSessionsPerUser: 2,
+    maxSessionsPerUser: 5,
     maxSessionsTotal: 20,
     idleTimeoutMin: 30,
     maxDurationHours: 8,

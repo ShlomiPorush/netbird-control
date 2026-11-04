@@ -5,6 +5,7 @@ import { useViewer } from '@/contexts/ViewerContext';
 import { usePendingRequestCount, useMspStatus } from '@/lib/queries';
 import { getTenantMode } from '@/lib/api';
 import { useScrollLock } from '@/lib/useScrollLock';
+import { useRemoteSessions } from '@/components/remote/RemoteSessions';
 
 interface NavItem {
   to: string;
@@ -20,7 +21,7 @@ interface NavItem {
   /** Visible while MANAGING a tenant (default: hidden in tenant mode). */
   tenantMode?: boolean;
   end?: boolean;
-  badge?: 'pendingRequests';
+  badge?: 'pendingRequests' | 'remoteSessions';
   /** Browser remote access: only when it is on and this viewer may use it. */
   remoteAccess?: boolean;
 }
@@ -34,7 +35,7 @@ const NAV: NavItem[] = [
   { to: '/policies', label: 'Policies', icon: Shield, adminOnly: true, tenantMode: true },
   { to: '/networks', label: 'Networks', icon: Network, tenantMode: true },
   { to: '/reverse-proxy', label: 'Reverse Proxy', icon: Globe, adminOnly: true, perm: 'proxy.manage', tenantMode: true },
-  { to: '/remote-access', label: 'Remote Access', icon: MonitorPlay, remoteAccess: true },
+  { to: '/remote-access', label: 'Remote Access', icon: MonitorPlay, remoteAccess: true, badge: 'remoteSessions' },
   { to: '/request-access', label: 'Request Access', icon: KeyRound },
   { to: '/access', label: 'Access Management', icon: ClipboardCheck, accessHub: true, badge: 'pendingRequests', tenantMode: true },
   { to: '/tenants', label: 'Tenants', icon: Building2, adminOnly: true, mspOnly: true },
@@ -64,11 +65,12 @@ function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: 
   });
   // Access requests are a main-account feature - don't poll pending-count in tenant mode (403).
   const pending = usePendingRequestCount(canApprove && !inTenantMode).data?.count || 0;
+  const openSessions = useRemoteSessions().count;
   return (
     <>
       <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-[3px]">
         {items.map(({ to, label, icon: Icon, end, badge }) => {
-          const count = badge === 'pendingRequests' ? pending : 0;
+          const count = badge === 'pendingRequests' ? pending : badge === 'remoteSessions' ? openSessions : 0;
           return (
           <NavLink
             key={to}
