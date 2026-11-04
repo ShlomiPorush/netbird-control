@@ -111,7 +111,11 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
     remoteApi.end(id).catch(() => { });
     onRemove(id);
   };
-  const leave = () => { setClipOpen(false); onHide(); };
+  const leave = () => {
+    setClipOpen(false);
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => { });
+    onHide();
+  };
   const newSession = () => { leave(); navigate('/remote-access'); };
   const fullscreen = () => {
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => { });

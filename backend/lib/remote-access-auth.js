@@ -227,7 +227,9 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
     return evaluatePolicies(snap, cfg, src, best.res, port, now, { resource, network });
 }
 
-// The managed gateway policies are infrastructure, never a user's access.
+// The managed gateway policies are infrastructure, never a user's access: matched by id, and by
+// name for one whose id was not saved yet (re-created after a deletion, then interrupted).
+const MANAGED_POLICY_NAMES = new Set(['Browser Gateway', 'Browser Gateway (Names)']);
 function managedPolicyIds(cfg) {
     return new Set([cfg && cfg.managedPolicyId, ...arr(cfg && cfg.managedPolicyIds)].filter(Boolean));
 }
@@ -243,7 +245,7 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
     let postureOnly = false;
     let portMismatch = false;
     for (const p of arr(snap.policies)) {
-        if (!p || p.enabled === false || managed.has(p.id)) continue;
+        if (!p || p.enabled === false || managed.has(p.id) || MANAGED_POLICY_NAMES.has(p.name)) continue;
         const tm = TEMP_POLICY_RE.exec(p.name || '');
         if (tm && !grantIsValid(grantById.get(tm[1]), now)) continue;
         const posture = arr(p.source_posture_checks).length > 0;

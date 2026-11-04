@@ -162,7 +162,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
         clipboardAutoRead().then((ok) => {
           if (!ok || disposed || !activeRef.current) return;
           navigator.clipboard.readText().then((text) => {
-            if (text && text !== lastSynced && !disposed) sendClip(text);
+            if (text && text !== lastSynced && !disposed && activeRef.current && clipboardRef.current) sendClip(text);
           }).catch(() => { /* not allowed right now */ });
         });
       };

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQuery } from '@tanstack/react-query';
 import { MonitorPlay, Terminal } from 'lucide-react';
 import { ApiError } from '@/lib/api';
-import { remoteApi, cleanAddressInput, type RemoteProtocol } from '@/lib/remoteAccess';
+import { remoteApi, cleanAddressInput, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
 import { Button, Field, Input, LoadingState, PageHeader, Select, Textarea } from '@/components/ui';
 import { useRemoteSessions } from '@/components/remote/RemoteSessions';
 import {
@@ -11,6 +11,13 @@ import {
 } from '@/components/remote/steps';
 
 const DEFAULT_PORT: Record<RemoteProtocol, number> = { rdp: 3389, ssh: 22 };
+
+// "Resource (name -> ip:port)" from what the server actually opened.
+function sessionTitle(s: RemoteSession, port: number): string {
+  if (!s.address) return '';
+  const where = s.name && s.gateway === 'ip' && s.address !== s.name ? `${s.name} → ${s.address}` : (s.name || s.address);
+  return s.resource?.name ? `${s.resource.name} (${where}:${port})` : `${where}:${port}`;
+}
 
 // The page runs the checks (access, path, SSH credentials) and asks the server for a session.
 // The session itself opens as a tab in the session view (components/remote/RemoteSessions.tsx),
@@ -115,7 +122,7 @@ export default function RemoteAccess() {
         ...(creds || {}),
       });
       sessions.add({
-        sessionId: s.sessionId, token: s.token, protocol, title: c.label || `${targetRef.current.address}:${targetRef.current.port}`,
+        sessionId: s.sessionId, token: s.token, protocol, title: sessionTitle(s, targetRef.current.port) || c.label || `${targetRef.current.address}:${targetRef.current.port}`,
         clipboard: !!info.data?.clipboard, steps: handoff, dwell,
       });
       reset();

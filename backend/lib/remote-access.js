@@ -595,7 +595,8 @@ function connectArgs(s, argNames) {
         hostname: guacdHostname(s), port: String(s.port),
         username: s.creds.username || '', password: s.creds.password || '',
         'private-key': s.creds.privateKey || '', passphrase: s.creds.passphrase || '',
-        'host-key': _cfg.sshHostKeys[s.address] || '',
+        // The key set for the name the user typed, else for the address used.
+        'host-key': (s.targetName && _cfg.sshHostKeys[s.targetName]) || _cfg.sshHostKeys[s.address] || '',
         'disable-copy': _cfg.clipboard ? '' : 'true', 'disable-paste': _cfg.clipboard ? '' : 'true',
         'enable-sftp': '', timezone: s.timezone,
     };
@@ -916,5 +917,5 @@ module.exports = {
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
-    _internal: { GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES },
+    _internal: { GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, setConfigForTest: (c) => { _cfg = normConfig(c); } },
 };

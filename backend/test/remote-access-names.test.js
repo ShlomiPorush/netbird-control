@@ -191,3 +191,21 @@ test('SSH host keys are kept per IPv4 address or per normalized host name', () =
     const c = normConfig({ sshHostKeys: { '10.0.0.5': 'k1', 'Srv.Corp.Example.': 'k2', 'https://bad': 'k3', '*.corp.example': 'k4' } });
     assert.deepEqual(c.sshHostKeys, { '10.0.0.5': 'k1', 'srv.corp.example': 'k2' });
 });
+
+test('an SSH host key set for a name applies when the name was looked up to an IP', () => {
+    ra._internal.setConfigForTest({ sshHostKeys: { 'srv.corp.example': 'ssh-ed25519 KEYNAME', '10.0.0.9': 'ssh-ed25519 KEYIP' } });
+    const args = (s) => connectArgs({ protocol: 'ssh', creds: {}, timezone: '', port: 22, ...s }, ['hostname', 'host-key']);
+    assert.deepEqual(args({ gateway: 'ip', address: '10.0.0.5', targetName: 'srv.corp.example' }), ['10.0.0.5', 'ssh-ed25519 KEYNAME']);
+    assert.deepEqual(args({ gateway: 'ip', address: '10.0.0.9', targetName: '' }), ['10.0.0.9', 'ssh-ed25519 KEYIP']);
+    assert.deepEqual(args({ gateway: 'names', address: 'srv.corp.example', targetName: 'srv.corp.example' }), ['srv.corp.example.', 'ssh-ed25519 KEYNAME']);
+    ra._internal.setConfigForTest({});
+});
+
+test('a managed gateway policy never grants, even before its id was saved', () => {
+    const s = base();
+    s.users[0].auto_groups = ['g-ngw'];
+    s.policies = s.policies.filter(p => p.id !== 'pol-web');
+    // The ids are not known (an interrupted re-creation): the name still excludes it.
+    const r = evaluateNameAccess(s, { ...NAMES, managedPolicyIds: [] }, { userId: 'u1', name: 'mosessafe.com', port: 3389, now: NOW });
+    assert.equal(r.code, 'NO_ACCESS');
+});

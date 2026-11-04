@@ -34,8 +34,8 @@ x-gateway-start: &gateway-start |
     flags_ok BlockInbound true || exit 1
     exit 0
   fi
-  if [ -z "$${NB_SETUP_KEY:-}" ]; then
-    echo "The setup key is missing. Create one in NetBird Control (Settings > Remote Access), put it in .env and keep it there: see docs/remote-access.md." >&2
+  if ! printf '%s' "$${NB_SETUP_KEY:-}" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$$'; then
+    echo "The setup key is missing or is not a NetBird setup key. Create one in NetBird Control (Settings > Remote Access), put it in .env and keep it there: see docs/remote-access.md." >&2
     exit 1
   fi
   iptables -w -D OUTPUT -p tcp -m owner --uid-owner "$$GUACD_UID" -j "$$CHAIN" 2>/dev/null || true
@@ -64,6 +64,13 @@ x-gateway: &gateway
     - net.ipv6.conf.default.disable_ipv6=1
   mem_limit: 256m
   pids_limit: 256
+
+# guacd starts only once its gateway's NetBird interface exists. The gateway's start script creates
+# it only after the egress lock is in place, so this also holds when Docker starts the containers
+# on its own (a restart policy does not wait for depends_on).
+x-guacd-start: &guacd-start |
+  until grep -q 'wt0:' /proc/net/dev; do sleep 1; done
+  exec /opt/guacamole/sbin/guacd -f -b "$$GUACD_BIND" -l 4822 -L info
 
 x-guacd: &guacd
   image: guacamole/guacd:${REMOTE_GUACD_TAG:-1.6.0}
@@ -106,7 +113,9 @@ services:
     depends_on:
       remote-gateway:
         condition: service_healthy
-    entrypoint: [ "/opt/guacamole/sbin/guacd", "-f", "-b", "172.31.250.2", "-l", "4822", "-L", "info" ]
+    environment:
+      - GUACD_BIND=172.31.250.2
+    entrypoint: [ "/bin/sh", "-c", *guacd-start ]
     # The image's own health check probes 127.0.0.1:4822, where guacd does not listen here. Left
     # as is, the container shows as unhealthy and a watchdog such as autoheal would restart it.
     healthcheck:
@@ -143,7 +152,9 @@ services:
     depends_on:
       remote-names-gateway:
         condition: service_healthy
-    entrypoint: [ "/opt/guacamole/sbin/guacd", "-f", "-b", "172.31.250.3", "-l", "4822", "-L", "info" ]
+    environment:
+      - GUACD_BIND=172.31.250.3
+    entrypoint: [ "/bin/sh", "-c", *guacd-start ]
     healthcheck:
       test: [ "CMD-SHELL", "nc -z 172.31.250.3 4822 || exit 1" ]
       interval: 60s
