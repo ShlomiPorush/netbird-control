@@ -219,7 +219,9 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       document.addEventListener('focusin', onFocusIn);
       host.addEventListener('pointerenter', syncLocal);
 
-      // Size: ask the remote for the viewport size; scale down only if it answers bigger.
+      // Size: like the official Guacamole client, ask the remote for the box size in device pixels
+      // (the session's DPI follows the screen's scaling) and scale the display down to the box, so
+      // a scaled screen (125%, 150%) stays sharp. A remote that can't resize is scaled down to fit.
       const fit = () => {
         const w = host.clientWidth, h = host.clientHeight;
         const dw = display.getWidth(), dh = display.getHeight();
@@ -229,10 +231,15 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       const refit = () => {
         window.clearTimeout(resizeTimer);
         resizeTimer = window.setTimeout(() => {
-          if (host.clientWidth && host.clientHeight) c.sendSize(host.clientWidth, host.clientHeight);
+          const dpr = window.devicePixelRatio || 1;
+          if (host.clientWidth && host.clientHeight) c.sendSize(Math.round(host.clientWidth * dpr), Math.round(host.clientHeight * dpr));
           fit();
         }, 250);
       };
+      // The box changes with the window, full screen, and the session bar being pinned. A window
+      // moved to a screen with other scaling fires a window resize.
+      const boxWatch = new ResizeObserver(refit);
+      boxWatch.observe(host);
       window.addEventListener('resize', refit);
       hooks.current = { release: releaseKeys, refit, syncLocal };
 
@@ -245,6 +252,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       }, LEASE_MS);
 
       cleanupListeners = () => {
+        boxWatch.disconnect();
         window.removeEventListener('resize', refit);
         window.removeEventListener('focus', syncLocal);
         host.removeEventListener('pointerenter', syncLocal);

@@ -109,6 +109,14 @@ after the idle timeout, and after the maximum session length.
 - **Copy and paste.** Text copied on the remote side goes to the local clipboard, and the local
   clipboard is offered to the remote side when the session comes into use. Browsers that ask before
   every read (Firefox) use the Clipboard panel instead. Text only; file transfer is off.
+- **The session bar.** It hides itself a few seconds after a session comes to the front. A click
+  on its handle at the top of the screen, or the pointer resting there for half a second, brings it
+  back. Pinned, it stays, and the session moves down below it and is resized to the space left.
+  Resizing needs Windows 8.1 or Windows Server 2012 R2 or later; an older server's screen is scaled
+  down to fit instead.
+- **Scaled screens.** The session uses the screen's real resolution and scaling (like the official
+  Guacamole client), so text stays sharp at 125% or 150%. That means more pixels to send than at
+  100%.
 
 ## Set it up
 
@@ -257,6 +265,11 @@ that the real end time is unknown.
 | Idle Timeout | 30 minutes | No keyboard or mouse input. A session in a background tab gets none. |
 | Maximum Session Length | 8 hours | |
 | Allow Clipboard | On | Text only. File transfer is always off. |
+| RDP Display: Colors | 32-bit | 8, 16, 24 or 32-bit. |
+| RDP Display: Keyboard Layout | English (US) | The remote server's layout, from guacd's built-in list. Characters it doesn't have, such as Hebrew, are sent as Unicode text. |
+| RDP Display: Font Smoothing | On | ClearType. |
+| RDP Display: Wallpaper, Themes, Window Contents While Dragging, Desktop Composition, Menu Animations | Off | Each costs bandwidth. |
+| SSH Terminal: Font Size / Colors | 12 / Gray On Black | |
 | guacd Address / Port | `remote-gateway` / 4822 | The IP gateway's guacd as the app reaches it. |
 | Names guacd Address / Port | `remote-names-gateway` / 4822 | The names gateway's guacd as the app reaches it. |
 | SSH Host Keys | None | Per IPv4 address or host name; enforced when present. |

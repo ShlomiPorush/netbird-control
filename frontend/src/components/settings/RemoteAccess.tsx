@@ -4,8 +4,28 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { useNetworks } from '@/lib/queries';
-import { remoteApi, type RemoteAccessConfig } from '@/lib/remoteAccess';
-import { Button, CopyButton, Field, Input, LoadingState, Textarea } from '@/components/ui';
+import { remoteApi, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
+import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
+
+// guacd's keymaps, by name. An id missing here shows as is.
+const LAYOUT_NAMES: Record<string, string> = {
+  'en-us-qwerty': 'English (US)', 'en-gb-qwerty': 'English (UK)', 'cs-cz-qwertz': 'Czech', 'da-dk-qwerty': 'Danish',
+  'de-ch-qwertz': 'German (Switzerland)', 'de-de-qwertz': 'German', 'es-es-qwerty': 'Spanish', 'es-latam-qwerty': 'Spanish (Latin America)',
+  'fr-be-azerty': 'French (Belgium)', 'fr-ca-qwerty': 'French (Canada)', 'fr-ch-qwertz': 'French (Switzerland)', 'fr-fr-azerty': 'French',
+  'hu-hu-qwertz': 'Hungarian', 'it-it-qwerty': 'Italian', 'ja-jp-qwerty': 'Japanese', 'no-no-qwerty': 'Norwegian', 'pl-pl-qwerty': 'Polish',
+  'pt-br-qwerty': 'Portuguese (Brazil)', 'pt-pt-qwerty': 'Portuguese', 'ro-ro-qwerty': 'Romanian', 'sv-se-qwerty': 'Swedish', 'tr-tr-qwerty': 'Turkish',
+  failsafe: 'Unicode Only (Failsafe)',
+};
+const DEPTH_NAMES: Record<number, string> = { 8: '8-Bit (256 Colors)', 16: '16-Bit', 24: '24-Bit', 32: '32-Bit (Full Color)' };
+const SCHEME_NAMES: Record<string, string> = { 'gray-black': 'Gray On Black', 'black-white': 'Black On White', 'green-black': 'Green On Black', 'white-black': 'White On Black' };
+const RDP_EFFECTS: { key: 'fontSmoothing' | 'wallpaper' | 'theming' | 'fullWindowDrag' | 'desktopComposition' | 'menuAnimations'; label: string; hint: string }[] = [
+  { key: 'fontSmoothing', label: 'Font Smoothing (ClearType)', hint: 'Smooth text. Costs little.' },
+  { key: 'wallpaper', label: 'Desktop Wallpaper', hint: 'Costs bandwidth, mostly on the first screen.' },
+  { key: 'theming', label: 'Windows Themes', hint: 'Themed buttons and windows instead of the classic look.' },
+  { key: 'fullWindowDrag', label: 'Window Contents While Dragging', hint: 'Costs bandwidth while a window moves.' },
+  { key: 'desktopComposition', label: 'Desktop Composition', hint: 'Transparent window borders and shadows.' },
+  { key: 'menuAnimations', label: 'Menu Animations', hint: 'Menus fade and slide.' },
+];
 
 const box = 'rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-4';
 const toggleCard = 'flex items-start gap-3 p-3.5 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-50 dark:bg-nb-gray-900/30 cursor-pointer';
@@ -58,6 +78,7 @@ export function RemoteAccessSettings() {
         namesGuacdHost: form.namesGuacdHost, namesGuacdPort: Number(form.namesGuacdPort),
         networks: form.networks, maxSessionsPerUser: Number(form.maxSessionsPerUser), maxSessionsTotal: Number(form.maxSessionsTotal),
         idleTimeoutMin: Number(form.idleTimeoutMin), maxDurationHours: Number(form.maxDurationHours), clipboard: form.clipboard, sshHostKeys,
+        rdp: form.rdp, ssh: { ...form.ssh, fontSize: Number(form.ssh.fontSize) },
       });
       setForm(r.config);
       setSaved(r.sync ? `Saved. NetBird updated: ${r.sync.added} resource(s) added to the gateway, ${r.sync.removed} removed.` : 'Saved.');
@@ -77,6 +98,10 @@ export function RemoteAccessSettings() {
     catch (e) { setError(e instanceof ApiError ? e.message : 'The setup key could not be created.'); }
     finally { setKeyBusy(''); }
   };
+
+  const setRdp = <K extends keyof RdpDisplay>(k: K, v: RdpDisplay[K]) => set('rdp', { ...form.rdp, [k]: v });
+  const setSsh = <K extends keyof SshTerminal>(k: K, v: SshTerminal[K]) => set('ssh', { ...form.ssh, [k]: v });
+  const opts = form.options || { rdpLayouts: [form.rdp.serverLayout], rdpColorDepths: [form.rdp.colorDepth], sshColorSchemes: [form.ssh.colorScheme] };
 
   const toggleNetwork = (id: string) => set('networks', form.networks.includes(id) ? form.networks.filter((n) => n !== id) : [...form.networks, id]);
 
@@ -195,6 +220,51 @@ export function RemoteAccessSettings() {
           <div className="text-[0.8rem] text-nb-gray-500">Copy and paste text between the browser and the remote session. File transfer is always off.</div>
         </div>
       </label>
+
+      {/* How sessions look. Applies to sessions opened after saving. */}
+      <div className={`${box} flex flex-col gap-4`}>
+        <div>
+          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">RDP Display</div>
+          <div className="text-[0.8rem] text-nb-gray-500">Applies to sessions opened after saving.</div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field label="Colors">
+            <Select value={String(form.rdp.colorDepth)} onChange={(e) => setRdp('colorDepth', Number(e.target.value))}>
+              {opts.rdpColorDepths.map((d) => <option key={d} value={d}>{DEPTH_NAMES[d] || `${d}-Bit`}</option>)}
+            </Select>
+          </Field>
+          <Field label="Keyboard Layout" hint="The layout of the remote server. Characters it doesn't have are sent as Unicode text.">
+            <Select value={form.rdp.serverLayout} onChange={(e) => setRdp('serverLayout', e.target.value)}>
+              {opts.rdpLayouts.map((l) => <option key={l} value={l}>{LAYOUT_NAMES[l] || l}</option>)}
+            </Select>
+          </Field>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {RDP_EFFECTS.map((f) => (
+            <label key={f.key} className="flex items-start gap-2 text-sm cursor-pointer">
+              <input type="checkbox" className="mt-1 accent-netbird" checked={form.rdp[f.key]} onChange={(e) => setRdp(f.key, e.target.checked)} />
+              <span>
+                <span className="text-nb-gray-800 dark:text-nb-gray-100">{f.label}</span>
+                <span className="block text-[0.78rem] text-nb-gray-500">{f.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <div className="border-t border-nb-gray-200 dark:border-nb-gray-800 pt-3">
+          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">SSH Terminal</div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Font Size">
+            <Input inputMode="numeric" value={String(form.ssh.fontSize)} onChange={(e) => setSsh('fontSize', Number(e.target.value.replace(/\D/g, '')) || 0)} />
+          </Field>
+          <Field label="Colors">
+            <Select value={form.ssh.colorScheme} onChange={(e) => setSsh('colorScheme', e.target.value)}>
+              {opts.sshColorSchemes.map((s) => <option key={s} value={s}>{SCHEME_NAMES[s] || s}</option>)}
+            </Select>
+          </Field>
+        </div>
+      </div>
 
       <div className="grid grid-cols-[1fr_8rem] gap-3">
         <Field label="guacd Address" hint="The IP gateway's guacd, as this app reaches it."><Input value={form.guacdHost} onChange={(e) => set('guacdHost', e.target.value)} /></Field>

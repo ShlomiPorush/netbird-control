@@ -65,7 +65,29 @@ const DEFAULTS = {
     maxDurationHours: 8,
     clipboard: true,
     sshHostKeys: {},
+    // How RDP sessions look. Font smoothing and full color cost little bandwidth; the desktop
+    // effects (wallpaper, themes, window contents while dragging, animations) cost more.
+    rdp: {
+        colorDepth: 32,
+        fontSmoothing: true,
+        wallpaper: false,
+        theming: false,
+        fullWindowDrag: false,
+        desktopComposition: false,
+        menuAnimations: false,
+        serverLayout: 'en-us-qwerty',
+    },
+    ssh: { fontSize: 12, colorScheme: 'gray-black' },
 };
+
+// What guacd 1.6 accepts (its built-in keymaps and terminal color schemes).
+const RDP_COLOR_DEPTHS = [8, 16, 24, 32];
+const RDP_LAYOUTS = ['en-us-qwerty', 'en-gb-qwerty', 'cs-cz-qwertz', 'da-dk-qwerty', 'de-ch-qwertz', 'de-de-qwertz',
+    'es-es-qwerty', 'es-latam-qwerty', 'fr-be-azerty', 'fr-ca-qwerty', 'fr-ch-qwertz', 'fr-fr-azerty', 'hu-hu-qwertz',
+    'it-it-qwerty', 'ja-jp-qwerty', 'no-no-qwerty', 'pl-pl-qwerty', 'pt-br-qwerty', 'pt-pt-qwerty', 'ro-ro-qwerty',
+    'sv-se-qwerty', 'tr-tr-qwerty', 'failsafe'];
+const SSH_COLOR_SCHEMES = ['gray-black', 'black-white', 'green-black', 'white-black'];
+const RDP_FLAGS = ['fontSmoothing', 'wallpaper', 'theming', 'fullWindowDrag', 'desktopComposition', 'menuAnimations'];
 
 // ─── Settings ───
 let _cfg = { ...DEFAULTS };
@@ -102,6 +124,28 @@ function normConfig(c) {
         maxDurationHours: clampInt(x.maxDurationHours, 1, 24, DEFAULTS.maxDurationHours),
         clipboard: x.clipboard === undefined ? DEFAULTS.clipboard : !!x.clipboard,
         sshHostKeys: keys,
+        rdp: normRdp(x.rdp),
+        ssh: normSsh(x.ssh),
+    };
+}
+
+function normRdp(v) {
+    const x = v && typeof v === 'object' ? v : {};
+    const d = DEFAULTS.rdp;
+    const depth = Number(x.colorDepth);
+    const out = {
+        colorDepth: RDP_COLOR_DEPTHS.includes(depth) ? depth : d.colorDepth,
+        serverLayout: RDP_LAYOUTS.includes(x.serverLayout) ? x.serverLayout : d.serverLayout,
+    };
+    for (const k of RDP_FLAGS) out[k] = x[k] === undefined ? d[k] : !!x[k];
+    return out;
+}
+
+function normSsh(v) {
+    const x = v && typeof v === 'object' ? v : {};
+    return {
+        fontSize: clampInt(x.fontSize, 8, 32, DEFAULTS.ssh.fontSize),
+        colorScheme: SSH_COLOR_SCHEMES.includes(x.colorScheme) ? x.colorScheme : DEFAULTS.ssh.colorScheme,
     };
 }
 
@@ -114,7 +158,8 @@ async function loadRemoteAccessConfig() {
 }
 
 function getRemoteAccessConfig() {
-    return { ..._cfg, networks: [..._cfg.networks], sshHostKeys: { ..._cfg.sshHostKeys }, managed: { ..._nb }, lastApply: { ..._lastApply } };
+    return { ..._cfg, networks: [..._cfg.networks], sshHostKeys: { ..._cfg.sshHostKeys }, rdp: { ..._cfg.rdp }, ssh: { ..._cfg.ssh },
+        options: { rdpLayouts: RDP_LAYOUTS, rdpColorDepths: RDP_COLOR_DEPTHS, sshColorSchemes: SSH_COLOR_SCHEMES }, managed: { ..._nb }, lastApply: { ..._lastApply } };
 }
 
 function setRemoteAccessDeps(deps) { _deps = { ..._deps, ...deps }; }
@@ -578,11 +623,22 @@ class GuacParser {
 // (trailing dot), which the resolver never expands with its search list (resolv.conf(5)).
 const guacdHostname = (s) => (s.gateway === 'names' ? `${s.address}.` : s.address);
 
+const flag = (on) => (on ? 'true' : '');
+
 function connectArgs(s, argNames) {
+    const look = _cfg.rdp, term = _cfg.ssh;
     const rdp = {
         hostname: guacdHostname(s), port: String(s.port),
         security: 'any', 'ignore-cert': 'true',
         'resize-method': 'display-update',
+        'color-depth': String(look.colorDepth),
+        'server-layout': look.serverLayout,
+        'enable-font-smoothing': flag(look.fontSmoothing),
+        'enable-wallpaper': flag(look.wallpaper),
+        'enable-theming': flag(look.theming),
+        'enable-full-window-drag': flag(look.fullWindowDrag),
+        'enable-desktop-composition': flag(look.desktopComposition),
+        'enable-menu-animations': flag(look.menuAnimations),
         'disable-audio': 'true', 'enable-drive': '', 'enable-printing': '',
         'disable-download': 'true', 'disable-upload': 'true',
         'disable-copy': _cfg.clipboard ? '' : 'true', 'disable-paste': _cfg.clipboard ? '' : 'true',
@@ -599,6 +655,7 @@ function connectArgs(s, argNames) {
         'host-key': (s.targetName && _cfg.sshHostKeys[s.targetName]) || _cfg.sshHostKeys[s.address] || '',
         'disable-copy': _cfg.clipboard ? '' : 'true', 'disable-paste': _cfg.clipboard ? '' : 'true',
         'enable-sftp': '', timezone: s.timezone,
+        'font-size': String(term.fontSize), 'color-scheme': term.colorScheme,
     };
     const map = s.protocol === 'rdp' ? rdp : ssh;
     return argNames.map(name => (Object.prototype.hasOwnProperty.call(map, name) ? map[name] : ''));

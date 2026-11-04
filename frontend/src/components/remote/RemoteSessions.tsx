@@ -36,6 +36,23 @@ const SessionsContext = createContext<Ctx>({ count: 0, open: false, add: () => {
 export const useRemoteSessions = () => useContext(SessionsContext);
 
 const PIN_KEY = 'nbc.remote.barPinned';
+// The bar's height (h-11). Pinned, the sessions start below it.
+const BAR_PX = 44;
+// How long the pointer must rest on the handle before the bar opens: passing over it does nothing.
+const HANDLE_DWELL_MS = 500;
+
+const readPinned = () => { try { return localStorage.getItem(PIN_KEY) === '1'; } catch { return false; } };
+
+/** The size a new session asks for: the session box in device pixels, and the screen's DPI. */
+export function sessionScreenSize() {
+  const dpr = window.devicePixelRatio || 1;
+  const top = readPinned() ? BAR_PX : 0;
+  return {
+    width: Math.round(window.innerWidth * dpr),
+    height: Math.round((window.innerHeight - top) * dpr),
+    dpi: Math.round(96 * dpr),
+  };
+}
 
 export function RemoteSessionsProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
@@ -90,19 +107,23 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const active = sessions.find((s) => s.sessionId === activeId) || sessions[sessions.length - 1];
 
   // The bar hides itself (like the connection bar of a desktop RDP client): it shows for a moment
-  // when a session comes to the front, then again when the pointer reaches the top edge or the
-  // handle. Pinned, it stays.
-  const [pinned, setPinned] = useState(() => { try { return localStorage.getItem(PIN_KEY) === '1'; } catch { return false; } });
+  // when a session comes to the front, then only from the small handle at the top - a click, or
+  // the pointer resting on it. The rest of the top edge belongs to the remote screen. Pinned, it
+  // stays, and the sessions move down below it so none of the remote screen is covered.
+  const [pinned, setPinned] = useState(readPinned);
   const [barShown, setBarShown] = useState(true);
   const hideTimer = useRef<number | undefined>(undefined);
+  const dwellTimer = useRef<number | undefined>(undefined);
   const hovering = useRef(false);
   const scheduleHide = useCallback((ms: number) => {
     window.clearTimeout(hideTimer.current);
     hideTimer.current = window.setTimeout(() => { if (!hovering.current) setBarShown(false); }, ms);
   }, []);
-  const reveal = () => { window.clearTimeout(hideTimer.current); setBarShown(true); };
+  const reveal = () => { window.clearTimeout(dwellTimer.current); window.clearTimeout(hideTimer.current); setBarShown(true); };
+  const handleEnter = () => { window.clearTimeout(dwellTimer.current); dwellTimer.current = window.setTimeout(reveal, HANDLE_DWELL_MS); };
+  const handleLeave = () => window.clearTimeout(dwellTimer.current);
   useEffect(() => { if (open) { reveal(); scheduleHide(3000); } }, [open, activeId, scheduleHide]);
-  useEffect(() => () => window.clearTimeout(hideTimer.current), []);
+  useEffect(() => () => { window.clearTimeout(hideTimer.current); window.clearTimeout(dwellTimer.current); }, []);
   const keepBar = pinned || clipOpen;
   const barVisible = barShown || keepBar;
   const togglePin = () => setPinned((p) => { const n = !p; try { localStorage.setItem(PIN_KEY, n ? '1' : '0'); } catch { /* ignore */ } return n; });
@@ -130,7 +151,8 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
       className={cn('dark fixed inset-0 z-1050 bg-nb-gray-950 text-nb-gray-100', !open && 'invisible pointer-events-none')}
       role="dialog" aria-modal={open} aria-label="Remote sessions" aria-hidden={!open}>
       {sessions.map((s) => (
-        <div key={s.sessionId} className={cn('absolute inset-0', s.sessionId !== active?.sessionId && 'invisible pointer-events-none')}>
+        <div key={s.sessionId} style={{ top: pinned ? BAR_PX : 0 }}
+          className={cn('absolute inset-x-0 bottom-0', s.sessionId !== active?.sessionId && 'invisible pointer-events-none')}>
           <SessionPane
             entry={s}
             active={open && s.sessionId === active?.sessionId}
@@ -143,10 +165,9 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
         </div>
       ))}
 
-      {/* The top edge brings the bar back. */}
-      {!barVisible && <div className="absolute inset-x-0 top-0 z-30 h-1.5" onMouseEnter={reveal} />}
+      {/* The handle brings the bar back: a click, or the pointer resting on it. */}
       {!barVisible && active && (
-        <button onClick={reveal} onMouseEnter={reveal}
+        <button onClick={reveal} onMouseEnter={handleEnter} onMouseLeave={handleLeave} aria-label="Show the session bar"
           className="absolute left-1/2 top-0 z-30 -translate-x-1/2 inline-flex max-w-[60vw] items-center gap-1.5 rounded-b-lg border border-t-0 border-nb-gray-800 bg-nb-gray-940/95 px-3 py-0.5 text-[0.72rem] text-nb-gray-300 shadow-lg">
           <span className={dot(status[active.sessionId])} />
           <span className="truncate">{active.title}</span>
@@ -193,7 +214,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             <Button size="sm" variant="ghost" onClick={() => setClipOpen((v) => !v)} title="Clipboard"><ClipboardPaste size={15} /></Button>
           )}
           <Button size="sm" variant="ghost" onClick={fullscreen} title="Full Screen"><Maximize2 size={15} /></Button>
-          <span className="hidden sm:inline-flex"><Button size="sm" variant="ghost" onClick={togglePin} title={pinned ? 'Let The Bar Hide' : 'Keep The Bar Open'}>{pinned ? <PinOff size={15} /> : <Pin size={15} />}</Button></span>
+          <Button size="sm" variant="ghost" onClick={togglePin} title={pinned ? 'Let The Bar Hide' : 'Keep The Bar Open'}>{pinned ? <PinOff size={15} /> : <Pin size={15} />}</Button>
           <Button size="sm" variant="ghost" onClick={leave} title="Back To The Portal (Sessions Keep Running)"><Minimize2 size={15} /></Button>
           {active && <Button size="sm" variant="danger" onClick={() => disconnect(active.sessionId)}><Power size={15} /><span className="hidden md:inline"> Disconnect</span></Button>}
         </div>

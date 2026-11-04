@@ -25,8 +25,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     `remote-names`); any other name is looked up and each address is checked like a typed one.
     A pasted link keeps only its host, and its port moves to the port field.
   - **Tabs.** Several sessions stay open as tabs in one full-screen view and keep running while the
-    user moves around the portal. The session bar hides itself and comes back at the top edge.
-    Copy and paste work both ways where the browser allows it. Sessions Per User defaults to 5.
+    user moves around the portal. The session bar hides itself and comes back from its handle at
+    the top; pinned, it stays and the session moves down below it. Copy and paste work both ways
+    where the browser allows it. Sessions Per User defaults to 5.
+  - **Display settings.** Settings → Remote Access sets the RDP colors, keyboard layout, font
+    smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
+    color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
+    real resolution, so it stays sharp.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is

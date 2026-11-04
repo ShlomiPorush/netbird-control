@@ -48,6 +48,22 @@ export interface RemoteSession {
   gateway?: 'ip' | 'names';
 }
 
+export interface RdpDisplay {
+  colorDepth: number;
+  fontSmoothing: boolean;
+  wallpaper: boolean;
+  theming: boolean;
+  fullWindowDrag: boolean;
+  desktopComposition: boolean;
+  menuAnimations: boolean;
+  serverLayout: string;
+}
+
+export interface SshTerminal {
+  fontSize: number;
+  colorScheme: string;
+}
+
 export interface RemoteAccessConfig {
   enabled: boolean;
   allowAll: boolean;
@@ -62,6 +78,10 @@ export interface RemoteAccessConfig {
   maxDurationHours: number;
   clipboard: boolean;
   sshHostKeys: Record<string, string>;
+  rdp: RdpDisplay;
+  ssh: SshTerminal;
+  /** What guacd accepts, for the settings form. */
+  options?: { rdpLayouts: string[]; rdpColorDepths: number[]; sshColorSchemes: string[] };
   managed?: { gatewayGroupId: string; targetGroupId: string; policyId: string };
   lastApply?: { at: string | null; error: string };
   ssoEnabled?: boolean;

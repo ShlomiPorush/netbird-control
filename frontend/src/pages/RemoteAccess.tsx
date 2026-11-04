@@ -4,7 +4,7 @@ import { MonitorPlay, Terminal } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { remoteApi, cleanAddressInput, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
 import { Button, Field, Input, LoadingState, PageHeader, Select, Textarea } from '@/components/ui';
-import { useRemoteSessions } from '@/components/remote/RemoteSessions';
+import { sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
 import {
   FailureBox, PACE_KEY, StepList, StepSummary, freshSteps, pickDwell, usePacedSteps, withStep,
   type Failure, type Step, type StepKey, type StepState,
@@ -116,8 +116,8 @@ export default function RemoteAccess() {
     try {
       const s = await remoteApi.createSession({
         protocol, address: targetRef.current.address, port: targetRef.current.port,
-        // The session view uses the whole window; its bar hides itself.
-        width: window.innerWidth, height: window.innerHeight, dpi: Math.round(96 * (window.devicePixelRatio || 1)),
+        // The session view uses the whole window, below the bar when it is pinned.
+        ...sessionScreenSize(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(creds || {}),
       });
