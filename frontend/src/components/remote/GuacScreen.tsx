@@ -142,7 +142,8 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       // Clipboard, both ways, text only. Remote -> local goes straight to the system clipboard
       // while this session is in front; local -> remote is sent when the session comes into use
       // (focus, pointer over it), so Ctrl+V on the remote side pastes what was copied locally.
-      let lastSynced = '';
+      // null until the first sync, so an empty local clipboard is offered on connect as well.
+      let lastSynced: string | null = null;
       // Clipboard text sent before the session is connected would be dropped by the tunnel.
       let connected = false;
       const sendClip = (text: string) => {
