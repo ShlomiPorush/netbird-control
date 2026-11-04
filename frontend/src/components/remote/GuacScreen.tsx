@@ -121,6 +121,9 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       tunnel.onstatechange = (st: number) => { if (st === G.Tunnel.State.OPEN) emit({ type: 'channel-open' }); };
       c.onstatechange = (st: number) => {
         if (st === G.Client.State.CONNECTED) {
+          connected = true;
+          // The session can take client instructions now: offer the local clipboard.
+          syncLocal();
           emit({ type: 'connected' });
           const started = Date.now();
           window.clearInterval(paintTimer);
@@ -140,6 +143,8 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       // while this session is in front; local -> remote is sent when the session comes into use
       // (focus, pointer over it), so Ctrl+V on the remote side pastes what was copied locally.
       let lastSynced = '';
+      // Clipboard text sent before the session is connected would be dropped by the tunnel.
+      let connected = false;
       const sendClip = (text: string) => {
         const w = new G.StringWriter(c.createClipboardStream('text/plain'));
         w.sendText(text);
@@ -158,11 +163,12 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
         };
       };
       const syncLocal = () => {
-        if (!activeRef.current || !clipboardRef.current) return;
+        if (!connected || !activeRef.current || !clipboardRef.current) return;
         clipboardAutoRead().then((ok) => {
           if (!ok || disposed || !activeRef.current) return;
           navigator.clipboard.readText().then((text) => {
-            if (text && text !== lastSynced && !disposed && activeRef.current && clipboardRef.current) sendClip(text);
+            // An emptied local clipboard is sent too, so an old paste never lingers on the remote side.
+            if (text !== lastSynced && !disposed && activeRef.current && clipboardRef.current) sendClip(text);
           }).catch(() => { /* not allowed right now */ });
         });
       };
