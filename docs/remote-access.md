@@ -116,7 +116,8 @@ after the idle timeout, and after the maximum session length.
   down to fit instead.
 - **Scaled screens.** The session uses the screen's real resolution and scaling (like the official
   Guacamole client), so text stays sharp at 125% or 150%. That means more pixels to send than at
-  100%.
+  100%. A session keeps the scaling it opened with; moved to a screen with other scaling, it is
+  shown larger or smaller rather than reopened.
 
 ## Set it up
 

@@ -52,8 +52,8 @@ const MAX_W = 7680, MAX_H = 4320, MAX_DPR = 5;
  * A box of CSS pixels as the remote screen to ask for: device pixels and the matching DPI, like the
  * official Guacamole client. The scaling is lowered when it would go past the server's limit.
  */
-export function deviceSize(w: number, h: number) {
-  const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR, MAX_W / w, MAX_H / h);
+export function deviceSize(w: number, h: number, scaling = window.devicePixelRatio || 1) {
+  const dpr = Math.min(scaling, MAX_DPR, MAX_W / w, MAX_H / h);
   return { width: Math.round(w * dpr), height: Math.round(h * dpr), dpi: Math.round(96 * dpr) };
 }
 
@@ -236,27 +236,30 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       // Size: like the official Guacamole client, ask the remote for the box size in device pixels
       // (the session's DPI follows the screen's scaling) and scale the display down to the box, so
       // a scaled screen (125%, 150%) stays sharp. A remote that can't resize is scaled down to fit.
+      // The session keeps the scaling it opened with: guacd can't change a session's DPI, so on a
+      // screen with other scaling the same remote pixels are shown larger or smaller instead.
+      const scaling = window.devicePixelRatio || 1;
+      // Fill the box, but never past one remote pixel per device pixel (a remote that can't resize
+      // stays sharp and centered).
       const fit = () => {
         const w = host.clientWidth, h = host.clientHeight;
         const dw = display.getWidth(), dh = display.getHeight();
-        if (dw && dh && w && h) display.scale(Math.min(w / dw, h / dh, 1));
+        if (dw && dh && w && h) display.scale(Math.min(w / dw, h / dh, w / deviceSize(w, h, scaling).width));
       };
       display.onresize = fit;
       const refit = () => {
         window.clearTimeout(resizeTimer);
         resizeTimer = window.setTimeout(() => {
           if (host.clientWidth && host.clientHeight) {
-            const s = deviceSize(host.clientWidth, host.clientHeight);
+            const s = deviceSize(host.clientWidth, host.clientHeight, scaling);
             c.sendSize(s.width, s.height);
           }
           fit();
         }, 250);
       };
-      // The box changes with the window, full screen, and the session bar being pinned. A window
-      // moved to a screen with other scaling fires a window resize.
+      // The box changes with the window, full screen, and the session bar being pinned.
       const boxWatch = new ResizeObserver(refit);
       boxWatch.observe(host);
-      window.addEventListener('resize', refit);
       hooks.current = { release: releaseKeys, refit, syncLocal };
 
       c.connect('token=' + encodeURIComponent(token));
@@ -269,7 +272,6 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
 
       cleanupListeners = () => {
         boxWatch.disconnect();
-        window.removeEventListener('resize', refit);
         window.removeEventListener('focus', syncLocal);
         host.removeEventListener('pointerenter', syncLocal);
       };
