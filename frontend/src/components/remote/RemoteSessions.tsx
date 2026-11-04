@@ -91,6 +91,12 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   onActivate: (id: string) => void; onRemove: (id: string) => void; onHide: () => void;
 }) {
   useScrollLock(open);
+  // No page scrollbar beside the session (index.css).
+  useEffect(() => {
+    if (!open) return;
+    document.documentElement.classList.add('nb-session-open');
+    return () => document.documentElement.classList.remove('nb-session-open');
+  }, [open]);
   const navigate = useNavigate();
   const rootRef = useRef<HTMLDivElement>(null);
   const apis = useRef<Record<string, { current: ScreenApi | null }>>({});
