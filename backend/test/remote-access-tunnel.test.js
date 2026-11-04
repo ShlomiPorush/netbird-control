@@ -20,14 +20,19 @@ const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
 const snapshot = {
     '/api/users': [{ id: 'u1', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u2', auto_groups: ['g-staff'], is_blocked: false }],
-    '/api/peers': [{ id: 'p-gw', name: 'gw', groups: [{ id: 'g-gw' }], connected: true }, { id: 'p-r', name: 'r', groups: [], connected: true }],
-    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-staff', name: 'Staff' }],
+    '/api/peers': [{ id: 'p-gw', name: 'gw', groups: [{ id: 'g-gw' }], connected: true }, { id: 'p-ngw', name: 'ngw', groups: [{ id: 'g-ngw' }], connected: true }, { id: 'p-r', name: 'r', groups: [], connected: true }],
+    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-ngw', name: 'Browser Gateway Names' }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets' }, { id: 'g-staff', name: 'Staff' }],
     '/api/policies': [
         { id: 'pol-gw', name: 'Browser Gateway', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-gwt' }] }] },
         { id: 'pol-ssh', name: 'Staff SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-gwt' }] }] },
+        { id: 'pol-ngw', name: 'Browser Gateway (Names)', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-ngw' }], destinations: [{ id: 'g-ngwt' }] }] },
+        { id: 'pol-web', name: 'Staff Web SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [], destinationResource: { id: 'r-dom', type: 'domain' } }] },
     ],
-    '/api/networks/resources': [{ id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }] }],
-    '/api/networks': [{ id: 'n1', name: 'Office', resources: ['r1'] }],
+    '/api/networks/resources': [
+        { id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }] },
+        { id: 'r-dom', name: 'Safe', type: 'domain', address: 'mosessafe.com', enabled: true, groups: [{ id: 'g-ngwt' }] },
+    ],
+    '/api/networks': [{ id: 'n1', name: 'Office', resources: ['r1', 'r-dom'] }],
     '/api/routes': [],
     '/api/networks/n1/routers': [{ peer: 'p-r', enabled: true }],
 };
@@ -60,6 +65,20 @@ const guacd = net.createServer((sock) => {
     });
 });
 
+// A second fake guacd, standing in for the names gateway's.
+const namesSeen = [];
+const guacdNames = net.createServer((sock) => {
+    guacdSockets.push(sock);
+    const parser = new GuacParser(1 << 20);
+    sock.on('data', (d) => {
+        for (const ins of parser.push(d.toString('utf8'))) {
+            namesSeen.push(ins);
+            if (ins.opcode === 'select') sock.write(encodeInstruction('args', 'VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'host-key'));
+            if (ins.opcode === 'connect') sock.write(encodeInstruction('ready', '$conn-n'));
+        }
+    });
+});
+
 // ─── App side: upgrade -> takeToken -> attachTunnel (as server.js does) ───
 const wss = new WebSocketServer({ noServer: true, maxPayload: ra.WS_MAX_PAYLOAD, handleProtocols: (p) => (p.has('guacamole') ? 'guacamole' : false) });
 const app = http.createServer();
@@ -74,11 +93,12 @@ const viewer = { user_id: 'u1', email: 'alice@example.test', name: 'Alice', oid:
 
 test.before(async () => {
     const gport = await listen(guacd);
-    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], guacdHost: '127.0.0.1', guacdPort: gport });
-    settings.remote_access_nb = JSON.stringify({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw' });
+    const nport = await listen(guacdNames);
+    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], guacdHost: '127.0.0.1', guacdPort: gport, namesGuacdHost: '127.0.0.1', namesGuacdPort: nport });
+    settings.remote_access_nb = JSON.stringify({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw', namesGroupId: 'g-ngw', namesTargetGroupId: 'g-ngwt', namesPolicyId: 'pol-ngw' });
     await ra.loadRemoteAccessConfig();
 });
-test.after(() => { ra.closeAllSessions('test over'); guacd.close(); app.close(); for (const s of guacdSockets) s.destroy(); });
+test.after(() => { ra.closeAllSessions('test over'); guacd.close(); guacdNames.close(); app.close(); for (const s of guacdSockets) s.destroy(); });
 
 function open(port, token) {
     return new Promise((resolve, reject) => {
@@ -238,4 +258,21 @@ test('the parser handles split chunks and surrogate pairs', () => {
     assert.deepEqual(got.map(i => [i.opcode, i.args]), [['name', ['a😀b']], ['nop', []]]);
     assert.throws(() => new GuacParser(1024).push('x.nop;'), /malformed/);
     assert.throws(() => new GuacParser(10).push('99.'), /too large/);
+});
+
+test('a domain resource name opens on the names gateway, with an absolute name for guacd', async () => {
+    const port = app.address().port;
+    const out = await ra.createSession(viewer, { protocol: 'ssh', address: 'MosesSafe.com', port: 22, username: 'alice', password: SECRET }, '203.0.113.9');
+    assert.equal(out.gateway, 'names');
+    assert.equal(out.address, 'mosessafe.com');
+    const before = guacdSeen.length;
+    const { ws } = await open(port, out.token);
+    await waitFor(() => namesSeen.some(i => i.opcode === 'connect'));
+    assert.deepEqual(namesSeen.find(i => i.opcode === 'connect').args.slice(0, 3), ['VERSION_1_5_0', 'mosessafe.com.', '22']);
+    assert.equal(guacdSeen.length, before, 'the IP gateway was not used');
+    const insert = queries.find(q => /INSERT INTO remote_sessions/.test(q.sql) && q.params[0] === out.sessionId);
+    assert.equal(insert.params[6], 'mosessafe.com');
+    assert.equal(insert.params[12], 'mosessafe.com');
+    assert.equal(insert.params[13], 'names');
+    ws.close();
 });

@@ -3330,8 +3330,9 @@ app.post('/api/remote-access/setup-key', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const key = await createGatewaySetupKey();
-        audit(await getViewer(req), 'remote_access.setup_key', 'Browser Gateway', { expiresInDays: 1, usageLimit: 1 });
+        const kind = (req.body || {}).kind === 'names' ? 'names' : 'ip';
+        const key = await createGatewaySetupKey(kind);
+        audit(await getViewer(req), 'remote_access.setup_key', kind === 'names' ? 'Browser Gateway Names' : 'Browser Gateway', { expiresInDays: 1, usageLimit: 1 });
         res.json({ key: key && key.key, expires: key && key.expires, name: key && key.name });
     } catch (e) {
         res.status(502).json({ error: e.message || 'Could not create the setup key' });
@@ -4704,7 +4705,7 @@ async function start() {
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
-            addResourceGroups, removeResourceGroups, createSetupKey,
+            addResourceGroups, removeResourceGroups, createSetupKey, scanResourceConflicts,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).
             stillPermitted: async ({ oid, email, userId, snap }) => {

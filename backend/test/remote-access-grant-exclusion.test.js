@@ -25,8 +25,10 @@ nb.bustNbCaches = () => { };
 const core = require('../lib/core');
 const sqls = [];
 let grantRow = null;
+let savedNb = null;
 core.pool.query = async (sql, params) => {
     sqls.push({ sql, params, nbCallsBefore: nbCalls.length });
+    if (/FROM app_settings WHERE key = \$1/.test(sql) && params && params[0] === 'remote_access_nb' && savedNb) return { rows: [{ value: JSON.stringify(savedNb) }] };
     if (/nextval/.test(sql)) return { rows: [{ id: 601 }] };
     if (/RETURNING id/.test(sql)) return { rows: [{ id: 601 }] };
     if (/SELECT \* FROM temporary_access_grants WHERE id=\$1/.test(sql) && grantRow) return { rows: [grantRow] };
@@ -66,4 +68,32 @@ test('a revoke records revoke_requested_at before any NetBird call', async () =>
     assert.equal(mark.nbCallsBefore, 0, 'the mark is written before NetBird is touched');
     assert.ok(nbCalls.some(c => c[0] === 'DELETE'), 'then NetBird objects are removed');
     grantRow = null;
+});
+
+// The names gateway's standing policy is infrastructure too - by name before its id is saved, and
+// by id once saved (even if someone renamed it in NetBird).
+const namesPolicy = (id, name) => ({
+    id, name, enabled: true, source_posture_checks: [],
+    rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: [], sources: [{ id: 'grp-ngw' }], destinations: [{ id: 'grp-gwt' }] }],
+});
+
+test('a temporary grant ignores the names gateway policy by its name', async () => {
+    policies = [namesPolicy('pol-ngw', 'Browser Gateway (Names)'), staffRdp];
+    posts = [];
+    await createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'resource', id: 'res-rdp', networkId: 'net1' }] }, { email: 'admin@example.test' });
+    const temp = posts.filter(p => p.path === '/api/policies').map(p => p.body);
+    assert.equal(temp.length, 1);
+    assert.deepEqual(temp[0].rules[0].ports, ['3389']);
+});
+
+test('a temporary grant ignores the names gateway policy by its saved id, even renamed', async () => {
+    savedNb = { namesPolicyId: 'pol-ngw-renamed' };
+    await require('../lib/remote-access').loadRemoteAccessConfig();
+    policies = [namesPolicy('pol-ngw-renamed', 'Someone renamed it'), staffRdp];
+    posts = [];
+    await createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'resource', id: 'res-rdp', networkId: 'net1' }] }, { email: 'admin@example.test' });
+    const temp = posts.filter(p => p.path === '/api/policies').map(p => p.body);
+    assert.equal(temp.length, 1);
+    assert.deepEqual(temp[0].rules[0].ports, ['3389']);
+    savedNb = null;
 });

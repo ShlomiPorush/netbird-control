@@ -4004,6 +4004,10 @@ async function initializeDatabase() {
             tx_bytes BIGINT DEFAULT 0
           );
         `);
+        // Host names: the name the user typed, and which gateway the session uses ('ip' or 'names').
+        // Older rows keep the defaults and are IP sessions.
+        await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS target_name TEXT DEFAULT ''`);
+        await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS gateway TEXT DEFAULT 'ip'`);
 
         // Access requests - a (usually non-admin) user asks for access; an admin approves it
         // (in-app or via Telegram buttons), which creates a temporary_access_grants row.

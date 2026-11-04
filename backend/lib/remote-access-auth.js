@@ -7,13 +7,18 @@
 // anything it does not positively understand does not grant access.
 //
 // What it answers:
+//   normalizeTarget     - is the typed address an IPv4 address, a valid host name, or neither?
 //   evaluateUserAccess  - may this user open a session to ip:port (TCP) right now?
+//   evaluateNameAccess  - may this user open a session to name:port through a NetBird domain
+//                         resource (on the names gateway) right now?
 //   gatewayReach        - every address the gateway peer can route to, used to prove that the
 //                         approved resource is the ONLY route the gateway would take to the ip.
 //   pathStatus          - is the gateway online, and is a routing peer of the network online?
 
 const TEMP_POLICY_RE = /^Temporary access #(\d+)(?: \(\d+\))?$/;
 const TEMP_GROUP_RE = /^Temp (?:access|resources) #(\d+)(?:\D|$)/;
+
+const { domainToASCII } = require('url');
 
 const idOf = (x) => (x && typeof x === 'object') ? x.id : x;
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -151,7 +156,7 @@ function gatewayReach(snap, cfg) {
         const prefix = parsePrefix(res.address);
         const base = { kind: 'resource', id: res.id, name: res.name || res.address || res.id, address: res.address || '', networkId: net ? net.id : '', networkName: net ? (net.name || net.id) : '' };
         if (prefix) entries.set('r:' + res.id, { ...base, prefix, selected: selected.has(base.networkId) });
-        else domain.set('r:' + res.id, base);
+        else domain.set('r:' + res.id, { ...base, domains: [res.address || ''], selected: selected.has(base.networkId) });
     };
     const resources = arr(snap.resources);
     for (const p of arr(snap.policies)) {
@@ -166,7 +171,7 @@ function gatewayReach(snap, cfg) {
         if (!r || r.enabled === false) continue;
         if (!arr(r.groups).some(g => gwGroups.has(idOf(g)))) continue;
         const base = { kind: 'route', id: r.id, name: r.network_id || r.description || r.id, address: r.network || arr(r.domains).join(', '), networkId: '', networkName: '' };
-        if (arr(r.domains).length) { domain.set('l:' + r.id, base); continue; }
+        if (arr(r.domains).length) { domain.set('l:' + r.id, { ...base, domains: arr(r.domains), selected: false }); continue; }
         const prefix = parsePrefix(r.network);
         if (prefix) entries.set('l:' + r.id, { ...base, prefix, selected: false });
     }
@@ -219,26 +224,37 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
         && prefixCovers(e.prefix, ip) && e.prefix.bits >= best.prefix.bits);
     if (rival) return deny('AMBIGUOUS_ROUTE', { resource, network });
 
-    // Policies: an enabled accept rule from one of the user's groups to this resource that
-    // opens the TCP port. Posture-checked policies cannot be evaluated for a browser session
-    // and do not count. A matching drop rule wins.
+    return evaluatePolicies(snap, cfg, src, best.res, port, now, { resource, network });
+}
+
+// The managed gateway policies are infrastructure, never a user's access.
+function managedPolicyIds(cfg) {
+    return new Set([cfg && cfg.managedPolicyId, ...arr(cfg && cfg.managedPolicyIds)].filter(Boolean));
+}
+
+// Policies: an enabled accept rule from one of the user's groups to this resource that opens
+// the TCP port. Posture-checked policies cannot be evaluated for a browser session and do not
+// count. A matching drop rule wins.
+function evaluatePolicies(snap, cfg, src, res, port, now, where) {
+    const deny = (code, extra = {}) => ({ ok: false, code, ...where, ...extra });
+    const managed = managedPolicyIds(cfg);
     const grantById = new Map(arr(snap.grants).map(g => [String(g.id), g]));
     const granting = [];
     let postureOnly = false;
     let portMismatch = false;
     for (const p of arr(snap.policies)) {
-        if (!p || p.enabled === false || (cfg.managedPolicyId && p.id === cfg.managedPolicyId)) continue;
+        if (!p || p.enabled === false || managed.has(p.id)) continue;
         const tm = TEMP_POLICY_RE.exec(p.name || '');
         if (tm && !grantIsValid(grantById.get(tm[1]), now)) continue;
         const posture = arr(p.source_posture_checks).length > 0;
         for (const rule of arr(p.rules)) {
             if (!ruleIsUsable(rule)) continue;
             if (!rule.sources.some(s => src.groups.has(idOf(s)))) continue;
-            if (!ruleTargetsResource(rule, best.res)) continue;
+            if (!ruleTargetsResource(rule, res)) continue;
             const opens = ruleOpensTcpPort(rule, port);
             const action = rule.action || 'accept';
             if (action === 'drop') {
-                if (opens) return deny('BLOCKED_BY_POLICY', { resource, network, policy: p.name || p.id });
+                if (opens) return deny('BLOCKED_BY_POLICY', { policy: p.name || p.id });
                 continue;
             }
             if (action !== 'accept') continue;
@@ -247,10 +263,102 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
             granting.push(p.name || p.id);
         }
     }
-    if (granting.length) return { ok: true, code: 'OK', resource, network, policies: [...new Set(granting)] };
-    if (postureOnly) return deny('POSTURE_REQUIRED', { resource, network });
-    if (portMismatch) return deny('PORT_NOT_ALLOWED', { resource, network });
-    return deny('NO_ACCESS', { resource, network });
+    if (granting.length) return { ok: true, code: 'OK', ...where, policies: [...new Set(granting)] };
+    if (postureOnly) return deny('POSTURE_REQUIRED');
+    if (portMismatch) return deny('PORT_NOT_ALLOWED');
+    return deny('NO_ACCESS');
+}
+
+// ─── Host names ───
+// The typed address is an IPv4 address, or a host name in the form the DNS uses. Anything else
+// is refused - nothing is cut off silently (the browser cleans pasted URLs visibly before
+// sending). The last label must start with a letter, so no inet_aton form ("127.1", "0x7f.1",
+// "2130706433") can pass as a name: guacd resolves names with getaddrinfo, which reads those as
+// addresses.
+const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+function asciiName(raw, minLabels = 2) {
+    if (!/^[\p{L}\p{M}\p{N}.-]+$/u.test(raw)) return null;
+    let name;
+    try { name = domainToASCII(raw); } catch { return null; }
+    if (!name) return null;
+    name = name.toLowerCase();
+    if (name.endsWith('.')) name = name.slice(0, -1);
+    if (!name || name.length > 253) return null;
+    const labels = name.split('.');
+    if (labels.length < minLabels || !labels.every(l => LABEL_RE.test(l)) || !/^[a-z]/.test(labels[labels.length - 1])) return null;
+    return name;
+}
+
+function normalizeTarget(input) {
+    const raw = String(input === undefined || input === null ? '' : input).trim();
+    if (!raw || raw.length > 300) return { error: 'INVALID_ADDRESS' };
+    if (/^[0-9.]+$/.test(raw)) return ipv4ToInt(raw) === null ? { error: 'INVALID_ADDRESS' } : { kind: 'ip', ip: raw };
+    const name = asciiName(raw);
+    return name ? { kind: 'name', name } : { error: 'INVALID_ADDRESS' };
+}
+
+// A domain resource address as NetBird matches it: "example.com" (exact) or "*.example.com"
+// (one or more labels below example.com, never example.com itself).
+function domainPattern(addr) {
+    const str = String(addr || '').trim();
+    const wildcard = str.startsWith('*.');
+    const base = wildcard ? asciiName(str.slice(2), 1) : asciiName(str);
+    return base ? { wildcard, base, rank: wildcard ? base.split('.').length : 1000 } : null;
+}
+
+function patternMatches(p, name) {
+    return !!p && (p.wildcard ? name.endsWith('.' + p.base) : name === p.base);
+}
+
+const isDomainResource = (res) => !!res && !parsePrefix(res.address) && !!domainPattern(res.address);
+
+// May this user open a session to name:port through a domain resource? The answer is
+// { ok: false, code: 'NO_DOMAIN_MATCH' } when no domain resource in any network matches the
+// name - the caller then resolves the name to IPv4 addresses and uses evaluateUserAccess.
+//   cfg.networks        - networks open to browser access
+//   cfg.gatewayGroupId  - the NAMES gateway's group (its reach is checked here)
+function evaluateNameAccess(snap, cfg, { userId, name, port, now = Date.now() }) {
+    const deny = (code, extra = {}) => ({ ok: false, code, ...extra });
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return deny('INVALID_PORT');
+
+    const netOf = networkIndex(snap);
+    const selected = new Set(arr(cfg.networks));
+    const matches = [];
+    for (const res of arr(snap.resources)) {
+        if (!isDomainResource(res)) continue;
+        const p = domainPattern(res.address);
+        if (!patternMatches(p, name)) continue;
+        const net = netOf.get(res.id);
+        matches.push({ res, net, rank: p.rank, selected: !!net && selected.has(net.id) });
+    }
+    if (!matches.length) return deny('NO_DOMAIN_MATCH');
+    const open = matches.filter(m => m.selected);
+    if (!open.length) return deny('NETWORK_NOT_ENABLED');
+    open.sort((a, b) => b.rank - a.rank);
+    const best = open[0];
+    const resource = { id: best.res.id, name: best.res.name || best.res.address, address: best.res.address, type: 'domain' };
+    const network = { id: best.net.id, name: best.net.name || best.net.id };
+    if (open.length > 1 && open[1].rank === best.rank) return deny('AMBIGUOUS_ROUTE', { resource, network });
+    if (best.res.enabled === false) return deny('RESOURCE_DISABLED', { resource, network });
+
+    const src = userSourceGroups(snap, userId, now);
+    if (src.error) return deny(src.error, { resource, network });
+
+    // The names gateway must reach this name through this resource and nothing else: no
+    // address routes at all (a static route could capture the address the name resolves to),
+    // and no other domain resource or domain route, in any network, that matches the name at
+    // least as specifically (NetBird resolves a name through its most specific match, so a
+    // broader wildcard elsewhere never takes it).
+    const reach = gatewayReach(snap, cfg);
+    if (reach.error) return deny('NAMES_GATEWAY_NOT_ENROLLED', { resource, network });
+    if (reach.entries.length) return deny('NAMES_GATEWAY_EXTRA_REACH', { resource, network });
+    const inReach = reach.domain.some(d => d.kind === 'resource' && d.id === best.res.id);
+    if (!inReach) return deny('GATEWAY_NOT_SYNCED', { resource, network });
+    const rival = reach.domain.some(d => !(d.kind === 'resource' && d.id === best.res.id)
+        && arr(d.domains).some(a => { const p = domainPattern(a); return patternMatches(p, name) && p.rank >= best.rank; }));
+    if (rival) return deny('AMBIGUOUS_ROUTE', { resource, network });
+
+    return evaluatePolicies(snap, cfg, src, best.res, port, now, { resource, network });
 }
 
 // Is the path up: a connected gateway peer, and an enabled, connected routing peer for the
@@ -276,7 +384,8 @@ function pathStatus(snap, cfg, routers) {
 }
 
 module.exports = {
-    evaluateUserAccess, gatewayReach, extraReach, pathStatus,
+    evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource,
+    gatewayReach, extraReach, pathStatus,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt,
     TEMP_POLICY_RE, TEMP_GROUP_RE,
 };

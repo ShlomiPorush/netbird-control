@@ -1,11 +1,14 @@
 'use strict';
 // Browser remote access: RDP and SSH sessions opened from the browser through the Browser
 // Gateway - a NetBird client container with guacd in its network namespace, next to this app.
+// There are two gateways: the IP gateway (NetBird DNS off, static routes to the IPv4 host and
+// subnet resources) and the names gateway (NetBird DNS on, only domain resources, reached by
+// name the way any NetBird client reaches them). An IP session never uses the names gateway.
 //
 // NetBird sees every browser session as traffic from the gateway peer, so the PORTAL decides who
 // may connect where (lib/remote-access-auth.js, fail closed). This module owns:
-//   - the settings and the NetBird objects it manages (gateway group, target group, one standing
-//     policy "Browser Gateway" -> resources of the admin-selected networks);
+//   - the settings and the NetBird objects it manages (per gateway: a gateway group, a target
+//     group and one standing policy -> resources of the admin-selected networks);
 //   - session issue (one-time token), the WebSocket <-> guacd tunnel, quotas and backpressure;
 //   - the per-minute re-check that disconnects sessions whose access is gone;
 //   - session records in `events` (same format as NetBird traffic, source_type BROWSER_GATEWAY)
@@ -16,16 +19,21 @@
 // db.js helpers it needs are injected by server.js through setRemoteAccessDeps().
 
 const crypto = require('crypto');
+const dns = require('dns');
 const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { pool, getSetting, setSetting } = require('./core');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY } = require('./netbird');
 const { addEvent } = require('./events');
-const { evaluateUserAccess, gatewayReach, extraReach, pathStatus } = require('./remote-access-auth');
+const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isDomainResource, gatewayReach, extraReach, pathStatus } = require('./remote-access-auth');
 
-const GATEWAY_GROUP_NAME = 'Browser Gateway';
-const TARGET_GROUP_NAME = 'Browser Gateway Targets';
-const POLICY_NAME = 'Browser Gateway';
+// The managed NetBird objects of each gateway.
+const KINDS = {
+    ip: { group: 'Browser Gateway', targets: 'Browser Gateway Targets', policy: 'Browser Gateway', groupKey: 'gatewayGroupId', targetKey: 'targetGroupId', policyKey: 'policyId' },
+    names: { group: 'Browser Gateway Names', targets: 'Browser Gateway Name Targets', policy: 'Browser Gateway (Names)', groupKey: 'namesGroupId', targetKey: 'namesTargetGroupId', policyKey: 'namesPolicyId' },
+};
+const POLICY_NAMES = new Set(Object.values(KINDS).map(k => k.policy));
+const NAME_LOOKUP_TIMEOUT_MS = 3000;
 const SOURCE_TYPE = 'BROWSER_GATEWAY';
 
 const TOKEN_TTL_MS = 30_000;
@@ -48,6 +56,8 @@ const DEFAULTS = {
     allowAll: false,          // every signed-in user (still only to what they reach) vs. the remote.connect permission
     guacdHost: 'remote-gateway',
     guacdPort: 4822,
+    namesGuacdHost: 'remote-names-gateway',
+    namesGuacdPort: 4822,
     networks: [],
     maxSessionsPerUser: 2,
     maxSessionsTotal: 20,
@@ -59,7 +69,8 @@ const DEFAULTS = {
 
 // ─── Settings ───
 let _cfg = { ...DEFAULTS };
-let _nb = { gatewayGroupId: '', targetGroupId: '', policyId: '' };
+const NB_EMPTY = { gatewayGroupId: '', targetGroupId: '', policyId: '', namesGroupId: '', namesTargetGroupId: '', namesPolicyId: '' };
+let _nb = { ...NB_EMPTY };
 let _deps = {};
 let _lastApply = { at: null, error: '' };
 
@@ -70,10 +81,11 @@ function normConfig(c) {
     const x = c && typeof c === 'object' ? c : {};
     const keys = {};
     if (x.sshHostKeys && typeof x.sshHostKeys === 'object') {
+        // Keyed by IPv4 address or by host name (normalized, without the trailing dot).
         for (const [addr, key] of Object.entries(x.sshHostKeys)) {
-            const a = String(addr || '').trim();
+            const t = normalizeTarget(addr);
             const k = String(key || '').trim();
-            if (/^\d{1,3}(\.\d{1,3}){3}$/.test(a) && k && k.length <= 16384) keys[a] = k;
+            if (!t.error && k && k.length <= 16384) keys[t.kind === 'ip' ? t.ip : t.name] = k;
         }
     }
     return {
@@ -81,6 +93,8 @@ function normConfig(c) {
         allowAll: !!x.allowAll,
         guacdHost: HOST_RE.test(String(x.guacdHost || '').trim()) ? String(x.guacdHost).trim() : DEFAULTS.guacdHost,
         guacdPort: clampInt(x.guacdPort, 1, 65535, DEFAULTS.guacdPort),
+        namesGuacdHost: HOST_RE.test(String(x.namesGuacdHost || '').trim()) ? String(x.namesGuacdHost).trim() : DEFAULTS.namesGuacdHost,
+        namesGuacdPort: clampInt(x.namesGuacdPort, 1, 65535, DEFAULTS.namesGuacdPort),
         networks: [...new Set((Array.isArray(x.networks) ? x.networks : []).map(String).filter(s => /^[A-Za-z0-9_-]{1,64}$/.test(s)))],
         maxSessionsPerUser: clampInt(x.maxSessionsPerUser, 1, 10, DEFAULTS.maxSessionsPerUser),
         maxSessionsTotal: clampInt(x.maxSessionsTotal, 1, 200, DEFAULTS.maxSessionsTotal),
@@ -95,8 +109,8 @@ async function loadRemoteAccessConfig() {
     try { _cfg = normConfig(JSON.parse(await getSetting('remote_access_config') || 'null')); } catch { _cfg = { ...DEFAULTS }; }
     try {
         const n = JSON.parse(await getSetting('remote_access_nb') || 'null') || {};
-        _nb = { gatewayGroupId: String(n.gatewayGroupId || ''), targetGroupId: String(n.targetGroupId || ''), policyId: String(n.policyId || '') };
-    } catch { _nb = { gatewayGroupId: '', targetGroupId: '', policyId: '' }; }
+        _nb = Object.fromEntries(Object.keys(NB_EMPTY).map(k => [k, String(n[k] || '')]));
+    } catch { _nb = { ...NB_EMPTY }; }
 }
 
 function getRemoteAccessConfig() {
@@ -105,10 +119,13 @@ function getRemoteAccessConfig() {
 
 function setRemoteAccessDeps(deps) { _deps = { ..._deps, ...deps }; }
 
-// The standing gateway policy is infrastructure, not exposure: callers that mirror existing
-// policies (temporary grants, resource policy edits) must skip it.
+// The standing gateway policies are infrastructure, not exposure: callers that mirror existing
+// policies (temporary grants, resource policy edits) must skip them. Matched by id, and by name
+// for a policy whose id was not saved yet (an interrupted first save).
 function isRemoteAccessManagedPolicy(p) {
-    return !!p && ((!!_nb.policyId && p.id === _nb.policyId) || p.name === POLICY_NAME);
+    if (!p) return false;
+    const ids = [_nb.policyId, _nb.namesPolicyId].filter(Boolean);
+    return ids.includes(p.id) || POLICY_NAMES.has(p.name);
 }
 
 function remoteAccessAvailable() { return _cfg.enabled && netbirdApiConfigured(); }
@@ -127,52 +144,59 @@ async function ensureGroup(name, knownId) {
     return r.body.id;
 }
 
-function policyBody(enabled) {
+function policyBody(kind, enabled) {
+    const k = KINDS[kind];
     return {
-        name: POLICY_NAME,
-        description: 'Managed by NetBird Control: lets the Browser Gateway reach the networks enabled for browser remote access. Who may connect is decided per session by NetBird Control.',
+        name: k.policy,
+        description: kind === 'names'
+            ? 'Managed by NetBird Control: lets the Browser Gateway for host names reach the domain resources of the networks enabled for browser remote access. Who may connect is decided per session by NetBird Control.'
+            : 'Managed by NetBird Control: lets the Browser Gateway reach the networks enabled for browser remote access. Who may connect is decided per session by NetBird Control.',
         enabled,
         source_posture_checks: [],
         rules: [{
-            name: POLICY_NAME, enabled: true, action: 'accept', bidirectional: false,
-            protocol: 'tcp', ports: [], sources: [_nb.gatewayGroupId], destinations: [_nb.targetGroupId],
+            name: k.policy, enabled: true, action: 'accept', bidirectional: false,
+            protocol: 'tcp', ports: [], sources: [_nb[k.groupKey]], destinations: [_nb[k.targetKey]],
         }],
     };
 }
 
-async function ensurePolicy(enabled) {
+async function ensurePolicy(kind, enabled) {
+    const k = KINDS[kind];
     const pols = await netbirdGet('/api/policies');
     if (!Array.isArray(pols)) throw new Error("Couldn't read the policies from NetBird");
-    const found = pols.find(p => p && p.id === _nb.policyId) || pols.find(p => p && p.name === POLICY_NAME);
+    const found = pols.find(p => p && p.id === _nb[k.policyKey]) || pols.find(p => p && p.name === k.policy);
     if (found) {
-        const r = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(found.id), policyBody(enabled));
-        if (!nbOk(r)) throw nbErr('Updating the Browser Gateway policy', r);
+        const r = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(found.id), policyBody(kind, enabled));
+        if (!nbOk(r)) throw nbErr(`Updating the "${k.policy}" policy`, r);
         return found.id;
     }
-    const r = await netbirdPost('/api/policies', policyBody(enabled));
-    if (!nbOk(r) || !r.body || !r.body.id) throw nbErr('Creating the Browser Gateway policy', r);
+    const r = await netbirdPost('/api/policies', policyBody(kind, enabled));
+    if (!nbOk(r) || !r.body || !r.body.id) throw nbErr(`Creating the "${k.policy}" policy`, r);
     return r.body.id;
 }
 
-// Put the target group on every IPv4 host/subnet resource of the selected networks, and take it
-// off every other resource. Domain resources are never targets (no DNS in the gateway).
+// Put the IP target group on every IPv4 host/subnet resource of the selected networks and the
+// names target group on every domain resource of them; take each group off every other resource.
 async function syncTargetGroup() {
     const [resources, networks] = await Promise.all([netbirdGet('/api/networks/resources'), netbirdGet('/api/networks')]);
     if (!Array.isArray(resources) || !Array.isArray(networks)) throw new Error("Couldn't read the networks from NetBird");
     const netOf = new Map();
     for (const n of networks) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOf.set((rid && rid.id) || rid, n.id);
     const selected = new Set(_cfg.enabled ? _cfg.networks : []);
-    const tg = _nb.targetGroupId;
     let added = 0, removed = 0;
     for (const res of resources) {
         if (!res || !res.id) continue;
         const netId = netOf.get(res.id);
         if (!netId) continue;
-        const has = (Array.isArray(res.groups) ? res.groups : []).some(g => ((g && g.id) || g) === tg);
         const isIp = /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(String(res.address || '').trim());
-        const want = selected.has(netId) && isIp;
-        if (want && !has) { await _deps.addResourceGroups(netId, res.id, [tg]); added++; }
-        else if (!want && has) { await _deps.removeResourceGroups(netId, res.id, [tg]); removed++; }
+        const isDomain = !isIp && isDomainResource(res);
+        for (const [tg, fits] of [[_nb.targetGroupId, isIp], [_nb.namesTargetGroupId, isDomain]]) {
+            if (!tg) continue;
+            const has = (Array.isArray(res.groups) ? res.groups : []).some(g => ((g && g.id) || g) === tg);
+            const want = selected.has(netId) && fits;
+            if (want && !has) { await _deps.addResourceGroups(netId, res.id, [tg]); added++; }
+            else if (!want && has) { await _deps.removeResourceGroups(netId, res.id, [tg]); removed++; }
+        }
     }
     return { added, removed };
 }
@@ -183,11 +207,13 @@ async function applyGatewayObjects() {
     if (!netbirdApiConfigured()) throw new Error('Connect the NetBird API first (Settings → NetBird API).');
     if (NETBIRD_READONLY) throw new Error('This instance is read-only (NETBIRD_READONLY=true) - the Browser Gateway objects cannot be created.');
     try {
-        _nb.gatewayGroupId = await ensureGroup(GATEWAY_GROUP_NAME, _nb.gatewayGroupId);
-        _nb.targetGroupId = await ensureGroup(TARGET_GROUP_NAME, _nb.targetGroupId);
-        await setSetting('remote_access_nb', JSON.stringify(_nb));
-        _nb.policyId = await ensurePolicy(_cfg.enabled);
-        await setSetting('remote_access_nb', JSON.stringify(_nb));
+        for (const [kind, k] of Object.entries(KINDS)) {
+            _nb[k.groupKey] = await ensureGroup(k.group, _nb[k.groupKey]);
+            _nb[k.targetKey] = await ensureGroup(k.targets, _nb[k.targetKey]);
+            await setSetting('remote_access_nb', JSON.stringify(_nb));
+            _nb[k.policyKey] = await ensurePolicy(kind, _cfg.enabled);
+            await setSetting('remote_access_nb', JSON.stringify(_nb));
+        }
         const sync = await syncTargetGroup();
         bustNbCaches('policies', 'gref', 'usage');
         _snapshot = null;
@@ -206,7 +232,7 @@ async function setRemoteAccessConfig(input) {
     await setSetting('remote_access_config', JSON.stringify(_cfg));
     if (!_cfg.enabled) closeAllSessions('Browser remote access was turned off by an administrator.');
     let sync = null;
-    if (_cfg.enabled || wasEnabled || _nb.policyId) sync = await applyGatewayObjects();
+    if (_cfg.enabled || wasEnabled || _nb.policyId || _nb.namesPolicyId) sync = await applyGatewayObjects();
     return { config: getRemoteAccessConfig(), sync };
 }
 
@@ -216,9 +242,10 @@ async function reconcileRemoteAccess() {
     await applyGatewayObjects();
 }
 
-async function createGatewaySetupKey() {
-    if (!_nb.gatewayGroupId) await applyGatewayObjects();
-    return _deps.createSetupKey({ name: 'Browser Gateway', type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb.gatewayGroupId] });
+async function createGatewaySetupKey(kind = 'ip') {
+    const k = KINDS[kind] || KINDS.ip;
+    if (!_nb[k.groupKey]) await applyGatewayObjects();
+    return _deps.createSetupKey({ name: k.group, type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
 }
 
 // ─── NetBird snapshot (fresh, bounded in time) ───
@@ -258,11 +285,20 @@ function freshSnapshot(maxAgeMs) {
     return _snapshotInFlight;
 }
 
-const authCfg = () => ({ networks: _cfg.networks, gatewayGroupId: _nb.gatewayGroupId, managedPolicyId: _nb.policyId });
+const authCfg = (kind = 'ip') => ({
+    networks: _cfg.networks,
+    gatewayGroupId: kind === 'names' ? _nb.namesGroupId : _nb.gatewayGroupId,
+    managedPolicyIds: [_nb.policyId, _nb.namesPolicyId].filter(Boolean),
+});
 
 // ─── Checks (steps 1 and 2) ───
 const MESSAGES = {
-    INVALID_ADDRESS: 'Enter an IPv4 address, such as 10.0.0.5. Host names are not supported yet.',
+    INVALID_ADDRESS: 'Enter an IPv4 address, such as 10.0.0.5, or a host name, such as server.example.com.',
+    NAME_NOT_FOUND: "This host name wasn't found. Check the name, or enter the server's IP address.",
+    NO_IPV4_ADDRESS: 'This host name has no IPv4 address. Enter the IPv4 address instead.',
+    NAME_LOOKUP_FAILED: "The host name couldn't be looked up right now. Try again, or enter the IP address.",
+    NAMES_GATEWAY_NOT_ENROLLED: "Connecting by host name isn't set up yet. Ask an administrator to enroll the Browser Gateway for host names, or enter an IP address.",
+    NAMES_GATEWAY_EXTRA_REACH: 'The Browser Gateway for host names receives address routes, so connecting by name is blocked until an administrator fixes it.',
     INVALID_PORT: 'Enter a port between 1 and 65535.',
     USER_NOT_FOUND: "Your account wasn't found in NetBird, so your access can't be checked.",
     USER_BLOCKED: 'Your NetBird account is blocked.',
@@ -297,14 +333,56 @@ function parseTarget(body) {
     return { protocol, address, port };
 }
 
+// Name lookups for the IP path use the system's DNS servers through c-ares (a bounded,
+// cancellable lookup that never occupies the libuv thread pool). Tests inject their own.
+function defaultResolve4(name) {
+    const r = new dns.promises.Resolver({ timeout: NAME_LOOKUP_TIMEOUT_MS, tries: 1 });
+    return r.resolve4(name);
+}
+
+// What the typed address means and whether this user may reach it:
+//   { ok, gateway: 'ip', address: <ip>, name: <typed name or ''>, verdict }
+//   { ok, gateway: 'names', address: <name>, name: <name>, verdict }
+// A name that matches a NetBird domain resource goes to the names gateway; any other name is
+// looked up and each IPv4 answer is checked like a typed IP (the first allowed one is used).
+async function resolveTarget(snap, userId, address, port, opts = {}) {
+    const ipCfg = opts.ipCfg || authCfg('ip');
+    const namesCfg = opts.namesCfg || authCfg('names');
+    const resolve4 = opts.resolve4 || _deps.resolve4 || defaultResolve4;
+    const t = normalizeTarget(address);
+    if (t.error) return { ok: false, verdict: { ok: false, code: t.error } };
+    if (t.kind === 'ip') {
+        const verdict = evaluateUserAccess(snap, ipCfg, { userId, address: t.ip, port });
+        return { ok: verdict.ok, gateway: 'ip', address: t.ip, name: '', verdict };
+    }
+    const named = evaluateNameAccess(snap, namesCfg, { userId, name: t.name, port });
+    if (named.code !== 'NO_DOMAIN_MATCH') return { ok: named.ok, gateway: 'names', address: t.name, name: t.name, verdict: named };
+    let ips;
+    try { ips = await resolve4(t.name); }
+    catch (e) {
+        const code = e && e.code === 'ENOTFOUND' ? 'NAME_NOT_FOUND' : e && e.code === 'ENODATA' ? 'NO_IPV4_ADDRESS' : 'NAME_LOOKUP_FAILED';
+        return { ok: false, gateway: 'ip', address: '', name: t.name, verdict: { ok: false, code } };
+    }
+    const list = (Array.isArray(ips) ? ips : []).map(String).filter(ip => !normalizeTarget(ip).error && normalizeTarget(ip).kind === 'ip');
+    if (!list.length) return { ok: false, gateway: 'ip', address: '', name: t.name, verdict: { ok: false, code: 'NO_IPV4_ADDRESS' } };
+    let first = null;
+    for (const ip of list) {
+        const verdict = evaluateUserAccess(snap, ipCfg, { userId, address: ip, port });
+        if (verdict.ok) return { ok: true, gateway: 'ip', address: ip, name: t.name, verdict };
+        if (!first) first = { ok: false, gateway: 'ip', address: ip, name: t.name, verdict };
+    }
+    return first;
+}
+
 async function checkAccess(viewer, body) {
     const { protocol, address, port } = parseTarget(body);
     const steps = [];
     let snap;
     try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); }
     catch (e) { return { steps: [{ key: 'access', status: 'fail', code: 'SNAPSHOT_FAILED', message: MESSAGES.SNAPSHOT_FAILED }] }; }
-    const verdict = evaluateUserAccess(snap, authCfg(), { userId: viewer.user_id, address, port });
-    const target = { protocol, address, port, resource: verdict.resource || null, network: verdict.network || null };
+    const rt = await resolveTarget(snap, viewer.user_id, address, port);
+    const verdict = rt.verdict;
+    const target = { protocol, address: rt.address || address, name: rt.name || '', gateway: rt.gateway || 'ip', port, resource: verdict.resource || null, network: verdict.network || null };
     if (!verdict.ok) {
         steps.push({ key: 'access', status: 'fail', code: verdict.code, message: MESSAGES[verdict.code] || verdict.code, requestable: REQUESTABLE.has(verdict.code) });
         return { steps, target };
@@ -315,7 +393,7 @@ async function checkAccess(viewer, body) {
         steps.push({ key: 'path', status: 'fail', code: 'SNAPSHOT_FAILED', message: MESSAGES.SNAPSHOT_FAILED });
         return { steps, target };
     }
-    const path = pathStatus(snap, authCfg(), routers);
+    const path = pathStatus(snap, authCfg(rt.gateway), routers);
     steps.push(path.ok
         ? { key: 'path', status: 'pass', detail: `Gateway online, routing peer online for ${verdict.network.name}` }
         : { key: 'path', status: 'fail', code: path.code, message: MESSAGES[path.code] || path.code, troubleshoot: path.code === 'NO_ROUTER_ONLINE' });
@@ -346,7 +424,7 @@ function sessionEvent(s, kind, extra = {}) {
             // sums per flow are not doubled.
             rx_bytes: end ? (extra.rx || 0) : 0, tx_bytes: end ? (extra.tx || 0) : 0,
         },
-        remoteAccess: { protocol: s.protocol, user: s.userEmail || s.userName || '', endReason: extra.reason || undefined, bytes: end ? 'tunnel' : undefined },
+        remoteAccess: { protocol: s.protocol, user: s.userEmail || s.userName || '', name: s.targetName || undefined, gateway: s.gateway || 'ip', endReason: extra.reason || undefined, bytes: end ? 'tunnel' : undefined },
     };
 }
 
@@ -358,12 +436,13 @@ async function createSession(viewer, body, clientIp) {
 
     let snap;
     try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
-    const verdict = evaluateUserAccess(snap, authCfg(), { userId: viewer.user_id, address, port });
+    const rt = await resolveTarget(snap, viewer.user_id, address, port);
+    const verdict = rt.verdict;
     if (!verdict.ok) throw httpError(403, verdict.code);
     // The path check is enforced here too, not only shown by /check.
     const routers = await withDeadline(netbirdGet(`/api/networks/${encodeURIComponent(verdict.network.id)}/routers`), SNAPSHOT_DEADLINE_MS, 'Reading routers').catch(() => null);
     if (!Array.isArray(routers)) throw httpError(503, 'SNAPSHOT_FAILED');
-    const path = pathStatus(snap, authCfg(), routers);
+    const path = pathStatus(snap, authCfg(rt.gateway), routers);
     if (!path.ok) throw httpError(409, path.code);
 
     const width = clampInt(body.width, 320, MAX_WIDTH, 1280);
@@ -382,11 +461,12 @@ async function createSession(viewer, body, clientIp) {
     // Check the quota again: the snapshot read above may have let another request in.
     if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser || _sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY');
     const s = {
-        id: crypto.randomUUID(), protocol, address, port, width, height, dpi, timezone, creds,
+        id: crypto.randomUUID(), protocol, address: rt.address, port, width, height, dpi, timezone, creds,
+        gateway: rt.gateway, targetName: rt.name || '',
         userId: viewer.user_id, userEmail: viewer.email || '', userName: viewer.name || '', oid: viewer.oid || '',
         clientIp: String(clientIp || ''),
-        resourceId: verdict.resource.id, resourceName: verdict.resource.name || address,
-        resourceType: verdict.resource.type === 'subnet' ? 'SUBNET_RESOURCE' : 'HOST_RESOURCE',
+        resourceId: verdict.resource.id, resourceName: verdict.resource.name || rt.address,
+        resourceType: verdict.resource.type === 'subnet' ? 'SUBNET_RESOURCE' : verdict.resource.type === 'domain' ? 'DOMAIN_RESOURCE' : 'HOST_RESOURCE',
         networkId: verdict.network.id,
         startedAt: new Date(), leaseAt: Date.now(), lastInputAt: Date.now(),
         state: 'pending', ws: null, guacd: null, rx: 0, tx: 0, closed: false,
@@ -395,9 +475,9 @@ async function createSession(viewer, body, clientIp) {
 
     try {
         await pool.query(
-            `INSERT INTO remote_sessions (id, user_id, user_email, user_name, client_ip, protocol, target_addr, target_port, resource_id, resource_name, network_id, started_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-            [s.id, s.userId, s.userEmail, s.userName, s.clientIp, protocol, address, port, s.resourceId, s.resourceName, s.networkId, s.startedAt]);
+            `INSERT INTO remote_sessions (id, user_id, user_email, user_name, client_ip, protocol, target_addr, target_port, resource_id, resource_name, network_id, started_at, target_name, gateway)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+            [s.id, s.userId, s.userEmail, s.userName, s.clientIp, protocol, s.address, port, s.resourceId, s.resourceName, s.networkId, s.startedAt, s.targetName, s.gateway]);
         await addEvent(sessionEvent(s, 'start'));
     } catch (e) {
         _sessions.delete(s.id);
@@ -414,7 +494,7 @@ async function createSession(viewer, body, clientIp) {
         _tokens.delete(token);
         if (s.state === 'pending') closeSession(s, 'The session was not opened in time.');
     }, TOKEN_TTL_MS + 1000);
-    return { sessionId: s.id, token, resource: verdict.resource, network: verdict.network };
+    return { sessionId: s.id, token, resource: verdict.resource, network: verdict.network, address: s.address, name: s.targetName, gateway: s.gateway };
 }
 
 // Lease renewal through an ordinary authenticated request (the SSO middleware answers 401 for an
@@ -494,9 +574,13 @@ class GuacParser {
     }
 }
 
+// The host guacd connects to: the IP, or for the names gateway the name as an absolute FQDN
+// (trailing dot), which the resolver never expands with its search list (resolv.conf(5)).
+const guacdHostname = (s) => (s.gateway === 'names' ? `${s.address}.` : s.address);
+
 function connectArgs(s, argNames) {
     const rdp = {
-        hostname: s.address, port: String(s.port),
+        hostname: guacdHostname(s), port: String(s.port),
         security: 'any', 'ignore-cert': 'true',
         'resize-method': 'display-update',
         'disable-audio': 'true', 'enable-drive': '', 'enable-printing': '',
@@ -508,7 +592,7 @@ function connectArgs(s, argNames) {
         username: '', password: '', domain: '',
     };
     const ssh = {
-        hostname: s.address, port: String(s.port),
+        hostname: guacdHostname(s), port: String(s.port),
         username: s.creds.username || '', password: s.creds.password || '',
         'private-key': s.creds.privateKey || '', passphrase: s.creds.passphrase || '',
         'host-key': _cfg.sshHostKeys[s.address] || '',
@@ -539,7 +623,9 @@ function attachTunnel(sessionId, ws) {
     // The tunnel's own UUID first: Guacamole.WebSocketTunnel marks itself open on it.
     ws.send(encodeInstruction('', s.id));
 
-    const sock = net.connect({ host: _cfg.guacdHost, port: _cfg.guacdPort });
+    const sock = net.connect(s.gateway === 'names'
+        ? { host: _cfg.namesGuacdHost, port: _cfg.namesGuacdPort }
+        : { host: _cfg.guacdHost, port: _cfg.guacdPort });
     s.guacd = sock;
     const decoder = new StringDecoder('utf8');
     const parser = new GuacParser(GUACD_INSTRUCTION_MAX);
@@ -727,7 +813,9 @@ async function recheckSessions() {
         return permission.get(s.userId);
     };
     await Promise.all([..._sessions.values()].map(async (s) => {
-        const v = evaluateUserAccess(snap, authCfg(), { userId: s.userId, address: s.address, port: s.port });
+        const v = s.gateway === 'names'
+            ? evaluateNameAccess(snap, authCfg('names'), { userId: s.userId, name: s.address, port: s.port })
+            : evaluateUserAccess(snap, authCfg('ip'), { userId: s.userId, address: s.address, port: s.port });
         if (!v.ok || v.resource.id !== s.resourceId) { failSession(s, `Your access to this server ended: ${MESSAGES[v.code] || v.code || 'the route changed.'}`, 0x0303); return; }
         if (!(await permitted(s)) && !s.closed) failSession(s, 'You no longer have permission to use browser remote access.', 0x0303);
     }));
@@ -753,6 +841,7 @@ async function closeOrphanSessions() {
             id: row.id, protocol: row.protocol, address: row.target_addr, port: row.target_port,
             userId: row.user_id, userEmail: row.user_email, userName: row.user_name, clientIp: row.client_ip,
             resourceId: row.resource_id, resourceName: row.resource_name, resourceType: '',
+            targetName: row.target_name || '', gateway: row.gateway || 'ip',
             startedAt: new Date(row.started_at),
         };
         try {
@@ -767,9 +856,9 @@ async function closeOrphanSessions() {
 }
 
 // ─── Status (admin settings + System Health) ───
-function probeGuacd() {
+function probeGuacd(host, port) {
     return new Promise((resolve) => {
-        const sock = net.connect({ host: _cfg.guacdHost, port: _cfg.guacdPort });
+        const sock = net.connect({ host, port });
         const done = (ok) => { sock.destroy(); resolve(ok); };
         sock.setTimeout(2000, () => done(false));
         sock.on('connect', () => done(true));
@@ -783,13 +872,32 @@ async function getRemoteAccessStatus() {
     const out = {
         enabled: _cfg.enabled, activeSessions: _sessions.size, guacdReachable: null,
         gateway: { enrolled: false, online: false, peers: [] }, domainRoutes: [], extraReach: [], targets: 0, error: '',
+        names: { guacdReachable: null, gateway: { enrolled: false, online: false, peers: [] }, extraReach: [], targets: 0 },
+        conflicts: [],
         lastApply: { ..._lastApply },
     };
-    out.guacdReachable = await probeGuacd();
+    [out.guacdReachable, out.names.guacdReachable] = await Promise.all([
+        probeGuacd(_cfg.guacdHost, _cfg.guacdPort), probeGuacd(_cfg.namesGuacdHost, _cfg.namesGuacdPort)]);
     if (!netbirdApiConfigured()) { out.error = 'The NetBird API is not connected.'; return out; }
     try {
         const snap = await freshSnapshot(30_000);
-        const reach = gatewayReach(snap, authCfg());
+        const peersOf = (r) => (r.peers || []).map(p => ({ id: p.id, name: p.name || p.id, connected: !!p.connected, ip: p.ip || '' }));
+        const nreach = gatewayReach(snap, authCfg('names'));
+        out.names.gateway.enrolled = !nreach.error;
+        out.names.gateway.peers = peersOf(nreach);
+        out.names.gateway.online = out.names.gateway.peers.some(p => p.connected);
+        // Any address route on the names gateway blocks connecting by name (it could capture the
+        // address a name resolves to).
+        out.names.extraReach = (nreach.entries || []).map(e => ({ name: e.name, address: e.address, network: e.networkName || (e.kind === 'route' ? 'Network route' : '') }));
+        out.names.targets = (nreach.domain || []).filter(d => d.selected).length;
+        if (_deps.scanResourceConflicts) {
+            const sel = new Set(_cfg.networks);
+            const all = await withDeadline(Promise.resolve(_deps.scanResourceConflicts()), SNAPSHOT_DEADLINE_MS, 'Scanning address conflicts').catch(() => []);
+            out.conflicts = (Array.isArray(all) ? all : [])
+                .filter(c => (c.networks || []).some(n => sel.has(n.id)))
+                .map(c => ({ address: c.address, networks: (c.networks || []).map(n => n.name) }));
+        }
+        const reach = gatewayReach(snap, authCfg('ip'));
         out.gateway.enrolled = !reach.error;
         out.gateway.peers = (reach.peers || []).map(p => ({ id: p.id, name: p.name || p.id, connected: !!p.connected, ip: p.ip || '' }));
         out.gateway.online = out.gateway.peers.some(p => p.connected);
@@ -808,5 +916,5 @@ module.exports = {
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
-    _internal: { GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, MESSAGES },
+    _internal: { GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES },
 };
