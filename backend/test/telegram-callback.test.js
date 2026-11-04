@@ -6,6 +6,7 @@ const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
 const net = require('net');
+const crypto = require('crypto');
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const deadDb = net.createServer((socket) => socket.destroy());
@@ -15,6 +16,8 @@ const origError = console.error;
 
 // server.js takes both functions from ../db when it loads, so they are replaced before that.
 let secret = '';
+// The registered webhook secret is generated for each run; none is fixed in the repository.
+const REGISTERED_SECRET = crypto.randomBytes(32).toString('hex');
 const handled = [];
 
 before(async () => {
@@ -63,20 +66,20 @@ test('without a stored webhook secret every update is rejected and never handled
 
 test('rejections while no secret is stored do not count toward the failed-token throttle', async () => {
     for (let i = 0; i < 25; i++) assert.equal((await callback(withToken('x'))).status, 403);
-    secret = 'the-registered-secret';
+    secret = REGISTERED_SECRET;
     assert.equal((await callback(withToken(secret))).status, 200);
     assert.equal(handled.length, 1);
 });
 
 test('with a stored secret, a missing or wrong secret header is rejected', async () => {
-    secret = 'the-registered-secret';
+    secret = REGISTERED_SECRET;
     assert.equal((await callback()).status, 403);
     assert.equal((await callback(withToken('wrong-secret'))).status, 403);
     assert.equal(handled.length, 0);
 });
 
 test('with a stored secret, the matching secret header passes the update to the handler', async () => {
-    secret = 'the-registered-secret';
+    secret = REGISTERED_SECRET;
     const r = await callback(withToken(secret));
     assert.equal(r.status, 200);
     assert.deepEqual(handled, [UPDATE]);

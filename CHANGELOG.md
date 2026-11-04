@@ -22,6 +22,17 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   in [docs/remote-access.md](docs/remote-access.md) are required.
 
 ### Changed
+- **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
+  missing or empty, or still holds the old `.env.example` value `change-me-to-a-strong-password`,
+  and the log says what to set. With `docker compose`, the database container does not start with
+  that old example value either, so a new database is never created with it. `.env.example` now
+  leaves `DB_PASSWORD` empty, and the README quick start generates one.
+
+  **Check before you upgrade:** an install whose `.env` sets its own `DB_PASSWORD` needs nothing.
+  An install that relied on the old built-in password `netbird`, or kept the example value, stops
+  starting. Both values were public, so change the database user's password in PostgreSQL first
+  and then set the same value in `.env`; changing `.env` alone does not change an existing
+  database's password. The steps are in the README, under Upgrading.
 - **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
   cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
   revoke fails. On upgrade, active grants with a recorded error are marked once.

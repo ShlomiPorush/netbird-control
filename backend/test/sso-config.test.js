@@ -4,6 +4,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const net = require('net');
 const path = require('path');
 
@@ -11,7 +12,7 @@ const SSO_VARS = ['OIDC_ISSUER_BASE_URL', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET'
 const FULL = {
     OIDC_ISSUER_BASE_URL: 'https://login.example.com/tenant/v2.0',
     OIDC_CLIENT_ID: 'client-id',
-    OIDC_CLIENT_SECRET: 'client-secret',
+    OIDC_CLIENT_SECRET: crypto.randomBytes(32).toString('hex'),
     BASE_URL: 'https://logs.example.com',
 };
 const only = (...keys) => Object.fromEntries(keys.map((k) => [k, FULL[k]]));

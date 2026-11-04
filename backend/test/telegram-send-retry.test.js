@@ -15,13 +15,14 @@ http.httpJson = async (method, url, opts) => {
     if (next instanceof Error) throw next;
     return next;
 };
+const crypto = require('crypto');
 const tg = require('../lib/telegram');
 
 let waits = [];
 tg._setTelegramSleepForTests(async (ms) => { waits.push(ms); });
 let observed = [];
 tg.setTelegramObserver((e) => observed.push({ ok: e.ok, error: e.error }));
-Object.assign(tg.getTelegramState(), { enabled: true, token: 'test-token', chatId: '-1001' });
+Object.assign(tg.getTelegramState(), { enabled: true, token: crypto.randomBytes(32).toString('hex'), chatId: '-1001' });
 
 const OK = { status: 200, body: { ok: true, result: { message_id: 42, chat: { id: -1001 } } } };
 const reset = (...r) => { replies = r; calls = []; waits = []; observed = []; };

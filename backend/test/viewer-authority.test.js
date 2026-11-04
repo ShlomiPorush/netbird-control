@@ -4,10 +4,13 @@
 // approver mapping, and a deleted user's mirror row never comes back to grant their old role.
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
+// The NetBird API token is generated for each run; none is fixed in the repository.
+const NB_API_TOKEN = crypto.randomBytes(32).toString('hex');
 
 Object.assign(process.env, {
-    OIDC_ISSUER_BASE_URL: 'http://127.0.0.1:9', OIDC_CLIENT_ID: 'test-client', OIDC_CLIENT_SECRET: 'test-secret',
-    BASE_URL: 'http://127.0.0.1:8', SESSION_SECRET: 'a-fixed-test-session-secret-0123456789',
+    OIDC_ISSUER_BASE_URL: 'http://127.0.0.1:9', OIDC_CLIENT_ID: 'test-client', OIDC_CLIENT_SECRET: crypto.randomBytes(32).toString('hex'),
+    BASE_URL: 'http://127.0.0.1:8', SESSION_SECRET: crypto.randomBytes(32).toString('hex'),
     ADMIN_GROUP_ID: 'admins', NETBIRD_API_URL: '', NETBIRD_API_TOKEN: '',
 });
 
@@ -151,7 +154,7 @@ function holdListRead(skip = 0) {
 async function untilHeld() { while (!gateHit) await tick(); }
 function withNetbirdApi(fn) {
     return async () => {
-        nb._nbApi.url = 'http://netbird.test'; nb._nbApi.token = 't';
+        nb._nbApi.url = 'http://netbird.test'; nb._nbApi.token = NB_API_TOKEN;
         try { await fn(); } finally { nb._nbApi.url = ''; nb._nbApi.token = ''; }
     };
 }
