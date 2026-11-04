@@ -152,6 +152,15 @@ export function EventDescription({ ev }: { ev: LogEvent }) {
   const dstName = ev.destination_name || '';
   const peer = <span className="text-nb-gray-700 dark:text-nb-gray-300 font-medium">{srcName}</span>;
 
+  // A browser RDP/SSH session through the Browser Gateway (recorded by NetBird Control).
+  if (ev.source_type === 'BROWSER_GATEWAY') {
+    const res = <span className="text-netbird font-medium">{dstName || dstAddr}</span>;
+    const kind = String(ev.reference || '').endsWith(':ssh') ? 'SSH' : 'RDP';
+    return isStart
+      ? <>Browser {kind} session opened to {res}{dstName && dstAddr ? <> ({dstAddr})</> : null}</>
+      : <>Browser {kind} session to {res} ended</>;
+  }
+
   if (ev.destination_type === 'HOST_RESOURCE' && dstName) {
     const res = <span className="text-netbird font-medium">{dstName}</span>;
     return isStart

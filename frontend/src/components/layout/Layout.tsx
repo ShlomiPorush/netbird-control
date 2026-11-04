@@ -6,6 +6,7 @@ import { GlobalSearch } from './GlobalSearch';
 import { LoadingState, TopProgress } from '@/components/ui';
 import { useAppConfig } from '@/lib/queries';
 import { setTimeFormat } from '@/lib/logfmt';
+import { RemoteSessionsProvider } from '@/components/remote/RemoteSessions';
 
 export function Layout() {
   const cfg = useAppConfig().data;
@@ -37,6 +38,8 @@ export function Layout() {
   return (
     // The page itself scrolls (the standard browser scrollbar at the window edge).
     // The top bar and the sidebar are sticky so they stay put while content scrolls.
+    // Browser remote sessions live above the pages, so moving around the portal keeps them open.
+    <RemoteSessionsProvider>
     <div className="flex flex-col min-h-screen">
       {/* Global loading bar for the heavy log queries - renders nothing while idle. */}
       <TopProgress />
@@ -56,5 +59,6 @@ export function Layout() {
       <MobileSidebar open={mobileOpen} onClose={() => setMobileOpen(false)} />
       <GlobalSearch />
     </div>
+    </RemoteSessionsProvider>
   );
 }

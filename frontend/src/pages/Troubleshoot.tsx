@@ -7,6 +7,7 @@ import { usePeers, useDiagnosticsInfo, useDiagNotices } from '@/lib/queries';
 import { useNetbirdRefresh, useDismissNbNotice } from '@/lib/mutations';
 import { useViewer } from '@/contexts/ViewerContext';
 import { formatTimestamp } from '@/lib/logfmt';
+import { requestAccessLink } from '@/lib/requestAccess';
 import type { DeviceDiagnosis, DiagCheck, GrantTarget, TargetDiagnosis } from '@/lib/types';
 import { Badge, Button, PageHeader, SelectMenu } from '@/components/ui';
 import { TargetSearch } from '@/components/access/TargetSearch';
@@ -266,12 +267,7 @@ export default function Troubleshoot() {
         networkId: targetDiag.target.networkId, resourceType: targetDiag.target.resourceType, access: undefined,
       }
       : target;
-    if (!resolved) return '/request-access';
-    const p = new URLSearchParams({ type: resolved.type, id: resolved.id, name: resolved.name });
-    if (resolved.networkId) p.set('networkId', resolved.networkId);
-    if (resolved.resourceType) p.set('resourceType', resolved.resourceType);
-    if (resolved.access) p.set('access', JSON.stringify(resolved.access));
-    return `/request-access?${p.toString()}`;
+    return requestAccessLink(resolved);
   }, [target, targetDiag]);
 
   // Verdict: every FAIL/WARN from all three sources, most severe first.

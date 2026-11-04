@@ -37,6 +37,10 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   to keep or revoke each item.
 - **Automation** - create, update and remove NetBird resources from an external HTTP source on a
   schedule, with a dry run before anything is written.
+- **Browser remote access** - RDP and SSH sessions from the browser through NetBird gateway
+  peers, by IP address or host name, only to servers the user's own NetBird access already
+  reaches. Several sessions stay open as tabs while you use the rest of the portal. Each session
+  is checked live and recorded on the Activity page ([setup and security model](docs/remote-access.md)).
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and
   what to do next, plus a downloadable Windows diagnostics script.
 - **Guardrails** - an address blocklist, overlap and conflict detection, a cleanup report and a
@@ -121,6 +125,7 @@ covers the database, SSO and a few locked values:
 | `TRUST_PROXY` | The reverse proxy allowed to report the client address (`X-Forwarded-For`): its address or CIDR (comma-separated for several), or a hop count. Empty (default) uses the connecting address and ignores the header. Behind a proxy, set it to that proxy, and make sure the app port is not also reachable directly |
 | `TELEGRAM_BOT_TOKEN`, `SMTP_*` | Notifications (can also be set in the app) |
 | `EVENT_PURGE_ADMINS` | Emails allowed to delete stored events |
+| `REMOTE_GATEWAY_SETUP_KEY`, `REMOTE_NAMES_GATEWAY_SETUP_KEY`, `REMOTE_GATEWAY_MANAGEMENT_URL` | Browser Remote Access only: the setup keys and management URL of the Browser Gateway containers (`docker-compose.remote-access.yml`). Keep the keys after enrollment. The feature itself is configured in **Settings → Remote Access** ([docs](docs/remote-access.md)) |
 
 [`.env.example`](.env.example) documents every variable.
 
@@ -196,6 +201,6 @@ This project interoperates with NetBird and its UI **look-and-feel is derived fr
 
 The original application code in this repository (backend, the React app structure, the automation engine, etc.) is provided under the **MIT License** - see [`LICENSE`](LICENSE). Because the visual layer is derived from AGPL-licensed work, **if you redistribute or publicly host a modified version, review NetBird's AGPL-3.0 terms** and ensure your use complies. This README is not legal advice.
 
-Third-party material (the country flags) and its licenses are listed in [`NOTICE`](NOTICE).
+Third-party material (the country flags and the Apache Guacamole client library) and its licenses are listed in [`NOTICE`](NOTICE).
 
 "NetBird" and related marks belong to their respective owner; this project is independent and not affiliated with NetBird.

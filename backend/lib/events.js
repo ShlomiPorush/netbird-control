@@ -483,7 +483,9 @@ async function queryTrafficSummary(opts) {
 
     // Pair keys: prefer the stable id; fall back to the address with the ephemeral :port
     // stripped (otherwise every source port would become its own "pair").
-    const SRC = `COALESCE(NULLIF(source_id, ''), regexp_replace(source_addr, ':[0-9]+$', ''))`;
+    // Browser remote sessions all share the source name "Browser Gateway" and may share a NAT
+    // address, so they pair per USER - never one user's sessions under another's name.
+    const SRC = `CASE WHEN source_type = 'BROWSER_GATEWAY' THEN 'bgw:' || COALESCE(user_id, '') ELSE COALESCE(NULLIF(source_id, ''), regexp_replace(source_addr, ':[0-9]+$', '')) END`;
     const DST = `COALESCE(NULLIF(destination_id, ''), NULLIF(destination_name, ''), regexp_replace(destination_addr, ':[0-9]+$', ''))`;
 
     // CAPPED count of the pair groups - see cappedCount() in lib/core.js.
@@ -499,6 +501,7 @@ async function queryTrafficSummary(opts) {
         `SELECT
             MAX(source_name) AS source_name,
             MAX(NULLIF(source_id, '')) AS source_id,
+            MAX(source_type) AS source_type,
             MAX(source_dns_label) AS source_dns,
             regexp_replace(MAX(source_addr), ':[0-9]+$', '') AS source_host,
             MAX(destination_name) AS destination_name,
@@ -530,7 +533,7 @@ async function queryTrafficSummary(opts) {
         rows: r.rows.map(x => ({
             // sourceName/destinationName stay RAW - the expanded row and "jump to Detailed"
             // filter the DB by these values. The *Label fields are what the UI displays.
-            sourceName: x.source_name || '', sourceId: x.source_id || null, sourceDns: x.source_dns || '', sourceHost: x.source_host || '',
+            sourceName: x.source_name || '', sourceId: x.source_id || null, sourceType: x.source_type || '', sourceDns: x.source_dns || '', sourceHost: x.source_host || '',
             sourceLabel: resolveProxyPeerName(x.source_name || '', pmap),
             destinationLabel: resolveProxyPeerName(x.destination_name || '', pmap),
             destinationName: x.destination_name || '', destinationId: x.destination_id || null,

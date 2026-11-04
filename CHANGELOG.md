@@ -10,6 +10,33 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **Browser Remote Access (RDP and SSH).** Users open sessions from the new Remote Access page,
+  with no NetBird client on their device or on the server. Sessions go through the Browser Gateway,
+  a NetBird peer with Apache Guacamole's guacd that runs next to the app
+  (`docker-compose.remote-access.yml`, added on top of the main compose file; existing
+  deployments are unchanged without it). A user reaches only servers their own NetBird access
+  already reaches, on ports their policies open. Policies with posture checks do not count. Every
+  open session is checked again each minute and closes when access ends. Sessions appear on the
+  Activity page. Off by default; turn it on in **Settings → Remote Access**. The host firewall rules
+  in [docs/remote-access.md](docs/remote-access.md) are required.
+  - **Host names.** A user can type a host name. A name of a NetBird domain resource is checked
+    against that resource's policies and connects through the optional names gateway (profile
+    `remote-names`); any other name is looked up and each address is checked like a typed one.
+    A pasted link keeps only its host, and its port moves to the port field.
+  - **Tabs.** Several sessions stay open as tabs in one full-screen view and keep running while the
+    user moves around the portal. The session bar hides itself and comes back from its handle at
+    the top; pinned, it stays and the session moves down below it. Copy and paste work both ways
+    where the browser allows it. Sessions Per User defaults to 5.
+  - **Sign-in retry.** A wrong user name or password shows the sign-in form again in the same tab
+    instead of ending there. Password fields can show what was typed.
+  - **Request Access.** When a user has no access to a server, Request Access opens with that
+    server's resource already chosen.
+  - **Display settings.** Settings → Remote Access sets the RDP colors, keyboard layout, font
+    smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
+    color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
+    real resolution, so it stays sharp.
+
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
   missing or empty, or still holds the old `.env.example` value `change-me-to-a-strong-password`,
@@ -22,6 +49,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   starting. Both values were public, so change the database user's password in PostgreSQL first
   and then set the same value in `.env`; changing `.env` alone does not change an existing
   database's password. The steps are in the README, under Upgrading.
+- **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
+  cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
+  revoke fails. On upgrade, active grants with a recorded error are marked once.
 
 ---
 

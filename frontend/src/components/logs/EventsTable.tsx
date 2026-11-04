@@ -164,7 +164,8 @@ function EventHead({ ev, count }: { ev: LogEvent; count?: number }) {
 }
 
 function RouterCell({ ev, usersMap }: { ev: LogEvent; usersMap: Record<string, UserRef> }) {
-  const isRouted = ev.destination_type === 'HOST_RESOURCE';
+  // A browser session (recorded by NetBird Control) has no routing peer to show.
+  const isRouted = ev.destination_type === 'HOST_RESOURCE' && ev.source_type !== 'BROWSER_GATEWAY';
   const routerName = ev.reporter_name || '';
   const email = (ev.user_id && usersMap[ev.user_id]?.email) || '';
   if (!isRouted || (!routerName && !email)) {
@@ -299,7 +300,7 @@ function EventCardBody({ ev, usersMap, traffic, showRouter }: {
   ev: LogEvent; usersMap: Record<string, UserRef>; traffic: React.ReactNode; showRouter: boolean;
 }) {
   const proto = getProtocol(ev.protocol, ev);
-  const routed = ev.destination_type === 'HOST_RESOURCE';
+  const routed = ev.destination_type === 'HOST_RESOURCE' && ev.source_type !== 'BROWSER_GATEWAY';
   const routerName = ev.reporter_name || '';
   const routerEmail = (ev.user_id && usersMap[ev.user_id]?.email) || '';
   return (

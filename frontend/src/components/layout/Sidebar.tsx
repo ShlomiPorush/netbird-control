@@ -1,10 +1,11 @@
 import { NavLink } from 'react-router-dom';
-import { Home, Activity, ShieldCheck, Shield, Users, MonitorSmartphone, Network, Settings, Wrench, KeyRound, ClipboardCheck, X, Globe, Stethoscope, Building2 } from 'lucide-react';
+import { Home, Activity, ShieldCheck, Shield, Users, MonitorSmartphone, Network, Settings, Wrench, KeyRound, ClipboardCheck, X, Globe, Stethoscope, Building2, MonitorPlay } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useViewer } from '@/contexts/ViewerContext';
 import { usePendingRequestCount, useMspStatus } from '@/lib/queries';
 import { getTenantMode } from '@/lib/api';
 import { useScrollLock } from '@/lib/useScrollLock';
+import { useRemoteSessions } from '@/components/remote/RemoteSessions';
 
 interface NavItem {
   to: string;
@@ -20,7 +21,9 @@ interface NavItem {
   /** Visible while MANAGING a tenant (default: hidden in tenant mode). */
   tenantMode?: boolean;
   end?: boolean;
-  badge?: 'pendingRequests';
+  badge?: 'pendingRequests' | 'remoteSessions';
+  /** Browser remote access: only when it is on and this viewer may use it. */
+  remoteAccess?: boolean;
 }
 
 const NAV: NavItem[] = [
@@ -32,6 +35,7 @@ const NAV: NavItem[] = [
   { to: '/policies', label: 'Policies', icon: Shield, adminOnly: true, tenantMode: true },
   { to: '/networks', label: 'Networks', icon: Network, tenantMode: true },
   { to: '/reverse-proxy', label: 'Reverse Proxy', icon: Globe, adminOnly: true, perm: 'proxy.manage', tenantMode: true },
+  { to: '/remote-access', label: 'Remote Access', icon: MonitorPlay, remoteAccess: true, badge: 'remoteSessions' },
   { to: '/request-access', label: 'Request Access', icon: KeyRound },
   { to: '/access', label: 'Access Management', icon: ClipboardCheck, accessHub: true, badge: 'pendingRequests', tenantMode: true },
   { to: '/tenants', label: 'Tenants', icon: Building2, adminOnly: true, mspOnly: true },
@@ -40,7 +44,7 @@ const NAV: NavItem[] = [
 ];
 
 function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: () => void }) {
-  const { restricted, tenantAdmin, canApprove, can } = useViewer();
+  const { restricted, tenantAdmin, canApprove, can, viewer } = useViewer();
   // Tenants shows only for admins of an activated MSP account (checked once, cached long).
   const mspAvailable = !!useMspStatus(!restricted).data?.available;
   const inTenantMode = !!getTenantMode();
@@ -50,6 +54,7 @@ function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: 
     if (inTenantMode && !n.tenantMode) return false;
     // Tenants stays admin-only (never shown to support users): `restricted`, not tenantAdmin.
     if (n.mspOnly && (!mspAvailable || restricted)) return false;
+    if (n.remoteAccess) return !!viewer?.remoteAccess;
     if (n.accessHub) return !restricted || canApprove || can('temp.manage') || tenantAdmin;
     // Admin-gated items open to a Tenant Support holder WHILE managing a tenant (tenantAdmin);
     // outside tenant mode tenantAdmin === isAdmin, so a support user sees exactly what a
@@ -60,11 +65,12 @@ function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: 
   });
   // Access requests are a main-account feature - don't poll pending-count in tenant mode (403).
   const pending = usePendingRequestCount(canApprove && !inTenantMode).data?.count || 0;
+  const openSessions = useRemoteSessions().count;
   return (
     <>
       <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-[3px]">
         {items.map(({ to, label, icon: Icon, end, badge }) => {
-          const count = badge === 'pendingRequests' ? pending : 0;
+          const count = badge === 'pendingRequests' ? pending : badge === 'remoteSessions' ? openSessions : 0;
           return (
           <NavLink
             key={to}

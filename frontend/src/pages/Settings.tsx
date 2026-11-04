@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Send,
   Settings as SettingsGear, ChevronRight, SlidersHorizontal, Cable, Webhook as WebhookIcon, Mail,
-  UserCheck, Lock, Shield, Database, Archive, Building2, Cog,
+  UserCheck, Lock, Shield, Database, Archive, Building2, Cog, MonitorPlay,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -21,11 +21,12 @@ import { Retention } from '@/components/settings/Retention';
 import { TenantDefaults } from '@/components/settings/TenantDefaults';
 import { NetbirdSettings } from '@/components/settings/NetbirdSettings';
 import { BackupRestore } from '@/components/settings/BackupRestore';
+import { RemoteAccessSettings } from '@/components/settings/RemoteAccess';
 
 // Settings is pure app configuration only. The access-model and hygiene pages that used to
 // live here (Network Access, Access Profiles, Posture Checks, Blocklist, Event Filtering)
 // now live under Operations; old ?tab= deep links to them redirect there.
-type Section = 'general' | 'netbird' | 'netbird-settings' | 'webhook' | 'telegram' | 'smtp' | 'approver' | 'permissions' | 'security' | 'retention' | 'tenant-defaults' | 'backup';
+type Section = 'general' | 'netbird' | 'netbird-settings' | 'webhook' | 'telegram' | 'smtp' | 'approver' | 'permissions' | 'security' | 'retention' | 'tenant-defaults' | 'backup' | 'remote-access';
 const MOVED_TO_OPERATIONS = new Set(['access', 'profiles', 'posture', 'blocklist', 'filtering']);
 
 const TABS: { key: Section; label: string; icon: LucideIcon }[] = [
@@ -37,6 +38,7 @@ const TABS: { key: Section; label: string; icon: LucideIcon }[] = [
   { key: 'smtp', label: 'Email (SMTP)', icon: Mail },
   { key: 'approver', label: 'Approvals', icon: UserCheck },
   { key: 'permissions', label: 'Permissions', icon: Lock },
+  { key: 'remote-access', label: 'Remote Access', icon: MonitorPlay },
   { key: 'security', label: 'Security', icon: Shield },
   { key: 'retention', label: 'Data Retention', icon: Database },
   { key: 'tenant-defaults', label: 'Tenant Defaults', icon: Building2 },
@@ -121,6 +123,7 @@ export default function Settings() {
             : active.key === 'security' ? <Security />
             : active.key === 'retention' ? <Retention />
             : active.key === 'tenant-defaults' ? <TenantDefaults />
+            : active.key === 'remote-access' ? <RemoteAccessSettings />
             : <BackupRestore />}
       </div>
     </div>

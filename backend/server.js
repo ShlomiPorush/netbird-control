@@ -956,7 +956,8 @@ app.use(express.static(path.join(__dirname, 'public'), {
 app.get('/api/me', async (req, res) => {
     try {
         const v = await getViewer(req);
-        const body = { authEnabled: v.authEnabled, isAdmin: v.isAdmin, canApprove: !!v.canApprove, canPurge: canPurgeEvents(v), perms: v.perms || {}, user_id: v.user_id, name: v.name, email: v.email, role: v.role, netbirdConfigured: netbirdApiConfigured() };
+        const body = { authEnabled: v.authEnabled, isAdmin: v.isAdmin, canApprove: !!v.canApprove, canPurge: canPurgeEvents(v), perms: v.perms || {}, user_id: v.user_id, name: v.name, email: v.email, role: v.role, netbirdConfigured: netbirdApiConfigured(),
+            remoteAccess: AUTH_ENABLED && remoteAccessAvailable() && !currentTenantAccount() && remoteAccessViewerOk(v) };
         // /api/me?debug=1 → "why am I (not) an admin": the viewer's own identity + the AD groups
         // resolved from Microsoft Graph, so an ADMIN_GROUP_ID mismatch or a missing/unconsented
         // Graph permission is immediately obvious. Returns only the caller's own data.
@@ -1791,6 +1792,7 @@ app.get('/api/system-health', requireAdmin, async (req, res) => {
                 netbird: stats.netbird,
                 telegram: { enabled: !!getTelegramConfig().enabled, hasToken: !!getTelegramConfig().hasToken, queue: getTelegramQueueStats() },
                 smtp: { enabled: !!getSmtpConfig().enabled },
+                remoteAccess: { enabled: !!getRemoteAccessConfig().enabled, activeSessions: getRemoteAccessStatusLite().activeSessions },
             },
             db: stats.db,
             activeGrants: stats.activeGrants,
@@ -2188,6 +2190,15 @@ app.get('/api/request-targets', async (req, res) => {
 
 // Create a request (any logged-in user).
 const { refreshAutoApprovalInventory } = require('./db');
+const { addResourceGroups, removeResourceGroups, fetchUserGroupsFresh } = require('./db');
+const { WebSocketServer } = require('ws');
+const {
+    getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps, remoteAccessAvailable, reconcileRemoteAccess,
+    createGatewaySetupKey, getRemoteAccessStatus, checkAccess: checkRemoteAccess, createSession: createRemoteSession,
+    renewLease: renewRemoteLease, endSession: endRemoteSession, takeToken: takeRemoteToken, attachTunnel: attachRemoteTunnel,
+    recheckSessions: recheckRemoteSessions, sweepSessions: sweepRemoteSessions, closeOrphanSessions: closeRemoteOrphans,
+    getRemoteAccessStatusLite, RECHECK_INTERVAL_MS: REMOTE_RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD: REMOTE_WS_MAX_PAYLOAD,
+} = require('./lib/remote-access');
 app.post('/api/access-requests', async (req, res) => {
     try {
         const viewer = await getViewer(req);
@@ -3231,6 +3242,129 @@ app.get('/api/peers/:id', async (req, res) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
+
+// ─── Browser remote access (RDP / SSH through the Browser Gateway) - main account only ───
+// The portal authorizes every session (lib/remote-access-auth.js): NetBird only sees the gateway
+// peer. Needs SSO - without it there is no NetBird identity to check access against.
+function remoteAccessViewerOk(v) {
+    const cfg = getRemoteAccessConfig();
+    return !!(v && v.authEnabled && v.user_id && (cfg.allowAll || v.isAdmin || (v.perms && v.perms['remote.connect'])));
+}
+async function requireRemoteUser(req, res, next) {
+    try {
+        if (currentTenantAccount()) return res.status(404).json({ error: 'Browser remote access is not available while managing a tenant.' });
+        if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
+        if (!remoteAccessAvailable()) return res.status(403).json({ error: 'Browser remote access is turned off.', code: 'DISABLED' });
+        const v = await getViewer(req);
+        if (!remoteAccessViewerOk(v)) return res.status(403).json({ error: "You don't have permission to use browser remote access.", code: 'FORBIDDEN' });
+        req.remoteViewer = v;
+        next();
+    } catch (err) {
+        console.error('[remote-access] viewer:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+function sendRemoteError(res, e) {
+    const status = e.status || 500;
+    if (status >= 500 && !e.code) console.error('[remote-access]', e.message);
+    res.status(status).json({ error: status >= 500 && !e.code ? 'Internal server error' : e.message, code: e.code });
+}
+
+app.get('/api/remote-access/info', async (req, res) => {
+    try {
+        const v = await getViewer(req);
+        const cfg = getRemoteAccessConfig();
+        res.json({
+            available: AUTH_ENABLED && remoteAccessAvailable() && !currentTenantAccount(),
+            allowed: remoteAccessViewerOk(v),
+            ssoRequired: !AUTH_ENABLED,
+            clipboard: cfg.clipboard, idleTimeoutMin: cfg.idleTimeoutMin, maxDurationHours: cfg.maxDurationHours,
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+app.post('/api/remote-access/check', requireRemoteUser, async (req, res) => {
+    try { res.json(await checkRemoteAccess(req.remoteViewer, req.body || {})); }
+    catch (e) { sendRemoteError(res, e); }
+});
+app.post('/api/remote-access/sessions', requireRemoteUser, async (req, res) => {
+    try { res.json(await createRemoteSession(req.remoteViewer, req.body || {}, req.ip)); }
+    catch (e) { sendRemoteError(res, e); }
+});
+app.post('/api/remote-access/sessions/:id/lease', requireRemoteUser, (req, res) => {
+    if (!renewRemoteLease(req.remoteViewer, String(req.params.id))) return res.status(404).json({ error: 'This session has ended.' });
+    res.json({ ok: true });
+});
+app.delete('/api/remote-access/sessions/:id', requireRemoteUser, (req, res) => {
+    endRemoteSession(req.remoteViewer, String(req.params.id));
+    res.json({ ok: true });
+});
+
+// Admin: settings, managed NetBird objects, gateway enrollment, status.
+app.get('/api/remote-access/config', requireAdmin, (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    res.json({ ...getRemoteAccessConfig(), ssoEnabled: AUTH_ENABLED, readonly: NETBIRD_READONLY });
+});
+app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    const before = getRemoteAccessConfig();
+    try {
+        const out = await setRemoteAccessConfig(req.body || {});
+        audit(await getViewer(req), 'settings.remote_access', '', {
+            enabled: out.config.enabled, networks: out.config.networks.length, allowAll: out.config.allowAll,
+            wasEnabled: before.enabled, sync: out.sync || undefined,
+        });
+        res.json(out);
+    } catch (e) {
+        // The settings are saved even when NetBird could not be updated; the error says what failed.
+        res.status(502).json({ error: e.message || 'Could not update NetBird', config: getRemoteAccessConfig() });
+    }
+});
+app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try { res.json(await getRemoteAccessStatus()); }
+    catch (e) { sendRemoteError(res, e); }
+});
+app.post('/api/remote-access/setup-key', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
+    try {
+        const kind = (req.body || {}).kind === 'names' ? 'names' : 'ip';
+        const key = await createGatewaySetupKey(kind);
+        audit(await getViewer(req), 'remote_access.setup_key', kind === 'names' ? 'Browser Gateway Names' : 'Browser Gateway', { expiresInDays: 1, usageLimit: 1 });
+        res.json({ key: key && key.key, expires: key && key.expires, name: key && key.name });
+    } catch (e) {
+        res.status(502).json({ error: e.message || 'Could not create the setup key' });
+    }
+});
+
+// The tunnel itself is a WebSocket upgrade (no Express middleware runs there): it is authorized
+// only by the one-time token that POST /api/remote-access/sessions handed to the signed-in user.
+const remoteWss = new WebSocketServer({
+    noServer: true,
+    maxPayload: REMOTE_WS_MAX_PAYLOAD,
+    handleProtocols: (protocols) => (protocols.has('guacamole') ? 'guacamole' : false),
+});
+function handleRemoteUpgrade(req, socket, head) {
+    socket.on('error', () => { });
+    const reject = (code, text) => {
+        socket.write(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+        socket.destroy();
+    };
+    let url;
+    try { url = new URL(req.url, 'http://localhost'); } catch { return reject(400, 'Bad Request'); }
+    if (url.pathname !== '/api/remote-access/tunnel') return reject(404, 'Not Found');
+    // Same-origin browsers only (the Host the request came to, or the configured BASE_URL).
+    const allowedHosts = new Set([String(req.headers.host || '').toLowerCase()]);
+    try { if (process.env.BASE_URL) allowedHosts.add(new URL(process.env.BASE_URL).host.toLowerCase()); } catch { /* ignore */ }
+    let originHost = '';
+    try { originHost = new URL(String(req.headers.origin || '')).host.toLowerCase(); } catch { /* none */ }
+    if (!originHost || !allowedHosts.has(originHost)) return reject(403, 'Forbidden');
+    const sessionId = takeRemoteToken(url.searchParams.get('token'));
+    if (!sessionId) return reject(401, 'Unauthorized');
+    remoteWss.handleUpgrade(req, socket, head, (ws) => attachRemoteTunnel(sessionId, ws));
+}
 
 // ─── Connectivity diagnostics (Troubleshoot page) - all read-only ───
 // A regular user may diagnose only their OWN devices; admins - and holders of View All
@@ -4567,6 +4701,41 @@ async function start() {
         const dbProblem = dbPasswordProblem(process.env);
         if (dbProblem) throw new Error(dbProblem);
         await initializeDatabase();
+        // Browser remote access: inject the db.js helpers it needs, close sessions a crash or
+        // restart left open (with an honest "end time unknown"), then run its timers. The re-check
+        // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
+        setRemoteAccessDeps({
+            addResourceGroups, removeResourceGroups, createSetupKey, scanResourceConflicts,
+            // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
+            // peers mirrors behind getViewer refresh only every 10 minutes).
+            stillPermitted: async ({ oid, email, userId, snap }) => {
+                const u = (snap.users || []).find(x => x && x.id === userId);
+                if (!u || u.is_blocked) return false;
+                if (getRemoteAccessConfig().allowAll) return true;
+                if (u.role === 'owner' || u.role === 'admin') return true;
+                const peerGroups = (snap.peers || []).filter(p => p && p.user_id === userId)
+                    .flatMap(p => (p.groups || []).map(g => (g && g.id) || g));
+                const allNb = [...(u.auto_groups || []), ...peerGroups];
+                const nbGroups = [...allNb, ...allNb.map(g => String(g).split('|').pop())];
+                const permitted = (groups) => !!resolveFeaturePerms({ isAdmin: false, userId, oid, email: u.email || email, groups: [...new Set(groups.filter(Boolean))] })['remote.connect'];
+                if (permitted(nbGroups)) return true;
+                // Only Entra (Graph) membership can still grant it: that needs a fresh, successful
+                // lookup - a failed or cached one never keeps a session open.
+                const adGroups = await fetchUserGroupsFresh(oid).catch(() => null);
+                if (adGroups === null) return false;
+                if (!!ADMIN_GROUP_ID && adGroups.includes(ADMIN_GROUP_ID)) return true;
+                return permitted([...adGroups, ...nbGroups]);
+            },
+        });
+        await closeRemoteOrphans().then(n => { if (n) console.log(`[remote-access] closed ${n} session(s) left open by a restart`); })
+            .catch(err => console.error('[remote-access] orphan cleanup error:', err.message));
+        setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);
+        setInterval(sweepRemoteSessions, 15000);
+        if (!NETBIRD_READONLY) {
+            const raTick = () => tracked('remoteAccessSync', reconcileRemoteAccess);
+            setTimeout(raTick, 45000);
+            setInterval(raTick, 10 * 60000);
+        }
         // One-time: fill approved_minutes on old approved requests from grants/bypass evidence.
         backfillApprovedDurations().catch(err => console.error('Approved-durations backfill error:', err.message));
         // Warm the NetBird caches at startup (user + router name resolution)
@@ -4674,7 +4843,7 @@ async function start() {
                 .catch(() => { });
         }
 
-        app.listen(PORT, '0.0.0.0', async () => {
+        const server = app.listen(PORT, '0.0.0.0', async () => {
             console.log(`NetBird Logs server running on port ${PORT}`);
             // The (tenant, timestamp DESC) log indexes are built HERE, after the port is open, and
             // CONCURRENTLY - on a multi-GB events table each build takes minutes, so it must never
@@ -4704,6 +4873,7 @@ async function start() {
                 console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
             }
         });
+        server.on('upgrade', handleRemoteUpgrade);
     } catch (err) {
         console.error('Failed to start server:', err.message);
         process.exit(1);
