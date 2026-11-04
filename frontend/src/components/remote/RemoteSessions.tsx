@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown, ClipboardPaste, Keyboard, Maximize2, Minimize2, MonitorPlay, Pin, PinOff, Plus, Power, Terminal, X } from 'lucide-react';
@@ -91,8 +91,8 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   onActivate: (id: string) => void; onRemove: (id: string) => void; onHide: () => void;
 }) {
   useScrollLock(open);
-  // No page scrollbar beside the session (index.css).
-  useEffect(() => {
+  // No visible page scrollbar beside the session (index.css). Before paint, so it never flashes.
+  useLayoutEffect(() => {
     if (!open) return;
     document.documentElement.classList.add('nb-session-open');
     return () => document.documentElement.classList.remove('nb-session-open');

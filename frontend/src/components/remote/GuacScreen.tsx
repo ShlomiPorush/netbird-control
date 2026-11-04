@@ -239,6 +239,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       // The session keeps the scaling it opened with: guacd can't change a session's DPI, so on a
       // screen with other scaling the same remote pixels are shown larger or smaller instead.
       const scaling = window.devicePixelRatio || 1;
+      let sentSize = '';
       // Fill the box, but never past one remote pixel per device pixel (a remote that can't resize
       // stays sharp and centered).
       const fit = () => {
@@ -250,9 +251,12 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       const refit = () => {
         window.clearTimeout(resizeTimer);
         resizeTimer = window.setTimeout(() => {
-          if (host.clientWidth && host.clientHeight) {
+          // Only a real change, and only once connected (before that the tunnel drops it): an
+          // unchanged size still makes the remote redraw the whole screen.
+          if (connected && host.clientWidth && host.clientHeight) {
             const s = deviceSize(host.clientWidth, host.clientHeight, scaling);
-            c.sendSize(s.width, s.height);
+            const key = `${s.width}x${s.height}`;
+            if (key !== sentSize) { sentSize = key; c.sendSize(s.width, s.height); }
           }
           fit();
         }, 250);

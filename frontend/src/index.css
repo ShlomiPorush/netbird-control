@@ -159,11 +159,12 @@
   .dark input::placeholder, .dark textarea::placeholder { color: #aab3ba !important; opacity: 1 !important; }
 }
 
-/* While the remote session view covers the window, the page behind keeps its scroll offset but
-   not its scrollbar, which would otherwise show at the window's edge next to the session.
-   Overflow is left alone (see lib/useScrollLock: hiding the root's overflow breaks sticky). */
-html.nb-session-open { scrollbar-width: none; }
-html.nb-session-open::-webkit-scrollbar { display: none; }
+/* While the remote session view covers the window, the page's scrollbar would show at the
+   window's edge next to the session. It is made invisible, not removed: removing it widens the
+   window, which resizes the remote desktop and makes it flicker on every open and close. Its
+   strip takes the session view's background. Overflow is left alone (see lib/useScrollLock:
+   hiding the root's overflow breaks sticky). */
+html.nb-session-open { scrollbar-color: transparent transparent; background-color: var(--color-nb-gray-950); }
 
 /* Slim, theme-aware scrollbar for popovers / menus / scrollable lists (matches the NetBird
    dashboard's look). The thumb is invisible until you hover the scroll area, then fades in -
