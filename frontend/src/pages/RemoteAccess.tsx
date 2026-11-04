@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Circle, Loader2, MonitorPlay, Terminal, XCircle } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { ApiError } from '@/lib/api';
-import { remoteApi, GUAC, PORTAL_MESSAGE_CODES, type GuacStatus, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
+import { remoteApi, cleanAddressInput, GUAC, PORTAL_MESSAGE_CODES, type GuacStatus, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
 import { Button, Field, Input, LoadingState, PageHeader, Select, Textarea } from '@/components/ui';
 import { RemoteViewer, type ViewerEvent } from '@/components/remote/RemoteViewer';
 
@@ -220,8 +220,23 @@ export default function RemoteAccess() {
   // It also stays locked while the paced list is still catching up with a result.
   const locked = (phase === 'checking' && !failure) || phase === 'ssh-creds' || phase === 'connecting' || (phase === 'checking' && !caughtUp);
 
+  // Paste, blur and submit clean the address; typing ":" moves on to the port field.
+  const portRef = useRef<HTMLInputElement>(null);
+  // The cleaned target of the current attempt (state updates land only after this handler).
+  const targetRef = useRef<{ address: string; port: number }>({ address: '', port: 0 });
+  const applyAddress = (raw: string) => {
+    const c = cleanAddressInput(raw);
+    setAddress(c.address);
+    if (c.port) { setPort(c.port); setPortTouched(true); }
+    return c;
+  };
+
   const start = async (e: FormEvent) => {
     e.preventDefault();
+    const typed = applyAddress(address);
+    const target = typed.address;
+    const targetPort = typed.port ? Number(typed.port) : portNum;
+    targetRef.current = { address: target, port: targetPort };
     setFailure(null);
     setSteps(freshSteps());
     setDwell(pickDwell());
@@ -229,10 +244,13 @@ export default function RemoteAccess() {
     setPhase('checking');
     setStep('access', 'running');
     try {
-      const r = await remoteApi.check({ protocol, address: address.trim(), port: portNum });
+      const r = await remoteApi.check({ protocol, address: target, port: targetPort });
       const access = r.steps.find((s) => s.key === 'access');
       const path = r.steps.find((s) => s.key === 'path');
-      setTargetLabel(r.target?.resource ? `${r.target.resource.name} (${address.trim()}:${portNum})` : `${address.trim()}:${portNum}`);
+      // A name the portal looked up shows where it leads: "name -> ip".
+      const t = r.target;
+      const where = t?.name && t.gateway === 'ip' && t.address && t.address !== t.name ? `${t.name} → ${t.address}` : (t?.name || target);
+      setTargetLabel(t?.resource ? `${t.resource.name} (${where}:${targetPort})` : `${where}:${targetPort}`);
       if (!access || access.status === 'fail') { fail('access', { message: access?.message || 'Access was denied.', requestable: access?.requestable }); return; }
       setStep('access', 'pass', access.detail);
       if (!path || path.status === 'fail') { fail('path', { message: path?.message || 'The path could not be checked.', troubleshoot: path?.troubleshoot }); return; }
@@ -249,7 +267,7 @@ export default function RemoteAccess() {
     setStep('channel', 'running');
     try {
       const s = await remoteApi.createSession({
-        protocol, address: address.trim(), port: portNum,
+        protocol, address: targetRef.current.address, port: targetRef.current.port,
         width: window.innerWidth, height: Math.max(240, window.innerHeight - 44), dpi: Math.round(96 * (window.devicePixelRatio || 1)),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(creds || {}),
@@ -406,10 +424,28 @@ export default function RemoteAccess() {
               </Select>
             </Field>
             <Field label="Server Address">
-              <Input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="10.0.0.5" inputMode="decimal" required disabled={locked} />
+              <Input
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                onPaste={(e) => {
+                  const text = e.clipboardData.getData('text');
+                  if (!text) return;
+                  e.preventDefault();
+                  const el = e.currentTarget;
+                  const merged = el.value.slice(0, el.selectionStart ?? el.value.length) + text + el.value.slice(el.selectionEnd ?? el.value.length);
+                  applyAddress(merged);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === ':' && !address.startsWith('[')) { e.preventDefault(); setPortTouched(true); portRef.current?.focus(); portRef.current?.select(); }
+                }}
+                onBlur={() => applyAddress(address)}
+                placeholder="10.0.0.5 or server.example.com"
+                autoCapitalize="off" autoCorrect="off" spellCheck={false}
+                required disabled={locked}
+              />
             </Field>
             <Field label="Port">
-              <Input value={port} onChange={(e) => { setPort(e.target.value.replace(/[^0-9]/g, '')); setPortTouched(true); }} inputMode="numeric" required disabled={locked} />
+              <Input ref={portRef} value={port} onChange={(e) => { setPort(e.target.value.replace(/[^0-9]/g, '')); setPortTouched(true); }} inputMode="numeric" required disabled={locked} />
             </Field>
             <div className="sm:col-span-3 flex items-center gap-3">
               <Button type="submit" variant="primary" disabled={locked || !address.trim() || !(portNum > 0)}>

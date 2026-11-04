@@ -29,6 +29,10 @@ export interface RemoteCheck {
   ok?: boolean;
   target?: {
     protocol: RemoteProtocol; address: string; port: number;
+    /** The host name the user typed (normalized), when they typed one. */
+    name?: string;
+    /** 'names': the name goes through the names gateway; 'ip': the address shown is the IP used. */
+    gateway?: 'ip' | 'names';
     resource: { id: string; name: string; address: string; type: string } | null;
     network: { id: string; name: string } | null;
   };
@@ -39,6 +43,9 @@ export interface RemoteSession {
   token: string;
   resource: { id: string; name: string; address: string };
   network: { id: string; name: string };
+  address?: string;
+  name?: string;
+  gateway?: 'ip' | 'names';
 }
 
 export interface RemoteAccessConfig {
@@ -46,6 +53,8 @@ export interface RemoteAccessConfig {
   allowAll: boolean;
   guacdHost: string;
   guacdPort: number;
+  namesGuacdHost: string;
+  namesGuacdPort: number;
   networks: string[];
   maxSessionsPerUser: number;
   maxSessionsTotal: number;
@@ -68,7 +77,30 @@ export interface RemoteAccessStatus {
   extraReach: { name: string; address: string; network: string }[];
   targets: number;
   error: string;
+  names: {
+    guacdReachable: boolean | null;
+    gateway: { enrolled: boolean; online: boolean; peers: { id: string; name: string; connected: boolean; ip: string }[] };
+    extraReach: { name: string; address: string; network: string }[];
+    targets: number;
+  };
+  conflicts: { address: string; networks: string[] }[];
   lastApply: { at: string | null; error: string };
+}
+
+// What the user typed or pasted into the address field, cleaned to what the field is for: a
+// pasted link keeps only its host ("https://server.example.com:3389/x?y" -> server.example.com,
+// port 3389), and "host:port" moves the port to the port field. The server still checks the
+// result strictly; this only saves the user from editing it by hand.
+export function cleanAddressInput(raw: string): { address: string; port?: string } {
+  let s = String(raw || '').trim();
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^\\+/, '');
+  s = s.split(/[/?#\\]/)[0];
+  const at = s.lastIndexOf('@');
+  if (at >= 0) s = s.slice(at + 1);
+  if (s.startsWith('[')) return { address: s };
+  const m = /^([^:]+):(\d{1,5})$/.exec(s);
+  if (m) return { address: m[1], port: String(Number(m[2])) };
+  return { address: s.replace(/:$/, '') };
 }
 
 export const remoteApi = {
@@ -80,7 +112,7 @@ export const remoteApi = {
   config: () => api.get<RemoteAccessConfig>('/api/remote-access/config'),
   saveConfig: (cfg: Partial<RemoteAccessConfig>) => api.put<{ config: RemoteAccessConfig; sync: { added: number; removed: number } | null }>('/api/remote-access/config', cfg),
   status: () => api.get<RemoteAccessStatus>('/api/remote-access/status'),
-  setupKey: () => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', {}),
+  setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
 };
 
 // ─── Guacamole (global from the vendored script) ───

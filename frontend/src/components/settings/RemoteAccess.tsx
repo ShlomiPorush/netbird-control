@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { useNetworks } from '@/lib/queries';
@@ -34,8 +35,8 @@ export function RemoteAccessSettings() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState('');
   const [error, setError] = useState('');
-  const [setupKey, setSetupKey] = useState<{ key: string; expires: string } | null>(null);
-  const [keyBusy, setKeyBusy] = useState(false);
+  const [setupKey, setSetupKey] = useState<{ kind: 'ip' | 'names'; key: string; expires: string } | null>(null);
+  const [keyBusy, setKeyBusy] = useState<'' | 'ip' | 'names'>('');
 
   useEffect(() => {
     if (cfgQ.data && !form) {
@@ -54,6 +55,7 @@ export function RemoteAccessSettings() {
       const sshHostKeys = Object.fromEntries(keys.filter((k) => k.address.trim() && k.key.trim()).map((k) => [k.address.trim(), k.key.trim()]));
       const r = await remoteApi.saveConfig({
         enabled: form.enabled, allowAll: form.allowAll, guacdHost: form.guacdHost, guacdPort: Number(form.guacdPort),
+        namesGuacdHost: form.namesGuacdHost, namesGuacdPort: Number(form.namesGuacdPort),
         networks: form.networks, maxSessionsPerUser: Number(form.maxSessionsPerUser), maxSessionsTotal: Number(form.maxSessionsTotal),
         idleTimeoutMin: Number(form.idleTimeoutMin), maxDurationHours: Number(form.maxDurationHours), clipboard: form.clipboard, sshHostKeys,
       });
@@ -69,11 +71,11 @@ export function RemoteAccessSettings() {
     }
   };
 
-  const createKey = async () => {
-    setKeyBusy(true); setError('');
-    try { setSetupKey(await remoteApi.setupKey()); }
+  const createKey = async (kind: 'ip' | 'names') => {
+    setKeyBusy(kind); setError('');
+    try { setSetupKey({ kind, ...(await remoteApi.setupKey(kind)) }); }
     catch (e) { setError(e instanceof ApiError ? e.message : 'The setup key could not be created.'); }
-    finally { setKeyBusy(false); }
+    finally { setKeyBusy(''); }
   };
 
   const toggleNetwork = (id: string) => set('networks', form.networks.includes(id) ? form.networks.filter((n) => n !== id) : [...form.networks, id]);
@@ -81,8 +83,9 @@ export function RemoteAccessSettings() {
   return (
     <div className="max-w-2xl flex flex-col gap-5">
       <p className="text-nb-gray-500 text-sm">
-        Let users open RDP and SSH sessions from the browser through the Browser Gateway - a NetBird peer next to this app.
-        Each session is checked against the user's own NetBird access; the gateway itself can only reach the networks you pick here.
+        Let users open RDP and SSH sessions from the browser through the Browser Gateway - NetBird peers next to this app.
+        Each session is checked against the user's own NetBird access; the gateways can only reach the networks you pick here.
+        The IP gateway serves IPv4 addresses. The names gateway, which is optional, serves host names of NetBird domain resources.
       </p>
 
       {!form.ssoEnabled && (
@@ -101,6 +104,7 @@ export function RemoteAccessSettings() {
         <div className="text-sm font-semibold mb-1 text-nb-gray-800 dark:text-nb-gray-100">Status</div>
         {statusQ.isLoading ? <div className="text-sm text-nb-gray-500">Checking…</div> : st ? (
           <>
+            <div className="text-[0.75rem] font-semibold uppercase tracking-wide text-nb-gray-500 mt-1">IP Gateway</div>
             <StatusLine ok={st.gateway.enrolled && st.gateway.online} warn={st.gateway.enrolled}
               label={!st.gateway.enrolled ? 'Gateway Not Enrolled' : st.gateway.online ? 'Gateway Online' : 'Gateway Offline'}
               detail={st.gateway.enrolled ? st.gateway.peers.map((p) => `${p.name}${p.connected ? '' : ' (offline)'}`).join(', ') : 'Create a setup key below and start the gateway containers.'} />
@@ -114,6 +118,26 @@ export function RemoteAccessSettings() {
             {st.extraReach.length > 0 && (
               <StatusLine ok={false} warn label="The Gateway Reaches More Than You Selected"
                 detail={`Other policies or routes give the gateway access to ${st.extraReach.slice(0, 5).map((e) => `${e.name} (${e.address})`).join(', ')}${st.extraReach.length > 5 ? ` and ${st.extraReach.length - 5} more` : ''}. Sessions still need each user's own access, but a compromised gateway could reach these too. Usually caused by policies whose source is All.`} />
+            )}
+            <div className="text-[0.75rem] font-semibold uppercase tracking-wide text-nb-gray-500 mt-3">Names Gateway (Optional)</div>
+            <StatusLine ok={st.names.gateway.enrolled ? st.names.gateway.online : null} warn={st.names.gateway.enrolled}
+              label={!st.names.gateway.enrolled ? 'Not Enrolled - Host Names Of Domain Resources Are Refused' : st.names.gateway.online ? 'Gateway Online' : 'Gateway Offline'}
+              detail={st.names.gateway.enrolled ? st.names.gateway.peers.map((p) => `${p.name}${p.connected ? '' : ' (offline)'}`).join(', ') : 'Optional. Create a names gateway setup key below and start it with the remote-names profile.'} />
+            {st.names.gateway.enrolled && (
+              <StatusLine ok={st.names.guacdReachable} label={st.names.guacdReachable ? 'guacd Reachable' : 'guacd Not Reachable'}
+                detail={st.names.guacdReachable ? `${form.namesGuacdHost}:${form.namesGuacdPort}` : `No answer from ${form.namesGuacdHost}:${form.namesGuacdPort}. Is the names gateway running (profile remote-names)?`} />
+            )}
+            {st.names.gateway.enrolled && <StatusLine ok={st.names.targets > 0} warn label={`${st.names.targets} Domain Resource${st.names.targets === 1 ? '' : 's'} Open To The Names Gateway`} />}
+            {st.names.extraReach.length > 0 && (
+              <StatusLine ok={false} label="Address Routes Block Connecting By Name"
+                detail={`The names gateway receives address routes (${st.names.extraReach.slice(0, 5).map((e) => `${e.name} (${e.address})`).join(', ')}${st.names.extraReach.length > 5 ? ` and ${st.names.extraReach.length - 5} more` : ''}). One of them could capture the address a name resolves to, so connecting by name is refused. Usually caused by policies whose source is All.`} />
+            )}
+            {st.conflicts.length > 0 && (
+              <>
+                <StatusLine ok={false} warn label="Address Conflicts In The Selected Networks"
+                  detail={`The same address is a resource in more than one network: ${st.conflicts.slice(0, 4).map((c) => `${c.address} (${c.networks.join(', ')})`).join('; ')}${st.conflicts.length > 4 ? ` and ${st.conflicts.length - 4} more` : ''}. Sessions to such an address are refused until the conflict is fixed.`} />
+                <div className="text-[0.8rem] ml-6"><Link className="text-netbird hover:underline" to="/networks">Open Networks</Link></div>
+              </>
             )}
             {(st.error || st.lastApply.error) && <StatusLine ok={false} label="Problem" detail={st.error || st.lastApply.error} />}
             <div className="text-[0.78rem] text-nb-gray-500 mt-1">{st.activeSessions} active session(s)</div>
@@ -143,7 +167,7 @@ export function RemoteAccessSettings() {
         </div>
       </Field>
 
-      <Field label="Networks Open To The Gateway" hint="IPv4 host and subnet resources of these networks join the gateway's target group. Domain resources are never included. Keep this list as small as possible.">
+      <Field label="Networks Open To The Gateway" hint="IPv4 host and subnet resources of these networks join the IP gateway's target group, and their domain resources join the names gateway's. Keep this list as small as possible, and don't open two networks whose host names can resolve to the same private address.">
         <div className={`${box} max-h-64 overflow-auto flex flex-col gap-1.5`}>
           {networksQ.isLoading ? <span className="text-sm text-nb-gray-500">Loading networks…</span>
             : (networksQ.data || []).length === 0 ? <span className="text-sm text-nb-gray-500">No networks found.</span>
@@ -173,8 +197,10 @@ export function RemoteAccessSettings() {
       </label>
 
       <div className="grid grid-cols-[1fr_8rem] gap-3">
-        <Field label="guacd Address" hint="The guacd container of the Browser Gateway, as this app reaches it."><Input value={form.guacdHost} onChange={(e) => set('guacdHost', e.target.value)} /></Field>
+        <Field label="guacd Address" hint="The IP gateway's guacd, as this app reaches it."><Input value={form.guacdHost} onChange={(e) => set('guacdHost', e.target.value)} /></Field>
         <Field label="guacd Port"><Input inputMode="numeric" value={String(form.guacdPort)} onChange={(e) => set('guacdPort', Number(e.target.value.replace(/\D/g, '')) || 0)} /></Field>
+        <Field label="Names guacd Address" hint="The names gateway's guacd, as this app reaches it."><Input value={form.namesGuacdHost} onChange={(e) => set('namesGuacdHost', e.target.value)} /></Field>
+        <Field label="Names guacd Port"><Input inputMode="numeric" value={String(form.namesGuacdPort)} onChange={(e) => set('namesGuacdPort', Number(e.target.value.replace(/\D/g, '')) || 0)} /></Field>
       </div>
 
       <Field label="SSH Host Keys" hint="Optional. When a server has a host key here, SSH sessions to it verify the key and refuse a mismatch. Without one, the server's identity is not verified. RDP server certificates are not verified.">
@@ -182,7 +208,7 @@ export function RemoteAccessSettings() {
           {keys.map((k, i) => (
             <div key={i} className={`${box} flex flex-col gap-2`}>
               <div className="flex gap-2">
-                <Input placeholder="10.0.0.5" value={k.address} onChange={(e) => setKeys(keys.map((x, j) => (j === i ? { ...x, address: e.target.value } : x)))} />
+                <Input placeholder="10.0.0.5 or server.example.com" value={k.address} onChange={(e) => setKeys(keys.map((x, j) => (j === i ? { ...x, address: e.target.value } : x)))} />
                 <Button variant="ghost" onClick={() => setKeys(keys.filter((_, j) => j !== i))} aria-label="Remove host key"><Trash2 size={15} /></Button>
               </div>
               <Textarea placeholder="ssh-ed25519 AAAA…" rows={2} value={k.key} onChange={(e) => setKeys(keys.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))} />
@@ -200,16 +226,20 @@ export function RemoteAccessSettings() {
 
       {/* Enrollment */}
       <div className={box}>
-        <div className="text-sm font-semibold mb-1 text-nb-gray-800 dark:text-nb-gray-100">Enroll The Gateway</div>
+        <div className="text-sm font-semibold mb-1 text-nb-gray-800 dark:text-nb-gray-100">Enroll The Gateways</div>
         <p className="text-[0.82rem] text-nb-gray-500 mb-3">
-          Creates a one-time NetBird setup key (valid for 1 day) that puts the gateway peer in the Browser Gateway group.
-          Put it in <code>.env</code> as <code>REMOTE_GATEWAY_SETUP_KEY</code>, then start the gateway with <code>docker-compose.remote-access.yml</code> (see docs/remote-access.md).
-          See docs/remote-access.md for the host firewall rule the gateway needs.
+          Each button creates a one-time NetBird setup key (valid for 1 day) for one gateway.
+          Put it in <code>.env</code> as <code>REMOTE_GATEWAY_SETUP_KEY</code> or <code>REMOTE_NAMES_GATEWAY_SETUP_KEY</code> and keep it there:
+          the gateway needs it at every start, and a used key can't enroll anything else. Then start the gateways
+          with <code>docker-compose.remote-access.yml</code>. docs/remote-access.md has the steps and the host firewall rules.
         </p>
-        <Button onClick={createKey} disabled={keyBusy || form.readonly}><KeyRound size={15} /> {keyBusy ? 'Creating…' : 'Create Gateway Setup Key'}</Button>
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={() => createKey('ip')} disabled={!!keyBusy || form.readonly}><KeyRound size={15} /> {keyBusy === 'ip' ? 'Creating…' : 'Create IP Gateway Setup Key'}</Button>
+          <Button onClick={() => createKey('names')} disabled={!!keyBusy || form.readonly}><KeyRound size={15} /> {keyBusy === 'names' ? 'Creating…' : 'Create Names Gateway Setup Key'}</Button>
+        </div>
         {setupKey && (
           <div className="mt-3 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-50 dark:bg-nb-gray-900/40 p-3">
-            <div className="text-[0.8rem] text-nb-gray-500 mb-1">Shown once. Copy it now.</div>
+            <div className="text-[0.8rem] text-nb-gray-500 mb-1">{setupKey.kind === 'names' ? 'REMOTE_NAMES_GATEWAY_SETUP_KEY' : 'REMOTE_GATEWAY_SETUP_KEY'} - shown once. Copy it now.</div>
             <div className="flex items-center gap-2">
               <code className="text-sm break-all">{setupKey.key}</code>
               <CopyButton value={setupKey.key} />
