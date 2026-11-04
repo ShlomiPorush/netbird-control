@@ -22,7 +22,7 @@ export const PasswordInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttribut
       <div className="relative">
         <Input ref={ref} type={shown ? 'text' : 'password'} className={cn('w-full pr-10', className)} {...rest} />
         <button type="button" onClick={() => setShown((s) => !s)}
-          aria-label={shown ? 'Hide password' : 'Show password'} title={shown ? 'Hide' : 'Show'}
+          aria-label={shown ? 'Hide Password' : 'Show Password'} title={shown ? 'Hide Password' : 'Show Password'}
           className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1.5 text-nb-gray-400 hover:text-nb-gray-700 dark:hover:text-nb-gray-100">
           {shown ? <EyeOff size={15} /> : <Eye size={15} />}
         </button>

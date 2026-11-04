@@ -297,6 +297,8 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
   const [ended, setEnded] = useState('');
   // Sign-in retry: the form again after wrong credentials.
   const [retry, setRetry] = useState<string[] | null>(null);
+  // Why the last retry could not open a session (the form stays for another try).
+  const [retryError, setRetryError] = useState('');
   const retryRef = useRef(false);
   const [busy, setBusy] = useState(false);
   // RDP: credentials were sent in this attempt (only then is a refusal a failed sign-in).
@@ -322,6 +324,7 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
     pending.current = null;
     retryRef.current = true;
     setRequired(null);
+    setRetryError('');
     setRetry(fields);
     setArgValues(Object.fromEntries(fields.map((f) => [f, f === 'password' ? '' : kept.current[f] || ''])));
     setPhase('connecting');
@@ -359,10 +362,13 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
         break;
       case 'painted':
         // Real remote content (a desktop, a logon screen, a terminal prompt) is on the screen.
+        // A server that drew without asking (no NLA) never needs the retry's values.
+        pending.current = null;
         if (phaseRef.current === 'connecting') setStep('server', 'pass');
         setPhase((p) => (p === 'connecting' ? 'live' : p));
         break;
       case 'paint-timeout':
+        pending.current = null;
         setPhase((p) => (p === 'connecting' ? 'live' : p));
         break;
       case 'error': {
@@ -435,14 +441,11 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
       setPhase('connecting');
       setConn({ sessionId: s.sessionId, token: s.token });
     } catch (err) {
+      // No session was opened (network, limit, access): the form stays, with the reason, so the
+      // user can try again or cancel. The password is typed again.
       if (!mounted.current) return;
-      const message = err instanceof ApiError ? err.message : 'The session could not be opened. Try again.';
-      retryRef.current = false;
-      setRetry(null);
-      setArgValues({});
-      setStep('channel', 'fail', message);
-      setFailure({ message });
-      setPhase('ended');
+      setRetryError(err instanceof ApiError ? err.message : 'The session could not be opened. Try again.');
+      setArgValues((v) => ({ ...v, password: '' }));
     } finally {
       if (mounted.current) setBusy(false);
     }
@@ -467,7 +470,7 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
         <StepSummary steps={shown} />
         <form key={conn.sessionId} onSubmit={submitRetry} className="mt-4 flex flex-col gap-3">
           <p className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-[0.82rem] text-nb-gray-700 dark:text-nb-gray-200">
-            {SIGNIN_FAILED}{ssh && <> {SSH_KEY_NOTE}</>}
+            {retryError || <>{SIGNIN_FAILED}{ssh && <> {SSH_KEY_NOTE}</>}</>}
           </p>
           {fieldsFor(retry)}
           {ssh && <p className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">Leave the password empty to type it in the terminal.</p>}
