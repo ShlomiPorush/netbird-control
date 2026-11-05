@@ -20,7 +20,11 @@ core.pool.query = async () => ({ rows: [] });
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
 let live = null; // the NetBird answers for the session tests, by path
-nb.netbirdGet = async (p) => JSON.parse(JSON.stringify((live && live[p]) ?? null));
+let routersHook = null; // runs while a session's router read is in flight
+nb.netbirdGet = async (p) => {
+    if (routersHook && p.endsWith('/routers')) await routersHook();
+    return JSON.parse(JSON.stringify((live && live[p]) ?? null));
+};
 const events = require('../lib/events');
 events.addEvent = async () => { };
 
@@ -224,6 +228,34 @@ test('a live names session whose resource is now a wildcard is closed by the re-
         await ra.recheckSessions();
         assert.equal(ra.renewLease(viewer, out.sessionId), false, 'the session was closed');
     } finally {
+        ra.closeAllSessions('test over');
+        live = null;
+    }
+});
+
+test('a session whose checks were already running is not approved when settling starts meanwhile', async () => {
+    const s = base();
+    live = {
+        '/api/users': s.users, '/api/peers': s.peers, '/api/groups': s.groups, '/api/policies': s.policies,
+        '/api/networks/resources': s.resources, '/api/networks': s.networks, '/api/routes': [], '/api/networks/n1/routers': [{ peer: 'p-r1', enabled: true }],
+    };
+    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'] });
+    settings.remote_access_nb = JSON.stringify({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw', namesGroupId: 'g-ngw', namesTargetGroupId: 'g-ngwt', namesPolicyId: 'pol-ngw' });
+    await ra.loadRemoteAccessConfig();
+    ra._internal.resetSettlingForTest();
+    ra._internal.invalidateSnapshot();
+    const viewer = { user_id: 'u1', email: 'a@example.test' };
+    // An unanswered resource write starts settling while the router read is still running.
+    routersHook = async () => { routersHook = null; ra.noteUncertainTargetWrite(); };
+    try {
+        await assert.rejects(ra.createSession(viewer, { protocol: 'rdp', address: '10.20.0.9', port: 3389 }, '203.0.113.9'), (e) => e.code === 'TARGETS_SETTLING');
+        ra._internal.resetSettlingForTest();
+        routersHook = async () => { routersHook = null; ra.noteUncertainTargetWrite(); };
+        const check = await ra.checkAccess(viewer, { protocol: 'rdp', address: '10.20.0.9', port: 3389 });
+        assert.equal(check.steps[0].code, 'TARGETS_SETTLING');
+    } finally {
+        routersHook = null;
+        ra._internal.resetSettlingForTest();
         ra.closeAllSessions('test over');
         live = null;
     }

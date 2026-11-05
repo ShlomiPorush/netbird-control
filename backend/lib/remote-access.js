@@ -209,11 +209,18 @@ function withManagedTargets(networkId, address, groupIds) {
 // configuration always finishes before the sync that follows a configuration change starts (that
 // sync then corrects it). Re-entrant within one call chain: a writer that calls another writer, or
 // the sync calling addResourceGroups, never waits on itself.
+// Re-entry is allowed only for the call chain that holds the lock right now: a timer or promise
+// that outlives its holder keeps the context but not the right to skip the queue.
 const _targetLockCtx = new AsyncLocalStorage();
 let _targetLockTail = Promise.resolve();
+let _targetLockHolder = null;
 function withTargetLock(fn) {
-    if (_targetLockCtx.getStore()) return fn();
-    const run = _targetLockTail.then(() => _targetLockCtx.run(true, fn));
+    const store = _targetLockCtx.getStore();
+    if (store && store === _targetLockHolder) return fn();
+    const token = {};
+    const run = _targetLockTail
+        .then(() => { _targetLockHolder = token; return _targetLockCtx.run(token, fn); })
+        .finally(() => { if (_targetLockHolder === token) _targetLockHolder = null; });
     _targetLockTail = run.catch(() => { });
     return run;
 }
@@ -227,25 +234,29 @@ const SETTLE_MS = 90_000;
 let _settleUntil = 0;       // no session is approved before a sync that started at or after this
 let _lastSyncStartOk = 0;   // start time of the last target sync that finished
 let _settleTimer = null;
-function scheduleSettleSync(delayMs = Math.max(0, _settleUntil - Date.now()) + 1000) {
+const untilDeadline = () => Math.max(0, _settleUntil - Date.now()) + 1000;
+function scheduleSettleSync(delayMs = untilDeadline()) {
     clearTimeout(_settleTimer);
-    _settleTimer = setTimeout(() => {
+    // Created outside any lock context: the timer must queue for the lock like everyone else.
+    _settleTimer = _targetLockCtx.exit(() => setTimeout(() => {
         _settleTimer = null;
         if (!_cfg.enabled || !netbirdApiConfigured() || NETBIRD_READONLY) return; // the next apply syncs
         syncTargetGroup().catch(e => {
             console.error('[remote-access] target sync after an unanswered write failed:', e.message);
-            scheduleSettleSync(60_000);
+            if (!_settleTimer) scheduleSettleSync(Math.max(60_000, untilDeadline()));
         });
-    }, delayMs);
+    }, delayMs));
     if (_settleTimer.unref) _settleTimer.unref();
 }
 function noteUncertainTargetWrite() {
     _settleUntil = Math.max(_settleUntil, Date.now() + SETTLE_MS);
-    _snapshot = null;
+    invalidateSnapshot();
     scheduleSettleSync();
 }
 function beginStartupSettling() { noteUncertainTargetWrite(); }
-const targetsSettling = () => !NETBIRD_READONLY && (Date.now() < _settleUntil || _lastSyncStartOk < _settleUntil);
+// Read-only: this process never writes, but a write sent before a restart may still land, so the
+// deadline still holds; with no sync to wait for, a snapshot read after it is enough.
+const targetsSettling = () => Date.now() < _settleUntil || (!NETBIRD_READONLY && _lastSyncStartOk < _settleUntil);
 
 function remoteAccessAvailable() { return _cfg.enabled && netbirdApiConfigured(); }
 
@@ -312,7 +323,9 @@ function syncTargetGroup() {
         const started = Date.now();
         const out = await syncTargetGroupLocked();
         _lastSyncStartOk = Math.max(_lastSyncStartOk, started);
-        _snapshot = null;
+        invalidateSnapshot();
+        // Finished, but started before the current deadline: one more sync after it is still due.
+        if (_lastSyncStartOk < _settleUntil && !_settleTimer) scheduleSettleSync();
         return out;
     });
 }
@@ -355,7 +368,7 @@ async function applyGatewayObjects() {
         }
         const sync = await syncTargetGroup();
         bustNbCaches('policies', 'gref', 'usage');
-        _snapshot = null;
+        invalidateSnapshot();
         _lastApply = { at: new Date().toISOString(), error: '' };
         return sync;
     } catch (e) {
@@ -388,8 +401,14 @@ async function createGatewaySetupKey(kind = 'ip') {
 }
 
 // ─── NetBird snapshot (fresh, bounded in time) ───
-let _snapshot = null; // { at, data }
-let _snapshotInFlight = null;
+let _snapshot = null;         // { at: when the read started, epoch, data }
+let _snapshotInFlight = null; // { at, epoch, promise }
+let _snapshotEpoch = 0;
+// Drop the cached snapshot and any read still running: neither is used once the targets changed.
+function invalidateSnapshot() { _snapshotEpoch++; _snapshot = null; _snapshotInFlight = null; }
+// A read is usable only if no invalidation came after it started and, once a settling deadline has
+// passed, only if it started after that deadline (a late write may have landed just before).
+const snapshotUsable = (s) => !!s && s.epoch === _snapshotEpoch && (Date.now() < _settleUntil || s.at >= _settleUntil);
 
 function withDeadline(promise, ms, what) {
     let t;
@@ -416,12 +435,14 @@ async function fetchSnapshot() {
 
 // One shared fetch at a time; the whole snapshot has an overall deadline.
 function freshSnapshot(maxAgeMs) {
-    if (_snapshot && Date.now() - _snapshot.at <= maxAgeMs) return Promise.resolve(_snapshot.data);
-    if (_snapshotInFlight) return _snapshotInFlight;
-    _snapshotInFlight = withDeadline(fetchSnapshot(), SNAPSHOT_DEADLINE_MS, 'Reading NetBird')
-        .then(data => { _snapshot = { at: Date.now(), data }; return data; })
-        .finally(() => { _snapshotInFlight = null; });
-    return _snapshotInFlight;
+    if (snapshotUsable(_snapshot) && Date.now() - _snapshot.at <= maxAgeMs) return Promise.resolve(_snapshot.data);
+    if (snapshotUsable(_snapshotInFlight)) return _snapshotInFlight.promise;
+    const read = { at: Date.now(), epoch: _snapshotEpoch, promise: null };
+    read.promise = withDeadline(fetchSnapshot(), SNAPSHOT_DEADLINE_MS, 'Reading NetBird')
+        .then(data => { if (snapshotUsable(read)) _snapshot = { at: read.at, epoch: read.epoch, data }; return data; })
+        .finally(() => { if (_snapshotInFlight === read) _snapshotInFlight = null; });
+    _snapshotInFlight = read;
+    return read.promise;
 }
 
 const authCfg = (kind = 'ip') => ({
@@ -539,6 +560,8 @@ async function checkAccess(viewer, body) {
         return { steps, target };
     }
     const path = pathStatus(snap, authCfg(rt.gateway), routers);
+    // Again after the reads: an unanswered write may have started settling meanwhile.
+    if (targetsSettling()) return { steps: [{ key: 'access', status: 'fail', code: 'TARGETS_SETTLING', message: MESSAGES.TARGETS_SETTLING }], target };
     steps.push(path.ok
         ? { key: 'path', status: 'pass', detail: `Gateway online, routing peer online for ${verdict.network.name}` }
         : { key: 'path', status: 'fail', code: path.code, message: MESSAGES[path.code] || path.code, troubleshoot: path.code === 'NO_ROUTER_ONLINE' });
@@ -607,6 +630,8 @@ async function createSession(viewer, body, clientIp) {
 
     // Check the quota again: the snapshot read above may have let another request in.
     if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser || _sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY');
+    // And the settling state: an unanswered write may have started it during the reads above.
+    if (targetsSettling()) throw httpError(503, 'TARGETS_SETTLING');
     const s = {
         id: crypto.randomUUID(), protocol, address: rt.address, port, width, height, dpi, timezone, creds,
         gateway: rt.gateway, targetName: rt.name || '',
@@ -956,7 +981,7 @@ async function recheckSessions() {
     if (!_sessions.size) { _lastGoodRecheck = now; return; }
     let snap = null;
     try {
-        _snapshot = null; // the re-check always reads NetBird again
+        invalidateSnapshot(); // the re-check always reads NetBird again
         snap = await freshSnapshot(0);
         _lastGoodRecheck = Date.now();
     } catch (e) {
@@ -1095,5 +1120,7 @@ module.exports = {
         settlingForTest: () => targetsSettling(),
         passSettleDeadlineForTest: () => { _settleUntil = Math.min(_settleUntil, Date.now() - 1); },
         settleTimerPendingForTest: () => !!_settleTimer,
+        clearSettleTimerForTest: () => { clearTimeout(_settleTimer); _settleTimer = null; },
+        freshSnapshot, invalidateSnapshot,
     },
 };

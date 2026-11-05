@@ -381,3 +381,72 @@ test('the resource editor, merge and move never re-point or delete a managed pol
     await assert.rejects(db.moveResources('n1', ['r1'], 'n2'), /Browser Gateway's own policy/);
     assert.equal(writes('PUT', /^\/api\/policies\//).length + writes('DELETE', /./).length + writes('POST', /resources$/).length, 0, 'nothing changed');
 });
+
+// ─── Review round 1 ───
+test('a timer that outlives its lock holder queues for the lock like everyone else', async () => {
+    const order = [];
+    let leaked;
+    await ra.withTargetLock(async () => {
+        setTimeout(() => { leaked = ra.withTargetLock(async () => { order.push('leaked'); }); }, 5);
+    });
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const holder = ra.withTargetLock(async () => { order.push('holder-start'); await gate; order.push('holder-end'); });
+    await new Promise(r => setTimeout(r, 30));
+    assert.deepEqual(order, ['holder-start'], 'the late timer did not skip the queue');
+    release();
+    await holder;
+    await leaked;
+    assert.deepEqual(order, ['holder-start', 'holder-end', 'leaked']);
+});
+
+test('a snapshot read that started before the targets changed is never used afterwards', async () => {
+    reset();
+    let n = 0;
+    const gates = [];
+    state.readHook = async (p) => { if (p === '/api/peers') { const i = n++; await new Promise(r => gates.push(r)); state.readIndex = i; } };
+    const nbGet = nb.netbirdGet;
+    nb.netbirdGet = async (p) => (p === '/api/users' ? (await nbGet(p), [{ id: 'read-' + (state.readIndex ?? 'x') }]) : nbGet(p));
+    try {
+        const first = ra._internal.freshSnapshot(60_000);
+        await new Promise(r => setImmediate(r));
+        ra._internal.invalidateSnapshot(); // e.g. a target sync finished
+        const second = ra._internal.freshSnapshot(60_000);
+        await new Promise(r => setImmediate(r));
+        assert.equal(gates.length, 2, 'a new read started instead of joining the old one');
+        gates[0](); await first;
+        gates[1](); const fresh = await second;
+        const again = await ra._internal.freshSnapshot(60_000);
+        assert.equal(again, fresh, 'the cache holds the read that started after the change');
+    } finally { nb.netbirdGet = nbGet; state.readHook = null; ra._internal.invalidateSnapshot(); }
+});
+
+test('a successful sync that started before the deadline leaves one more sync scheduled', async () => {
+    reset();
+    ra.beginStartupSettling();
+    ra._internal.clearSettleTimerForTest(); // as when a retry replaced the deadline timer
+    await ra._internal.syncTargetGroup();
+    assert.equal(ra._internal.settlingForTest(), true);
+    assert.equal(ra._internal.settleTimerPendingForTest(), true, 'not left waiting for the periodic reconcile');
+    ra._internal.resetSettlingForTest();
+});
+
+test('deleting a resource deletes no group whose read is an error answer', async () => {
+    reset();
+    ra._internal.setManagedForTest({}); // ids lost: only the live name would tell
+    state.groups = state.groups.filter(g => g.id !== 'g-gwt');
+    const get = nb.netbirdGet;
+    nb.netbirdGet = async (p) => (p === '/api/groups/g-gwt' ? { code: 500, message: 'internal error' } : get(p));
+    try {
+        await db.deleteResource('n1', 'r1');
+        assert.equal(writes('DELETE', /^\/api\/groups\/g-gwt$/).length, 0);
+    } finally { nb.netbirdGet = get; }
+});
+
+test('an Access Profile whose group is a managed one is refused as a grant target', async () => {
+    reset();
+    rowsFor = (sql) => (/FROM access_profiles/.test(sql) ? [{ id: 7, name: 'Browser Gateway', group_id: 'g-gw', sources: [], protocol: 'all', ports: '', shared: true, posture_checks: [] }] : null);
+    await assert.rejects(db.createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'profile', id: 7 }] }, {}), /managed by Browser Remote Access/);
+    await assert.rejects(db.createRecurringAccess({ userId: 'user-1', targets: [{ type: 'profile', id: '7', name: 'P' }], days: [1], startTime: '09:00', endTime: '10:00' }, {}), /managed by Browser Remote Access/);
+    assert.equal(sqls.some(q => /INSERT INTO (temporary_access_grants|recurring_access)/.test(q.sql)), false);
+});

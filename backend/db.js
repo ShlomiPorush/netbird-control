@@ -108,9 +108,18 @@ async function managedGroupCheck() {
     return (id) => isRemoteAccessManagedGroup(id, nameOf.get(id));
 }
 const MANAGED_GROUP_ERROR = "This group is managed by Browser Remote Access and can't be granted. Choose another group.";
+// Group targets, and the destination group of each Access Profile target (a profile whose group is
+// a managed one - possible on old data - would grant through it just the same).
 async function refuseManagedGroupTargets(targets) {
-    const ids = (Array.isArray(targets) ? targets : []).filter(t => t && t.type === 'group' && t.id).map(t => String(t.id));
-    if (!ids.length || !raMain()) return;
+    if (!raMain()) return;
+    const list = Array.isArray(targets) ? targets.filter(t => t && t.id) : [];
+    const ids = list.filter(t => t.type === 'group').map(t => String(t.id));
+    const profiles = list.filter(t => t.type === 'profile');
+    if (profiles.length) {
+        const byId = new Map((await listAccessProfiles()).map(p => [String(p.id), p.groupId]));
+        for (const t of profiles) for (const g of [t.groupId, byId.get(String(t.id))]) if (g) ids.push(String(g));
+    }
+    if (!ids.length) return;
     const isManaged = await managedGroupCheck();
     if (ids.some(isManaged)) { const e = new Error(MANAGED_GROUP_ERROR); e.status = 400; throw e; }
 }
@@ -8201,7 +8210,8 @@ async function deleteResource(networkId, resourceId) {
         try {
             if (raMain() && isRemoteAccessManagedGroup(gid, '')) continue;
             const g = await netbirdGet('/api/groups/' + encodeURIComponent(gid));
-            if (raMain() && (!g || isRemoteAccessManagedGroup(gid, g.name || ''))) continue;
+            // Only a confirmed read of THIS group (an error body is no group) may lead to a delete.
+            if (raMain() && (!g || typeof g !== 'object' || g.id !== gid || isRemoteAccessManagedGroup(gid, g.name || ''))) continue;
             const stillUsed = g && ((g.resources_count || (g.resources ? g.resources.length : 0)) > 0 || (g.peers_count || 0) > 0);
             if (g && !stillUsed) {
                 const pols = await netbirdGet('/api/policies');
