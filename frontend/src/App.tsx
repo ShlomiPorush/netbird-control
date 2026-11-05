@@ -40,8 +40,8 @@ function AdminRoute({ children }: { children: ReactNode }) {
 // The Access Management hub: admins, approvers, and Manage Temporary Access holders -
 // each sees only the sections their rights unlock (filtered inside the page).
 function AccessMgmtRoute({ children }: { children: ReactNode }) {
-  const { restricted, canApprove, can } = useViewer();
-  return (!restricted || canApprove || can('temp.manage')) ? <>{children}</> : <Navigate to="/" replace />;
+  const { restricted, canApprove, can, canCheckAccess } = useViewer();
+  return (!restricted || canApprove || can('temp.manage') || canCheckAccess) ? <>{children}</> : <Navigate to="/" replace />;
 }
 
 // Pages open to admins AND holders of a fine-grained feature permission (Settings → Permissions).

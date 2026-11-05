@@ -45,6 +45,17 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
     color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
     real resolution, so it stays sharp.
+- **Access Check.** A new section in Access Management answers two questions from a fresh read
+  of NetBird: does this user have access to a resource or a network, and who has access to it.
+  The answer follows what NetBird enforces: each device's own groups, the most specific route when
+  resources overlap, and accept rules minus drop rules on the winning route. It shows, for each
+  device, which policy and group give the access and on which ports, and why a device cannot
+  connect (compliance, an expired sign-in, a blocked user). A policy with posture checks makes the
+  answer "Depends On Posture Checks" with both outcomes. A temporary grant that has ended but is
+  still in NetBird is flagged. Admins and holders of Manage Temporary Access, Manage All Networks
+  or Troubleshoot All Peers can use it, and Tenant Support users inside a tenant. The user page has
+  a **Check Access** button and the resource editor a **Who Has Access** button. It is not part of
+  the public API.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
