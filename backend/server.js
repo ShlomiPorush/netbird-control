@@ -2198,6 +2198,7 @@ const {
     renewLease: renewRemoteLease, endSession: endRemoteSession, takeToken: takeRemoteToken, attachTunnel: attachRemoteTunnel,
     recheckSessions: recheckRemoteSessions, sweepSessions: sweepRemoteSessions, closeOrphanSessions: closeRemoteOrphans,
     getRemoteAccessStatusLite, RECHECK_INTERVAL_MS: REMOTE_RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD: REMOTE_WS_MAX_PAYLOAD,
+    beginStartupSettling: beginRemoteTargetSettling,
 } = require('./lib/remote-access');
 app.post('/api/access-requests', async (req, res) => {
     try {
@@ -4406,7 +4407,7 @@ app.post('/api/networks/:id/routers', async (req, res) => {
         res.json({ status: 'ok', router: out });
     } catch (err) {
         console.error('Error adding routing peer:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to add routing peer' });
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to add routing peer' });
     }
 });
 
@@ -4727,6 +4728,9 @@ async function start() {
                 return permitted([...adGroups, ...nbGroups]);
             },
         });
+        // A resource write sent before a restart may still land in NetBird: no session is approved
+        // until a target sync that starts 90 s from now has finished.
+        beginRemoteTargetSettling();
         await closeRemoteOrphans().then(n => { if (n) console.log(`[remote-access] closed ${n} session(s) left open by a restart`); })
             .catch(err => console.error('[remote-access] orphan cleanup error:', err.message));
         setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);

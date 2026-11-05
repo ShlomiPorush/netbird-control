@@ -32,8 +32,17 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
 - **One standing policy per gateway** that the app manages (*Browser Gateway* and
   *Browser Gateway (Names)*) lets each gateway reach its targets in the networks that an
   administrator selects. The app puts the *Browser Gateway Targets* group on the IPv4 host and
-  subnet resources of those networks, and *Browser Gateway Name Targets* on their domain
-  resources. No temporary policies are created per session.
+  subnet resources of those networks, and *Browser Gateway Name Targets* on their exact domain
+  resources (never on a wildcard such as `*.example.com`). No temporary policies are created per
+  session.
+- **The gateway groups, their policies and the gateway peers belong to the app.** Only the app
+  decides which resources carry the target groups, whoever edits, creates, moves or merges a
+  resource: groups sent for a resource are ignored for those, and the app sets them by the rule
+  above. No temporary grant, approved request or recurring rule can put a user into a gateway
+  group. A gateway peer can't be a routing peer, and neither can a group it is in, nor *All*
+  (a gateway that enrolls later joins it). Deleting a resource never deletes these groups or
+  policies, and merging, moving or editing a resource never changes these policies. This is the
+  same for administrators.
 - **Sessions open as tabs** in one full-screen view. They keep running while the user moves around
   the portal, and a button brings them back. Closing the browser tab ends them.
 
@@ -48,12 +57,20 @@ understand is refused.
 3. The address is one of:
    - an IPv4 address inside an enabled host or subnet resource of a network that is open to the
      gateways;
-   - the host name of an enabled **domain resource** in such a network. An exact name beats a
-     wildcard (`*.example.com` covers names below `example.com`, not `example.com` itself), and
-     two equally good matches are refused;
+   - the exact host name of an enabled **domain resource** in such a network. Two equally good
+     matches are refused. **Wildcard domain resources are never targets:** a name that only a
+     wildcard covers (`*.example.com` covers names below `example.com`) is refused, because the
+     user could pick any name below it and the names gateway connects to whatever that name
+     resolves to. Add the exact name as a domain resource, or use the server's address. An exact
+     resource still wins over a wildcard that also covers the name;
    - any other host name. The app looks it up with the server's own DNS settings, and each IPv4
      answer is checked as if the user had typed it. The first allowed address is used, and the
      session goes to that address, never to the name again.
+
+   Some addresses are never targets, whatever the resources and policies say, typed or looked up:
+   `0.0.0.0/8`, loopback `127.0.0.0/8`, link-local `169.254.0.0/16`, NetBird peers
+   `100.64.0.0/10`, multicast `224.0.0.0/4`, reserved `240.0.0.0/4`, and the gateways' own Docker
+   networks `172.31.250.0/24` and `172.31.251.0/24`.
 4. An enabled *accept* policy rule connects one of the user's groups to that resource and opens the
    TCP port. The user's groups are their own groups, the groups of their peers, and *All*. A
    matching *drop* rule refuses the session.
@@ -66,7 +83,13 @@ understand is refused.
      route;
    - on the names gateway, it receives no address routes at all, and no other domain resource or
      domain route matches the name as specifically or more.
-8. The gateway peer is online, and a routing peer of the network is online.
+
+   A rule counts toward the gateway's routes when its source is one of the gateway's groups
+   (including *All*) or the gateway peer itself. A policy rule whose source the app can't read
+   (for example a network resource as the source) blocks every session, and Settings → Remote
+   Access names the problem.
+8. The gateway peer is online, and a routing peer of the network is online. A gateway peer never
+   counts as a routing peer.
 
 Rules 1 to 7 decide who may connect; rule 8 (the path is up) is checked only when a session
 opens. Every 60 seconds the app reads NetBird again and checks every open session against rules
@@ -76,7 +99,15 @@ group that grants it must be confirmed by a fresh Microsoft Graph lookup), when 
 removed from the gateway, or when Remote Access is turned off. A router that goes down does not
 close a session by itself: the connection simply stops working until it comes back. Sessions also
 close when access cannot be verified with NetBird for 2.5 minutes, when the user's sign-in ends,
-after the idle timeout, and after the maximum session length.
+after the idle timeout, and after the maximum session length. A session that went through a
+wildcard domain resource (possible before this rule existed) closes at the next check.
+
+**After a restart, and after a resource change that NetBird did not answer,** new sessions wait:
+for 90 seconds, and then until the app has synced the target groups again (about a minute and a
+half after a restart). The user is told to try again in a minute. A change that NetBird did not
+answer may still be applied later, and the app can't tell when, so it does not approve sessions
+from what it read before. A change applied more than 90 seconds after it was sent is caught by
+the next check of open sessions or the next sync.
 
 Every check is for one user. A session that another user opened to the same server gives nobody
 else access, and only the user who opened a session can keep it alive or end it. When the check
@@ -105,7 +136,10 @@ server's resource already chosen.
 - **RDP to a looked-up name uses NTLM.** The session connects to the address, not the name, so
   Network Level Authentication cannot use Kerberos. Servers that refuse NTLM can't be reached by a
   name that is not a domain resource.
-- **IPv4 only.** Peers (100.x addresses) are not targets.
+- **IPv4 only.** Peers (100.64.0.0/10 addresses) are not targets.
+- **Host names of domain resources are resolved by the names gateway.** The app checks the name,
+  not the address it resolves to there. That is why wildcard domain resources are refused: keep
+  the DNS records of exact domain resources in hands you trust.
 - **Main account only.** MSP tenants are not supported.
 - **Connections go through NetBird relays.** The host firewall rules below block direct
   connections to routing peers on the local network, as for the exit nodes.
@@ -136,7 +170,11 @@ server's resource already chosen.
 1. **Turn on SSO.** Without sign-in there is no NetBird identity to check.
 2. **Settings → Remote Access:** select the networks to open to the gateways, choose who can use it,
    turn on **Enable Browser Remote Access**, and save. The app creates the gateway groups and
-   policies in NetBird.
+   policies in NetBird. It uses only the objects it created and recorded: if NetBird already has
+   a group or policy with one of their names that the app has no record of (for example after
+   restoring settings into a new database), the save stops and says which one. Delete or rename
+   it in NetBird and save again; if it was the gateway's group, enroll the gateway again with a
+   new setup key afterwards. A group with that name is never taken over, even an empty one.
 3. **Create the setup keys** on the same page: **Create IP Gateway Setup Key**, and
    **Create Names Gateway Setup Key** if users should connect by host name. Each is valid for one
    day and one use.

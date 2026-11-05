@@ -36,6 +36,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
     color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
     real resolution, so it stays sharp.
+  - **The gateway's objects belong to the app.** Resource edits, grants, recurring rules and
+    routing peers can't add, remove or reuse the Browser Gateway groups, policies or peers, and
+    setup never takes over an existing group or policy with one of their names. Wildcard domain
+    resources and special addresses (loopback, link-local, NetBird peers, multicast, the gateways'
+    own networks) are never targets. A policy rule whose source the app can't read blocks sessions
+    until it is changed. After a restart, new sessions wait about a minute and a half.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
