@@ -68,7 +68,10 @@ const PERMS = {
 // A small NetBird account: Dana's laptop reaches srv1 through Staff RDP.
 const SNAP = () => ({
     users: [{ id: 'u1', name: 'Dana', email: 'dana@example.com', auto_groups: [] }],
-    peers: [{ id: 'p1', name: 'dana-laptop', user_id: 'u1', groups: [{ id: 'g-staff' }], connected: true }],
+    peers: [
+        { id: 'p1', name: 'dana-laptop', user_id: 'u1', groups: [{ id: 'g-staff' }], connected: true },
+        { id: 'p-r1', name: 'office-router', groups: [], connected: true },
+    ],
     groups: [{ id: 'g-all', name: 'All' }, { id: 'g-staff', name: 'Staff' }],
     networks: [{ id: 'n1', name: 'Office', resources: ['r1'] }],
     resources: [{ id: 'r1', name: 'srv1', address: '10.0.0.5/32', enabled: true, groups: [] }],
@@ -114,7 +117,7 @@ before(async () => {
         if (snapshotFails) { const e = new Error("Couldn't read peers from NetBird"); e.code = 'NETBIRD_READ_FAILED'; throw e; }
         return SNAP();
     };
-    db.loadAccessCheckRouters = async (ids) => new Map(ids.map((id) => [id, []]));
+    db.loadAccessCheckRouters = async (ids) => new Map(ids.map((id) => [id, [{ id: 'rt1', peer: 'p-r1', enabled: true }]]));
     appServer.on('request', require('../server').app);
 });
 
@@ -186,7 +189,7 @@ test('admins and each access-management permission may use every endpoint', asyn
     }
     const user = (await api('netmgr', PATHS[1])).json();
     assert.equal(user.verdict, 'granted');
-    assert.equal(user.routers[0].status, 'none');
+    assert.equal(user.routers[0].status, 'online');
     const who = (await api('trouble', PATHS[2])).json();
     assert.deepEqual(who.users.map((u) => u.user.id), ['u1']);
     const opts = (await api('temp', PATHS[0])).json();
