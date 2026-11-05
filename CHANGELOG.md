@@ -34,8 +34,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     server's resource already chosen.
 - **API keys and a public API.** Admins create API keys in **Settings → API Keys**. A key does only
   what its permissions allow, can be limited to addresses and an expiry date, is shown once, and is
-  stored only as a hash. The audit log records keys being created and revoked, and every connection
-  link a key makes or that is opened. The first action,
+  stored only as a hash. The audit log records keys being created and revoked, every connection
+  link a key makes or that is opened, and link requests it refuses (collapsed per key and error
+  code). The first action,
   `POST /api/v1/remote-access/launch`, lets another system, such as a customer file, open a browser
   RDP or SSH session with stored credentials: it returns a one-time link that expires after five
   minutes, the credentials never reach the browser, and the user's own access is checked as for a
@@ -61,6 +62,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
   cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
   revoke fails. On upgrade, active grants with a recorded error are marked once.
+- **Correct credentials always work from an address that failed too often.** The webhook receivers
+  and the Telegram callback check the token or secret first. While an address is blocked after
+  repeated failures, only its failed attempts get `429`; the correct webhook token and the correct
+  Telegram secret are accepted as usual.
 
 ---
 

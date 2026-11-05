@@ -18,7 +18,9 @@ const fakeClient = {
     release: () => { },
 };
 core.pool.connect = async () => fakeClient;
+let queryTimeouts = []; // query_timeout of every query sent as a config object
 core.pool.query = async (sql, params = []) => {
+    if (typeof sql !== 'string') { queryTimeouts.push(sql.query_timeout); params = sql.values; sql = sql.text; }
     const s = sql.trim();
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(s)) return { rows: [] };
     if (s.startsWith('INSERT INTO app_audit')) {
@@ -49,7 +51,7 @@ const keys = require('../lib/api-keys');
 const { parseAllowedIps, ipAllowed, sha256 } = keys._internal;
 const admin = { user_id: 'u-admin', email: 'admin@example.test', name: 'Admin' };
 
-test.beforeEach(() => { rows = []; audits = []; failAudit = false; txLog = []; });
+test.beforeEach(() => { rows = []; audits = []; failAudit = false; txLog = []; queryTimeouts = []; });
 
 test('a new key is shown once and only its hash and prefix are stored', async () => {
     const { key, apiKey } = await keys.createApiKey({ name: 'Customer File', scopes: ['remote-access:launch'] }, admin);
@@ -128,7 +130,7 @@ function runMiddleware(mw, headers, ip = '203.0.113.5') {
     });
 }
 
-test('the middleware checks the scope and counts every failed attempt', async () => {
+test('the middleware checks the scope and counts missing, malformed, unknown and expired keys as failed attempts', async () => {
     const fails = [];
     let blocked = false;
     const deps = { tooManyAuthFails: () => blocked, noteAuthFail: (ip) => fails.push(ip) };
@@ -139,9 +141,120 @@ test('the middleware checks the scope and counts every failed attempt', async ()
     assert.equal(ok.req.apiKey.name, 'k');
     assert.equal((await runMiddleware(mw, {})).body.code, 'MISSING_KEY');
     assert.equal((await runMiddleware(mw, { authorization: 'Bearer nbc_nope' })).body.code, 'INVALID_KEY');
-    assert.equal(fails.length, 2);
+    const unknown = 'nbc_' + crypto.randomBytes(32).toString('base64url');
+    assert.equal((await runMiddleware(mw, { authorization: `Bearer ${unknown}` })).body.code, 'INVALID_KEY');
+    assert.equal(fails.length, 3);
+    rows[0].expires_at = new Date(Date.now() - 1000);
+    assert.equal((await runMiddleware(mw, { authorization: `Bearer ${key}` })).body.code, 'KEY_EXPIRED');
+    assert.equal(fails.length, 4, 'an expired key still counts');
+    rows[0].expires_at = null;
     const other = keys.requireApiKey('something:else', deps);
     assert.equal((await runMiddleware(other, { authorization: `Bearer ${key}` })).body.code, 'SCOPE_MISSING');
-    blocked = true;
-    assert.equal((await runMiddleware(mw, { authorization: `Bearer ${key}` })).status, 429);
+    assert.equal(fails.length, 4, 'a missing scope is not a failed attempt');
+    assert.ok(queryTimeouts.length > 0 && queryTimeouts.every(t => t === keys.QUERY_TIMEOUT_MS), 'the key lookup has a time limit');
+});
+
+test('a valid key works from a blocked address; every failed attempt from it gets 429 and adds nothing', async () => {
+    const fails = [];
+    const deps = { tooManyAuthFails: () => true, noteAuthFail: (ip) => fails.push(ip) };
+    const mw = keys.requireApiKey('remote-access:launch', deps);
+    const { key } = await keys.createApiKey({ name: 'k', scopes: ['remote-access:launch'] }, admin);
+    const { key: limited } = await keys.createApiKey({ name: 'limited', scopes: ['remote-access:launch'], allowedIps: ['198.51.100.0/24'] }, admin);
+    const { key: expired } = await keys.createApiKey({ name: 'expired', scopes: ['remote-access:launch'] }, admin);
+    const { key: revoked, apiKey: revokedRow } = await keys.createApiKey({ name: 'revoked', scopes: ['remote-access:launch'] }, admin);
+    rows[2].expires_at = new Date(Date.now() - 1000);
+    await keys.revokeApiKey(revokedRow.id, admin);
+    audits = [];
+
+    const ok = await runMiddleware(mw, { authorization: `Bearer ${key}` });
+    assert.equal(ok.status, 'next');
+    assert.equal(ok.req.apiKey.name, 'k');
+    // A valid key without the permission: the real answer, not the throttle.
+    assert.equal((await runMiddleware(keys.requireApiKey('something:else', deps), { authorization: `Bearer ${key}` })).body.code, 'SCOPE_MISSING');
+
+    const unknown = 'nbc_' + crypto.randomBytes(32).toString('base64url');
+    for (const headers of [{}, { authorization: 'Bearer nbc_nope' }, { authorization: `Bearer ${unknown}` }, { authorization: `Bearer ${expired}` },
+        { authorization: `Bearer ${revoked}` }, { authorization: `Bearer ${limited}` }, { authorization: `Basic ${key}` }]) {
+        const r = await runMiddleware(mw, headers);
+        assert.equal(r.status, 429, JSON.stringify(headers));
+        assert.equal(r.body.code, 'TOO_MANY_FAILURES');
+    }
+    assert.equal(fails.length, 0, 'nothing more is counted while blocked');
+    assert.equal(audits.length, 0, 'a failed attempt writes nothing');
+});
+
+test('a failed key lookup is "unavailable", blocked address or not', async () => {
+    const { key } = await keys.createApiKey({ name: 'k', scopes: ['remote-access:launch'] }, admin);
+    const realQuery = core.pool.query;
+    core.pool.query = async () => { throw new Error('Query read timeout'); };
+    try {
+        for (const blocked of [false, true]) {
+            const fails = [];
+            const mw = keys.requireApiKey('remote-access:launch', { tooManyAuthFails: () => blocked, noteAuthFail: (ip) => fails.push(ip) });
+            const r = await runMiddleware(mw, { authorization: `Bearer ${key}` });
+            assert.equal(r.status, 503);
+            assert.equal(r.body.code, 'UNAVAILABLE');
+            assert.equal(fails.length, 0);
+        }
+    } finally {
+        core.pool.query = realQuery;
+    }
+});
+
+test('a real key used from a non-allowed address, or after it was revoked, is refused but not counted as a failed attempt', async () => {
+    const fails = [];
+    const deps = { tooManyAuthFails: () => false, noteAuthFail: (ip) => fails.push(ip) };
+    const mw = keys.requireApiKey('remote-access:launch', deps);
+    const { key, apiKey } = await keys.createApiKey({ name: 'k', scopes: ['remote-access:launch'], allowedIps: ['198.51.100.0/24'] }, admin);
+    for (let i = 0; i < 25; i++) {
+        const r = await runMiddleware(mw, { authorization: `Bearer ${key}` }, '203.0.113.9');
+        assert.equal(r.status, 403);
+        assert.equal(r.body.code, 'IP_NOT_ALLOWED');
+    }
+    await keys.revokeApiKey(apiKey.id, admin);
+    for (let i = 0; i < 25; i++) {
+        const r = await runMiddleware(mw, { authorization: `Bearer ${key}` }, '198.51.100.3');
+        assert.equal(r.status, 401);
+        assert.equal(r.body.code, 'KEY_REVOKED');
+    }
+    assert.equal(fails.length, 0);
+    // A guess from the same address still counts.
+    await runMiddleware(mw, { authorization: 'Bearer nbc_nope' }, '203.0.113.9');
+    assert.deepEqual(fails, ['203.0.113.9']);
+});
+
+test('only the listed permission names are accepted, never inherited object names', async () => {
+    for (const s of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf', 'isPrototypeOf']) {
+        await assert.rejects(keys.createApiKey({ name: 'x', scopes: [s] }, admin), (e) => e.code === 'INVALID_SCOPES', s);
+        await assert.rejects(keys.createApiKey({ name: 'x', scopes: ['remote-access:launch', s] }, admin), (e) => e.code === 'INVALID_SCOPES', s);
+    }
+    assert.equal(rows.length, 0);
+    assert.equal(audits.length, 0);
+});
+
+test('revoke takes only an exact key id, as a number or a string of digits', async () => {
+    const { apiKey } = await keys.createApiKey({ name: 'k', scopes: ['remote-access:launch'] }, admin);
+    assert.equal(apiKey.id, 1);
+    let connects = 0;
+    const realConnect = core.pool.connect;
+    core.pool.connect = async () => { connects++; return fakeClient; };
+    try {
+        for (const bad of ['1abc', '1.5', '1e3', '01', ' 1', '1 ', '+1', '0x1', '', '0', '-1', '2147483648', '99999999999',
+            1.5, 0, -1, NaN, Infinity, 2147483648, null, undefined, true, [1], { id: 1 }]) {
+            await assert.rejects(keys.revokeApiKey(bad, admin), (e) => e.status === 404 && e.code === 'NOT_FOUND', JSON.stringify(bad) ?? String(bad));
+        }
+        assert.equal(connects, 0, 'a value that is no id never reaches the database');
+        assert.equal(rows[0].revoked_at, null);
+        assert.ok((await keys.revokeApiKey('1', admin)).apiKey.revokedAt);
+        rows[0].revoked_at = null;
+        assert.ok((await keys.revokeApiKey(1, admin)).apiKey.revokedAt);
+        // The largest id the column holds is a valid id (no such key here).
+        await assert.rejects(keys.revokeApiKey('2147483647', admin), (e) => e.code === 'NOT_FOUND');
+        await assert.rejects(keys.revokeApiKey(2147483647, admin), (e) => e.code === 'NOT_FOUND');
+        assert.equal(connects, 4);
+    } finally {
+        core.pool.connect = realConnect;
+    }
+    assert.equal(keys._internal.parseKeyId('2147483647'), 2147483647);
+    assert.equal(keys._internal.parseKeyId(2147483647), 2147483647);
 });

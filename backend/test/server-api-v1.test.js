@@ -48,6 +48,7 @@ before(async () => {
     const realQuery = core.pool.query.bind(core.pool);
     const keyHash = crypto.createHash('sha256').update(API_KEY).digest('hex');
     core.pool.query = async (sql, params) => {
+        if (typeof sql !== 'string') ({ text: sql, values: params } = sql);
         if (/FROM api_keys WHERE key_prefix/.test(sql)) {
             return { rows: params[0] === API_KEY.slice(0, 12) ? [{ id: 1, name: 'Test', key_prefix: API_KEY.slice(0, 12), key_hash: keyHash, scopes: ['remote-access:launch'], allowed_ips: [], revoked_at: null, expires_at: null, last_used_at: new Date() }] : [] };
         }
@@ -67,8 +68,8 @@ after(async () => {
 });
 
 let n = 1;
-async function post(path, { key, raw, json, contentType = 'application/json' } = {}) {
-    const headers = { accept: 'application/json', 'x-forwarded-for': `10.9.${(n >> 8) & 255}.${n++ & 255}` };
+async function post(path, { key, raw, json, contentType = 'application/json', ip = `10.9.${(n >> 8) & 255}.${n++ & 255}` } = {}) {
+    const headers = { accept: 'application/json', 'x-forwarded-for': ip };
     if (key) headers.authorization = `Bearer ${key}`;
     if (raw !== undefined || json !== undefined) headers['content-type'] = contentType;
     const res = await fetch(BASE + path, { method: 'POST', headers, body: raw !== undefined ? raw : json !== undefined ? JSON.stringify(json) : undefined, redirect: 'manual' });
@@ -90,6 +91,22 @@ test('a valid key reaches the action with no login (here: refused because remote
     assert.equal(r.location, '');
     assert.equal(r.status, 403);
     assert.equal(JSON.parse(r.text).code, 'DISABLED');
+});
+
+test('a valid key works from an address that failed too often; a bad or missing key from it gets 429', async () => {
+    const ip = '10.8.0.1';
+    const body = { json: { protocol: 'rdp', address: '10.0.0.5', port: 3389 }, ip };
+    for (let i = 0; i < 20; i++) assert.equal((await post('/api/v1/remote-access/launch', { ...body, key: 'nbc_' + crypto.randomBytes(32).toString('base64url') })).status, 401);
+    const bad = await post('/api/v1/remote-access/launch', { ...body, key: 'nbc_' + 'x'.repeat(43) });
+    assert.equal(bad.status, 429);
+    assert.equal(JSON.parse(bad.text).code, 'TOO_MANY_FAILURES');
+    assert.equal((await post('/api/v1/remote-access/launch', body)).status, 429, 'no key');
+    for (let i = 0; i < 2; i++) {
+        const good = await post('/api/v1/remote-access/launch', { ...body, key: API_KEY });
+        assert.equal(good.status, 403);
+        assert.equal(JSON.parse(good.text).code, 'DISABLED', 'the valid key reached the action');
+    }
+    assert.equal((await post('/api/v1/remote-access/launch', { ...body, key: 'nbc_' + 'y'.repeat(43) })).status, 429, 'a valid key does not lift the block');
 });
 
 test('a body that is not JSON: 400, and its contents appear in no log line or response, on every path form', async () => {
