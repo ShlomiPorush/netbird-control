@@ -283,10 +283,9 @@ function authExplanation(a: AccessAuthorization, q: AccessQuery): string {
   if (a.reason === 'user_blocked') return 'The user is blocked in NetBird.';
   switch (a.verdict) {
     case 'granted': return q.protocol === 'any' ? 'A policy from the user\'s groups allows access to it.' : `A policy from the user's groups allows ${queryText(q)}.`;
-    case 'partial': return 'The user is authorized for some of the resources in this network.';
+    case 'partial': return 'The user is authorized for some of the resources in this network (some may need posture checks).';
     case 'conditional': return 'A policy allows it only for a device that passes its posture checks.';
     case 'port_blocked': return `A policy from the user's groups reaches it, but not for ${queryText(q)}.`;
-    case 'cannot_determine': return 'A blocking rule has a port format this check does not understand.';
     default:
       return blocked.length ? `A blocking rule covers it: ${[...new Set(blocked)].join(', ')}.` : 'No policy from the user\'s groups reaches it.';
   }
@@ -296,10 +295,9 @@ function authExplanation(a: AccessAuthorization, q: AccessQuery): string {
 function deviceGap(r: UserAccessResult): string | null {
   if (!authorizedVerdict(r.authorization.verdict) || authorizedVerdict(r.verdict)) return null;
   if (r.reason === 'no_devices') return 'The user has no devices yet.';
-  if (r.verdict === 'pending') return 'None of the user\'s devices is in the authorized groups yet.';
   if (r.reason === 'device_cannot_connect') return 'A device of the user cannot connect right now - see Device Details.';
   if (r.verdict === 'cannot_determine') return 'Whether the user\'s devices can reach it right now cannot be determined - see Device Details.';
-  return 'None of the user\'s devices can reach it right now - see Device Details.';
+  return 'None of the user\'s devices has this access right now - see Device Details for why.';
 }
 
 function UserResult({ r }: { r: UserAccessResult }) {
@@ -533,7 +531,7 @@ function WhoResult({ r, onDetails }: { r: WhoHasAccessResult; onDetails: (userId
         {uncertain > 0 && <p>For {plural(uncertain, 'more user', 'more users')} the answer cannot be determined.</p>}
         {portOnly > 0 && <p>{plural(portOnly, 'more is', 'more are')} authorized for it, but not for {queryText(r.query)}.</p>}
       </Banner>
-      {r.authorized.length > 0 && <AuthorizedTable rows={r.authorized} q={r.query} onDetails={onDetails} />}
+      {r.authorized.length > 0 && <AuthorizedTable rows={r.authorized} q={r.query} network={r.target.type === 'network'} onDetails={onDetails} />}
       {!r.authorized.length && <Panel><EmptyState title="Nobody Is Authorized" hint="No policy from any user's groups reaches this target." /></Panel>}
       {deviceCount > 0 && (
         <Collapsible title="Device Details">
@@ -563,7 +561,7 @@ function WhoResult({ r, onDetails }: { r: WhoHasAccessResult; onDetails: (userId
   );
 }
 
-function AuthorizedTable({ rows, q, onDetails }: { rows: WhoAuthorizedUser[]; q: AccessQuery; onDetails: (userId: string) => void }) {
+function AuthorizedTable({ rows, q, network, onDetails }: { rows: WhoAuthorizedUser[]; q: AccessQuery; network: boolean; onDetails: (userId: string) => void }) {
   return (
     <Panel className="overflow-hidden">
       <h3 className="px-4 pt-4 pb-3 text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Users</h3>
@@ -578,7 +576,7 @@ function AuthorizedTable({ rows, q, onDetails }: { rows: WhoAuthorizedUser[]; q:
             <div className="flex-1 min-w-0 flex flex-col gap-1">
               {u.resources.map((x) => (
                 <p key={x.resource.id} className="text-xs text-nb-gray-600 dark:text-nb-gray-400 flex flex-wrap items-center gap-1.5">
-                  {u.resources.length > 1 && <span className="font-medium text-nb-gray-700 dark:text-nb-gray-300">{x.resource.name}:</span>}
+                  {network && <span className="font-medium text-nb-gray-700 dark:text-nb-gray-300">{x.resource.name}:</span>}
                   <span>{x.policies.join(', ')}{x.via.length ? ` through ${x.via.join(', ')}` : ''}</span>
                   {x.temporary && <Badge tone="gray" className="py-0.5 px-1.5 text-[0.68rem]">Temporary</Badge>}
                 </p>

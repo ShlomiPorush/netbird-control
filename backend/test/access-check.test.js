@@ -654,7 +654,17 @@ function authzSnap() {
         pol('pol-t8', [rule({ ports: ['9100'], sources: [{ id: 'g-gone' }], destinationResource: { id: 'r1', type: 'host' } })], { name: 'Temporary access #8' }),
         pol('pol-t9', [rule({ ports: ['9200'], sources: [{ id: 'g-all' }], destinationResource: { id: 'r-lab', type: 'subnet' } })], { name: 'Temporary access #9' }),
         pol('pol-udp', [rule({ protocol: 'udp', ports: ['53'], destinationResource: { id: 'r-lab', type: 'subnet' } })], { name: 'Lab DNS' }),
+        // Rule shapes the two readings could disagree on, all toward r-x.
+        pol('pol-x-range', [rule({ ports: ['8000-8100'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Range In Ports' }),
+        pol('pol-x-all', [rule({ protocol: 'all', ports: ['9300'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'All With Ports' }),
+        pol('pol-x-udpdrop', [rule({ protocol: 'udp', action: 'drop', ports: ['5000-5100'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'UDP Range Drop' }),
+        pol('pol-x-upper', [rule({ action: 'ACCEPT', ports: ['9400'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Upper Case' }),
+        pol('pol-x-bad', [rule({ ports: ['abc'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Bad Token' }),
+        pol('pol-x-7000', [rule({ ports: ['7000'], sources: [{ id: 'g-other' }], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Other 7000' }),
+        pol('pol-x-7000d', [rule({ action: 'drop', ports: ['7000'], sources: [{ id: 'g-other' }], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'No 7000' }),
     ];
+    s.resources.push({ id: 'r-x', name: 'edge', type: 'subnet', address: '10.8.0.0/24', enabled: true, groups: [] });
+    s.networks[1].resources.push('r-x');
     return s;
 }
 
@@ -667,7 +677,7 @@ test('authorization agrees with the Remote Access policy check on every TCP port
     for (const userId of ['u1', 'u2', 'u3']) {
         const src = userSourceGroups(s, userId, NOW);
         for (const res of s.resources) {
-            for (const port of [22, 53, 443, 3389, 5900, 8080, 9000, 9100, 9200, 12345]) {
+            for (const port of [22, 53, 443, 3389, 5050, 5900, 7000, 8050, 8080, 9000, 9100, 9200, 9300, 9400, 12345]) {
                 const ra = evaluatePolicies(s, { managedPolicyId: null }, src, res, port, NOW, {});
                 const a = authz(s, userId, { type: 'resource', id: res.id }, { protocol: 'tcp', port });
                 assert.equal(a.verdict, map[ra.code], `${userId} ${res.id}:${port} remote-access=${ra.code} access-check=${a.verdict}`);
@@ -675,7 +685,33 @@ test('authorization agrees with the Remote Access policy check on every TCP port
             }
         }
     }
-    assert.equal(compared, 90);
+    assert.equal(compared, 180);
+});
+
+test('authorization reads rules as Remote Access does, and credits only the policies behind the answer', () => {
+    const s = authzSnap();
+    const x = { type: 'resource', id: 'r-x' };
+    assert.equal(authz(s, 'u1', x, { protocol: 'tcp', port: 8050 }).verdict, 'granted');   // "8000-8100" in ports
+    assert.equal(authz(s, 'u1', x, { protocol: 'tcp', port: 9300 }).verdict, 'granted');   // "all" with ports
+    assert.equal(authz(s, 'u1', x, { protocol: 'tcp', port: 9301 }).verdict, 'port_blocked');
+    assert.equal(authz(s, 'u1', x, { protocol: 'tcp', port: 9400 }).verdict, 'port_blocked'); // "ACCEPT" does not count
+    assert.equal(authz(s, 'u1', x, { protocol: 'udp', port: 5050 }).verdict, 'denied');    // the UDP range drop
+    assert.equal(authz(s, 'u1', x, { protocol: 'udp', port: 5050 }).resources[0].reason, 'blocked_by_policy');
+    assert.equal(authz(s, 'u2', x, { protocol: 'tcp', port: 443 }).verdict, 'port_blocked'); // accept 7000, dropped 7000
+    const rdp = authz(s, 'u1', { type: 'resource', id: 'r1' }, { protocol: 'tcp', port: 3389 });
+    assert.deepEqual(rdp.resources[0].grantedBy.map(g => g.policy), ['Staff RDP']);
+    const port = authz(s, 'u1', { type: 'resource', id: 'r1' }, { protocol: 'tcp', port: 12345 });
+    assert.equal(port.verdict, 'port_blocked');
+    assert.ok(port.resources[0].grantedBy.length >= 2); // nothing opens it: every accept is shown
+});
+
+test('a network with posture-only and unauthorized resources is partly authorized', () => {
+    const s = base();
+    s.policies = [pol('p-web', [rule({ ports: ['443'], destinations: [{ id: 'g-srv' }] })], { name: 'Web', source_posture_checks: ['pc-1'] })];
+    const net = { type: 'network', id: 'n1' };
+    assert.equal(authz(s, 'u1', net, { protocol: 'any' }).verdict, 'partial');
+    s.policies.push(pol('p-lan', [rule({ destinationResource: { id: 'r-lan', type: 'subnet' } })], { name: 'LAN', source_posture_checks: ['pc-1'] }));
+    assert.equal(authz(s, 'u1', net, { protocol: 'any' }).verdict, 'conditional');
 });
 
 test('authorization does not depend on having a device', () => {

@@ -127,6 +127,35 @@ function ruleSet(rule) {
     return null;
 }
 
+// The traffic one rule opens, read the way Remote Access reads it (ruleOpensTcpPort): a port
+// token is "N" or "N-M" and an unreadable token opens nothing; a non-array ports field opens
+// nothing; no ports at all opens every port; "all" with ports opens only those ports. Used by
+// the authorization, so that it agrees with Remote Access on every TCP port.
+const AUTH_PORT_RE = /^(\d{1,5})(?:-(\d{1,5}))?$/;
+function authRuleSet(rule) {
+    const proto = String(rule.protocol || '').toLowerCase();
+    if ((rule.ports !== undefined && rule.ports !== null && !Array.isArray(rule.ports))
+        || (rule.port_ranges !== undefined && rule.port_ranges !== null && !Array.isArray(rule.port_ranges))) return emptySet();
+    const ports = arr(rule.ports);
+    const ranges = arr(rule.port_ranges);
+    const intervals = [];
+    for (const tok of ports) {
+        const m = AUTH_PORT_RE.exec(String(tok).trim());
+        if (m) intervals.push([Math.max(1, Number(m[1])), Math.min(MAX_PORT, m[2] ? Number(m[2]) : Number(m[1]))]);
+    }
+    for (const r of ranges) {
+        const a = Number(r && r.start), b = Number(r && r.end);
+        if (Number.isInteger(a) && Number.isInteger(b)) intervals.push([Math.max(1, a), Math.min(MAX_PORT, b)]);
+    }
+    const any = !ports.length && !ranges.length;
+    const list = any ? [[1, MAX_PORT]] : normIntervals(intervals);
+    if (proto === 'tcp') return { tcp: list, udp: [], icmp: false };
+    if (proto === 'udp') return { tcp: [], udp: list, icmp: false };
+    if (proto === 'all') return { tcp: list, udp: list, icmp: any };
+    if (proto === 'icmp') return { tcp: [], udp: [], icmp: true };
+    return emptySet();
+}
+
 // Does the allowed set answer the query? Without a protocol: any traffic at all.
 function setAnswers(s, query) {
     const { protocol, port } = query;
@@ -206,7 +235,8 @@ function buildIndex(snap) {
                 policyId: p.id, policyName: p.name || p.id, ruleIndex: i, action,
                 sources: new Set(arr(rule.sources).map(idOf).filter(Boolean)),
                 sourcePeer: src && String(src.type || '').toLowerCase() === 'peer' ? idOf(src) : null,
-                dest, set: ruleSet(rule), posture: postureIds.length > 0, postureIds,
+                dest, set: ruleSet(rule), authSet: authRuleSet(rule), exactAction: (rule.action || 'accept') === action,
+                posture: postureIds.length > 0, postureIds,
                 infra: managed.has(p.id), managedName: MANAGED_POLICY_NAMES.has(p.name),
                 tempGrant: (TEMP_POLICY_RE.exec(p.name || '') || [])[1] || null,
             });
@@ -676,42 +706,39 @@ function userVerdict(ix, snap, user, t, query, now) {
 // session cannot pass device checks. Here such a policy makes the answer "conditional" - the
 // user is authorized if their device passes the checks.
 function authorizeResource(ix, groups, res, query, now) {
-    const rules = ix.rules.filter(r => r.dest.has(res.id) && !r.infra && !r.managedName
+    const rules = ix.rules.filter(r => r.dest.has(res.id) && !r.infra && !r.managedName && r.exactAction
         && (!r.tempGrant || grantIsValid(ix.grantById.get(r.tempGrant), now))
         && [...r.sources].some(g => groups.has(g)));
-    let accept = emptySet();
-    let acceptNoPosture = emptySet();
-    let drop = emptySet();
-    let unparsableDrop = false;
-    const grantedBy = [];
-    const drops = [];
-    for (const r of rules) {
-        if (!r.set) { if (r.action === 'drop') unparsableDrop = true; continue; }
-        if (r.action === 'drop') { drop = unionSets(drop, r.set); drops.push(r); continue; }
-        accept = unionSets(accept, r.set);
-        if (!r.posture) acceptNoPosture = unionSets(acceptNoPosture, r.set);
-        const via = [...r.sources].filter(g => groups.has(g));
-        const tempId = r.tempGrant || via.map(g => (TEMP_GROUP_RE.exec(ix.groupName.get(g) || '') || [])[1]).find(Boolean) || null;
-        grantedBy.push({
-            policy: r.policyName, policyId: r.policyId,
-            via: via.map(g => ix.groupName.get(g) || g), ports: describeSet(r.set),
-            ...(r.posture ? { postureChecks: r.postureIds.map(id => ix.postureName.get(id) || id) } : {}),
-            ...(tempId ? { temp: tempNote(ix, tempId, now) } : {}),
-        });
-    }
-    const allowed = subtractSets(accept, drop);
-    const certain = subtractSets(acceptNoPosture, drop);
-    // A drop is worth naming when it removes something the accepts open, or blocks the query.
-    const blockedBy = [...new Set(drops.filter(r => !setIsEmpty(intersectSets(r.set, accept)) || setAnswers(r.set, query)).map(r => r.policyName))];
+    const accepts = rules.filter(r => r.action === 'accept');
+    const drops = rules.filter(r => r.action === 'drop');
+    const union = (list) => list.reduce((s, r) => unionSets(s, r.authSet), emptySet());
+    const drop = union(drops);
+    const allowed = subtractSets(union(accepts), drop);
+    const certain = subtractSets(union(accepts.filter(r => !r.posture)), drop);
     let verdict;
     let reason;
-    if (unparsableDrop) { verdict = 'cannot_determine'; reason = 'unparsable_rule'; }
-    else if (setAnswers(certain, query)) verdict = 'granted';
+    if (setAnswers(certain, query)) verdict = 'granted';
     else if (setAnswers(allowed, query)) verdict = 'conditional';
-    // A drop rule that covers the query blocks it, as in Remote Access (BLOCKED_BY_POLICY).
+    // As in Remote Access: a drop that covers the query blocks it (BLOCKED_BY_POLICY), and an
+    // accept that reaches the resource but not for this query is "not on this port".
     else if (setAnswers(drop, query)) { verdict = 'denied'; reason = 'blocked_by_policy'; }
-    else if (query.protocol !== 'any' && !setIsEmpty(allowed)) verdict = 'port_blocked';
+    else if (query.protocol !== 'any' && accepts.some(r => !setAnswers(r.authSet, query))) verdict = 'port_blocked';
     else verdict = 'denied';
+    // Name the policies behind this answer: the accepts that still open the query after the
+    // drops, or, when none does, every accept that reaches the resource.
+    const open = accepts.filter(r => setAnswers(subtractSets(r.authSet, drop), query));
+    const grantedBy = (open.length ? open : accepts).map(r => {
+        const via = [...r.sources].filter(g => groups.has(g));
+        const tempId = r.tempGrant || via.map(g => (TEMP_GROUP_RE.exec(ix.groupName.get(g) || '') || [])[1]).find(Boolean) || null;
+        return {
+            policy: r.policyName, policyId: r.policyId,
+            via: via.map(g => ix.groupName.get(g) || g), ports: describeSet(r.authSet),
+            ...(r.posture ? { postureChecks: r.postureIds.map(id => ix.postureName.get(id) || id) } : {}),
+            ...(tempId ? { temp: tempNote(ix, tempId, now) } : {}),
+        };
+    });
+    const acceptAll = union(accepts);
+    const blockedBy = [...new Set(drops.filter(r => !setIsEmpty(intersectSets(r.authSet, acceptAll)) || setAnswers(r.authSet, query)).map(r => r.policyName))];
     return {
         resource: resInfo(ix, res), verdict, allowed: describeSet(allowed), grantedBy, blockedBy,
         ...(reason ? { reason } : {}),
@@ -724,10 +751,12 @@ function authorizeUser(ix, snap, user, t, query, now) {
     const groups = [...src.groups].filter(g => !ix.allIds.includes(g)).map(g => ix.groupName.get(g) || g).sort((a, b) => a.localeCompare(b));
     const resources = t.resources.map(r => authorizeResource(ix, src.groups, r, query, now));
     const vs = resources.map(r => r.verdict);
+    const positive = (v) => v === 'granted' || v === 'conditional';
     let verdict;
     if (!vs.length) verdict = 'denied';
     else if (vs.every(v => v === 'granted')) verdict = 'granted';
-    else if (t.type === 'network' && vs.some(v => v === 'granted')) verdict = 'partial';
+    else if (vs.every(positive)) verdict = 'conditional';
+    else if (vs.some(positive)) verdict = 'partial';
     else verdict = best(vs);
     return { verdict, groups, resources };
 }

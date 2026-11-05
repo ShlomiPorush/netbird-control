@@ -1924,7 +1924,7 @@ export interface AccessAuthResource {
   allowed: AccessPortsDesc;
   grantedBy: AccessAuthGrant[];
   blockedBy: string[];
-  reason?: 'unparsable_rule' | 'blocked_by_policy';
+  reason?: 'blocked_by_policy';
 }
 export interface AccessAuthorization { verdict: AccessVerdict; reason?: 'user_blocked' | 'user_not_found'; groups: string[]; resources: AccessAuthResource[] }
 export interface WhoAuthorizedUser {
