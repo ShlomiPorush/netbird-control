@@ -192,7 +192,22 @@ function buildIndex(snap) {
             });
         });
     }
-    return { groupName, allIds, resources, resById, netOf, grantById, postureName, users, userById, rules };
+    // Routing peers per network: a Set of peer ids, or null when its routers were not read.
+    const routerPeers = new Map();
+    const routerLists = snap.routers instanceof Map ? snap.routers : new Map();
+    const groupById = new Map(arr(snap.groups).map(g => [g.id, g]));
+    for (const n of arr(snap.networks)) {
+        const list = routerLists.get(n.id);
+        if (!Array.isArray(list)) { routerPeers.set(n.id, null); continue; }
+        const set = new Set();
+        for (const r of list) {
+            if (!r || r.enabled === false) continue;
+            if (r.peer) set.add(idOf(r.peer));
+            for (const g of arr(r.peer_groups)) for (const m of arr((groupById.get(idOf(g)) || {}).peers)) set.add(idOf(m));
+        }
+        routerPeers.set(n.id, set);
+    }
+    return { groupName, allIds, resources, resById, netOf, grantById, postureName, users, userById, rules, routerPeers };
 }
 
 // A device's view: its groups (+ All), and the rules whose sources hit it.
@@ -225,8 +240,45 @@ function tempNote(ix, id, now) {
     return { id: String(id), state: 'ended', status: g.status || '' };
 }
 
-// Evaluate the winner's rules for one part. Returns the part answer and its explanation.
-function evaluatePart(ix, entries, winnerId, query, now) {
+// Which resources' rules apply on the routing peer that carries this part. The client sends the
+// traffic along the winning route, so it reaches a routing peer of the winner's network. That
+// peer installs the rules of EVERY resource it routes and checks all of them whose destination
+// contains the address, drops before accepts (NetBird client/firewall/uspfilter routeACLsPass).
+// So the winner's rules apply together with those of every resource covering the part that the
+// same routing peer serves: always in the winner's own network, and in another network when its
+// routing peers include all of the winner's. Partial or unknown sharing is uncertain.
+function routerScope(ix, winnerId, coverIds) {
+    const wNet = (ix.netOf.get(winnerId) || {}).id;
+    const definite = new Set([winnerId]);
+    const uncertain = new Set();
+    for (const id of coverIds) {
+        if (id === winnerId) continue;
+        const net = (ix.netOf.get(id) || {}).id;
+        if (net && net === wNet) { definite.add(id); continue; }
+        const a = wNet ? ix.routerPeers.get(wNet) : null;
+        const b = net ? ix.routerPeers.get(net) : null;
+        if (!a || !b || !a.size) { uncertain.add(id); continue; }
+        const shared = [...a].filter(p => b.has(p)).length;
+        if (shared === a.size) definite.add(id);
+        else if (shared) uncertain.add(id);
+    }
+    return { definite, uncertain };
+}
+
+const sameAllowed = (a, b) => a.answer === b.answer && JSON.stringify(a.allowed) === JSON.stringify(b.allowed);
+
+// Evaluate one part on its routing peer. Returns the part answer and its explanation.
+function evaluatePart(ix, entries, winnerId, coverIds, query, now) {
+    const { definite, uncertain } = routerScope(ix, winnerId, coverIds);
+    const sure = evaluateRules(ix, entries, definite, winnerId, query, now);
+    if (!uncertain.size || sure.answer === 'unknown') return sure;
+    const wider = evaluateRules(ix, entries, new Set([...definite, ...uncertain]), winnerId, query, now);
+    if (sameAllowed(sure, wider)) return sure;
+    return { ...sure, answer: 'unknown', reason: 'router_unknown' };
+}
+
+// Accepts minus drops over the device's rules toward any resource in `scope`.
+function evaluateRules(ix, entries, scope, winnerId, query, now) {
     let accept = emptySet();
     let drop = emptySet();
     const grantedBy = [];
@@ -234,9 +286,15 @@ function evaluatePart(ix, entries, winnerId, query, now) {
     let unparsableDrop = false;
     let unparsableAccept = false;
     for (const e of entries) {
-        if (!e.dest.has(winnerId)) continue;
+        const hit = [...e.dest].filter(id => scope.has(id));
+        if (!hit.length) continue;
         if (!e.set) { if (e.action === 'drop') unparsableDrop = true; else unparsableAccept = true; continue; }
-        if (e.action === 'drop') { drop = unionSets(drop, e.set); blockedBy.add(e.policyName); continue; }
+        if (e.action === 'drop') {
+            drop = unionSets(drop, e.set);
+            const on = hit.includes(winnerId) ? '' : ((ix.resById.get(hit[0]) || {}).name || hit[0]);
+            blockedBy.add(on ? `${e.policyName} (on ${on})` : e.policyName);
+            continue;
+        }
         accept = unionSets(accept, e.set);
         const groupTemp = e.via.map(g => (TEMP_GROUP_RE.exec(ix.groupName.get(g) || '') || [])[1]).find(Boolean);
         const tempId = e.tempGrant || groupTemp || null;
@@ -276,16 +334,16 @@ function partition(ix, target, relevant) {
             const a = points[i], b = points[i + 1] - 1;
             const cover = rel.filter(x => x.a.start <= a && x.a.end >= b);
             const top = cover.reduce((m, x) => Math.max(m, x.a.bits), -1);
-            parts.push({ start: a, end: b, winners: cover.filter(x => x.a.bits === top).map(x => x.r.id) });
+            parts.push({ start: a, end: b, winners: cover.filter(x => x.a.bits === top).map(x => x.r.id), cover: cover.map(x => x.r.id) });
         }
         // Merge neighbours with the same winners so the output stays readable.
         const merged = [];
         for (const p of parts) {
             const last = merged[merged.length - 1];
-            if (last && last.end + 1 === p.start && last.winners.join() === p.winners.join()) last.end = p.end;
+            if (last && last.end + 1 === p.start && last.winners.join() === p.winners.join() && last.cover.join() === p.cover.join()) last.end = p.end;
             else merged.push({ ...p });
         }
-        return { kind: 'ip', parts: merged.map(p => ({ label: rangeLabel(p.start, p.end), winners: p.winners })) };
+        return { kind: 'ip', parts: merged.map(p => ({ label: rangeLabel(p.start, p.end), winners: p.winners, cover: p.cover })) };
     }
     if (t.kind === 'domain') {
         const rel = relevant.map(r => ({ r, a: addrOf(r) })).filter(x => x.a.kind === 'domain');
@@ -295,7 +353,8 @@ function partition(ix, target, relevant) {
             const top = list.reduce((m, x) => Math.max(m, x.a.pattern.rank), -1);
             return list.filter(x => x.a.pattern.rank === top).map(x => x.r.id);
         };
-        if (!T.wildcard) return { kind: 'domain', parts: [{ label: patternKey(T), winners: winnersOf(coversT) }] };
+        const idsOf = (list) => list.map(x => x.r.id);
+        if (!T.wildcard) return { kind: 'domain', parts: [{ label: patternKey(T), winners: winnersOf(coversT), cover: idsOf(coversT) }] };
         // Patterns strictly inside the wildcard target, each a part of its own minus the more
         // specific patterns inside it; the remainder is T minus all of them.
         const inside = new Map();
@@ -312,14 +371,15 @@ function partition(ix, target, relevant) {
         for (const k of keys) {
             const { pattern, ids } = inside.get(k);
             const ex = pattern.wildcard ? except(pattern) : [];
-            parts.push({ label: ex.length ? `${k} (except ${ex.join(', ')})` : k, winners: ids });
+            parts.push({ label: ex.length ? `${k} (except ${ex.join(', ')})` : k, winners: ids, cover: idsOf(rel.filter(x => patternCovers(x.a.pattern, pattern))) });
         }
         const exAll = keys;
-        parts.push({ label: exAll.length ? `${patternKey(T)} (except ${exAll.join(', ')})` : patternKey(T), winners: winnersOf(coversT) });
+        parts.push({ label: exAll.length ? `${patternKey(T)} (except ${exAll.join(', ')})` : patternKey(T), winners: winnersOf(coversT), cover: idsOf(coversT) });
         return { kind: 'domain', parts };
     }
     // IPv6 or an address shape this check does not parse: only the target's own rules count.
-    return { kind: 'other', parts: [{ label: target.address || target.name || target.id, winners: relevant.some(r => r.id === target.id) ? [target.id] : [] }] };
+    const own = relevant.some(r => r.id === target.id) ? [target.id] : [];
+    return { kind: 'other', parts: [{ label: target.address || target.name || target.id, winners: own, cover: own }] };
 }
 
 // Resources that may route part of the target for this device: enabled, at least one rule
@@ -353,7 +413,7 @@ function summarize(ix, entries, target, query, now) {
             return { ...base, answer: 'unknown', reason: 'ambiguous_route', hasAllowed: false, winners: p.winners.map(id => resInfo(ix, ix.resById.get(id))) };
         }
         const w = ix.resById.get(p.winners[0]);
-        return { ...base, winner: resInfo(ix, w), ...(w.id !== target.id ? { overlapping: true } : {}), ...evaluatePart(ix, entries, w.id, query, now) };
+        return { ...base, winner: resInfo(ix, w), ...(w.id !== target.id ? { overlapping: true } : {}), ...evaluatePart(ix, entries, w.id, p.cover, query, now) };
     });
     const yes = results.filter(r => r.answer === 'yes').length;
     const unknown = results.filter(r => r.answer === 'unknown').length;
@@ -382,8 +442,9 @@ function deviceAnswer(ix, entries, target, query, now) {
     // fails them together: the two extremes are the only outcomes, so if they agree the answer
     // is definitive. With different check sets, a mixed result can differ from both extremes.
     const checkSets = new Set(gated.map(e => [...e.postureIds].sort().join('\u0000')));
+    const key = (p) => JSON.stringify([p.label, p.answer, p.reason || '', p.allowed || null, (p.winner || {}).id || '']);
     const same = (a, b) => a.verdict === b.verdict && a.parts.length === b.parts.length
-        && a.parts.every((p, i) => p.answer === b.parts[i].answer && p.label === b.parts[i].label);
+        && a.parts.every((p, i) => key(p) === key(b.parts[i]));
     if (checkSets.size === 1 && same(baseline, full)) return { ...full, postureIndependent: [...policies.values()] };
     return { verdict: 'conditional', ifChecksFail: baseline, ifChecksPass: full, posturePolicies: [...policies.values()] };
 }
@@ -593,8 +654,10 @@ function whoHasAccess(snap, { target, query, now = Date.now() }) {
     const listedIds = new Set(people.map(u => u.id));
     const users = [];
     const pending = [];
+    const evaluated = [];
     for (const u of people) {
         const r = userVerdict(ix, snap, u, t, q, now);
+        evaluated.push(...r.devices);
         const compact = { user: userInfo(u), verdict: r.verdict, devices: r.devices.filter(d => d.answer.verdict !== 'denied').map(compactDevice) };
         if (r.verdict === 'pending') pending.push({ ...compact, pendingAs: r.pendingAs });
         else if (LISTED.has(r.verdict)) users.push(compact);
@@ -604,10 +667,14 @@ function whoHasAccess(snap, { target, query, now = Date.now() }) {
     for (const p of arr(snap.peers)) {
         if (!p || (p.user_id && listedIds.has(p.user_id))) continue;
         const d = deviceVsTarget(ix, snap, p, t, q, now);
+        evaluated.push(d);
         if (d.answer.verdict !== 'denied') devices.push(compactDevice(d));
     }
-    const nets = [...new Set(t.resources.map(r => (ix.netOf.get(r.id) || {}).id).filter(Boolean))];
-    return { target: targetInfo(ix, t), query: q, users, pending, devices, routers: routerStatus(snap, nets) };
+    const nets = [...new Set([...t.resources.map(r => (ix.netOf.get(r.id) || {}).id).filter(Boolean), ...networksInAnswers(evaluated)])];
+    return {
+        target: targetInfo(ix, t), query: q, users, pending, devices,
+        routers: routerStatus(snap, nets), legacyRoutes: legacyRouteWarnings(snap, t.resources),
+    };
 }
 
 // A granting rule that comes from a temporary grant that has ended but is still in NetBird.

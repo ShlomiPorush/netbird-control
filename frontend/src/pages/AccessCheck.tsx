@@ -44,6 +44,7 @@ const PART_REASON: Record<string, string> = {
   ambiguous_route: 'Two resources have exactly this address - NetBird may pick either one',
   unparsable_rule: 'A blocking rule has a port format this check does not understand',
   not_checked: 'No policy targets this resource directly, and overlap is not checked for this address type',
+  router_unknown: 'A resource in another network also covers this part, and it is not known whether the same routing peer serves it - its rules could change the answer',
 };
 
 function verdictLabel(v: AccessVerdict | 'cannot_connect', q?: AccessQuery) {
@@ -123,12 +124,18 @@ export default function AccessCheck() {
   const portEnabled = draft.protocol === 'tcp' || draft.protocol === 'udp';
   const portValid = !draft.port || (/^\d{1,5}$/.test(draft.port) && Number(draft.port) >= 1 && Number(draft.port) <= 65535);
   const ready = !!draft.target && (p.mode === 'who' || !!draft.user) && portValid;
-  const run = () => p.set({ user: draft.user, target: draft.target, protocol: draft.protocol === 'any' ? '' : draft.protocol, port: portEnabled ? draft.port : '' });
-
   const committed = toParams(p.target, p.protocol, p.port);
   const userQ = useUserAccessCheck(p.mode === 'user' ? p.user : '', p.mode === 'user' ? committed : null);
   const whoQ = useWhoHasAccess(p.mode === 'who' ? committed : null);
   const active = p.mode === 'user' ? userQ : whoQ;
+  // Committing the same values leaves the query key unchanged, so ask for a fresh read instead:
+  // a repeated Check must reflect NetBird now (after a change, or after a failed read).
+  const run = () => {
+    const next = { user: draft.user, target: draft.target, protocol: draft.protocol === 'any' ? '' : draft.protocol, port: portEnabled ? draft.port : '' };
+    const unchanged = next.target === p.target && (next.protocol || 'any') === p.protocol && next.port === p.port && (p.mode === 'who' || next.user === p.user);
+    if (unchanged && committed) void active.refetch();
+    else p.set(next);
+  };
 
   return (
     <div className="flex flex-col gap-5">
@@ -406,20 +413,33 @@ function PartRow({ p, single }: { p: AccessPart; single: boolean }) {
 
 // ─── Who Has Access result ───
 
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
 function WhoResult({ r, onDetails }: { r: WhoHasAccessResult; onDetails: (userId: string) => void }) {
-  const granted = r.users.filter((u) => u.verdict === 'granted').length;
-  const tone: Tone = r.users.length || r.devices.length ? (granted ? 'green' : 'amber') : 'red';
-  const title = r.users.length
-    ? `${r.users.length} User${r.users.length === 1 ? '' : 's'} With Access`
-    : 'No User Has Access';
+  // Only granted and partial are proven access; the rest are listed with what they are.
+  const count = (v: AccessVerdict) => r.users.filter((u) => u.verdict === v).length;
+  const full = count('granted');
+  const proven = full + count('partial');
+  const conditional = count('conditional');
+  const uncertain = count('cannot_determine');
+  const portOnly = count('port_blocked');
+  const devicesWith = r.devices.filter((d) => d.effective === 'granted' || d.effective === 'partial').length;
+  const devicesOther = r.devices.length - devicesWith;
+  const tone: Tone = full ? 'green' : proven || conditional ? 'amber' : uncertain ? 'gray' : 'red';
+  const title = proven ? `${plural(proven, 'User', 'Users')} With Access` : 'No User With Access';
   return (
     <div className="flex flex-col gap-4">
       <Banner tone={tone} title={title}>
         <p className="text-nb-gray-500">Target: {targetName(r.target)} · {queryText(r.query)}</p>
-        {r.pending.length > 0 && <p>{r.pending.length} more would get access once one of their devices joins the right group.</p>}
-        {r.devices.length > 0 && <p>{r.devices.length} device{r.devices.length === 1 ? '' : 's'} without a listed owner also {r.devices.length === 1 ? 'has' : 'have'} access.</p>}
+        {proven > full && <p>{plural(proven - full, 'of them reaches', 'of them reach')} only part of it.</p>}
+        {conditional > 0 && <p>{plural(conditional, 'more depends', 'more depend')} on posture checks.</p>}
+        {uncertain > 0 && <p>For {plural(uncertain, 'more user', 'more users')} the answer cannot be determined - the reasons are in their details.</p>}
+        {portOnly > 0 && <p>{plural(portOnly, 'more reaches', 'more reach')} it, but not for {queryText(r.query)}.</p>}
+        {r.pending.length > 0 && <p>{plural(r.pending.length, 'more would', 'more would')} get access once one of their devices joins the right group.</p>}
+        {devicesWith > 0 && <p>{plural(devicesWith, 'device', 'devices')} without a listed owner also {devicesWith === 1 ? 'has' : 'have'} access.</p>}
+        {devicesOther > 0 && <p>{plural(devicesOther, 'other device matches', 'other devices match')} a policy but cannot connect, or the answer is not certain.</p>}
       </Banner>
-      <Warnings target={r.target} routers={r.routers} />
+      <Warnings target={r.target} routers={r.routers} legacy={r.legacyRoutes} />
       {r.users.length > 0 && <UsersTable title="Users" rows={r.users} q={r.query} onDetails={onDetails} />}
       {r.pending.length > 0 && <UsersTable title="Pending - No Device In The Right Group Yet" rows={r.pending} q={r.query} onDetails={onDetails} />}
       {r.devices.length > 0 && (

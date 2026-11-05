@@ -1871,7 +1871,7 @@ export interface AccessGrantedBy { policy: string; policyId: string; infra: bool
 export interface AccessPart {
   label: string;
   answer: 'yes' | 'no' | 'unknown';
-  reason?: 'no_route' | 'ambiguous_route' | 'unparsable_rule' | 'not_checked';
+  reason?: 'no_route' | 'ambiguous_route' | 'unparsable_rule' | 'not_checked' | 'router_unknown';
   winner?: AccessResourceRef;
   winners?: AccessResourceRef[];
   overlapping?: boolean;
@@ -1944,6 +1944,7 @@ export interface WhoHasAccessResult {
   pending: WhoHasAccessUser[];
   devices: AccessCompactDevice[];
   routers: AccessRouterStatus[];
+  legacyRoutes: { resource: string; route: string }[];
 }
 export interface AccessCheckOptions {
   users: AccessUserRef[];

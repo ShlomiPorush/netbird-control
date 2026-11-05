@@ -23,6 +23,7 @@ function base() {
             { id: 'p1', name: 'dana-laptop', user_id: 'u1', groups: [{ id: 'g-staff' }], connected: true },
             { id: 'p2', name: 'avi-laptop', user_id: 'u2', groups: [{ id: 'g-other' }], connected: true },
             { id: 'p-r1', name: 'router-1', groups: [{ id: 'g-routers' }], connected: true },
+            { id: 'p-r2', name: 'router-2', groups: [], connected: true },
         ],
         groups: [
             { id: 'g-all', name: 'All' }, { id: 'g-staff', name: 'Staff' }, { id: 'g-other', name: 'Other' },
@@ -42,7 +43,7 @@ function base() {
         grants: [],
         bypassed: new Set(),
         postureChecks: [{ id: 'pc-1', name: 'Min Version' }],
-        routers: new Map([['n1', [{ id: 'rt1', peer_groups: ['g-routers'], enabled: true }]]]),
+        routers: new Map([['n1', [{ id: 'rt1', peer_groups: ['g-routers'], enabled: true }]], ['n2', [{ id: 'rt2', peer: 'p-r2', enabled: true }]]]),
         managedPolicyIds: [],
     };
 }
@@ -470,4 +471,62 @@ test('different posture check sets stay conditional even when the extremes agree
     assert.equal(r.verdict, 'conditional');
     assert.equal(r.devices[0].answer.ifChecksPass.verdict, 'port_blocked');
     assert.equal(r.devices[0].answer.ifChecksFail.verdict, 'port_blocked');
+});
+
+test('on one routing peer, a drop on a covering resource blocks the more specific route', () => {
+    // NetBird installs the rules of every resource the routing peer serves and checks drops first.
+    const s = base();
+    s.resources.push({ id: 'r-net', name: 'office-net', address: '10.0.0.0/24', enabled: true, groups: [] });
+    s.networks[0].resources.push('r-net');
+    s.policies = [
+        pol('p-a', [rule({ ports: ['22'], destinationResource: { id: 'r1' } })]),
+        pol('p-d', [rule({ action: 'drop', ports: ['22'], destinationResource: { id: 'r-net' } })], { name: 'No SSH' }),
+    ];
+    const r = userCheck(s, { query: { protocol: 'tcp', port: 22 } });
+    assert.equal(r.verdict, 'denied');
+    assert.deepEqual(r.devices[0].answer.parts[0].blockedBy, ['No SSH (on office-net)']);
+    // The same drop in another network with its own routing peer does not apply.
+    s.networks[0].resources.pop();
+    s.networks[1].resources.push('r-net');
+    assert.equal(userCheck(s, { query: { protocol: 'tcp', port: 22 } }).verdict, 'granted');
+    // ...unless that network is routed by the same peer.
+    s.routers.set('n2', [{ id: 'rt2', peer_groups: ['g-routers'], enabled: true }]);
+    assert.equal(userCheck(s, { query: { protocol: 'tcp', port: 22 } }).verdict, 'denied');
+    // Unknown routers for the other network, and the answer depends on it: cannot determine.
+    s.routers.set('n2', null);
+    const u = userCheck(s, { query: { protocol: 'tcp', port: 22 } });
+    assert.equal(u.verdict, 'cannot_determine');
+    assert.equal(u.devices[0].answer.parts[0].reason, 'router_unknown');
+});
+
+test('a covering accept on the same routing peer adds its ports to the winner', () => {
+    const s = base();
+    s.resources.push({ id: 'r-net', name: 'office-net', address: '10.0.0.0/24', enabled: true, groups: [] });
+    s.networks[0].resources.push('r-net');
+    s.policies.push(pol('p-web', [rule({ ports: ['443'], destinationResource: { id: 'r-net' } })]));
+    const r = userCheck(s);
+    assert.equal(r.devices[0].answer.parts[0].winner.id, 'r1');
+    assert.equal(r.devices[0].answer.parts[0].allowed.tcp, '443, 3389');
+});
+
+test('posture-gated extra ports keep the answer conditional even when the verdict agrees', () => {
+    const s = base();
+    s.policies.push(pol('p-ssh', [rule({ ports: ['22'], destinationResource: { id: 'r1' } })], { source_posture_checks: ['pc-1'] }));
+    const r = userCheck(s);
+    assert.equal(r.verdict, 'conditional');
+    assert.equal(r.devices[0].answer.ifChecksFail.parts[0].allowed.tcp, '3389');
+    assert.equal(r.devices[0].answer.ifChecksPass.parts[0].allowed.tcp, '22, 3389');
+});
+
+test('who has access reports legacy routes and the routers of the winning network', () => {
+    const s = base();
+    s.resources.push({ id: 'r-wide', name: 'wide', address: '10.0.0.0/16', enabled: true, groups: [] });
+    s.networks[1].resources.push('r-wide');
+    s.policies = [pol('p-wide', [rule({ destinationResource: { id: 'r-wide' } })])];
+    s.peers.find(p => p.id === 'p-r2').connected = false;
+    s.routes = [{ id: 'rt', network_id: 'old-office', network: '10.0.0.0/8', enabled: true }];
+    const r = whoHasAccess(s, { target: { type: 'resource', id: 'r1' }, now: NOW });
+    assert.deepEqual(r.users.map(u => u.user.id), ['u1']);
+    assert.deepEqual(r.legacyRoutes, [{ resource: 'r1', route: 'old-office' }]);
+    assert.deepEqual(r.routers.map(x => [x.network.id, x.status]).sort(), [['n1', 'online'], ['n2', 'offline']]);
 });
