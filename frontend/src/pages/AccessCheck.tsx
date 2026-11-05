@@ -44,7 +44,7 @@ const PART_REASON: Record<string, string> = {
   ambiguous_route: 'Two resources have exactly this address - NetBird may pick either one',
   unparsable_rule: 'A blocking rule has a port format this check does not understand',
   not_checked: 'No policy targets this resource directly, and overlap is not checked for this address type',
-  router_unknown: 'The routing peers of a network that covers this part could not be read, so the rules that apply here are not known',
+  router_unknown: 'The routing peers of a network that covers this part could not be read, or it is not certain they can route (compliance or sign-in state), so the rules that apply here are not known',
   router_differs: 'This network has several routing peers, and they apply different rules here - the answer depends on which one carries the traffic',
 };
 
@@ -407,7 +407,7 @@ function PartRow({ p, single }: { p: AccessPart; single: boolean }) {
         </div>
       )}
       {!!p.blockedBy?.length && <p className="text-xs text-nb-gray-600 dark:text-nb-gray-400"><span className="font-medium">Blocked by:</span> {p.blockedBy.join(', ')}</p>}
-      {p.variesByRouter && <p className="text-xs text-nb-gray-500">Shown: the ports open through every routing peer of this network. Some routing peers open more.</p>}
+      {p.variesByRouter && <p className="text-xs text-nb-gray-500">Shown: only the ports open through every routing peer of this network. Some routing peers open more.</p>}
       {p.note === 'unparsable_accept' && <p className="text-xs text-nb-gray-500">A rule with a port format this check does not understand was skipped.</p>}
     </div>
   );

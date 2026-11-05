@@ -205,20 +205,37 @@ function buildIndex(snap) {
             });
         });
     }
-    // Routing peers per network: a Set of peer ids, or null when its routers were not read.
+    // Routing peers per network: a Set of the peers that can route, or null when that is not
+    // known (the routers were not read, or a router's eligibility is uncertain). NetBird skips a
+    // router peer that does not exist and leaves peers waiting for compliance approval out of
+    // the network map; being offline does not remove a route.
     const routerPeers = new Map();
     const routerLists = snap.routers instanceof Map ? snap.routers : new Map();
     const groupById = new Map(arr(snap.groups).map(g => [g.id, g]));
+    const peerById = new Map(arr(snap.peers).filter(p => p && p.id).map(p => [p.id, p]));
+    const bypassed = snap.bypassed instanceof Set ? snap.bypassed : null;
     for (const n of arr(snap.networks)) {
         const list = routerLists.get(n.id);
         if (!Array.isArray(list)) { routerPeers.set(n.id, null); continue; }
-        const set = new Set();
+        const ids = new Set();
         for (const r of list) {
             if (!r || r.enabled === false) continue;
-            if (r.peer) set.add(idOf(r.peer));
-            for (const g of arr(r.peer_groups)) for (const m of arr((groupById.get(idOf(g)) || {}).peers)) set.add(idOf(m));
+            if (r.peer) ids.add(idOf(r.peer));
+            for (const g of arr(r.peer_groups)) for (const m of arr((groupById.get(idOf(g)) || {}).peers)) ids.add(idOf(m));
         }
-        routerPeers.set(n.id, set);
+        const set = new Set();
+        let uncertain = false;
+        for (const id of ids) {
+            const p = peerById.get(id);
+            if (!p) continue;
+            if (p.login_expired) { uncertain = true; continue; }
+            if (p.approval_required && !p.force_approved) {
+                if (!bypassed) { uncertain = true; continue; }
+                if (!bypassed.has(id)) continue;
+            }
+            set.add(id);
+        }
+        routerPeers.set(n.id, uncertain ? null : set);
     }
     return { groupName, allIds, resources, resById, netOf, grantById, postureName, users, userById, rules, routerPeers };
 }
@@ -280,14 +297,15 @@ function evaluatePart(ix, entries, winnerId, coverIds, query, now) {
     const results = [...scopes.values()].map(scope => evaluateRules(ix, entries, scope, winnerId, query, now));
     const first = results[0];
     if (results.length === 1) return first;
-    if (!results.every(r => r.answer === first.answer && r.reason === first.reason)) return { ...first, answer: 'unknown', reason: 'router_differs' };
-    if (results.every(r => JSON.stringify(r.allowed) === JSON.stringify(first.allowed))) return first;
-    // Same answer through every routing peer, different extra ports: show only what is open
-    // through all of them.
+    const agree = results.every(r => r.answer === first.answer && r.reason === first.reason);
+    if (agree && results.every(r => JSON.stringify(r.allowed) === JSON.stringify(first.allowed))) return first;
+    // The routing peers differ: show only the ports open through all of them, and the policies
+    // of every one. When their answers differ too, which peer carries the traffic decides.
     const common = results.map(r => RAW_ALLOWED.get(r)).reduce(intersectSets);
     return {
         ...first, allowed: describeSet(common), hasAllowed: !setIsEmpty(common), variesByRouter: true,
         grantedBy: uniqBy(results.flatMap(r => r.grantedBy)), blockedBy: [...new Set(results.flatMap(r => r.blockedBy))],
+        ...(agree ? {} : { answer: 'unknown', reason: 'router_differs' }),
     };
 }
 

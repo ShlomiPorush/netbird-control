@@ -554,6 +554,7 @@ test('high availability: routing peers that apply different rules make the answe
     const r = userCheck(s, { query: { protocol: 'tcp', port: 22 } });
     assert.equal(r.verdict, 'cannot_determine');
     assert.equal(r.devices[0].answer.parts[0].reason, 'router_differs');
+    assert.equal(r.devices[0].answer.parts[0].allowed.tcp, '3389'); // 22 is not open through router B
     // RDP is the same through either routing peer.
     assert.equal(userCheck(s, { query: { protocol: 'tcp', port: 3389 } }).verdict, 'granted');
     const rdp = userCheck(s, { query: { protocol: 'tcp', port: 3389 } }).devices[0].answer.parts[0];
@@ -577,4 +578,23 @@ test('a resource in a network with no enabled routing peer is no route', () => {
     r = userCheck(s, { query: { protocol: 'tcp', port: 22 } });
     assert.equal(r.verdict, 'granted');
     assert.equal(r.devices[0].answer.parts[0].winner.id, 'r-wide');
+});
+
+test('router peers that do not exist or wait for compliance approval do not route', () => {
+    const s = base();
+    s.routers.set('n1', [{ id: 'rt1', peer: 'MISSING', enabled: true }]);
+    assert.equal(userCheck(s).verdict, 'denied');
+    const r1 = s.peers.find(p => p.id === 'p-r1');
+    s.routers.set('n1', [{ id: 'rt1', peer: 'p-r1', enabled: true }]);
+    r1.approval_required = true;
+    assert.equal(userCheck(s).verdict, 'denied');        // blocked by compliance, no bypass
+    s.bypassed = new Set(['p-r1']);
+    assert.equal(userCheck(s).verdict, 'granted');       // bypassed: it routes
+    s.bypassed = null;
+    assert.equal(userCheck(s).verdict, 'cannot_determine'); // bypass list unreadable
+    r1.approval_required = false;
+    r1.connected = false;
+    assert.equal(userCheck(s).verdict, 'granted');       // offline does not remove the route
+    r1.login_expired = true;
+    assert.equal(userCheck(s).verdict, 'cannot_determine');
 });
