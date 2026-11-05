@@ -123,6 +123,19 @@ async function refuseManagedGroupTargets(targets) {
     const isManaged = await managedGroupCheck();
     if (ids.some(isManaged)) { const e = new Error(MANAGED_GROUP_ERROR); e.status = 400; throw e; }
 }
+// A resource's own access policies never use a managed group as their source (it would give the
+// gateway, or whoever is in that group, access the app did not decide). Checked live, before any
+// write.
+async function refuseManagedPolicySources(policies) {
+    if (!raMain()) return;
+    const ids = (Array.isArray(policies) ? policies : []).flatMap(p => (p && Array.isArray(p.sources) ? p.sources : [])).map(gid).filter(Boolean);
+    if (!ids.length) return;
+    const isManaged = await managedGroupCheck();
+    if (ids.some(isManaged)) {
+        const e = new Error("A Browser Remote Access group can't be the source of an access policy. Choose another group - nothing was changed.");
+        e.status = 400; throw e;
+    }
+}
 // Resource writes run under the target lock, and set the managed target groups by the one rule.
 const withTargets = (fn) => (raMain() ? withTargetLock(fn) : fn());
 const targetsFor = (networkId, address, ids) => (raMain() ? withManagedTargets(networkId, address, ids) : ids);
@@ -6674,6 +6687,7 @@ async function createClientResource(networkId, { name, address, description, gro
     }
     // Refuse an unusable policy before anything is created - never leave a resource behind.
     for (const p of (policies || [])) if (p) editorProtocol(p.protocol);
+    await refuseManagedPolicySources(policies);
     // allowBlocked = an ADMIN acting deliberately (the route audits the override).
     if (!allowBlocked) {
         const blocked = addressBlockedForNetwork(String(address || '').trim(), networkId, await getBlocklist());
@@ -7944,6 +7958,7 @@ async function scanResourceConflicts() {
 // (the route calls it before saving the resource too); returns the dedicated policies.
 async function checkResourcePolicySync(resourceId, policies) {
     for (const p of (policies || [])) if (p) editorProtocol(p.protocol);
+    await refuseManagedPolicySources(policies);
     const pols = await netbirdGet('/api/policies').catch(() => null);
     if (!Array.isArray(pols)) {
         const e = new Error("Couldn't read the current policies from NetBird - nothing was changed. Try again."); e.status = 502; throw e;
@@ -8104,7 +8119,15 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
         if (!r || !r.id) throw new Error('Resource not found');
         const current = groupIdsOf(r.groups);
         const have = new Set(current);
-        const missing = want.filter(g => !have.has(g));
+        let missing = want.filter(g => !have.has(g));
+        // Never a managed group from the caller (an Access Profile's group may be one on old data):
+        // stored ids are dropped at once, anything else is checked against NetBird's live names.
+        // The target groups come back below only where the rule wants them.
+        missing = missing.filter(g => !(raMain() && isRemoteAccessManagedGroup(g, '')));
+        if (missing.length && raMain()) {
+            const isManaged = await managedGroupCheck();
+            missing = missing.filter(g => !isManaged(g));
+        }
         const next = targetsFor(networkId, r.address, [...current, ...missing]);
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };

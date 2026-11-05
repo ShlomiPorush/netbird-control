@@ -414,8 +414,9 @@ test('a snapshot read that started before the targets changed is never used afte
         const second = ra._internal.freshSnapshot(60_000);
         await new Promise(r => setImmediate(r));
         assert.equal(gates.length, 2, 'a new read started instead of joining the old one');
-        gates[0](); await first;
-        gates[1](); const fresh = await second;
+        gates[0](); gates[1]();
+        const [old, fresh] = await Promise.all([first, second]);
+        assert.equal(old, fresh, 'a caller waiting on the overtaken read gets the newer one');
         const again = await ra._internal.freshSnapshot(60_000);
         assert.equal(again, fresh, 'the cache holds the read that started after the change');
     } finally { nb.netbirdGet = nbGet; state.readHook = null; ra._internal.invalidateSnapshot(); }
@@ -449,4 +450,28 @@ test('an Access Profile whose group is a managed one is refused as a grant targe
     await assert.rejects(db.createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'profile', id: 7 }] }, {}), /managed by Browser Remote Access/);
     await assert.rejects(db.createRecurringAccess({ userId: 'user-1', targets: [{ type: 'profile', id: '7', name: 'P' }], days: [1], startTime: '09:00', endTime: '10:00' }, {}), /managed by Browser Remote Access/);
     assert.equal(sqls.some(q => /INSERT INTO (temporary_access_grants|recurring_access)/.test(q.sql)), false);
+});
+
+test('a group added to a resource is never a managed one, by stored id or live name', async () => {
+    reset();
+    ra._internal.setManagedForTest({ targetGroupId: 'g-gwt', namesTargetGroupId: 'g-ngwt' }); // the source group id was lost
+    state.resources[1].groups = [];
+    assert.equal(await db.addResourceGroups('n2', 'r2', ['g-gw', 'g-gwt', 'g-own']), true);
+    assert.deepEqual(lastBody('PUT', /r2$/).groups, ['g-own'], 'an Access Profile group with the managed name is not attached');
+    reset({ groupsReadable: false });
+    state.resources[1].groups = [];
+    await assert.rejects(db.addResourceGroups('n2', 'r2', ['g-own']), /Couldn't read the groups/);
+    reset();
+    assert.equal(await db.addResourceGroups('n1', 'r1', ['g-gwt']), false, "the sync's own call needs no group read");
+    assert.equal(calls.some(c => c[1] === '/api/groups'), false);
+});
+
+test("a resource's access policy never takes a managed group as its source", async () => {
+    reset();
+    const pol = { protocol: 'tcp', ports: '3389', sources: ['g-own', 'g-gw'] };
+    await assert.rejects(db.createClientResource('n1', { name: 'x', address: '10.0.0.9', groups: [], policies: [pol] }), /can't be the source of an access policy/);
+    assert.equal(writes('POST', /./).length, 0, 'nothing created');
+    await assert.rejects(db.checkResourcePolicySync('r1', [pol]), /can't be the source of an access policy/);
+    await assert.rejects(db.syncResourcePolicies('n1', 'r1', [pol]), /can't be the source of an access policy/);
+    assert.equal(writes('DELETE', /./).length + writes('POST', /./).length, 0);
 });

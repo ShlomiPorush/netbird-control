@@ -253,6 +253,12 @@ test('a session whose checks were already running is not approved when settling 
         routersHook = async () => { routersHook = null; ra.noteUncertainTargetWrite(); };
         const check = await ra.checkAccess(viewer, { protocol: 'rdp', address: '10.20.0.9', port: 3389 });
         assert.equal(check.steps[0].code, 'TARGETS_SETTLING');
+        // A target change (a finished sync) while the router read runs: the snapshot is no longer current.
+        ra._internal.resetSettlingForTest();
+        routersHook = async () => { routersHook = null; ra._internal.invalidateSnapshot(); };
+        await assert.rejects(ra.createSession(viewer, { protocol: 'rdp', address: '10.20.0.9', port: 3389 }, '203.0.113.9'), (e) => e.code === 'TARGETS_SETTLING');
+        const ok = await ra.createSession(viewer, { protocol: 'rdp', address: '10.20.0.9', port: 3389 }, '203.0.113.9');
+        assert.ok(ok.sessionId, 'a retry with a current snapshot opens');
     } finally {
         routersHook = null;
         ra._internal.resetSettlingForTest();

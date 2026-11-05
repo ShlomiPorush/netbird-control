@@ -434,15 +434,31 @@ async function fetchSnapshot() {
 }
 
 // One shared fetch at a time; the whole snapshot has an overall deadline.
-function freshSnapshot(maxAgeMs) {
+const _readOf = new WeakMap(); // snapshot data -> the read it came from ({ at, epoch })
+function snapshotOnce(maxAgeMs) {
     if (snapshotUsable(_snapshot) && Date.now() - _snapshot.at <= maxAgeMs) return Promise.resolve(_snapshot.data);
     if (snapshotUsable(_snapshotInFlight)) return _snapshotInFlight.promise;
     const read = { at: Date.now(), epoch: _snapshotEpoch, promise: null };
     read.promise = withDeadline(fetchSnapshot(), SNAPSHOT_DEADLINE_MS, 'Reading NetBird')
-        .then(data => { if (snapshotUsable(read)) _snapshot = { at: read.at, epoch: read.epoch, data }; return data; })
+        .then(data => {
+            _readOf.set(data, { at: read.at, epoch: read.epoch });
+            if (snapshotUsable(read)) _snapshot = { at: read.at, epoch: read.epoch, data };
+            return data;
+        })
         .finally(() => { if (_snapshotInFlight === read) _snapshotInFlight = null; });
     _snapshotInFlight = read;
     return read.promise;
+}
+// Still current: no target change came after this snapshot's read started (see snapshotUsable).
+// Approval paths check it again right before they approve.
+const snapshotCurrent = (data) => snapshotUsable(_readOf.get(data));
+// Only a current snapshot is handed out: a read that a target change overtook is read again.
+async function freshSnapshot(maxAgeMs) {
+    for (let i = 0; i < 3; i++) {
+        const data = await snapshotOnce(maxAgeMs);
+        if (snapshotCurrent(data)) return data;
+    }
+    throw new Error('NetBird changed while it was being read');
 }
 
 const authCfg = (kind = 'ip') => ({
@@ -560,8 +576,9 @@ async function checkAccess(viewer, body) {
         return { steps, target };
     }
     const path = pathStatus(snap, authCfg(rt.gateway), routers);
-    // Again after the reads: an unanswered write may have started settling meanwhile.
-    if (targetsSettling()) return { steps: [{ key: 'access', status: 'fail', code: 'TARGETS_SETTLING', message: MESSAGES.TARGETS_SETTLING }], target };
+    // Again after the reads: an unanswered write may have started settling meanwhile, or the
+    // targets changed after the snapshot was read.
+    if (targetsSettling() || !snapshotCurrent(snap)) return { steps: [{ key: 'access', status: 'fail', code: 'TARGETS_SETTLING', message: MESSAGES.TARGETS_SETTLING }], target };
     steps.push(path.ok
         ? { key: 'path', status: 'pass', detail: `Gateway online, routing peer online for ${verdict.network.name}` }
         : { key: 'path', status: 'fail', code: path.code, message: MESSAGES[path.code] || path.code, troubleshoot: path.code === 'NO_ROUTER_ONLINE' });
@@ -630,8 +647,9 @@ async function createSession(viewer, body, clientIp) {
 
     // Check the quota again: the snapshot read above may have let another request in.
     if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser || _sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY');
-    // And the settling state: an unanswered write may have started it during the reads above.
-    if (targetsSettling()) throw httpError(503, 'TARGETS_SETTLING');
+    // And the settling state: an unanswered write may have started it during the reads above, or
+    // the targets changed after the snapshot was read.
+    if (targetsSettling() || !snapshotCurrent(snap)) throw httpError(503, 'TARGETS_SETTLING');
     const s = {
         id: crypto.randomUUID(), protocol, address: rt.address, port, width, height, dpi, timezone, creds,
         gateway: rt.gateway, targetName: rt.name || '',
@@ -981,7 +999,7 @@ async function recheckSessions() {
     if (!_sessions.size) { _lastGoodRecheck = now; return; }
     let snap = null;
     try {
-        invalidateSnapshot(); // the re-check always reads NetBird again
+        _snapshot = null; // the re-check always reads NetBird again (not a target change)
         snap = await freshSnapshot(0);
         _lastGoodRecheck = Date.now();
     } catch (e) {
