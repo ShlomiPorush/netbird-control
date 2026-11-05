@@ -433,17 +433,23 @@ async function fetchSnapshot() {
     return data;
 }
 
-// One shared fetch at a time; the whole snapshot has an overall deadline.
-const _readOf = new WeakMap(); // snapshot data -> the read it came from ({ at, epoch })
+// One shared fetch at a time; the whole snapshot has an overall deadline. Reads are numbered in
+// the order they start: an older read that finishes last never replaces a newer one.
+const _readOf = new WeakMap(); // snapshot data -> the read it came from ({ at, epoch, seq })
+let _readSeq = 0;      // number of the last read started
+let _latestDoneSeq = 0; // number of the newest read that finished
 function snapshotOnce(maxAgeMs) {
     if (snapshotUsable(_snapshot) && Date.now() - _snapshot.at <= maxAgeMs) return Promise.resolve(_snapshot.data);
-    // A read still running is as old as its start: the re-check (maxAgeMs 0) never joins one.
-    if (snapshotUsable(_snapshotInFlight) && Date.now() - _snapshotInFlight.at <= maxAgeMs) return _snapshotInFlight.promise;
-    const read = { at: Date.now(), epoch: _snapshotEpoch, promise: null };
+    // A read still running is as old as its start; the re-check (maxAgeMs 0) never joins one.
+    if (maxAgeMs > 0 && snapshotUsable(_snapshotInFlight) && Date.now() - _snapshotInFlight.at <= maxAgeMs) return _snapshotInFlight.promise;
+    const read = { at: Date.now(), epoch: _snapshotEpoch, seq: ++_readSeq, promise: null };
     read.promise = withDeadline(fetchSnapshot(), SNAPSHOT_DEADLINE_MS, 'Reading NetBird')
         .then(data => {
-            _readOf.set(data, { at: read.at, epoch: read.epoch });
-            if (snapshotUsable(read)) _snapshot = { at: read.at, epoch: read.epoch, data };
+            _readOf.set(data, { at: read.at, epoch: read.epoch, seq: read.seq });
+            if (read.seq > _latestDoneSeq) {
+                _latestDoneSeq = read.seq;
+                if (snapshotUsable(read)) _snapshot = { at: read.at, epoch: read.epoch, data };
+            }
             return data;
         })
         .finally(() => { if (_snapshotInFlight === read) _snapshotInFlight = null; });
@@ -453,11 +459,14 @@ function snapshotOnce(maxAgeMs) {
 // Still current: no target change came after this snapshot's read started (see snapshotUsable).
 // Approval paths check it again right before they approve.
 const snapshotCurrent = (data) => snapshotUsable(_readOf.get(data));
-// Only a current snapshot is handed out: a read that a target change overtook is read again.
+// Only a current snapshot is handed out: a read that a target change or a newer finished read
+// overtook is not; the caller gets a newer one.
 async function freshSnapshot(maxAgeMs) {
     for (let i = 0; i < 3; i++) {
         const data = await snapshotOnce(maxAgeMs);
-        if (snapshotCurrent(data)) return data;
+        const info = _readOf.get(data);
+        if (snapshotCurrent(data) && info.seq >= _latestDoneSeq) return data;
+        if (snapshotCurrent(data) && snapshotUsable(_snapshot)) return _snapshot.data; // the newer read
     }
     throw new Error('NetBird changed while it was being read');
 }

@@ -491,3 +491,23 @@ test('the re-check never joins a snapshot read that started before it', async ()
         await Promise.all([early, recheck]);
     } finally { state.readHook = null; ra._internal.invalidateSnapshot(); }
 });
+
+test('a re-check in the same millisecond still reads anew, and an older read finishing last never wins', async () => {
+    reset();
+    let reads = 0;
+    const gates = [];
+    state.readHook = async (p) => { if (p === '/api/peers') { reads++; await new Promise(r => gates.push(r)); } };
+    const nbGet = nb.netbirdGet;
+    let tag = 0;
+    nb.netbirdGet = async (p) => { const r = await nbGet(p); return p === '/api/users' ? [{ id: 'read-' + (++tag) }] : r; };
+    try {
+        const older = ra._internal.freshSnapshot(10_000);
+        const recheck = ra._internal.freshSnapshot(0); // no wait at all
+        await new Promise(r => setImmediate(r));
+        assert.equal(reads, 2, 'the re-check did not join the read started just before it');
+        gates[1](); const newer = await recheck;       // the newer read finishes first
+        gates[0](); const late = await older;          // the older one last
+        assert.equal(late, newer, 'whoever waited on the older read gets the newer data');
+        assert.equal(await ra._internal.freshSnapshot(10_000), newer, 'and the cache keeps the newer read');
+    } finally { nb.netbirdGet = nbGet; state.readHook = null; ra._internal.invalidateSnapshot(); }
+});
