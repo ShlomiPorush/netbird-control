@@ -520,14 +520,15 @@ function WhoResult({ r, onDetails }: { r: WhoHasAccessResult; onDetails: (userId
   const uncertain = count('cannot_determine');
   const portOnly = count('port_blocked');
   const tone: Tone = full ? 'green' : authorized || conditional ? 'amber' : uncertain ? 'gray' : 'red';
-  const title = authorized ? `${plural(authorized, 'User', 'Users')} Authorized` : 'No User Authorized';
+  const title = authorized ? `${plural(authorized, 'User', 'Users')} Authorized`
+    : conditional ? `${plural(conditional, 'User', 'Users')} Authorized If Posture Checks Pass` : 'No User Authorized';
   const deviceCount = r.users.length + r.pending.length + r.devices.length;
   return (
     <div className="flex flex-col gap-4">
       <Banner tone={tone} title={title}>
         <p className="text-nb-gray-500">Target: {targetName(r.target)} · {queryText(r.query)}</p>
         {authorized > full && <p>{plural(authorized - full, 'of them is', 'of them are')} authorized for only part of it.</p>}
-        {conditional > 0 && <p>{plural(conditional, 'more is', 'more are')} authorized only for a device that passes posture checks.</p>}
+        {authorized > 0 && conditional > 0 && <p>{plural(conditional, 'more is', 'more are')} authorized only for a device that passes posture checks.</p>}
         {uncertain > 0 && <p>For {plural(uncertain, 'more user', 'more users')} the answer cannot be determined.</p>}
         {portOnly > 0 && <p>{plural(portOnly, 'more is', 'more are')} authorized for it, but not for {queryText(r.query)}.</p>}
       </Banner>

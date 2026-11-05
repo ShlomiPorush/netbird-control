@@ -661,6 +661,7 @@ function authzSnap() {
         pol('pol-x-upper', [rule({ action: 'ACCEPT', ports: ['9400'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Upper Case' }),
         pol('pol-x-bad', [rule({ ports: ['abc'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Bad Token' }),
         pol('pol-x-7000', [rule({ ports: ['7000'], sources: [{ id: 'g-other' }], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Other 7000' }),
+        pol('pol-x-null', [rule({ ports: ['9500'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Null Posture', source_posture_checks: [null] }),
         pol('pol-x-7000d', [rule({ action: 'drop', ports: ['7000'], sources: [{ id: 'g-other' }], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'No 7000' }),
     ];
     s.resources.push({ id: 'r-x', name: 'edge', type: 'subnet', address: '10.8.0.0/24', enabled: true, groups: [] });
@@ -677,7 +678,7 @@ test('authorization agrees with the Remote Access policy check on every TCP port
     for (const userId of ['u1', 'u2', 'u3']) {
         const src = userSourceGroups(s, userId, NOW);
         for (const res of s.resources) {
-            for (const port of [22, 53, 443, 3389, 5050, 5900, 7000, 8050, 8080, 9000, 9100, 9200, 9300, 9400, 12345]) {
+            for (const port of [22, 53, 443, 3389, 5050, 5900, 7000, 8050, 8080, 9000, 9100, 9200, 9300, 9400, 9500, 12345]) {
                 const ra = evaluatePolicies(s, { managedPolicyId: null }, src, res, port, NOW, {});
                 const a = authz(s, userId, { type: 'resource', id: res.id }, { protocol: 'tcp', port });
                 assert.equal(a.verdict, map[ra.code], `${userId} ${res.id}:${port} remote-access=${ra.code} access-check=${a.verdict}`);
@@ -685,7 +686,7 @@ test('authorization agrees with the Remote Access policy check on every TCP port
             }
         }
     }
-    assert.equal(compared, 180);
+    assert.equal(compared, 192);
 });
 
 test('authorization reads rules as Remote Access does, and credits only the policies behind the answer', () => {

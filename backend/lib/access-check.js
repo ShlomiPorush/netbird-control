@@ -237,6 +237,7 @@ function buildIndex(snap) {
                 sourcePeer: src && String(src.type || '').toLowerCase() === 'peer' ? idOf(src) : null,
                 dest, set: ruleSet(rule), authSet: authRuleSet(rule), exactAction: (rule.action || 'accept') === action,
                 posture: postureIds.length > 0, postureIds,
+                authPosture: arr(p.source_posture_checks).length > 0,
                 infra: managed.has(p.id), managedName: MANAGED_POLICY_NAMES.has(p.name),
                 tempGrant: (TEMP_POLICY_RE.exec(p.name || '') || [])[1] || null,
             });
@@ -714,7 +715,7 @@ function authorizeResource(ix, groups, res, query, now) {
     const union = (list) => list.reduce((s, r) => unionSets(s, r.authSet), emptySet());
     const drop = union(drops);
     const allowed = subtractSets(union(accepts), drop);
-    const certain = subtractSets(union(accepts.filter(r => !r.posture)), drop);
+    const certain = subtractSets(union(accepts.filter(r => !r.authPosture)), drop);
     let verdict;
     let reason;
     if (setAnswers(certain, query)) verdict = 'granted';
@@ -733,7 +734,7 @@ function authorizeResource(ix, groups, res, query, now) {
         return {
             policy: r.policyName, policyId: r.policyId,
             via: via.map(g => ix.groupName.get(g) || g), ports: describeSet(r.authSet),
-            ...(r.posture ? { postureChecks: r.postureIds.map(id => ix.postureName.get(id) || id) } : {}),
+            ...(r.authPosture ? { postureChecks: r.postureIds.map(id => ix.postureName.get(id) || id) } : {}),
             ...(tempId ? { temp: tempNote(ix, tempId, now) } : {}),
         };
     });
