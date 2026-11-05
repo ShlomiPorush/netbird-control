@@ -1871,7 +1871,7 @@ export interface AccessGrantedBy { policy: string; policyId: string; infra: bool
 export interface AccessPart {
   label: string;
   answer: 'yes' | 'no' | 'unknown';
-  reason?: 'no_route' | 'ambiguous_route' | 'unparsable_rule' | 'not_checked' | 'router_unknown';
+  reason?: 'no_route' | 'ambiguous_route' | 'unparsable_rule' | 'not_checked' | 'router_unknown' | 'router_differs';
   winner?: AccessResourceRef;
   winners?: AccessResourceRef[];
   overlapping?: boolean;
@@ -1879,6 +1879,7 @@ export interface AccessPart {
   grantedBy?: AccessGrantedBy[];
   blockedBy?: string[];
   note?: 'unparsable_accept';
+  variesByRouter?: boolean;
 }
 export interface AccessSummary { verdict: AccessVerdict; parts: AccessPart[]; overlapNotChecked?: boolean; postureIndependent?: { policy: string; checks: string[] }[] }
 export interface AccessConditional {

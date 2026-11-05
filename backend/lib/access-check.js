@@ -67,6 +67,19 @@ function subtractSets(a, b) {
     return { tcp: subtractIntervals(a.tcp, b.tcp), udp: subtractIntervals(a.udp, b.udp), icmp: a.icmp && !b.icmp };
 }
 
+function intersectIntervals(a, b) {
+    const out = [];
+    for (const [x1, y1] of a) for (const [x2, y2] of b) {
+        const lo = Math.max(x1, x2), hi = Math.min(y1, y2);
+        if (lo <= hi) out.push([lo, hi]);
+    }
+    return normIntervals(out);
+}
+
+function intersectSets(a, b) {
+    return { tcp: intersectIntervals(a.tcp, b.tcp), udp: intersectIntervals(a.udp, b.udp), icmp: a.icmp && b.icmp };
+}
+
 const setIsEmpty = (s) => !s.tcp.length && !s.udp.length && !s.icmp;
 const inIntervals = (list, p) => list.some(([a, b]) => p >= a && p <= b);
 
@@ -240,41 +253,42 @@ function tempNote(ix, id, now) {
     return { id: String(id), state: 'ended', status: g.status || '' };
 }
 
-// Which resources' rules apply on the routing peer that carries this part. The client sends the
-// traffic along the winning route, so it reaches a routing peer of the winner's network. That
-// peer installs the rules of EVERY resource it routes and checks all of them whose destination
-// contains the address, drops before accepts (NetBird client/firewall/uspfilter routeACLsPass).
-// So the winner's rules apply together with those of every resource covering the part that the
-// same routing peer serves: always in the winner's own network, and in another network when its
-// routing peers include all of the winner's. Partial or unknown sharing is uncertain.
-function routerScope(ix, winnerId, coverIds) {
-    const wNet = (ix.netOf.get(winnerId) || {}).id;
-    const definite = new Set([winnerId]);
-    const uncertain = new Set();
-    for (const id of coverIds) {
-        if (id === winnerId) continue;
-        const net = (ix.netOf.get(id) || {}).id;
-        if (net && net === wNet) { definite.add(id); continue; }
-        const a = wNet ? ix.routerPeers.get(wNet) : null;
-        const b = net ? ix.routerPeers.get(net) : null;
-        if (!a || !b || !a.size) { uncertain.add(id); continue; }
-        const shared = [...a].filter(p => b.has(p)).length;
-        if (shared === a.size) definite.add(id);
-        else if (shared) uncertain.add(id);
-    }
-    return { definite, uncertain };
-}
+// The rules that apply on the routing peer carrying this part. The client sends the traffic
+// along the winning route to ONE routing peer of the winner's network (several = high
+// availability). That peer installs the rules of every resource it routes and checks all whose
+// destination contains the address, drops before accepts (NetBird client/firewall/uspfilter
+// routeACLsPass). So for each routing peer of the winner's network, the rules of every covering
+// resource that peer routes apply together. When the peers would answer differently, which one
+// carries the traffic decides, and the answer cannot be determined. When the routers of a
+// covering resource's network could not be read, neither can the answer.
+// The allowed set behind each evaluateRules() result, kept out of the JSON answer.
+const RAW_ALLOWED = new WeakMap();
+const uniqBy = (list) => [...new Map(list.map(x => [JSON.stringify(x), x])).values()];
 
-const sameAllowed = (a, b) => a.answer === b.answer && JSON.stringify(a.allowed) === JSON.stringify(b.allowed);
-
-// Evaluate one part on its routing peer. Returns the part answer and its explanation.
 function evaluatePart(ix, entries, winnerId, coverIds, query, now) {
-    const { definite, uncertain } = routerScope(ix, winnerId, coverIds);
-    const sure = evaluateRules(ix, entries, definite, winnerId, query, now);
-    if (!uncertain.size || sure.answer === 'unknown') return sure;
-    const wider = evaluateRules(ix, entries, new Set([...definite, ...uncertain]), winnerId, query, now);
-    if (sameAllowed(sure, wider)) return sure;
-    return { ...sure, answer: 'unknown', reason: 'router_unknown' };
+    const netOf = (id) => (ix.netOf.get(id) || {}).id;
+    const wNet = netOf(winnerId);
+    const sameNet = new Set(coverIds.filter(id => netOf(id) === wNet));
+    if (coverIds.some(id => !netOf(id) || !ix.routerPeers.get(netOf(id)))) {
+        return { ...evaluateRules(ix, entries, sameNet, winnerId, query, now), answer: 'unknown', reason: 'router_unknown' };
+    }
+    const scopes = new Map();
+    for (const peer of ix.routerPeers.get(wNet)) {
+        const scope = coverIds.filter(id => netOf(id) === wNet || ix.routerPeers.get(netOf(id)).has(peer));
+        scopes.set(scope.slice().sort().join('\u0000'), new Set(scope));
+    }
+    const results = [...scopes.values()].map(scope => evaluateRules(ix, entries, scope, winnerId, query, now));
+    const first = results[0];
+    if (results.length === 1) return first;
+    if (!results.every(r => r.answer === first.answer && r.reason === first.reason)) return { ...first, answer: 'unknown', reason: 'router_differs' };
+    if (results.every(r => JSON.stringify(r.allowed) === JSON.stringify(first.allowed))) return first;
+    // Same answer through every routing peer, different extra ports: show only what is open
+    // through all of them.
+    const common = results.map(r => RAW_ALLOWED.get(r)).reduce(intersectSets);
+    return {
+        ...first, allowed: describeSet(common), hasAllowed: !setIsEmpty(common), variesByRouter: true,
+        grantedBy: uniqBy(results.flatMap(r => r.grantedBy)), blockedBy: [...new Set(results.flatMap(r => r.blockedBy))],
+    };
 }
 
 // Accepts minus drops over the device's rules toward any resource in `scope`.
@@ -313,8 +327,11 @@ function evaluateRules(ix, entries, scope, winnerId, query, now) {
         blockedBy: removed ? [...blockedBy] : [],
         ...(unparsableAccept ? { note: 'unparsable_accept' } : {}),
     };
-    if (unparsableDrop) return { ...out, answer: 'unknown', reason: 'unparsable_rule', hasAllowed: !setIsEmpty(allowed) };
-    return { ...out, answer: setAnswers(allowed, query) ? 'yes' : 'no', hasAllowed: !setIsEmpty(allowed) };
+    const result = unparsableDrop
+        ? { ...out, answer: 'unknown', reason: 'unparsable_rule', hasAllowed: !setIsEmpty(allowed) }
+        : { ...out, answer: setAnswers(allowed, query) ? 'yes' : 'no', hasAllowed: !setIsEmpty(allowed) };
+    RAW_ALLOWED.set(result, allowed);
+    return result;
 }
 
 // The parts of the target and, for each, the winning route among `relevant` resources.
@@ -392,6 +409,8 @@ function relevantResources(ix, entries, target) {
     for (const rid of toward) {
         const r = ix.resById.get(rid);
         if (!r || r.enabled === false) continue;
+        const peers = ix.routerPeers.get((ix.netOf.get(r.id) || {}).id);
+        if (peers && !peers.size) continue; // no enabled routing peer: NetBird distributes no route
         if (t.kind === 'other') { if (r.id === target.id) out.push(r); continue; }
         const a = addrOf(r);
         if (t.kind === 'ip' && a.kind === 'ip' && a.start <= t.end && a.end >= t.start) out.push(r);

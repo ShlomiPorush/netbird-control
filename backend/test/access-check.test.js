@@ -382,6 +382,7 @@ test('a network target evaluates each resource', () => {
 test('wildcard domains are split into disjoint parts', () => {
     const s = base();
     s.networks.push({ id: 'n3', name: 'Web', resources: ['d-all', 'd-dev', 'd-db'] });
+    s.routers.set('n3', [{ id: 'rt3', peer: 'p-r2', enabled: true }]);
     s.resources.push(
         { id: 'd-all', name: 'all web', address: '*.example.com', enabled: true, groups: [] },
         { id: 'd-dev', name: 'dev', address: '*.dev.example.com', enabled: true, groups: [] },
@@ -419,14 +420,17 @@ test('IPv6 targets: only their own rules, overlap flagged, no rule = cannot dete
     assert.equal(r.devices[0].answer.overlapNotChecked, true);
 });
 
-test('legacy routes covering the target are reported; router read failures are unknown', () => {
+test('legacy routes covering the target are reported; unreadable routers make the answer uncertain', () => {
     const s = base();
     s.routes = [{ id: 'rt', network_id: 'old-office', network: '10.0.0.0/8', enabled: true }];
-    s.routers = new Map([['n1', null]]);
     const r = userCheck(s);
     assert.deepEqual(r.legacyRoutes, [{ resource: 'r1', route: 'old-office' }]);
-    assert.equal(r.routers[0].status, 'unknown');
     assert.equal(r.verdict, 'granted');
+    s.routers.set('n1', null); // the routers of the network could not be read
+    const u = userCheck(s);
+    assert.equal(u.routers[0].status, 'unknown');
+    assert.equal(u.verdict, 'cannot_determine');
+    assert.equal(u.devices[0].answer.parts[0].reason, 'router_unknown');
 });
 
 test('unknown users and targets return null; the query is normalised', () => {
@@ -529,4 +533,48 @@ test('who has access reports legacy routes and the routers of the winning networ
     assert.deepEqual(r.users.map(u => u.user.id), ['u1']);
     assert.deepEqual(r.legacyRoutes, [{ resource: 'r1', route: 'old-office' }]);
     assert.deepEqual(r.routers.map(x => [x.network.id, x.status]).sort(), [['n1', 'online'], ['n2', 'offline']]);
+});
+
+test('high availability: routing peers that apply different rules make the answer uncertain', () => {
+    // r1 (/32) is routed by A and B; a /24 routed only by A opens 22; a /16 routed only by B drops 22.
+    const s = base();
+    s.peers.push({ id: 'p-a', name: 'router-a', groups: [], connected: true }, { id: 'p-b', name: 'router-b', groups: [], connected: true });
+    s.networks.push({ id: 'n-a', name: 'A only', resources: ['r-24'] }, { id: 'n-b', name: 'B only', resources: ['r-16'] });
+    s.resources.push(
+        { id: 'r-24', name: 'lan-24', address: '10.0.0.0/24', enabled: true, groups: [] },
+        { id: 'r-16', name: 'lan-16', address: '10.0.0.0/16', enabled: true, groups: [] },
+    );
+    s.routers.set('n1', [{ id: 'ra', peer: 'p-a', enabled: true }, { id: 'rb', peer: 'p-b', enabled: true }]);
+    s.routers.set('n-a', [{ id: 'ra2', peer: 'p-a', enabled: true }]);
+    s.routers.set('n-b', [{ id: 'rb2', peer: 'p-b', enabled: true }]);
+    s.policies.push(
+        pol('p-24', [rule({ ports: ['22'], destinationResource: { id: 'r-24' } })]),
+        pol('p-16', [rule({ action: 'drop', ports: ['22'], destinationResource: { id: 'r-16' } })]),
+    );
+    const r = userCheck(s, { query: { protocol: 'tcp', port: 22 } });
+    assert.equal(r.verdict, 'cannot_determine');
+    assert.equal(r.devices[0].answer.parts[0].reason, 'router_differs');
+    // RDP is the same through either routing peer.
+    assert.equal(userCheck(s, { query: { protocol: 'tcp', port: 3389 } }).verdict, 'granted');
+    const rdp = userCheck(s, { query: { protocol: 'tcp', port: 3389 } }).devices[0].answer.parts[0];
+    assert.equal(rdp.allowed.tcp, '3389'); // 22 is open only through router A
+    assert.equal(rdp.variesByRouter, true);
+});
+
+test('a resource in a network with no enabled routing peer is no route', () => {
+    const s = base();
+    // Only resource, its network's only router disabled: denied, not granted.
+    s.routers.set('n1', [{ id: 'rt1', peer_groups: ['g-routers'], enabled: false }]);
+    let r = userCheck(s);
+    assert.equal(r.verdict, 'denied');
+    assert.equal(r.routers[0].status, 'none');
+    // A /32 in a network whose router group is empty does not beat a working /24 elsewhere.
+    s.routers.set('n1', [{ id: 'rt1', peer_groups: ['g-empty'], enabled: true }]);
+    s.groups.push({ id: 'g-empty', name: 'Empty', peers: [] });
+    s.resources.push({ id: 'r-wide', name: 'wide', address: '10.0.0.0/24', enabled: true, groups: [] });
+    s.networks[1].resources.push('r-wide');
+    s.policies.push(pol('p-ssh', [rule({ ports: ['22'], destinationResource: { id: 'r-wide' } })]));
+    r = userCheck(s, { query: { protocol: 'tcp', port: 22 } });
+    assert.equal(r.verdict, 'granted');
+    assert.equal(r.devices[0].answer.parts[0].winner.id, 'r-wide');
 });
