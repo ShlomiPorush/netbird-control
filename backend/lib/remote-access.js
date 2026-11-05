@@ -44,7 +44,11 @@ const SNAPSHOT_DEADLINE_MS = 20_000;
 const PERMISSION_DEADLINE_MS = 15_000;   // per-user permission check in the re-check (may call Graph)
 const SNAPSHOT_MAX_AGE_MS = 150_000;     // live sessions close when access could not be verified for this long
 const CHECK_SNAPSHOT_TTL_MS = 10_000;    // checks/session issue reuse a snapshot at most this old
-const WS_MAX_PAYLOAD = 1024 * 1024;      // client -> server message cap
+// Browser -> server. guacamole-common-js sends one instruction per message, the largest a blob of
+// a 6048-byte chunk (8064 base64 characters), and none with more than 8 elements.
+const CLIENT_INSTRUCTION_MAX = 16 * 1024;
+const CLIENT_MAX_ELEMENTS = 16;
+const WS_MAX_PAYLOAD = CLIENT_INSTRUCTION_MAX; // client -> server message cap
 const GUACD_INSTRUCTION_MAX = 16 * 1024 * 1024;
 const WS_BUFFER_HIGH = 4 * 1024 * 1024;  // pause guacd while the browser is this far behind
 const WS_BUFFER_LOW = 1 * 1024 * 1024;
@@ -570,53 +574,105 @@ function encodeInstruction(opcode, ...args) {
 }
 
 // Incremental parser over decoded text. Returns complete instructions as
-// { opcode, args, raw }. Throws on malformed input or an oversized instruction.
+// { opcode, args, raw }. Throws on malformed input, an oversized element, more elements than
+// allowed, an instruction longer than maxInstruction, or more than maxPending units of an
+// unfinished instruction left at the end of a push. The parse state (inside a length, a value or
+// between elements) is kept across push() calls, so no unit of input is read twice however the
+// text is split: `examined`, the units stepped over, always equals the input length so far.
+// After a throw the parser must not be reused.
+const SURROGATES = /[\uD800-\uDFFF]/;
 class GuacParser {
-    constructor(maxLen) { this.buf = ''; this.maxLen = maxLen; }
+    constructor(maxLen, { maxElements = Infinity, maxInstruction = Infinity, maxPending = maxLen + 64 } = {}) {
+        this.maxLen = maxLen;
+        this.maxElements = maxElements;
+        this.maxInstruction = maxInstruction;
+        this.maxPending = maxPending;
+        this.examined = 0;
+        this._reset();
+    }
+    _reset() {
+        this.state = 'len';      // 'len' (digits) | 'value' (code points) | 'term' (',' or ';')
+        this.lenStr = '';
+        this.need = 0;           // code points still missing from the current value
+        this.lowNext = false;    // the value's last high surrogate ended the previous chunk
+        this.valueParts = [];
+        this.elements = [];
+        this.rawParts = [];
+        this.size = 0;           // units of the pending instruction so far
+    }
     push(text) {
-        this.buf += text;
         const out = [];
-        let pos = 0;
-        for (;;) {
-            const start = pos;
-            const elements = [];
-            let complete = false;
-            let i = pos;
-            for (;;) {
-                const dot = this.buf.indexOf('.', i);
-                if (dot === -1) break;
-                const lenStr = this.buf.slice(i, dot);
-                if (!/^\d{1,10}$/.test(lenStr)) throw new Error('malformed instruction');
-                const len = Number(lenStr);
-                if (len > this.maxLen) throw new Error('instruction too large');
-                // Advance `len` code points (fast path when no surrogates are involved).
-                let j = dot + 1;
-                const quick = this.buf.slice(j, j + len);
-                if (quick.length < len) break;
-                if (!/[\uD800-\uDFFF]/.test(quick)) j += len;
-                else {
-                    let n = 0;
-                    while (n < len && j < this.buf.length) {
-                        const c = this.buf.charCodeAt(j);
-                        j += (c >= 0xD800 && c <= 0xDBFF) ? 2 : 1;
-                        n++;
-                    }
-                    if (n < len) break;
+        const n = text.length;
+        let i = 0;
+        let seg = 0;             // where the pending instruction's text in this chunk starts
+        const grow = (units) => {
+            this.size += units;
+            if (this.size > this.maxInstruction) throw new Error('instruction too large');
+        };
+        while (i < n) {
+            if (this.state === 'len') {
+                const c = text.charCodeAt(i);
+                this.examined++;
+                if (c >= 48 && c <= 57) {
+                    if (this.lenStr.length >= 10) throw new Error('malformed instruction');
+                    this.lenStr += text[i++];
+                    grow(1);
+                    continue;
                 }
-                if (j >= this.buf.length) break;
-                elements.push(this.buf.slice(dot + 1, j));
-                const term = this.buf[j];
-                if (term === ',') { i = j + 1; continue; }
-                if (term === ';') { complete = true; pos = j + 1; break; }
-                throw new Error('malformed instruction');
+                if (c !== 46 || !this.lenStr) throw new Error('malformed instruction');
+                const len = Number(this.lenStr);
+                if (len > this.maxLen) throw new Error('instruction too large');
+                if (this.elements.length >= this.maxElements) throw new Error('too many elements');
+                i++;
+                grow(1);
+                this.lenStr = '';
+                this.need = len;
+                this.state = len ? 'value' : 'term';
+                continue;
             }
-            if (!complete) {
-                if (this.buf.length - start > this.maxLen + 64) throw new Error('instruction too large');
-                this.buf = this.buf.slice(start);
-                return out;
+            if (this.state === 'value') {
+                const from = i;
+                if (this.lowNext) {
+                    // A high surrogate ended the previous chunk: the next unit belongs to its code
+                    // point, as it would have without the split.
+                    this.lowNext = false;
+                    i++;
+                }
+                const span = Math.min(this.need, n - i);
+                if (!SURROGATES.test(text.slice(i, i + span))) { i += span; this.need -= span; } else {
+                    while (this.need > 0 && i < n) {
+                        const c = text.charCodeAt(i);
+                        if (c >= 0xD800 && c <= 0xDBFF) {
+                            if (i + 1 < n) i += 2;
+                            else { i += 1; this.lowNext = true; }
+                        } else i += 1;
+                        this.need--;
+                    }
+                }
+                this.valueParts.push(text.slice(from, i));
+                this.examined += i - from;
+                grow(i - from);
+                if (this.need === 0 && !this.lowNext) this.state = 'term';
+                continue;
             }
-            out.push({ opcode: elements[0], args: elements.slice(1), raw: this.buf.slice(start, pos) });
+            // state 'term'
+            const c = text[i];
+            this.examined++;
+            if (c !== ',' && c !== ';') throw new Error('malformed instruction');
+            i++;
+            grow(1);
+            this.elements.push(this.valueParts.length === 1 ? this.valueParts[0] : this.valueParts.join(''));
+            this.valueParts = [];
+            if (c === ',') { this.state = 'len'; continue; }
+            this.rawParts.push(text.slice(seg, i));
+            const elements = this.elements;
+            out.push({ opcode: elements[0], args: elements.slice(1), raw: this.rawParts.join('') });
+            this._reset();
+            seg = i;
         }
+        if (seg < n) this.rawParts.push(text.slice(seg));
+        if (this.size > this.maxPending) throw new Error('instruction too large');
+        return out;
     }
 }
 
@@ -672,6 +728,14 @@ function connectArgs(s, argNames) {
 const INPUT_OPCODES = new Set(['key', 'mouse', 'touch', 'clipboard', 'argv', 'blob', 'end']);
 // Client instructions passed to guacd after the handshake. Anything else is dropped.
 const CLIENT_OPCODES = new Set(['key', 'mouse', 'touch', 'size', 'clipboard', 'argv', 'blob', 'end', 'ack', 'sync', 'nop', 'disconnect']);
+// Connection parameters the browser may send with "argv": the ones guacd asks for with
+// "required", plus terminal settings guacd always accepts for SSH. The target never comes from
+// the browser, even if asked for.
+const SSH_ARGV = ['font-name', 'font-size', 'color-scheme'];
+const NEVER_ARGV = new Set(['hostname', 'port']);
+// guacd's stream indices are 0..511 (GUAC_USER_MAX_STREAMS); written as plain decimals.
+const MAX_STREAMS = 512;
+const streamIndex = (v) => (/^(0|[1-9]\d{0,2})$/.test(v || '') && Number(v) < MAX_STREAMS ? Number(v) : -1);
 
 function sendError(ws, message, code) {
     try { if (ws && ws.readyState === 1) ws.send(encodeInstruction('error', message, String(code))); } catch { /* closing anyway */ }
@@ -694,7 +758,32 @@ function attachTunnel(sessionId, ws) {
     s.guacd = sock;
     const decoder = new StringDecoder('utf8');
     const parser = new GuacParser(GUACD_INSTRUCTION_MAX);
-    const clientParser = new GuacParser(WS_MAX_PAYLOAD);
+    const clientParser = new GuacParser(CLIENT_INSTRUCTION_MAX, { maxElements: CLIENT_MAX_ELEMENTS, maxInstruction: CLIENT_INSTRUCTION_MAX });
+    // argv names guacd asked for, and the browser's open output streams (clipboard, allowed argv).
+    const argvNames = new Set(s.protocol === 'ssh' ? SSH_ARGV : []);
+    const openStreams = new Set();
+    let warnedDrop = false;
+    const noteRequired = (list) => {
+        for (const ins of list) if (ins.opcode === 'required') for (const name of ins.args) argvNames.add(name);
+    };
+    // Stream instructions from the browser: clipboard and an asked-for argv open a stream; blob
+    // and end pass only on an open one. Anything else (another name, an unknown index) is dropped.
+    const streamAllowed = (ins) => {
+        const op = ins.opcode;
+        if (op !== 'clipboard' && op !== 'argv' && op !== 'blob' && op !== 'end') return true;
+        const idx = streamIndex(ins.args[0]);
+        if (idx < 0) return false;
+        if (op === 'clipboard') { openStreams.add(idx); return true; }
+        if (op === 'argv') {
+            const name = ins.args[2];
+            if (argvNames.has(name) && !NEVER_ARGV.has(name)) { openStreams.add(idx); return true; }
+            openStreams.delete(idx);
+            return false;
+        }
+        if (!openStreams.has(idx)) return false;
+        if (op === 'end') openStreams.delete(idx);
+        return true;
+    };
     let handshakeDone = false;
     const handshakeTimer = setTimeout(() => {
         if (!handshakeDone) failSession(s, 'The Browser Gateway did not answer in time.', 0x0208);
@@ -740,7 +829,9 @@ function attachTunnel(sessionId, ws) {
                     handshakeDone = true;
                     clearTimeout(handshakeTimer);
                     s.state = 'open';
-                    const rest = instructions.slice(k + 1).map(x => x.raw).join('');
+                    const after = instructions.slice(k + 1);
+                    noteRequired(after);
+                    const rest = after.map(x => x.raw).join('');
                     if (rest) forward(rest);
                     return;
                 } else if (ins.opcode === 'error') {
@@ -749,6 +840,7 @@ function attachTunnel(sessionId, ws) {
             }
             return;
         }
+        noteRequired(instructions);
         const text = instructions.map(x => x.raw).join('');
         if (text) forward(text);
     });
@@ -783,6 +875,10 @@ function attachTunnel(sessionId, ws) {
                 if (!(w > 0 && h > 0 && w <= MAX_WIDTH && h <= MAX_HEIGHT)) continue;
             }
             if (ins.opcode === 'disconnect') { closeSession(s, 'Closed by the user.'); return; }
+            if (!streamAllowed(ins)) {
+                if (!warnedDrop) { warnedDrop = true; console.warn('[remote-access] session %s: dropped a browser %s that guacd did not ask for', s.id, ins.opcode); }
+                continue;
+            }
             if (INPUT_OPCODES.has(ins.opcode)) s.lastInputAt = Date.now();
             out += ins.raw;
         }
@@ -981,5 +1077,5 @@ module.exports = {
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
-    _internal: { GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, setConfigForTest: (c) => { _cfg = normConfig(c); } },
+    _internal: { GuacParser, CLIENT_MAX_ELEMENTS, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, setConfigForTest: (c) => { _cfg = normConfig(c); } },
 };
