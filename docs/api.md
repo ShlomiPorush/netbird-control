@@ -17,8 +17,9 @@ An admin creates keys in **Settings → API Keys**, in the main account.
   the proxy's address, or the app sees every call as coming from the proxy.
 - A key can have an expiry date. **Revoke** stops a key at once. **Replace** creates a new key with
   the same settings and then revokes the old one.
-- Creating and revoking a key, and every action a key takes, is written to the audit log. If the
-  audit record can't be written, the action doesn't happen.
+- The audit log records keys being created and revoked, every connection link a key makes, and
+  every time a link is opened. If that record can't be written, the action doesn't happen. Calls
+  that are refused (a bad key, bad input, no access) are not in the audit log.
 
 | Scope | Allows |
 | --- | --- |

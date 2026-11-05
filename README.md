@@ -44,7 +44,8 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   Another system, such as a customer file, can open a session with stored credentials through the
   public API ([API reference](docs/api.md), [integration guide](docs/remote-launch-integration.md)).
 - **Public API and API keys** - admins create keys in **Settings → API Keys**, each limited to the
-  actions, addresses and dates it needs, and every call is recorded in the audit log.
+  actions, addresses and dates it needs. The audit log records keys being created and revoked, and
+  every connection link a key makes or that is opened.
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and
   what to do next, plus a downloadable Windows diagnostics script.
 - **Guardrails** - an address blocklist, overlap and conflict detection, a cleanup report and a

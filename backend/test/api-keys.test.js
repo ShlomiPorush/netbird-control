@@ -89,6 +89,16 @@ test('a key authenticates until it is revoked or expires', async () => {
     rows[0].expires_at = null;
     await keys.revokeApiKey(apiKey.id, admin);
     await assert.rejects(keys.authenticateKey(key, '203.0.113.5'), (e) => e.code === 'KEY_REVOKED');
+    // Revoking again (or a missing key) asks on the same connection it already holds.
+    let connects = 0;
+    const realConnect = core.pool.connect;
+    core.pool.connect = async () => { connects++; return fakeClient; };
+    txLog = [];
+    assert.deepEqual(await keys.revokeApiKey(apiKey.id, admin), { ok: true, alreadyRevoked: true });
+    assert.deepEqual(txLog, ['BEGIN', 'UPDATE', 'SELECT', 'ROLLBACK'], 'the lookup runs on the held connection');
+    await assert.rejects(keys.revokeApiKey(999, admin), (e) => e.code === 'NOT_FOUND');
+    core.pool.connect = realConnect;
+    assert.equal(connects, 2, 'one connection per revoke');
     assert.equal(await keys.keyStillValid(apiKey.id, 'remote-access:launch'), false);
     assert.deepEqual(audits.map(a => a.action), ['apikey.create', 'apikey.revoke']);
 });

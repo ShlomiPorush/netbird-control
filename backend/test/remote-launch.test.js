@@ -87,6 +87,10 @@ test('a named user: found by email in any letter case, and their own access is c
 test('input is validated: protocol, port, field types and lengths, SSH user name', async () => {
     await assert.rejects(ra.issueLaunch(KEY, rdp({ protocol: 'vnc' })), (e) => e.code === 'INVALID_PROTOCOL');
     await assert.rejects(ra.issueLaunch(KEY, rdp({ port: 70000 })), (e) => e.code === 'INVALID_PORT');
+    await assert.rejects(ra.issueLaunch(KEY, rdp({ port: 3389.5 })), (e) => e.code === 'INVALID_PORT');
+    await assert.rejects(ra.issueLaunch(KEY, rdp({ port: '3389junk' })), (e) => e.code === 'INVALID_PORT');
+    await assert.rejects(ra.issueLaunch(KEY, rdp({ port: null })), (e) => e.code === 'INVALID_PORT');
+    assert.ok((await ra.issueLaunch(KEY, rdp({ port: '3389' }))).ticket, 'a port sent as a string of digits is fine');
     await assert.rejects(ra.issueLaunch(KEY, rdp({ password: { x: 1 } })), (e) => e.code === 'INVALID_FIELD');
     await assert.rejects(ra.issueLaunch(KEY, rdp({ password: 'x'.repeat(1025) })), (e) => e.code === 'INVALID_FIELD');
     await assert.rejects(ra.issueLaunch(KEY, { protocol: 'ssh', address: '10.0.0.5', port: 22 }), (e) => e.code === 'USERNAME_REQUIRED');

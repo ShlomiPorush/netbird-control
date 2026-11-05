@@ -34,7 +34,8 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     server's resource already chosen.
 - **API keys and a public API.** Admins create API keys in **Settings → API Keys**. A key does only
   what its permissions allow, can be limited to addresses and an expiry date, is shown once, and is
-  stored only as a hash. Every call is recorded in the audit log. The first action,
+  stored only as a hash. The audit log records keys being created and revoked, and every connection
+  link a key makes or that is opened. The first action,
   `POST /api/v1/remote-access/launch`, lets another system, such as a customer file, open a browser
   RDP or SSH session with stored credentials: it returns a one-time link that expires after five
   minutes, the credentials never reach the browser, and the user's own access is checked as for a

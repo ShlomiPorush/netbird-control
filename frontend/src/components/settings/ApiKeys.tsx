@@ -14,6 +14,15 @@ const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remo
 
 type Draft = { name: string; scopes: string[]; allowedIps: string; expiresAt: string; replaces?: ApiKey };
 
+// The expiry as the date field shows it (local day), so Replace keeps it. A past expiry is dropped:
+// the form accepts only a future date.
+function dateOf(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime()) || d.getTime() <= Date.now()) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function status(k: ApiKey): { label: string; tone: 'green' | 'gray' | 'red' } {
   if (k.revokedAt) return { label: 'Revoked', tone: 'gray' };
   if (k.expiresAt && new Date(k.expiresAt).getTime() <= Date.now()) return { label: 'Expired', tone: 'red' };
@@ -26,16 +35,20 @@ export function ApiKeys() {
   const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list });
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState('');
-  const [created, setCreated] = useState<{ key: string; name: string } | null>(null);
+  const [created, setCreated] = useState<{ key: string; name: string; oldStillActive?: string } | null>(null);
 
   const create = useMutation({
     mutationFn: async (d: Draft) => {
       const out = await apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: d.expiresAt ? new Date(`${d.expiresAt}T23:59:59`).toISOString() : null });
-      // Replace: the new key works before the old one stops.
-      if (d.replaces) await apiKeysApi.revoke(d.replaces.id);
-      return out;
+      // Replace: the new key works before the old one stops. If revoking the old one fails, the
+      // new key is still shown (it exists and is shown only now), with a note to revoke by hand.
+      let oldStillActive: string | undefined;
+      if (d.replaces) {
+        try { await apiKeysApi.revoke(d.replaces.id); } catch { oldStillActive = d.replaces.name; }
+      }
+      return { ...out, oldStillActive };
     },
-    onSuccess: (out) => { setDraft(null); setCreated({ key: out.key, name: out.apiKey.name }); },
+    onSuccess: (out) => { setDraft(null); setCreated({ key: out.key, name: out.apiKey.name, oldStillActive: out.oldStillActive }); },
     onError: (e) => setError(e instanceof ApiError ? e.message : "The key couldn't be created. Try again."),
     onSettled: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
   });
@@ -62,8 +75,9 @@ export function ApiKeys() {
   return (
     <div className="max-w-3xl">
       <p className="text-nb-gray-500 text-sm mb-5">
-        Keys let another system, such as the customer file, call the NetBird Control API. Each key can do only what its permissions allow,
-        and every call is recorded in the audit log. The key is shown once when you create it, so store it in that system's secret store.
+        Keys let another system, such as the customer file, call the NetBird Control API. Each key can do only what its permissions allow.
+        Creating and revoking a key, and every connection link a key makes or that is opened, are recorded in the audit log.
+        The key is shown once when you create it, so store it in that system's secret store.
       </p>
 
       <div className="flex items-center justify-between mb-3">
@@ -85,7 +99,7 @@ export function ApiKeys() {
                   <Badge tone={st.tone}>{st.label}</Badge>
                   {!k.revokedAt && (
                     <div className="ml-auto flex gap-2">
-                      <Button size="sm" onClick={() => open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), replaces: k })}>Replace</Button>
+                      <Button size="sm" onClick={() => open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: dateOf(k.expiresAt), replaces: k })}>Replace</Button>
                       <Button size="sm" variant="danger" onClick={() => void askRevoke(k)} disabled={revoke.isPending}>Revoke</Button>
                     </div>
                   )}
@@ -150,6 +164,11 @@ export function ApiKeys() {
               <TriangleAlert size={16} className="shrink-0 mt-0.5" />
               This is the only time the key for "{created.name}" is shown. Store it in the other system's secret store, not in its code or settings files.
             </p>
+            {created.oldStillActive && (
+              <p className="text-sm text-red-500">
+                The old key "{created.oldStillActive}" could not be revoked and still works. Revoke it in the list after you copy the new key.
+              </p>
+            )}
             <div className="flex items-center gap-2 rounded-md border border-nb-gray-200 dark:border-nb-gray-700 bg-nb-gray-50 dark:bg-nb-gray-900 px-3 py-2">
               <code className="flex-1 break-all text-[0.8rem] text-nb-gray-900 dark:text-nb-gray-100">{created.key}</code>
               <CopyButton value={created.key} title="Copy Key" />

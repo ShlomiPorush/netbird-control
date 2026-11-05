@@ -152,8 +152,10 @@ async function revokeApiKey(id, viewer) {
             'UPDATE api_keys SET revoked_at = NOW(), revoked_by = $2 WHERE id = $1 AND revoked_at IS NULL RETURNING *',
             [n, (viewer && viewer.email) || '']);
         if (!r.rows.length) {
+            // Already revoked, or no such key. Asked on the same connection, so repeated revokes
+            // never hold one connection while they wait for another.
+            const exists = await client.query('SELECT 1 FROM api_keys WHERE id = $1', [n]);
             await client.query('ROLLBACK');
-            const exists = await pool.query('SELECT 1 FROM api_keys WHERE id = $1', [n]);
             if (!exists.rows.length) throw apiError(404, 'NOT_FOUND', 'This key does not exist.');
             return { ok: true, alreadyRevoked: true };
         }

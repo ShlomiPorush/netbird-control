@@ -4703,6 +4703,13 @@ function loginStateReturnTo(state) {
 }
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
+    // A body the JSON parser couldn't read: answered without logging the error object, which
+    // carries the raw body (it may hold a launch ticket, a password or a token).
+    if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
+        const tooLarge = err.type === 'entity.too.large';
+        console.error(`Unreadable request body on ${req.method} ${req.path}: ${err.type}`);
+        return res.status(tooLarge ? 413 : 400).json({ error: tooLarge ? 'The request body is too large.' : 'The request body is not valid JSON.' });
+    }
     if (req.path === '/callback' && oidcCallbackRecoverable(err)) {
         const state = callbackState(req);
         const tries = Math.max(0, Number.parseInt(state.retry, 10) || 0);

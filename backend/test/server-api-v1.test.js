@@ -104,6 +104,15 @@ test('a body that is not JSON: 400, and its contents appear in no log line or re
     assert.ok(!logs.some(l => l.includes(SECRET_IN_BODY)), 'no log line holds the body');
 });
 
+test('a body that is not JSON on an app route (opening a launch link) is answered 400 without logging it', async () => {
+    const before = logs.length;
+    const r = await post('/api/remote-access/launch/redeem', { raw: `{"ticket":"${SECRET_IN_BODY}",` });
+    assert.equal(r.status, 400);
+    assert.ok(!r.text.includes(SECRET_IN_BODY));
+    assert.ok(logs.length > before, 'the failure is logged');
+    assert.ok(!logs.some(l => l.includes(SECRET_IN_BODY)), 'no log line holds the body');
+});
+
 test('a body over 64 KB is refused', async () => {
     const r = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', password: 'x'.repeat(70 * 1024) } });
     assert.equal(r.status, 413);
