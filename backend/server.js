@@ -351,7 +351,12 @@ const apiKeysLib = require('./lib/api-keys');
 const remoteAccessLib = require('./lib/remote-access');
 const apiV1 = express.Router();
 const apiKeyLimiter = rateLimit(limiterOptions('apikey'));
-const apiV1Json = express.json({ limit: '64kb' });
+const apiV1JsonParser = express.json({ limit: '64kb' });
+// Bodies are JSON only. Any other type (a form, for example) is refused by name, instead of being
+// skipped by the parser and then reported as missing fields.
+const apiV1Json = (req, res, next) => (req.is('application/json')
+    ? apiV1JsonParser(req, res, next)
+    : res.status(415).json({ error: 'Send the body as JSON (Content-Type: application/json).', code: 'UNSUPPORTED_MEDIA_TYPE' }));
 const apiKeyAuth = (scope) => apiKeysLib.requireApiKey(scope, { tooManyAuthFails, noteAuthFail });
 apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLimiter, apiV1Json, async (req, res) => {
     try {

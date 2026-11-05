@@ -113,6 +113,17 @@ test('a body that is not JSON on an app route (opening a launch link) is answere
     assert.ok(!logs.some(l => l.includes(SECRET_IN_BODY)), 'no log line holds the body');
 });
 
+test('a body that is not JSON (a form, or none) is refused by name, not reported as missing fields', async () => {
+    const form = await post('/api/v1/remote-access/launch', { key: API_KEY, raw: 'protocol=rdp&address=10.0.0.5&port=3389', contentType: 'application/x-www-form-urlencoded' });
+    assert.equal(form.status, 415);
+    assert.equal(JSON.parse(form.text).code, 'UNSUPPORTED_MEDIA_TYPE');
+    const none = await post('/api/v1/remote-access/launch', { key: API_KEY });
+    assert.equal(none.status, 415);
+    // A JSON type with a charset is JSON.
+    const charset = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '10.0.0.5', port: 3389 }, contentType: 'application/json; charset=utf-8' });
+    assert.equal(JSON.parse(charset.text).code, 'DISABLED');
+});
+
 test('a body over 64 KB is refused', async () => {
     const r = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', password: 'x'.repeat(70 * 1024) } });
     assert.equal(r.status, 413);

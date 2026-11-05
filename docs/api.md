@@ -38,7 +38,8 @@ The app checks the key before it reads the request body. Failed attempts count t
 limit that the webhook receivers share: 20 failures in 10 minutes block that address for the rest
 of the window (`429 TOO_MANY_FAILURES`). A valid key may make 30 calls a minute (`429`).
 
-Request bodies are JSON, up to 64 KB.
+Request bodies are JSON (`Content-Type: application/json`), up to 64 KB. A form or any other
+body type gets `415 UNSUPPORTED_MEDIA_TYPE`.
 
 ## Errors
 
@@ -63,6 +64,7 @@ Every error is JSON with a message for people and a stable code for programs:
 | 404 | `NOT_FOUND` | No such API path. |
 | 409 | `USER_AMBIGUOUS` | More than one NetBird user has this email address. |
 | 413 | `TOO_LARGE` | The body is over 64 KB. |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | The body is not sent as JSON. |
 | 429 | `TOO_MANY_FAILURES`, or no code | Too many failed attempts from this address, or too many calls with this key. |
 | 503 | `BUSY`, `SNAPSHOT_FAILED`, `AUDIT_FAILED`, `UNAVAILABLE` | Try again shortly. |
 
