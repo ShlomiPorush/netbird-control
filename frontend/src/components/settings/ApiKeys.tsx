@@ -12,8 +12,9 @@ import { Badge, Button, Checkbox, CopyButton, EmptyState, Field, Input, LoadingS
 
 const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remote Sessions' };
 
-// keepExpiry: Replace's old expiry, sent exactly as it was while the date field still shows its day.
-type Draft = { name: string; scopes: string[]; allowedIps: string; expiresAt: string; replaces?: ApiKey; keepExpiry?: string };
+// Replace = a new key with the old key's settings. keepExpiry: the old key's exact expiry, sent as
+// it is unless the admin changes the date (the server refuses it if it has passed meanwhile).
+type Draft = { name: string; scopes: string[]; allowedIps: string; expiresAt: string; replaces?: ApiKey; keepExpiry?: string; expiryTouched?: boolean };
 
 const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
@@ -27,7 +28,7 @@ function dateOf(iso: string | null | undefined): string {
 }
 
 function expiryToSend(d: Draft): string | null {
-  if (d.keepExpiry && d.expiresAt && d.expiresAt === dateOf(d.keepExpiry)) return d.keepExpiry;
+  if (d.keepExpiry && !d.expiryTouched) return d.keepExpiry;
   return d.expiresAt ? new Date(`${d.expiresAt}T23:59:59`).toISOString() : null;
 }
 
@@ -40,18 +41,20 @@ function status(k: ApiKey): { label: string; tone: 'green' | 'gray' | 'red' } {
 export function ApiKeys() {
   const qc = useQueryClient();
   const confirm = useConfirm();
-  const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list });
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState('');
   const [created, setCreated] = useState<{ key: string; name: string; replaces?: ApiKey } | null>(null);
+  // The list doesn't refresh while a new key is on screen: a refresh that finds the sign-in
+  // expired would leave the page for the sign-in, and the key is shown only this once.
+  const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list, enabled: !created });
 
-  // Replace shows the new key first and revokes the old one only after the admin closes that
-  // dialog, so nothing that happens to the revoke (an error, an expired sign-in) can lose the new key.
   const create = useMutation({
     mutationFn: (d: Draft) => apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: expiryToSend(d) }),
     onSuccess: (out, d) => { setDraft(null); setCreated({ key: out.key, name: out.apiKey.name, replaces: d.replaces }); },
-    onError: (e) => setError(e instanceof ApiError ? e.message : "The key couldn't be created. Try again."),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
+    onError: (e) => {
+      setError(e instanceof ApiError ? e.message : "The key couldn't be created. Try again.");
+      void qc.invalidateQueries({ queryKey: ['api-keys'] });
+    },
   });
   const revoke = useMutation({
     mutationFn: (id: number) => apiKeysApi.revoke(id),
@@ -64,17 +67,8 @@ export function ApiKeys() {
 
   const open = (d?: Partial<Draft>) => { setError(''); setDraft({ name: '', scopes: scopes.map((s) => s.id), allowedIps: '', expiresAt: '', ...d }); };
   const closeCreated = () => {
-    const old = created?.replaces;
     setCreated(null);
-    if (old) {
-      revoke.mutate(old.id, {
-        onError: (e) => void confirm({
-          title: 'The Old Key Still Works',
-          message: `"${old.name}" could not be revoked${e instanceof ApiError ? `: ${e.message}` : '.'} Revoke it in the list.`,
-          confirmText: 'OK',
-        }),
-      });
-    }
+    void qc.invalidateQueries({ queryKey: ['api-keys'] });
   };
   const submit = (e: FormEvent) => { e.preventDefault(); if (draft) create.mutate(draft); };
   const askRevoke = async (k: ApiKey) => {
@@ -133,7 +127,7 @@ export function ApiKeys() {
       )}
 
       <Modal open={!!draft} onClose={() => setDraft(null)} title={draft?.replaces ? 'Replace API Key' : 'Create API Key'}
-        subtitle={draft?.replaces ? `A new key is created. "${draft.replaces.name}" is revoked when you close the dialog that shows the new key.` : undefined}
+        subtitle={draft?.replaces ? `A new key with the same settings. "${draft.replaces.name}" keeps working until you revoke it, so you can move the other system to the new key first.` : undefined}
         icon={<KeyRound size={18} />}
         footer={<>
           <Button onClick={() => setDraft(null)}>Cancel</Button>
@@ -163,7 +157,7 @@ export function ApiKeys() {
               <Textarea value={draft.allowedIps} onChange={(e) => setDraft({ ...draft, allowedIps: e.target.value })} rows={2} placeholder="203.0.113.10" spellCheck={false} />
             </Field>
             <Field label="Expires (Optional)" hint="The key stops working at the end of this day. Empty: it never expires.">
-              <Input type="date" value={draft.expiresAt} onChange={(e) => setDraft({ ...draft, expiresAt: e.target.value })} min={localDay(new Date())} />
+              <Input type="date" value={draft.expiresAt} onChange={(e) => setDraft({ ...draft, expiresAt: e.target.value, expiryTouched: true })} min={localDay(new Date())} />
             </Field>
             {error && <p className="text-sm text-red-500">{error}</p>}
           </form>
@@ -180,7 +174,7 @@ export function ApiKeys() {
             </p>
             {created.replaces && (
               <p className="text-sm text-nb-gray-600 dark:text-nb-gray-300">
-                When you click Done, the old key "{created.replaces.name}" is revoked. Put the new key in the other system first.
+                Put the new key in the other system, then revoke the old key "{created.replaces.name}" in the list.
               </p>
             )}
             <div className="flex items-center gap-2 rounded-md border border-nb-gray-200 dark:border-nb-gray-700 bg-nb-gray-50 dark:bg-nb-gray-900 px-3 py-2">
