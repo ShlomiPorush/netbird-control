@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { KeyRound, Plus, TriangleAlert } from 'lucide-react';
 import { ApiError, holdLoginRedirect } from '@/lib/api';
@@ -47,13 +47,19 @@ export function ApiKeys() {
   // The list doesn't refresh while a new key is on screen: a refresh that finds the sign-in
   // expired would leave the page for the sign-in, and the key is shown only this once.
   const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list, enabled: !created });
-  // Nor does any other request that finds the sign-in expired take the page away from it.
-  useEffect(() => (created ? holdLoginRedirect() : undefined), [created]);
+  // Nor does any other request that finds the sign-in expired take the page away from it: the hold
+  // starts with the create request (a 401 can arrive before the dialog is drawn) and ends when the
+  // dialog closes, the request fails, or the page goes away.
+  const hold = useRef<(() => void) | null>(null);
+  const releaseHold = () => { hold.current?.(); hold.current = null; };
+  useEffect(() => () => { hold.current?.(); hold.current = null; }, []);
 
   const create = useMutation({
     mutationFn: (d: Draft) => apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: expiryToSend(d) }),
+    onMutate: () => { releaseHold(); hold.current = holdLoginRedirect(); },
     onSuccess: (out, d) => { setDraft(null); setCreated({ key: out.key, name: out.apiKey.name, replaces: d.replaces }); },
     onError: (e) => {
+      releaseHold();
       setError(e instanceof ApiError ? e.message : "The key couldn't be created. Try again.");
       void qc.invalidateQueries({ queryKey: ['api-keys'] });
     },
@@ -68,8 +74,14 @@ export function ApiKeys() {
   const { keys, scopes, trustProxy } = list.data;
 
   const open = (d?: Partial<Draft>) => { setError(''); setDraft({ name: '', scopes: scopes.map((s) => s.id), allowedIps: '', expiresAt: '', ...d }); };
+  // The expiry's day is worked out once, so the field and the exact value always agree.
+  const replace = (k: ApiKey) => {
+    const day = dateOf(k.expiresAt);
+    open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: day, keepExpiry: day ? k.expiresAt || undefined : undefined, replaces: k });
+  };
   const closeCreated = () => {
     setCreated(null);
+    releaseHold();
     void qc.invalidateQueries({ queryKey: ['api-keys'] });
   };
   const submit = (e: FormEvent) => { e.preventDefault(); if (draft) create.mutate(draft); };
@@ -109,7 +121,7 @@ export function ApiKeys() {
                   <Badge tone={st.tone}>{st.label}</Badge>
                   {!k.revokedAt && (
                     <div className="ml-auto flex gap-2">
-                      <Button size="sm" onClick={() => open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: dateOf(k.expiresAt), keepExpiry: dateOf(k.expiresAt) ? k.expiresAt || undefined : undefined, replaces: k })}>Replace</Button>
+                      <Button size="sm" onClick={() => replace(k)}>Replace</Button>
                       <Button size="sm" variant="danger" onClick={() => void askRevoke(k)} disabled={revoke.isPending}>Revoke</Button>
                     </div>
                   )}
