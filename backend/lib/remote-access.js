@@ -1018,8 +1018,72 @@ function str(v, max, field) {
     return v;
 }
 
-// Issue a launch link. `key` is the API key ({ id, name }) the caller used.
+// ─── Refused launch requests in the audit log ───
+// One record per key and refusal code at the 1st, 10th, 100th... refusal in a 10-minute window,
+// with the count so far, so a key holder can't flood the log (the target is the caller's choice,
+// so it is not part of what is collapsed). A failed write is tried again on a later refusal, at
+// most once a minute. The target holds only values that passed the field checks; never the body's
+// other fields.
+const REFUSAL_WINDOW_MS = 10 * 60_000;
+const REFUSAL_RETRY_MS = 60_000;
+const _refusals = new Map(); // `${keyId}:${code}` -> { until, count, next, retryAt, writing }
+
+function refusalTarget(body) {
+    const b = body && typeof body === 'object' ? body : {};
+    const p = typeof b.protocol === 'string' ? b.protocol.toLowerCase() : '';
+    const protocol = p === 'rdp' || p === 'ssh' ? p : 'invalid';
+    const t = typeof b.address === 'string' ? normalizeTarget(b.address) : { error: true };
+    const address = t.error ? 'invalid' : (t.kind === 'ip' ? t.ip : t.name);
+    const rp = b.port;
+    const portOk = typeof rp === 'string' ? /^\d{1,5}$/.test(rp) && Number(rp) >= 1 && Number(rp) <= 65535 : (Number.isInteger(rp) && rp >= 1 && rp <= 65535);
+    return `${protocol}://${address}:${portOk ? Number(rp) : 'invalid'}`;
+}
+
+async function auditRefusedLaunch(key, code, body) {
+    const now = Date.now();
+    const id = `${key.id}:${code}`;
+    let r = _refusals.get(id);
+    if (!r) {
+        // Entries idle past their window (a key that stopped, or was revoked) are dropped.
+        for (const [k, v] of _refusals) if (now >= v.until && now >= v.retryAt && !v.writing) _refusals.delete(k);
+        r = { until: 0, count: 0, next: 1, retryAt: 0, writing: false };
+        _refusals.set(id, r);
+    }
+    // A new window restarts the count; a write in flight and the wait after a failed one carry over.
+    if (now >= r.until) { r.until = now + REFUSAL_WINDOW_MS; r.count = 0; r.next = 1; }
+    r.count++;
+    if (r.writing || r.count < r.next || now < r.retryAt) return;
+    r.writing = true;
+    const count = r.count;
+    const window = r.until;
+    try {
+        await apiKeys.writeAuditStrict(pool, {
+            ...apiKeys.keyActor(key), action: 'remote_access.launch_refused', target: refusalTarget(body),
+            meta: { keyId: key.id, code, count }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS,
+        });
+        if (r.until === window) while (r.next <= count) r.next *= 10;
+    } catch (e) {
+        r.retryAt = Date.now() + REFUSAL_RETRY_MS;
+        console.error('[remote-access] launch refusal audit failed:', e.message);
+    } finally {
+        r.writing = false;
+    }
+}
+
+// Issue a launch link. `key` is the API key ({ id, name }) the caller used. A refusal is recorded
+// (see above) and then reaches the caller unchanged.
 async function issueLaunch(key, body) {
+    try {
+        return await issueLaunchChecked(key, body);
+    } catch (e) {
+        if (e && e.status && e.code !== 'AUDIT_FAILED' && !e.audited) {
+            await auditRefusedLaunch(key, e.code, body).catch(() => { });
+        }
+        throw e;
+    }
+}
+
+async function issueLaunchChecked(key, body) {
     if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
     // The port exactly as sent: an integer, or a string of digits ("3389.5" or "3389x" is refused).
     const rawPort = body && body.port;
@@ -1066,8 +1130,10 @@ async function issueLaunch(key, body) {
     // Checked again with no await before the insert: other requests may have filled the room
     // while the audit record was written.
     if (!launchRoom()) {
-        await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_discard', meta: { ticketRef: ticketRef(hash), reason: 'busy' } }).catch(() => { });
-        throw httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
+        const recorded = await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_discard', meta: { ticketRef: ticketRef(hash), reason: 'busy' } }).then(() => true, () => false);
+        const busy = httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
+        busy.audited = recorded; // the discard record already says why; else the refusal record does
+        throw busy;
     }
     const expiresAt = Date.now() + LAUNCH_TTL_MS;
     _launches.set(hash, { userId, email, protocol, address, port, creds, keyId: key.id, keyName: key.name, expiresAt });
@@ -1118,5 +1184,6 @@ module.exports = {
     _internal: {
         GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, setConfigForTest: (c) => { _cfg = normConfig(c); },
         launchCount: () => _launches.size, LAUNCH_MAX, LAUNCH_TTL_MS, ticketHash, sweepLaunches,
+        REFUSAL_WINDOW_MS, REFUSAL_RETRY_MS, clearRefusals: () => _refusals.clear(), refusalCount: () => _refusals.size,
     },
 };

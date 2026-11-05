@@ -376,8 +376,23 @@ test('the failed-token throttle on the receivers is separate from the rate limit
     assert.equal(throttled.status, 429);
     assert.match(throttled.text, /Too many failed attempts/);
     assert.equal(throttled.headers.get('ratelimit'), null, 'not one of the rate limiters');
+    assert.equal((await call('POST', '/api/webhook', { ip, accept: 'application/json', body: {} })).status, 429, 'no token');
     const good = await call('POST', '/api/webhook', { ip: freshIp(), accept: 'application/json', headers: { authorization: `Bearer ${HOOK_TOKEN}` }, body: {} });
     assert.equal(good.status, 400);
+    // The correct token works from the blocked address too, bare or as Bearer (both receivers share
+    // this check; the notifications token is not set in this test).
+    for (const authorization of [`Bearer ${HOOK_TOKEN}`, HOOK_TOKEN]) {
+        const fromBlocked = await call('POST', '/api/webhook', { ip, accept: 'application/json', headers: { authorization }, body: {} });
+        assert.equal(fromBlocked.status, 400, 'passed the token check (the empty payload is refused after it)');
+    }
+    assert.equal((await bad()).status, 429, 'the correct token does not lift the block');
+});
+
+test('without a block, a missing token is 401 and a wrong one 403', async () => {
+    const ip = freshIp();
+    assert.equal((await call('POST', '/api/webhook', { ip, accept: 'application/json', body: {} })).status, 401);
+    assert.equal((await call('POST', '/api/webhook', { ip, accept: 'application/json', headers: { authorization: '' }, body: {} })).status, 401);
+    assert.equal((await call('POST', '/api/webhook', { ip, accept: 'application/json', headers: { authorization: 'Bearer wrong' }, body: {} })).status, 403);
 });
 
 // ── Failed OIDC callbacks restart the login, a bounded number of times; logout ──
