@@ -13,7 +13,8 @@ const WINDOW_MS = 60_000;
 //   api  - per signed-in user (else per client IP): everything under /api.
 //   spa  - per signed-in user (else per client IP): the app shell, /version.txt and other
 //          static files; the content-hashed build assets under /assets are exempt.
-const LIMITS = Object.freeze({ auth: 30, api: 600, spa: 300 });
+//   apikey - per API key: the public API (/api/v1), counted after the key was checked.
+const LIMITS = Object.freeze({ auth: 30, api: 600, spa: 300, apikey: 30 });
 const MESSAGE = 'Too many requests - try again in a moment';
 
 // TRUST_PROXY → Express 'trust proxy'. Default: trust nobody, so req.ip is the TCP peer and a
@@ -82,6 +83,7 @@ function limiterOptions(kind, { windowMs = WINDOW_MS, assetsDir = '', skipAuth =
         return { ...base, keyGenerator: (req) => `ip:${ipKeyGenerator(req.ip || '')}`, skip: (req) => skipAuth(req) || skipAuthBudget(req) };
     }
     if (kind === 'api') return { ...base, keyGenerator: clientKey };
+    if (kind === 'apikey') return { ...base, keyGenerator: (req) => `apikey:${req.apiKey ? req.apiKey.id : ''}` };
     if (kind === 'spa') {
         const assets = buildAssetNames(assetsDir);
         const isBuildAsset = (p) => p.startsWith('/assets/') && assets.has(p.slice('/assets/'.length));

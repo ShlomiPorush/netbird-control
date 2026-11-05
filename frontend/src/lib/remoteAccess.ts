@@ -133,6 +133,39 @@ export const remoteApi = {
   saveConfig: (cfg: Partial<RemoteAccessConfig>) => api.put<{ config: RemoteAccessConfig; sync: { added: number; removed: number } | null }>('/api/remote-access/config', cfg),
   status: () => api.get<RemoteAccessStatus>('/api/remote-access/status'),
   setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
+  /** Open a launch link from another system. Only the ticket and the screen size are sent. */
+  redeemLaunch: (body: { ticket: string; width: number; height: number; dpi: number; timezone: string }) =>
+    api.post<LaunchSession>('/api/remote-access/launch/redeem', body),
+};
+
+/** A session opened from a launch link: the server sends what the browser needs to show it. */
+export interface LaunchSession extends RemoteSession {
+  protocol: RemoteProtocol;
+  port: number;
+  /** The credentials came from the other system and went to the server directly. */
+  serverCredentials: true;
+}
+
+// ─── API keys (Settings → API Keys) ───
+export interface ApiKey {
+  id: number;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  allowedIps: string[];
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  lastUsedIp: string;
+  revokedAt: string | null;
+  revokedBy: string;
+}
+export const apiKeysApi = {
+  list: () => api.get<{ keys: ApiKey[]; scopes: { id: string; label: string }[]; trustProxy: boolean }>('/api/api-keys'),
+  create: (body: { name: string; scopes: string[]; allowedIps: string; expiresAt: string | null }) =>
+    api.post<{ key: string; apiKey: ApiKey }>('/api/api-keys', body),
+  revoke: (id: number) => api.post<{ ok: boolean }>(`/api/api-keys/${id}/revoke`, {}),
 };
 
 // ─── Guacamole (global from the vendored script) ───

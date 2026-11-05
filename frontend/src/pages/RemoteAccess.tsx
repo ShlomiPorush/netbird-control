@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { MonitorPlay, Terminal } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import { Loader2, MonitorPlay, Terminal, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
 import { remoteApi, cleanAddressInput, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
@@ -47,6 +48,39 @@ export default function RemoteAccess() {
   const [sshPassphrase, setSshPassphrase] = useState('');
 
   useEffect(() => { if (!portTouched) setPort(String(DEFAULT_PORT[protocol])); }, [protocol, portTouched]);
+
+  // A launch link from another system (/remote-access?launch=<ticket>): opened once, with the
+  // credentials the server already holds. The ticket stays in the address until the server has
+  // answered, so a sign-in that expired in between returns here and the link still opens.
+  const [params, setParams] = useSearchParams();
+  const launchTicket = params.get('launch') || '';
+  const launched = useRef('');
+  const [launch, setLaunch] = useState<{ state: 'opening' } | { state: 'failed'; message: string } | null>(null);
+  const ready = !!info.data?.available && !!info.data?.allowed;
+  useEffect(() => {
+    if (!launchTicket || !ready || launched.current === launchTicket) return;
+    launched.current = launchTicket;
+    setLaunch({ state: 'opening' });
+    const done = () => setParams((p) => { const n = new URLSearchParams(p); n.delete('launch'); return n; }, { replace: true });
+    remoteApi.redeemLaunch({
+      ticket: launchTicket, ...sessionScreenSize(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }).then((s) => {
+      done();
+      setLaunch(null);
+      sessions.add({
+        sessionId: s.sessionId, token: s.token, protocol: s.protocol,
+        title: sessionTitle(s, s.port) || `${s.address}:${s.port}`,
+        clipboard: !!info.data?.clipboard,
+        steps: withStep(withStep(withStep(freshSteps(), 'access', 'pass'), 'path', 'pass'), 'channel', 'running'),
+        dwell: pickDwell(), target: { address: s.address || '', port: s.port }, serverCredentials: true,
+      });
+    }).catch((err) => {
+      // 401: the sign-in ended and the browser is on its way to sign in again (and back here).
+      if (err instanceof ApiError && err.status === 401) return;
+      done();
+      setLaunch({ state: 'failed', message: err instanceof ApiError ? err.message : "The connection couldn't be opened. Open it again from the system that sent you here." });
+    });
+  }, [launchTicket, ready, info.data?.clipboard, sessions, setParams]);
 
   const setStep = useCallback((key: StepKey, state: StepState, detail?: string) => setSteps((p) => withStep(p, key, state, detail)), []);
 
@@ -165,6 +199,20 @@ export default function RemoteAccess() {
         title="Remote Access"
         description={<>Connect to a server from the browser with RDP or SSH. You can reach the same servers your NetBird access already allows - nothing more.</>}
       />
+
+      {launch && (
+        <div role="status" className={launch.state === 'failed'
+          ? 'mb-4 flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/5 px-4 py-3'
+          : 'mb-4 flex items-center gap-3 rounded-xl border border-netbird/40 bg-netbird/5 px-4 py-3'}>
+          {launch.state === 'opening'
+            ? <><Loader2 size={18} className="text-netbird shrink-0 animate-spin" /><span className="text-sm text-nb-gray-700 dark:text-nb-gray-200">Opening the connection you were sent here for…</span></>
+            : <>
+              <XCircle size={18} className="text-red-500 shrink-0 mt-0.5" />
+              <span className="text-sm text-nb-gray-700 dark:text-nb-gray-200">{launch.message}</span>
+              <Button size="sm" className="ml-auto shrink-0" onClick={() => setLaunch(null)}>Dismiss</Button>
+            </>}
+        </div>
+      )}
 
       {sessions.count > 0 && (
         <div className="mb-4 flex items-center gap-3 rounded-xl border border-netbird/40 bg-netbird/5 px-4 py-3">

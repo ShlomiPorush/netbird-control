@@ -131,7 +131,10 @@ const BODY_PARSER_EXEMPT = new Set(['/api/settings-import', '/api/internal-backu
 // Express 5's parser leaves req.body undefined when a request has no JSON body - no Content-Type or
 // another one, like the app's DELETE requests (Express 4 set {}). Keep {} so a handler that reads
 // req.body.x answers its usual 400 instead of throwing.
-app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) ? next() : jsonBody1mb(req, res, (err) => {
+// The public API (/api/v1, any letter case, with or without a trailing slash, as Express routes it)
+// reads its body with its own smaller parser, after the API key was checked.
+const API_V1_PATH = /^\/api\/v1(\/|$)/i;
+app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) || API_V1_PATH.test(req.path) ? next() : jsonBody1mb(req, res, (err) => {
     if (!err && req.body === undefined) req.body = {};
     next(err);
 })));
@@ -337,6 +340,52 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
     }
     res.status(200).json({ ok: true });
 });
+
+// ─── Public API v1 (other systems, with an API key from Settings → API Keys) ───
+// Registered before the login gate: a caller is a server with a key, not a signed-in browser. The
+// key is checked from the headers first; only then is the per-key limit counted and the body read,
+// by the router's own parser (the global one skips /api/v1, see BODY_PARSER_EXEMPT). The router's
+// error handler never logs the error object: a parse error carries the raw body, which may hold
+// passwords.
+const apiKeysLib = require('./lib/api-keys');
+const remoteAccessLib = require('./lib/remote-access');
+const apiV1 = express.Router();
+const apiKeyLimiter = rateLimit(limiterOptions('apikey'));
+const apiV1JsonParser = express.json({ limit: '64kb' });
+// Bodies are JSON only. Any other type (a form, for example) is refused by name, instead of being
+// skipped by the parser and then reported as missing fields.
+const apiV1Json = (req, res, next) => (req.is('application/json')
+    ? apiV1JsonParser(req, res, next)
+    : res.status(415).json({ error: 'Send the body as JSON (Content-Type: application/json).', code: 'UNSUPPORTED_MEDIA_TYPE' }));
+const apiKeyAuth = (scope) => apiKeysLib.requireApiKey(scope, { tooManyAuthFails, noteAuthFail });
+apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLimiter, apiV1Json, async (req, res) => {
+    try {
+        if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
+        const out = await remoteAccessLib.issueLaunch(req.apiKey, req.body || {});
+        const base = String(process.env.BASE_URL || '').replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`;
+        res.status(201).json({ url: `${base}/remote-access?launch=${out.ticket}`, expiresAt: out.expiresAt });
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        console.error('[api v1] launch failed:', e.message);
+        res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
+    }
+});
+apiV1.use((req, res) => res.status(404).json({ error: 'Not Found', code: 'NOT_FOUND' }));
+// eslint-disable-next-line no-unused-vars
+apiV1.use((err, req, res, next) => {
+    const key = req.apiKey ? req.apiKey.prefix : '-';
+    if (err && err.type === 'entity.parse.failed') {
+        console.error(`[api v1] ${req.method} ${req.path} key=${key}: the body is not valid JSON`);
+        return res.status(400).json({ error: 'The request body is not valid JSON.', code: 'BAD_JSON' });
+    }
+    if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'The request body is too large.', code: 'TOO_LARGE' });
+    if (err && typeof err.status === 'number' && err.status >= 400 && err.status < 500) {
+        return res.status(err.status).json({ error: 'The request could not be read.', code: 'BAD_REQUEST' });
+    }
+    console.error(`[api v1] ${req.method} ${req.path} key=${key}: ${(err && err.type) || (err && err.name) || 'error'}`);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
+});
+app.use('/api/v1', apiV1);
 
 // ══════════════ RATE LIMITS + AUTH GATE - everything below is rate limited and requires login (when configured) ══════════════
 // The routes above (webhook receivers, health probe, Telegram callback) are registered BEFORE
@@ -3300,6 +3349,49 @@ app.delete('/api/remote-access/sessions/:id', requireRemoteUser, (req, res) => {
     endRemoteSession(req.remoteViewer, String(req.params.id));
     res.json({ ok: true });
 });
+// A launch link from another system (POST /api/v1/remote-access/launch), opened in the browser.
+// Only the ticket and the screen size come from the browser; the target and credentials don't.
+app.post('/api/remote-access/launch/redeem', requireRemoteUser, async (req, res) => {
+    try {
+        const b = req.body || {};
+        res.json(await remoteAccessLib.redeemLaunch(req.remoteViewer, {
+            ticket: b.ticket, width: b.width, height: b.height, dpi: b.dpi, timezone: b.timezone,
+        }, req.ip));
+    } catch (e) { sendRemoteError(res, e); }
+});
+
+// ─── API keys (Settings → API Keys): admins, main account only ───
+app.get('/api/api-keys', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try {
+        res.json({
+            keys: await apiKeysLib.listApiKeys(),
+            scopes: Object.entries(apiKeysLib.SCOPES).map(([id, label]) => ({ id, label })),
+            trustProxy: !!process.env.TRUST_PROXY,
+        });
+    } catch (e) {
+        console.error('[api-keys] list failed:', e.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+app.post('/api/api-keys', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try { res.status(201).json(await apiKeysLib.createApiKey(req.body || {}, await getViewer(req))); }
+    catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        console.error('[api-keys] create failed:', e.message);
+        res.status(500).json({ error: "The key couldn't be created. Try again." });
+    }
+});
+app.post('/api/api-keys/:id/revoke', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try { res.json(await apiKeysLib.revokeApiKey(req.params.id, await getViewer(req))); }
+    catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        console.error('[api-keys] revoke failed:', e.message);
+        res.status(500).json({ error: "The key couldn't be revoked. Try again." });
+    }
+});
 
 // Admin: settings, managed NetBird objects, gateway enrollment, status.
 app.get('/api/remote-access/config', requireAdmin, (req, res) => {
@@ -4616,6 +4708,13 @@ function loginStateReturnTo(state) {
 }
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
+    // A body the JSON parser couldn't read: answered without logging the error object, which
+    // carries the raw body (it may hold a launch ticket, a password or a token).
+    if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
+        const tooLarge = err.type === 'entity.too.large';
+        console.error(`Unreadable request body on ${req.method} ${req.path}: ${err.type}`);
+        return res.status(tooLarge ? 413 : 400).json({ error: tooLarge ? 'The request body is too large.' : 'The request body is not valid JSON.' });
+    }
     if (req.path === '/callback' && oidcCallbackRecoverable(err)) {
         const state = callbackState(req);
         const tries = Math.max(0, Number.parseInt(state.retry, 10) || 0);

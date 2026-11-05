@@ -41,6 +41,11 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   peers, by IP address or host name, only to servers the user's own NetBird access already
   reaches. Several sessions stay open as tabs while you use the rest of the portal. Each session
   is checked live and recorded on the Activity page ([setup and security model](docs/remote-access.md)).
+  Another system, such as a customer file, can open a session with stored credentials through the
+  public API ([API reference](docs/api.md), [integration guide](docs/remote-launch-integration.md)).
+- **Public API and API keys** - admins create keys in **Settings → API Keys**, each limited to the
+  actions, addresses and dates it needs. The audit log records keys being created and revoked, and
+  every connection link a key makes or that is opened.
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and
   what to do next, plus a downloadable Windows diagnostics script.
 - **Guardrails** - an address blocklist, overlap and conflict detection, a cleanup report and a

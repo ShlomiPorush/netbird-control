@@ -25,6 +25,7 @@ const { StringDecoder } = require('string_decoder');
 const { pool, getSetting, setSetting } = require('./core');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY } = require('./netbird');
 const { addEvent } = require('./events');
+const apiKeys = require('./api-keys');
 const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isDomainResource, gatewayReach, extraReach, pathStatus } = require('./remote-access-auth');
 
 // The managed NetBird objects of each gateway.
@@ -473,7 +474,9 @@ function sessionEvent(s, kind, extra = {}) {
     };
 }
 
-async function createSession(viewer, body, clientIp) {
+// opts.presetCreds: credentials from a launch link (server side only - never read from a browser
+// body). They go to guacd for RDP and SSH alike.
+async function createSession(viewer, body, clientIp, opts = {}) {
     if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
     const { protocol, address, port } = parseTarget(body);
     if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser) throw httpError(429, 'TOO_MANY', `You already have ${_cfg.maxSessionsPerUser} open sessions. Close one first.`);
@@ -495,14 +498,16 @@ async function createSession(viewer, body, clientIp) {
     // Up to Windows' largest scaling (500%).
     const dpi = clampInt(body.dpi, 72, 480, 96);
     const timezone = /^[A-Za-z0-9_+\-/]{1,64}$/.test(String(body.timezone || '')) ? String(body.timezone) : '';
-    const creds = {};
-    if (protocol === 'ssh') {
+    let creds = {};
+    if (opts.presetCreds) {
+        creds = { ...opts.presetCreds };
+    } else if (protocol === 'ssh') {
         creds.username = String(body.username || '').slice(0, 256);
         creds.password = String(body.password || '').slice(0, 1024);
         creds.privateKey = String(body.privateKey || '').slice(0, 16384);
         creds.passphrase = String(body.passphrase || '').slice(0, 1024);
-        if (!creds.username) throw httpError(400, 'USERNAME_REQUIRED', 'Enter the user name for the SSH server.');
     }
+    if (protocol === 'ssh' && !creds.username) throw httpError(400, 'USERNAME_REQUIRED', 'Enter the user name for the SSH server.');
 
     // Check the quota again: the snapshot read above may have let another request in.
     if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser || _sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY');
@@ -650,9 +655,9 @@ function connectArgs(s, argNames) {
         'disable-download': 'true', 'disable-upload': 'true',
         'disable-copy': _cfg.clipboard ? '' : 'true', 'disable-paste': _cfg.clipboard ? '' : 'true',
         timezone: s.timezone,
-        // Credentials are left empty: an NLA server makes guacd ask for them ("required"),
-        // otherwise the Windows logon screen appears in the session.
-        username: '', password: '', domain: '',
+        // Credentials come only from a launch link. Otherwise they are left empty: an NLA server
+        // makes guacd ask for them ("required"), else the Windows logon screen appears.
+        username: s.creds.username || '', password: s.creds.password || '', domain: s.creds.domain || '',
     };
     const ssh = {
         hostname: guacdHostname(s), port: String(s.port),
@@ -975,11 +980,143 @@ async function getRemoteAccessStatus() {
     return out;
 }
 
+// ─── Launch links (POST /api/v1/remote-access/launch) ───
+// Another system (the customer file) asks, server to server with an API key, for a session to a
+// target with stored credentials. It gets a one-time link; the browser opens it signed in to the
+// portal, and the session opens with the same checks as a manual connect. The credentials stay in
+// this process: in the launch entry until the link is opened, then in the session until guacd has
+// them. The link holds only a random ticket; this map is keyed by the ticket's SHA-256.
+//   - user (email) given: the user must exist (one NetBird user, not blocked) and have access to
+//     the target now, and only that user can open the link.
+//   - user empty: no check at issue; whoever opens the link first and passes the checks gets it.
+const LAUNCH_TTL_MS = 5 * 60_000;
+const LAUNCH_MAX = 500;
+const LAUNCH_SCOPE = 'remote-access:launch';
+const TICKET_RE = /^[A-Za-z0-9_-]{43}$/;
+const _launches = new Map(); // sha256(ticket) -> entry
+let _launchSweep = null;
+
+const ticketHash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+const ticketRef = (hash) => hash.slice(0, 12); // what audit records carry, never the ticket
+
+function sweepLaunches(now = Date.now()) {
+    for (const [k, v] of _launches) if (v.expiresAt <= now) _launches.delete(k);
+    if (!_launches.size && _launchSweep) { clearInterval(_launchSweep); _launchSweep = null; }
+}
+function launchRoom() { sweepLaunches(); return _launches.size < LAUNCH_MAX; }
+
+const LAUNCH_MESSAGES = {
+    USER_NOT_FOUND: 'No NetBird user has this email address.',
+    USER_AMBIGUOUS: 'More than one NetBird user has this email address, so the user is unclear.',
+    USER_BLOCKED: 'This NetBird user is blocked.',
+};
+
+function str(v, max, field) {
+    if (v == null || v === '') return '';
+    if (typeof v !== 'string') throw httpError(400, 'INVALID_FIELD', `"${field}" must be text.`);
+    if (v.length > max) throw httpError(400, 'INVALID_FIELD', `"${field}" is too long (at most ${max} characters).`);
+    return v;
+}
+
+// Issue a launch link. `key` is the API key ({ id, name }) the caller used.
+async function issueLaunch(key, body) {
+    if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
+    // The port exactly as sent: an integer, or a string of digits ("3389.5" or "3389x" is refused).
+    const rawPort = body && body.port;
+    const portOk = typeof rawPort === 'string' ? /^\d{1,5}$/.test(rawPort) : (Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535);
+    if (!portOk) throw httpError(400, 'INVALID_PORT');
+    const { protocol, address, port } = parseTarget(body);
+    if (!address || address.length > 255) throw httpError(400, 'INVALID_ADDRESS');
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw httpError(400, 'INVALID_PORT');
+    const email = str(body.user, 254, 'user').trim().toLowerCase();
+    const creds = {
+        username: str(body.username, 256, 'username'), password: str(body.password, 1024, 'password'),
+        domain: str(body.domain, 256, 'domain'),
+        privateKey: str(body.privateKey, 16384, 'privateKey'), passphrase: str(body.passphrase, 1024, 'passphrase'),
+    };
+    if (protocol === 'ssh' && !creds.username) throw httpError(400, 'USERNAME_REQUIRED', 'Send the user name for the SSH server.');
+    if (protocol === 'rdp') { delete creds.privateKey; delete creds.passphrase; }
+    else delete creds.domain;
+
+    let userId = null;
+    if (email) {
+        if (!email.includes('@')) throw httpError(400, 'INVALID_USER', '"user" must be an email address.');
+        let snap;
+        try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+        const matches = (snap.users || []).filter(u => u && String(u.email || '').toLowerCase() === email);
+        if (!matches.length) throw httpError(404, 'USER_NOT_FOUND', LAUNCH_MESSAGES.USER_NOT_FOUND);
+        if (matches.length > 1) throw httpError(409, 'USER_AMBIGUOUS', LAUNCH_MESSAGES.USER_AMBIGUOUS);
+        const u = matches[0];
+        if (u.is_blocked || u.status === 'blocked') throw httpError(403, 'USER_BLOCKED', LAUNCH_MESSAGES.USER_BLOCKED);
+        const rt = await resolveTarget(snap, u.id, address, port);
+        if (!rt.verdict.ok) throw httpError(403, rt.verdict.code);
+        userId = u.id;
+    }
+
+    if (!launchRoom()) throw httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
+    const ticket = crypto.randomBytes(32).toString('base64url');
+    const hash = ticketHash(ticket);
+    const audit = { ...apiKeys.keyActor(key), target: `${protocol}://${address}:${port}` };
+    try {
+        await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_issue', meta: { ticketRef: ticketRef(hash), keyId: key.id, user: email || null } });
+    } catch (e) {
+        console.error('[remote-access] launch audit failed:', e.message);
+        throw httpError(503, 'AUDIT_FAILED', "The request couldn't be recorded, so no link was made. Try again.");
+    }
+    // Checked again with no await before the insert: other requests may have filled the room
+    // while the audit record was written.
+    if (!launchRoom()) {
+        await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_discard', meta: { ticketRef: ticketRef(hash), reason: 'busy' } }).catch(() => { });
+        throw httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
+    }
+    const expiresAt = Date.now() + LAUNCH_TTL_MS;
+    _launches.set(hash, { userId, email, protocol, address, port, creds, keyId: key.id, keyName: key.name, expiresAt });
+    if (!_launchSweep) { _launchSweep = setInterval(sweepLaunches, 30_000); _launchSweep.unref(); }
+    return { ticket, expiresAt: new Date(expiresAt).toISOString() };
+}
+
+// Open a launch link: the signed-in viewer gets the session. The ticket is used up on the first
+// try, whatever the outcome.
+async function redeemLaunch(viewer, body, clientIp) {
+    const ticket = String((body && body.ticket) || '');
+    const hash = TICKET_RE.test(ticket) ? ticketHash(ticket) : '';
+    const entry = hash ? _launches.get(hash) : null;
+    if (hash) _launches.delete(hash);
+    if (!entry || entry.expiresAt <= Date.now()) throw httpError(410, 'EXPIRED', 'This link has expired or was already used. Open the connection again from the system that sent you here.');
+    const ref = ticketRef(hash);
+    const actor = { actorId: viewer.user_id || viewer.oid || '', actorEmail: viewer.email || '', actorName: viewer.name || '' };
+    const target = `${entry.protocol}://${entry.address}:${entry.port}`;
+    let valid;
+    try { valid = await apiKeys.keyStillValid(entry.keyId, LAUNCH_SCOPE); } catch { throw httpError(503, 'UNAVAILABLE', "The link couldn't be checked. Open the connection again."); }
+    if (!valid) throw httpError(410, 'KEY_REVOKED', 'The API key that made this link was revoked or expired. Open the connection again from the system that sent you here.');
+    if (entry.userId && entry.userId !== viewer.user_id) {
+        await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_wrong_user', target, meta: { ticketRef: ref, keyId: entry.keyId, intendedUser: entry.email } })
+            .catch((e) => console.error('[remote-access] launch audit failed:', e.message));
+        throw httpError(403, 'WRONG_USER', 'This link was made for another user. Sign in as that user, or open the connection again from the system that sent you here.');
+    }
+    try {
+        await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_open', target, meta: { ticketRef: ref, keyId: entry.keyId, keyName: entry.keyName } });
+    } catch (e) {
+        console.error('[remote-access] launch audit failed:', e.message);
+        throw httpError(503, 'AUDIT_FAILED', "The connection couldn't be recorded, so it was not opened. Open it again from the system that sent you here.");
+    }
+    const display = {
+        protocol: entry.protocol, address: entry.address, port: entry.port,
+        width: body.width, height: body.height, dpi: body.dpi, timezone: body.timezone,
+    };
+    const out = await createSession(viewer, display, clientIp, { presetCreds: entry.creds });
+    return { ...out, protocol: entry.protocol, port: entry.port, serverCredentials: true };
+}
+
 module.exports = {
+    issueLaunch, redeemLaunch,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
-    _internal: { GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, setConfigForTest: (c) => { _cfg = normConfig(c); } },
+    _internal: {
+        GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, setConfigForTest: (c) => { _cfg = normConfig(c); },
+        launchCount: () => _launches.size, LAUNCH_MAX, LAUNCH_TTL_MS, ticketHash, sweepLaunches,
+    },
 };

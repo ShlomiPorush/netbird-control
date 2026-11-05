@@ -4009,6 +4009,27 @@ async function initializeDatabase() {
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS target_name TEXT DEFAULT ''`);
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS gateway TEXT DEFAULT 'ip'`);
 
+        // API keys for the versioned public API (/api/v1), created by admins in Settings. Only the
+        // SHA-256 of a key is stored; the key itself is shown once. See lib/api-keys.js.
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS api_keys (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            key_prefix TEXT NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            scopes TEXT[] NOT NULL DEFAULT '{}',
+            allowed_ips TEXT[] NOT NULL DEFAULT '{}',
+            created_by TEXT DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ,
+            last_used_at TIMESTAMPTZ,
+            last_used_ip TEXT DEFAULT '',
+            revoked_at TIMESTAMPTZ,
+            revoked_by TEXT DEFAULT ''
+          );
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (key_prefix)`);
+
         // Access requests - a (usually non-admin) user asks for access; an admin approves it
         // (in-app or via Telegram buttons), which creates a temporary_access_grants row.
         await client.query(`
