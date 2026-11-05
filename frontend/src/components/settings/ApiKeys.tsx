@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { KeyRound, Plus, TriangleAlert } from 'lucide-react';
-import { ApiError, holdLoginRedirect } from '@/lib/api';
+import { ApiError } from '@/lib/api';
 import { apiKeysApi, type ApiKey } from '@/lib/remoteAccess';
 import { formatTimestamp } from '@/lib/logfmt';
 import { useConfirm } from '@/contexts/ConfirmContext';
@@ -44,25 +44,15 @@ export function ApiKeys() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState('');
   const [created, setCreated] = useState<{ key: string; name: string; replaces?: ApiKey } | null>(null);
-  // The list doesn't refresh while a new key is on screen: a refresh that finds the sign-in
-  // expired would leave the page for the sign-in, and the key is shown only this once.
-  const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list, enabled: !created });
-  // Nor does any other request that finds the sign-in expired take the page away from it: the hold
-  // starts with the create request (a 401 can arrive before the dialog is drawn) and ends when the
-  // dialog closes, the request fails, or the page goes away.
-  const hold = useRef<(() => void) | null>(null);
-  const releaseHold = () => { hold.current?.(); hold.current = null; };
-  useEffect(() => () => { hold.current?.(); hold.current = null; }, []);
+  // A sign-in that ends while the new key is on screen takes the page to the sign-in like
+  // anywhere else: the key is then lost (create another, and revoke the lost one in the list).
+  const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list });
 
   const create = useMutation({
     mutationFn: (d: Draft) => apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: expiryToSend(d) }),
-    onMutate: () => { releaseHold(); hold.current = holdLoginRedirect(); },
     onSuccess: (out, d) => { setDraft(null); setCreated({ key: out.key, name: out.apiKey.name, replaces: d.replaces }); },
-    onError: (e) => {
-      releaseHold();
-      setError(e instanceof ApiError ? e.message : "The key couldn't be created. Try again.");
-      void qc.invalidateQueries({ queryKey: ['api-keys'] });
-    },
+    onError: (e) => setError(e instanceof ApiError ? e.message : "The key couldn't be created. Try again."),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
   });
   const revoke = useMutation({
     mutationFn: (id: number) => apiKeysApi.revoke(id),
@@ -79,11 +69,7 @@ export function ApiKeys() {
     const day = dateOf(k.expiresAt);
     open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: day, keepExpiry: day ? k.expiresAt || undefined : undefined, replaces: k });
   };
-  const closeCreated = () => {
-    setCreated(null);
-    releaseHold();
-    void qc.invalidateQueries({ queryKey: ['api-keys'] });
-  };
+  const closeCreated = () => setCreated(null);
   const submit = (e: FormEvent) => { e.preventDefault(); if (draft) create.mutate(draft); };
   const askRevoke = async (k: ApiKey) => {
     const ok = await confirm({
