@@ -26,16 +26,35 @@ function buildUrl(path: string, query?: Query): string {
 // hit would overwrite the OIDC transaction cookie and break the login with a PKCE mismatch.
 let redirectingToLogin = false;
 
+function redirectToLogin() {
+  if (redirectingToLogin) return;
+  redirectingToLogin = true;
+  const here = window.location.pathname + window.location.search + window.location.hash;
+  window.location.href = '/login?returnTo=' + encodeURIComponent(here);
+}
+
+// While something is on screen that is shown only once (a new API key), a 401 does not leave the
+// page: the sign-in starts when the last hold is released.
+let loginHolds = 0;
+let loginPending = false;
+export function holdLoginRedirect(): () => void {
+  loginHolds++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    loginHolds--;
+    if (!loginHolds && loginPending) { loginPending = false; redirectToLogin(); }
+  };
+}
+
 async function handle<T>(res: Response): Promise<T> {
   if (res.status === 401) {
     // Not authenticated → kick off the OIDC login flow, remembering WHERE the user was -
     // after the (frequent, by security design) re-login they land back on the same page
     // instead of being dumped on Home.
-    if (!redirectingToLogin) {
-      redirectingToLogin = true;
-      const here = window.location.pathname + window.location.search + window.location.hash;
-      window.location.href = '/login?returnTo=' + encodeURIComponent(here);
-    }
+    if (loginHolds) loginPending = true;
+    else redirectToLogin();
     throw new ApiError(401, 'Unauthorized');
   }
   const text = await res.text();

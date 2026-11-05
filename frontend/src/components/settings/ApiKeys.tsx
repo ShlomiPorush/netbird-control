@@ -1,7 +1,7 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { KeyRound, Plus, TriangleAlert } from 'lucide-react';
-import { ApiError } from '@/lib/api';
+import { ApiError, holdLoginRedirect } from '@/lib/api';
 import { apiKeysApi, type ApiKey } from '@/lib/remoteAccess';
 import { formatTimestamp } from '@/lib/logfmt';
 import { useConfirm } from '@/contexts/ConfirmContext';
@@ -47,6 +47,8 @@ export function ApiKeys() {
   // The list doesn't refresh while a new key is on screen: a refresh that finds the sign-in
   // expired would leave the page for the sign-in, and the key is shown only this once.
   const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list, enabled: !created });
+  // Nor does any other request that finds the sign-in expired take the page away from it.
+  useEffect(() => (created ? holdLoginRedirect() : undefined), [created]);
 
   const create = useMutation({
     mutationFn: (d: Draft) => apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: expiryToSend(d) }),
@@ -107,7 +109,7 @@ export function ApiKeys() {
                   <Badge tone={st.tone}>{st.label}</Badge>
                   {!k.revokedAt && (
                     <div className="ml-auto flex gap-2">
-                      <Button size="sm" onClick={() => open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: dateOf(k.expiresAt), keepExpiry: k.expiresAt || undefined, replaces: k })}>Replace</Button>
+                      <Button size="sm" onClick={() => open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: dateOf(k.expiresAt), keepExpiry: dateOf(k.expiresAt) ? k.expiresAt || undefined : undefined, replaces: k })}>Replace</Button>
                       <Button size="sm" variant="danger" onClick={() => void askRevoke(k)} disabled={revoke.isPending}>Revoke</Button>
                     </div>
                   )}
