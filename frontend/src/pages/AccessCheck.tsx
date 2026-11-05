@@ -235,8 +235,8 @@ function Warnings({ target, routers, legacy }: { target: AccessTargetInfo; route
   if (target.type === 'resource' && target.enabled === false) items.push('This resource is disabled. Only an enabled resource with an overlapping address can still route to it.');
   for (const r of routers) {
     if (r.status === 'offline') items.push(`No routing peer is online in network "${r.network.name}" - nothing routes through it right now.`);
-    if (r.status === 'none') items.push(`Network "${r.network.name}" has no routing peer - nothing routes through it.`);
-    if (r.status === 'unknown') items.push(`The routing peers of network "${r.network.name}" could not be read - their status is unknown.`);
+    if (r.status === 'none') items.push(`Network "${r.network.name}" has no routing peer that can route (none set up, all disabled, or blocked by compliance checks) - nothing routes through it.`);
+    if (r.status === 'unknown') items.push(`It is not known whether the routing peers of network "${r.network.name}" can route right now (they could not be read, or their compliance or sign-in state is uncertain).`);
   }
   for (const route of [...new Set((legacy || []).map((l) => l.route))]) items.push(`The legacy network route "${route}" also covers this address. This check does not evaluate legacy routes.`);
   if (!items.length) return null;

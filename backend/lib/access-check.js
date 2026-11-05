@@ -205,10 +205,11 @@ function buildIndex(snap) {
             });
         });
     }
-    // Routing peers per network: a Set of the peers that can route, or null when that is not
-    // known (the routers were not read, or a router's eligibility is uncertain). NetBird skips a
-    // router peer that does not exist and leaves peers waiting for compliance approval out of
-    // the network map; being offline does not remove a route.
+    // Routing peers per network: { sure, maybe } - peers that can route, and peers that may
+    // (eligibility not certain) - or null when the routers were not read. NetBird skips a router
+    // peer that does not exist and leaves a peer waiting for compliance approval out of the
+    // network map; being offline does not remove a route. A peer is eligible or not for every
+    // network it routes alike.
     const routerPeers = new Map();
     const routerLists = snap.routers instanceof Map ? snap.routers : new Map();
     const groupById = new Map(arr(snap.groups).map(g => [g.id, g]));
@@ -223,19 +224,20 @@ function buildIndex(snap) {
             if (r.peer) ids.add(idOf(r.peer));
             for (const g of arr(r.peer_groups)) for (const m of arr((groupById.get(idOf(g)) || {}).peers)) ids.add(idOf(m));
         }
-        const set = new Set();
-        let uncertain = false;
+        const sure = new Set();
+        const maybe = new Set();
         for (const id of ids) {
             const p = peerById.get(id);
             if (!p) continue;
-            if (p.login_expired) { uncertain = true; continue; }
+            let unsure = false;
             if (p.approval_required && !p.force_approved) {
-                if (!bypassed) { uncertain = true; continue; }
-                if (!bypassed.has(id)) continue;
+                if (!bypassed) unsure = true;
+                else if (!bypassed.has(id)) continue; // blocked by compliance: not a router
             }
-            set.add(id);
+            if (p.login_expired) unsure = true;
+            (unsure ? maybe : sure).add(id);
         }
-        routerPeers.set(n.id, uncertain ? null : set);
+        routerPeers.set(n.id, { sure, maybe });
     }
     return { groupName, allIds, resources, resById, netOf, grantById, postureName, users, userById, rules, routerPeers };
 }
@@ -286,12 +288,15 @@ function evaluatePart(ix, entries, winnerId, coverIds, query, now) {
     const netOf = (id) => (ix.netOf.get(id) || {}).id;
     const wNet = netOf(winnerId);
     const sameNet = new Set(coverIds.filter(id => netOf(id) === wNet));
-    if (coverIds.some(id => !netOf(id) || !ix.routerPeers.get(netOf(id)))) {
-        return { ...evaluateRules(ix, entries, sameNet, winnerId, query, now), answer: 'unknown', reason: 'router_unknown' };
-    }
+    const unknown = () => ({ ...evaluateRules(ix, entries, sameNet, winnerId, query, now), answer: 'unknown', reason: 'router_unknown' });
+    if (coverIds.some(id => !netOf(id) || !ix.routerPeers.get(netOf(id)))) return unknown();
+    // Without a peer that surely routes the winner, the route itself may not exist.
+    const w = ix.routerPeers.get(wNet);
+    if (!w.sure.size) return unknown();
+    const routes = (id, peer) => { const r = ix.routerPeers.get(netOf(id)); return r.sure.has(peer) || r.maybe.has(peer); };
     const scopes = new Map();
-    for (const peer of ix.routerPeers.get(wNet)) {
-        const scope = coverIds.filter(id => netOf(id) === wNet || ix.routerPeers.get(netOf(id)).has(peer));
+    for (const peer of [...w.sure, ...w.maybe]) {
+        const scope = coverIds.filter(id => netOf(id) === wNet || routes(id, peer));
         scopes.set(scope.slice().sort().join('\u0000'), new Set(scope));
     }
     const results = [...scopes.values()].map(scope => evaluateRules(ix, entries, scope, winnerId, query, now));
@@ -428,7 +433,7 @@ function relevantResources(ix, entries, target) {
         const r = ix.resById.get(rid);
         if (!r || r.enabled === false) continue;
         const peers = ix.routerPeers.get((ix.netOf.get(r.id) || {}).id);
-        if (peers && !peers.size) continue; // no enabled routing peer: NetBird distributes no route
+        if (peers && !peers.sure.size && !peers.maybe.size) continue; // no peer can route it: no route
         if (t.kind === 'other') { if (r.id === target.id) out.push(r); continue; }
         const a = addrOf(r);
         if (t.kind === 'ip' && a.kind === 'ip' && a.start <= t.end && a.end >= t.start) out.push(r);
@@ -548,24 +553,19 @@ function networksForTarget(snap, target) {
 }
 
 // Routing status of the networks that hold a winning route for any listed result.
-function routerStatus(snap, networkIds) {
+// Routing status of networks, from the same router eligibility the answer uses: online when a
+// peer that surely routes is connected, offline when such peers exist but none is connected,
+// unknown when only peers of uncertain eligibility (or unread routers) remain, none otherwise.
+function routerStatus(ix, snap, networkIds) {
     const peers = new Map(arr(snap.peers).map(p => [p.id, p]));
-    const groups = new Map(arr(snap.groups).map(g => [g.id, g]));
-    const routers = snap.routers instanceof Map ? snap.routers : new Map();
     const names = new Map(arr(snap.networks).map(n => [n.id, n.name || n.id]));
     return networkIds.map(id => {
-        const list = routers.get(id);
-        if (!Array.isArray(list)) return { network: { id, name: names.get(id) || id }, status: 'unknown' };
-        const members = [];
-        for (const r of list) {
-            if (!r || r.enabled === false) continue;
-            if (r.peer) members.push(peers.get(idOf(r.peer)));
-            for (const g of arr(r.peer_groups)) for (const m of arr((groups.get(idOf(g)) || {}).peers)) members.push(peers.get(idOf(m)));
-        }
-        const known = members.filter(Boolean);
-        const online = [...new Set(known.filter(p => p.connected).map(p => p.name || p.id))];
-        const status = online.length ? 'online' : (known.length ? 'offline' : 'none');
-        return { network: { id, name: names.get(id) || id }, status, online: online.slice(0, 6) };
+        const network = { id, name: names.get(id) || id };
+        const r = ix.routerPeers.get(id);
+        if (!r) return { network, status: 'unknown' };
+        const online = [...r.sure].map(pid => peers.get(pid)).filter(p => p && p.connected).map(p => p.name || p.id);
+        const status = online.length ? 'online' : r.sure.size ? 'offline' : r.maybe.size ? 'unknown' : 'none';
+        return { network, status, online: online.slice(0, 6) };
     });
 }
 
@@ -676,7 +676,7 @@ function explainUserAccess(snap, { userId, target, query, now = Date.now() }) {
     const out = userVerdict(ix, snap, user, t, q, now);
     return {
         user: userInfo(user), target: targetInfo(ix, t), query: q, ...out,
-        routers: routerStatus(snap, [...new Set([...t.resources.map(r => (ix.netOf.get(r.id) || {}).id).filter(Boolean), ...networksInAnswers(out.devices)])]),
+        routers: routerStatus(ix, snap, [...new Set([...t.resources.map(r => (ix.netOf.get(r.id) || {}).id).filter(Boolean), ...networksInAnswers(out.devices)])]),
         legacyRoutes: legacyRouteWarnings(snap, t.resources),
     };
 }
@@ -710,7 +710,7 @@ function whoHasAccess(snap, { target, query, now = Date.now() }) {
     const nets = [...new Set([...t.resources.map(r => (ix.netOf.get(r.id) || {}).id).filter(Boolean), ...networksInAnswers(evaluated)])];
     return {
         target: targetInfo(ix, t), query: q, users, pending, devices,
-        routers: routerStatus(snap, nets), legacyRoutes: legacyRouteWarnings(snap, t.resources),
+        routers: routerStatus(ix, snap, nets), legacyRoutes: legacyRouteWarnings(snap, t.resources),
     };
 }
 

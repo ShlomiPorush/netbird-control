@@ -597,4 +597,33 @@ test('router peers that do not exist or wait for compliance approval do not rout
     assert.equal(userCheck(s).verdict, 'granted');       // offline does not remove the route
     r1.login_expired = true;
     assert.equal(userCheck(s).verdict, 'cannot_determine');
+    // Compliance-blocked with a readable bypass list: not a router, whatever its sign-in state.
+    r1.approval_required = true;
+    s.bypassed = new Set();
+    let r = userCheck(s);
+    assert.equal(r.verdict, 'denied');
+    assert.equal(r.routers[0].status, 'none'); // shown as no usable routing peer, not "online"
+    r1.login_expired = false;
+    r1.connected = true;
+    r = userCheck(s);
+    assert.equal(r.verdict, 'denied');
+    assert.equal(r.routers[0].status, 'none');
+});
+
+test('one routing peer of uncertain state does not hide a certain answer from the others', () => {
+    // A healthy router plus one waiting for approval while the bypass list is unreadable; no
+    // overlapping resources, so both would apply the same rules.
+    const s = base();
+    s.peers.push({ id: 'p-r3', name: 'router-3', groups: [], connected: true, approval_required: true });
+    s.routers.set('n1', [{ id: 'rt1', peer: 'p-r1', enabled: true }, { id: 'rt3', peer: 'p-r3', enabled: true }]);
+    s.bypassed = null;
+    s.peers[0].approval_required = false;
+    const r = userCheck(s);
+    assert.equal(r.verdict, 'granted');
+    assert.equal(r.routers[0].status, 'online');
+    // Only the uncertain router left: the route itself is uncertain.
+    s.routers.set('n1', [{ id: 'rt3', peer: 'p-r3', enabled: true }]);
+    const u = userCheck(s);
+    assert.equal(u.verdict, 'cannot_determine');
+    assert.equal(u.routers[0].status, 'unknown');
 });
