@@ -685,6 +685,8 @@ const TENANT_CTX_PREFIXES = [
     // targets from the tenant's own usage; automations/grants/recurring/recert are tnt()-scoped.
     '/api/temporary-access', '/api/recurring-access', '/api/recertification',
     '/api/automations', '/api/request-targets',
+    // Access Check reads the tenant's own NetBird state and grant rows (read-only).
+    '/api/access-check',
     // Per-tenant app configuration exposed in Settings while managing a tenant: the tenant's own
     // incoming-webhook tokens + endpoint URL, its own event-retention window, and its own Telegram
     // (bot/chat/topics/events + test-send + create-topics - the tenant reads/writes ITS OWN config;
@@ -3559,6 +3561,88 @@ app.get('/api/diagnostics/address', async (req, res) => {
         console.error('Error diagnosing address:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
+});
+
+// ─── Access Check (Access Management) - read-only ───
+// "Does user X have access to resource Y?" and "who has access to Y?", answered from a fresh
+// read of NetBird (lib/access-check.js). It exposes other people's access, so it is limited to
+// admins and the holders of the access-management permissions. Session only - not in /api/v1.
+const accessCheck = require('./lib/access-check');
+const { loadAccessCheckSnapshot, loadAccessCheckRouters } = require('./db');
+const ACCESS_CHECK_PERMS = ['temp.manage', 'networks.manage', 'troubleshoot.all'];
+
+async function requireAccessChecker(req, res, next) {
+    try {
+        const viewer = await getViewer(req);
+        if (viewer.isAdmin || ACCESS_CHECK_PERMS.some(p => viewer.perms && viewer.perms[p])) return next();
+        res.status(403).json({ error: 'Forbidden' });
+    } catch (err) {
+        console.error('Error checking access-check permission:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+
+const ACCESS_ID_RE = /^[^\s\u0000-\u001f]{1,200}$/;
+// Target + query from the query string, or { error } for a 400.
+function parseAccessCheckQuery(q) {
+    const type = String(q.type || 'resource');
+    const id = String(q.id || '');
+    const protocol = String(q.protocol || 'any');
+    const portRaw = q.port === undefined || q.port === '' ? '' : String(q.port);
+    if (type !== 'resource' && type !== 'network') return { error: 'type must be resource or network' };
+    if (!ACCESS_ID_RE.test(id)) return { error: 'id is required' };
+    if (!['any', 'tcp', 'udp', 'icmp'].includes(protocol)) return { error: 'protocol must be any, tcp, udp or icmp' };
+    let port = null;
+    if (portRaw) {
+        if (protocol !== 'tcp' && protocol !== 'udp') return { error: 'A port needs the TCP or UDP protocol' };
+        if (!/^\d{1,5}$/.test(portRaw) || Number(portRaw) < 1 || Number(portRaw) > 65535) return { error: 'port must be a number from 1 to 65535' };
+        port = Number(portRaw);
+    }
+    return { target: { type, id }, query: { protocol, port } };
+}
+
+// The snapshot, plus the routers of every network the target can route through. The Browser
+// Gateway policies (main account only) are labelled as infrastructure by id.
+async function accessCheckSnapshot(target) {
+    const snap = await loadAccessCheckSnapshot();
+    const managed = currentTenantAccount() ? {} : ((remoteAccessLib.getRemoteAccessConfig() || {}).managed || {});
+    snap.managedPolicyIds = [managed.policyId, managed.namesPolicyId].filter(Boolean);
+    snap.routers = target ? await loadAccessCheckRouters(accessCheck.networksForTarget(snap, target)) : new Map();
+    return snap;
+}
+
+function sendAccessCheckError(res, err, what) {
+    if (err && err.code === 'NETBIRD_READ_FAILED') return res.status(503).json({ error: `${err.message}. Try again in a moment.` });
+    console.error(`Error ${what}:`, err && err.message);
+    res.status(500).json({ error: 'Internal server error' });
+}
+
+app.get('/api/access-check/options', requireAccessChecker, async (req, res) => {
+    try {
+        res.json(accessCheck.accessCheckOptions(await accessCheckSnapshot(null)));
+    } catch (err) { sendAccessCheckError(res, err, 'loading access-check options'); }
+});
+
+app.get('/api/access-check/user', requireAccessChecker, async (req, res) => {
+    const p = parseAccessCheckQuery(req.query);
+    if (p.error) return res.status(400).json({ error: p.error });
+    const userId = String(req.query.user_id || '');
+    if (!ACCESS_ID_RE.test(userId)) return res.status(400).json({ error: 'user_id is required' });
+    try {
+        const out = accessCheck.explainUserAccess(await accessCheckSnapshot(p.target), { userId, target: p.target, query: p.query });
+        if (!out) return res.status(404).json({ error: 'The user or the resource no longer exists' });
+        res.json(out);
+    } catch (err) { sendAccessCheckError(res, err, 'checking user access'); }
+});
+
+app.get('/api/access-check/target', requireAccessChecker, async (req, res) => {
+    const p = parseAccessCheckQuery(req.query);
+    if (p.error) return res.status(400).json({ error: p.error });
+    try {
+        const out = accessCheck.whoHasAccess(await accessCheckSnapshot(p.target), { target: p.target, query: p.query });
+        if (!out) return res.status(404).json({ error: 'The resource no longer exists' });
+        res.json(out);
+    } catch (err) { sendAccessCheckError(res, err, 'checking who has access'); }
 });
 
 // The Windows diagnostics script, for the local checks a browser cannot perform

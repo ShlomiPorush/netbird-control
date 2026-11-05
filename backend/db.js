@@ -7588,6 +7588,46 @@ async function diagnoseAddress(peerId, addressRaw) {
     return { target: null, findings };
 }
 
+// ── Access Check (Access Management → Access Check) ──
+// A fresh read of everything lib/access-check.js needs, in the CURRENT tenant context - no
+// cache, because the answer must reflect NetBird right now. A source the verdict depends on
+// that cannot be read fails the whole check (the caller answers 503, never a verdict on
+// partial data). The EDR bypass list and posture-check names are optional: missing, they
+// make the answer say "unknown" for the devices they affect, or show check ids.
+async function loadAccessCheckSnapshot() {
+    const names = ['users', 'peers', 'groups', 'policies', 'resources', 'networks', 'routes'];
+    const paths = ['/api/users', '/api/peers', '/api/groups', '/api/policies', '/api/networks/resources', '/api/networks', '/api/routes'];
+    const [core, bypassed, postureChecks] = await Promise.all([
+        Promise.all(paths.map(p => netbirdGet(p).catch(() => null))),
+        netbirdGet('/api/peers/edr/bypassed').catch(() => null),
+        netbirdGet('/api/posture-checks').catch(() => null),
+    ]);
+    const data = {};
+    names.forEach((n, i) => {
+        if (!Array.isArray(core[i])) { const e = new Error(`Couldn't read ${n} from NetBird`); e.code = 'NETBIRD_READ_FAILED'; throw e; }
+        data[n] = core[i];
+    });
+    const g = await pool.query(
+        `SELECT id, user_id, status, expires_at, revoke_requested_at, group_id, assigned_groups
+         FROM temporary_access_grants WHERE tenant = $1`, [tnt()]);
+    data.grants = g.rows;
+    data.bypassed = Array.isArray(bypassed)
+        ? new Set(bypassed.map(x => (x && (x.peer_id || x.id)) || (typeof x === 'string' ? x : '')).filter(Boolean))
+        : null;
+    data.postureChecks = Array.isArray(postureChecks) ? postureChecks : [];
+    return data;
+}
+
+// Routing peers of the given networks: Map(networkId → routers[] | null when unreadable).
+async function loadAccessCheckRouters(networkIds) {
+    const out = new Map();
+    await Promise.all(networkIds.map(async (id) => {
+        const r = await netbirdGet(`/api/networks/${encodeURIComponent(id)}/routers`).catch(() => null);
+        out.set(id, Array.isArray(r) ? r : null);
+    }));
+    return out;
+}
+
 // ── NetBird account notifications (Settings → Notifications → Webhook) ──
 // NetBird pushes account-level notifications as webhook POSTs. Real payload shape
 // (verified against production samples): { event_type: "routing.peer.disconnect",
@@ -12037,6 +12077,7 @@ module.exports = {
     pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
     getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
+    loadAccessCheckSnapshot, loadAccessCheckRouters,
     getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, getResourceInNetwork, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
     setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups,
     getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate,

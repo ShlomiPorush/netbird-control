@@ -16,6 +16,8 @@ interface ViewerCtx {
   canApprove: boolean;
   /** Fine-grained feature permission check (admins always pass). */
   can: (perm: string) => boolean;
+  /** May use Access Check: admins (tenantAdmin inside a tenant) and the access-management permissions. */
+  canCheckAccess: boolean;
   loading: boolean;
 }
 
@@ -33,6 +35,7 @@ export function ViewerProvider({ children }: { children: ReactNode }) {
   const can = (perm: string) => isAdmin || !!viewer.perms?.[perm];
   // Read once per render - a tenant switch hard-reloads the app, so this can't go stale.
   const tenantAdmin = isAdmin || (!!getTenantMode() && !!viewer.perms?.['tenants.support']);
+  const canCheckAccess = tenantAdmin || ['temp.manage', 'networks.manage', 'troubleshoot.all'].some((p) => can(p));
 
   if (isLoading && !data) {
     return (
@@ -42,7 +45,7 @@ export function ViewerProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  return <Ctx.Provider value={{ viewer, restricted, isAdmin, tenantAdmin, canApprove, can, loading: isLoading }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ viewer, restricted, isAdmin, tenantAdmin, canApprove, can, canCheckAccess, loading: isLoading }}>{children}</Ctx.Provider>;
 }
 
 export function useViewer(): ViewerCtx {
