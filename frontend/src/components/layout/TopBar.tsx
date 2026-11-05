@@ -6,7 +6,7 @@ import { avatarColor } from '@/lib/str';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useViewer } from '@/contexts/ViewerContext';
 import { useAppConfig, useVersion, useMspStatus, useMspSwitcher, useMspTenants } from '@/lib/queries';
-import { getTenantMode, switchAccount } from '@/lib/api';
+import { currentLaunchLink, getTenantMode, switchAccount } from '@/lib/api';
 
 /** Full-width top bar: brand + sidebar toggle on the left, theme + account on the right.
  * While managing a tenant the bar itself turns orange (tinted background + a solid tenant
@@ -29,7 +29,8 @@ export function TopBar({ collapsed, onToggleCollapse, onOpenMobile }: { collapse
     if (fellBack.current) return;
     if (tenantId && targets.ready && !targets.known.has(tenantId)) {
       fellBack.current = true;
-      switchAccount(null);
+      // A launch link that brought the user here opens in the main account.
+      switchAccount(null, currentLaunchLink() || '/');
     }
   }, [tenantId, targets]);
 

@@ -84,7 +84,20 @@ function setTenantMode(t: TenantMode | null) {
 // enough: in-flight responses from the previous account can land after qc.clear() and
 // repopulate the cache under the same query keys, and components that read getTenantMode()
 // at render time keep stale flags unless remounted. A full reload makes the switch atomic.
-export function switchAccount(t: TenantMode | null) {
+/** A same-origin path to land on after a switch ('/' for anything else). The full URL that was
+ *  checked is used, so a path like "/.//elsewhere" can't turn into another site. */
+export function sameOriginLanding(to: string): string {
+  try {
+    const u = new URL(to, window.location.origin);
+    if (u.origin !== window.location.origin) return '/';
+    u.hash = '';
+    return u.href;
+  } catch {
+    return '/';
+  }
+}
+
+export function switchAccount(t: TenantMode | null, to = '/') {
   switching = true;
   try {
     setTenantMode(t);
@@ -95,7 +108,13 @@ export function switchAccount(t: TenantMode | null) {
     window.alert("Couldn't switch the account: this browser blocks site storage for this app. Allow it and try again.");
     return;
   }
-  window.location.assign('/');
+  window.location.assign(sameOriginLanding(to));
+}
+
+/** The current address when it is a launch link (/remote-access?launch=...), else ''. */
+export function currentLaunchLink(): string {
+  const { pathname, search } = window.location;
+  return pathname === '/remote-access' && new URLSearchParams(search).has('launch') ? pathname + search : '';
 }
 function baseHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { Accept: 'application/json', ...(extra || {}) };

@@ -27,6 +27,8 @@ export interface SessionEntry {
   target: { address: string; port: number };
   /** SSH: the user name typed on the Remote Access page. */
   user?: string;
+  /** Opened from a launch link: the first attempt signs in with credentials the server sent. */
+  serverCredentials?: boolean;
 }
 
 type TabStatus = 'connecting' | 'live' | 'ended';
@@ -301,8 +303,9 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
   const [retryError, setRetryError] = useState('');
   const retryRef = useRef(false);
   const [busy, setBusy] = useState(false);
-  // RDP: credentials were sent in this attempt (only then is a refusal a failed sign-in).
-  const sentCreds = useRef(false);
+  // RDP: credentials were sent in this attempt (only then is a refusal a failed sign-in). A session
+  // from a launch link starts with credentials the server sent; a retry starts without.
+  const sentCreds = useRef(!!entry.serverCredentials);
   // RDP: what guacd asked for, and the user name and domain to keep for a retry.
   const askedFor = useRef<string[]>([]);
   const kept = useRef<Record<string, string>>({ username: entry.user || '' });
