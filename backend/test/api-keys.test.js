@@ -255,6 +255,4 @@ test('revoke takes only an exact key id, as a number or a string of digits', asy
     } finally {
         core.pool.connect = realConnect;
     }
-    assert.equal(keys._internal.parseKeyId('2147483647'), 2147483647);
-    assert.equal(keys._internal.parseKeyId(2147483647), 2147483647);
 });

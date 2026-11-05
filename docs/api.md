@@ -23,9 +23,11 @@ An admin creates keys in **Settings → API Keys**, in the main account.
 - A link request that a valid key makes and the app refuses (bad input, no access, remote access
   turned off, too many waiting links) is recorded as `remote_access.launch_refused`, with the key,
   the error code and the target. The target holds only values that passed the field checks;
-  anything else shows as `invalid`, and the credential fields are never recorded. Repeats are collapsed per key
-  and code: within 10 minutes, a record is written at the 1st, 10th, 100th (and so on) refusal,
-  with the number so far. Calls refused before the key is accepted (a missing or bad key, a
+  anything else shows as `invalid`, and the credential fields are never recorded. Repeats are
+  collapsed per key and code: within 10 minutes, a record is written at about the 1st, 10th, 100th
+  (and so on) refusal, with the number so far. A refusal that arrives while a record is being
+  written, or within a minute after a write failed, is only counted; the next refusal after that
+  writes the record. Calls refused before the key is accepted (a missing or bad key, a
   missing permission), and bodies that are not JSON, are not in the audit log.
 
 | Scope | Allows |

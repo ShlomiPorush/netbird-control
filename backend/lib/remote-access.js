@@ -1184,6 +1184,6 @@ module.exports = {
     _internal: {
         GuacParser, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, setConfigForTest: (c) => { _cfg = normConfig(c); },
         launchCount: () => _launches.size, LAUNCH_MAX, LAUNCH_TTL_MS, ticketHash, sweepLaunches,
-        refusalTarget, REFUSAL_WINDOW_MS, REFUSAL_RETRY_MS, clearRefusals: () => _refusals.clear(), refusalCount: () => _refusals.size,
+        REFUSAL_WINDOW_MS, REFUSAL_RETRY_MS, clearRefusals: () => _refusals.clear(), refusalCount: () => _refusals.size,
     },
 };

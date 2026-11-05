@@ -253,5 +253,5 @@ function requireApiKey(scope, { tooManyAuthFails, noteAuthFail }) {
 module.exports = {
     SCOPES, KEY_PREFIX_LEN, QUERY_TIMEOUT_MS, apiError, writeAuditStrict, keyActor,
     listApiKeys, createApiKey, revokeApiKey, authenticateKey, keyStillValid, requireApiKey,
-    _internal: { normalizeIp, parseAllowedIps, ipAllowed, sha256, isUsable, parseKeyId },
+    _internal: { normalizeIp, parseAllowedIps, ipAllowed, sha256, isUsable },
 };
