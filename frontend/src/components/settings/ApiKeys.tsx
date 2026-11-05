@@ -12,15 +12,23 @@ import { Badge, Button, Checkbox, CopyButton, EmptyState, Field, Input, LoadingS
 
 const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remote Sessions' };
 
-type Draft = { name: string; scopes: string[]; allowedIps: string; expiresAt: string; replaces?: ApiKey };
+// keepExpiry: Replace's old expiry, sent exactly as it was while the date field still shows its day.
+type Draft = { name: string; scopes: string[]; allowedIps: string; expiresAt: string; replaces?: ApiKey; keepExpiry?: string };
 
-// The expiry as the date field shows it (local day), so Replace keeps it. A past expiry is dropped:
-// the form accepts only a future date.
-function dateOf(iso: string | null): string {
+const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// The expiry's day as the date field shows it (local). A past expiry is dropped: the form accepts
+// only today or later.
+function dateOf(iso: string | null | undefined): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime()) || d.getTime() <= Date.now()) return '';
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return localDay(d);
+}
+
+function expiryToSend(d: Draft): string | null {
+  if (d.keepExpiry && d.expiresAt && d.expiresAt === dateOf(d.keepExpiry)) return d.keepExpiry;
+  return d.expiresAt ? new Date(`${d.expiresAt}T23:59:59`).toISOString() : null;
 }
 
 function status(k: ApiKey): { label: string; tone: 'green' | 'gray' | 'red' } {
@@ -35,20 +43,13 @@ export function ApiKeys() {
   const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list });
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState('');
-  const [created, setCreated] = useState<{ key: string; name: string; oldStillActive?: string } | null>(null);
+  const [created, setCreated] = useState<{ key: string; name: string; replaces?: ApiKey } | null>(null);
 
+  // Replace shows the new key first and revokes the old one only after the admin closes that
+  // dialog, so nothing that happens to the revoke (an error, an expired sign-in) can lose the new key.
   const create = useMutation({
-    mutationFn: async (d: Draft) => {
-      const out = await apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: d.expiresAt ? new Date(`${d.expiresAt}T23:59:59`).toISOString() : null });
-      // Replace: the new key works before the old one stops. If revoking the old one fails, the
-      // new key is still shown (it exists and is shown only now), with a note to revoke by hand.
-      let oldStillActive: string | undefined;
-      if (d.replaces) {
-        try { await apiKeysApi.revoke(d.replaces.id); } catch { oldStillActive = d.replaces.name; }
-      }
-      return { ...out, oldStillActive };
-    },
-    onSuccess: (out) => { setDraft(null); setCreated({ key: out.key, name: out.apiKey.name, oldStillActive: out.oldStillActive }); },
+    mutationFn: (d: Draft) => apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: expiryToSend(d) }),
+    onSuccess: (out, d) => { setDraft(null); setCreated({ key: out.key, name: out.apiKey.name, replaces: d.replaces }); },
     onError: (e) => setError(e instanceof ApiError ? e.message : "The key couldn't be created. Try again."),
     onSettled: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
   });
@@ -62,6 +63,19 @@ export function ApiKeys() {
   const { keys, scopes, trustProxy } = list.data;
 
   const open = (d?: Partial<Draft>) => { setError(''); setDraft({ name: '', scopes: scopes.map((s) => s.id), allowedIps: '', expiresAt: '', ...d }); };
+  const closeCreated = () => {
+    const old = created?.replaces;
+    setCreated(null);
+    if (old) {
+      revoke.mutate(old.id, {
+        onError: (e) => void confirm({
+          title: 'The Old Key Still Works',
+          message: `"${old.name}" could not be revoked${e instanceof ApiError ? `: ${e.message}` : '.'} Revoke it in the list.`,
+          confirmText: 'OK',
+        }),
+      });
+    }
+  };
   const submit = (e: FormEvent) => { e.preventDefault(); if (draft) create.mutate(draft); };
   const askRevoke = async (k: ApiKey) => {
     const ok = await confirm({
@@ -99,7 +113,7 @@ export function ApiKeys() {
                   <Badge tone={st.tone}>{st.label}</Badge>
                   {!k.revokedAt && (
                     <div className="ml-auto flex gap-2">
-                      <Button size="sm" onClick={() => open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: dateOf(k.expiresAt), replaces: k })}>Replace</Button>
+                      <Button size="sm" onClick={() => open({ name: k.name, scopes: k.scopes, allowedIps: k.allowedIps.join('\n'), expiresAt: dateOf(k.expiresAt), keepExpiry: k.expiresAt || undefined, replaces: k })}>Replace</Button>
                       <Button size="sm" variant="danger" onClick={() => void askRevoke(k)} disabled={revoke.isPending}>Revoke</Button>
                     </div>
                   )}
@@ -119,12 +133,12 @@ export function ApiKeys() {
       )}
 
       <Modal open={!!draft} onClose={() => setDraft(null)} title={draft?.replaces ? 'Replace API Key' : 'Create API Key'}
-        subtitle={draft?.replaces ? `A new key is created, and "${draft.replaces.name}" is revoked once it exists.` : undefined}
+        subtitle={draft?.replaces ? `A new key is created. "${draft.replaces.name}" is revoked when you close the dialog that shows the new key.` : undefined}
         icon={<KeyRound size={18} />}
         footer={<>
           <Button onClick={() => setDraft(null)}>Cancel</Button>
           <Button variant="primary" type="submit" form="api-key-form" disabled={create.isPending || !draft?.name.trim() || !draft?.scopes.length}>
-            {create.isPending ? 'Creating…' : draft?.replaces ? 'Create And Revoke Old Key' : 'Create Key'}
+            {create.isPending ? 'Creating…' : draft?.replaces ? 'Create New Key' : 'Create Key'}
           </Button>
         </>}>
         {draft && (
@@ -149,24 +163,24 @@ export function ApiKeys() {
               <Textarea value={draft.allowedIps} onChange={(e) => setDraft({ ...draft, allowedIps: e.target.value })} rows={2} placeholder="203.0.113.10" spellCheck={false} />
             </Field>
             <Field label="Expires (Optional)" hint="The key stops working at the end of this day. Empty: it never expires.">
-              <Input type="date" value={draft.expiresAt} onChange={(e) => setDraft({ ...draft, expiresAt: e.target.value })} min={new Date().toISOString().slice(0, 10)} />
+              <Input type="date" value={draft.expiresAt} onChange={(e) => setDraft({ ...draft, expiresAt: e.target.value })} min={localDay(new Date())} />
             </Field>
             {error && <p className="text-sm text-red-500">{error}</p>}
           </form>
         )}
       </Modal>
 
-      <Modal open={!!created} onClose={() => setCreated(null)} title="Copy The New Key" icon={<KeyRound size={18} />}
-        footer={<Button variant="primary" onClick={() => setCreated(null)}>Done</Button>}>
+      <Modal open={!!created} onClose={closeCreated} title="Copy The New Key" icon={<KeyRound size={18} />}
+        footer={<Button variant="primary" onClick={closeCreated}>Done</Button>}>
         {created && (
           <div className="flex flex-col gap-3">
             <p className="flex items-start gap-2 text-sm text-amber-600 dark:text-amber-400">
               <TriangleAlert size={16} className="shrink-0 mt-0.5" />
               This is the only time the key for "{created.name}" is shown. Store it in the other system's secret store, not in its code or settings files.
             </p>
-            {created.oldStillActive && (
-              <p className="text-sm text-red-500">
-                The old key "{created.oldStillActive}" could not be revoked and still works. Revoke it in the list after you copy the new key.
+            {created.replaces && (
+              <p className="text-sm text-nb-gray-600 dark:text-nb-gray-300">
+                When you click Done, the old key "{created.replaces.name}" is revoked. Put the new key in the other system first.
               </p>
             )}
             <div className="flex items-center gap-2 rounded-md border border-nb-gray-200 dark:border-nb-gray-700 bg-nb-gray-50 dark:bg-nb-gray-900 px-3 py-2">

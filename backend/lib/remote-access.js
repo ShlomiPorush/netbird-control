@@ -1023,7 +1023,8 @@ async function issueLaunch(key, body) {
     if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
     // The port exactly as sent: an integer, or a string of digits ("3389.5" or "3389x" is refused).
     const rawPort = body && body.port;
-    if (!(Number.isInteger(rawPort) || (typeof rawPort === 'string' && /^\d{1,5}$/.test(rawPort)))) throw httpError(400, 'INVALID_PORT');
+    const portOk = typeof rawPort === 'string' ? /^\d{1,5}$/.test(rawPort) : (Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535);
+    if (!portOk) throw httpError(400, 'INVALID_PORT');
     const { protocol, address, port } = parseTarget(body);
     if (!address || address.length > 255) throw httpError(400, 'INVALID_ADDRESS');
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw httpError(400, 'INVALID_PORT');

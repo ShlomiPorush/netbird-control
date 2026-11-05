@@ -90,6 +90,10 @@ test('input is validated: protocol, port, field types and lengths, SSH user name
     await assert.rejects(ra.issueLaunch(KEY, rdp({ port: 3389.5 })), (e) => e.code === 'INVALID_PORT');
     await assert.rejects(ra.issueLaunch(KEY, rdp({ port: '3389junk' })), (e) => e.code === 'INVALID_PORT');
     await assert.rejects(ra.issueLaunch(KEY, rdp({ port: null })), (e) => e.code === 'INVALID_PORT');
+    // Huge numbers are integers too, and parseInt would turn them into a small port.
+    for (const port of [1e21, 3.389e24, 1e100, 0, -22]) {
+        await assert.rejects(ra.issueLaunch(KEY, rdp({ port })), (e) => e.code === 'INVALID_PORT', String(port));
+    }
     assert.ok((await ra.issueLaunch(KEY, rdp({ port: '3389' }))).ticket, 'a port sent as a string of digits is fine');
     await assert.rejects(ra.issueLaunch(KEY, rdp({ password: { x: 1 } })), (e) => e.code === 'INVALID_FIELD');
     await assert.rejects(ra.issueLaunch(KEY, rdp({ password: 'x'.repeat(1025) })), (e) => e.code === 'INVALID_FIELD');
