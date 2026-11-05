@@ -36,6 +36,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
     color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
     real resolution, so it stays sharp.
+  - **What the browser may send.** The app passes to guacd only input, the screen size, the
+    clipboard and the sign-in values that guacd asks for. The server address and port never come
+    from the browser. A browser message is limited to 16 KiB; a larger or malformed one closes the
+    session.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is

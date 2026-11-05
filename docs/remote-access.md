@@ -111,6 +111,11 @@ server's resource already chosen.
   connections to routing peers on the local network, as for the exit nodes.
 - **guacd has no authentication of its own.** It listens only on its gateway's address on an
   internal Docker network that only the app shares, and the gateways run with `--block-inbound`.
+- **The app filters what the browser sends to guacd.** It passes only user input, the screen
+  size, the clipboard and the sign-in values that guacd asks for (and, over SSH, the terminal's
+  font and colors). The server address and port always come from the checked session, never from
+  the browser. A browser message is limited to 16 KiB, which is twice the largest message the
+  bundled client sends; a larger or malformed one closes the session.
 - **Copy and paste.** Text copied on the remote side goes to the local clipboard, and the local
   clipboard is offered to the remote side when the session comes into use. Browsers that ask before
   every read (Firefox) use the Clipboard panel instead. Text only; file transfer is off.
