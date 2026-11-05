@@ -11,6 +11,9 @@ const nb = require('../lib/netbird');
 let policies = [], posts = [], nextId = 0, nbCalls = [];
 const resource = { id: 'res-rdp', name: 'rdp', address: '10.0.0.5', groups: [{ id: 'grp-srv' }, { id: 'grp-gwt' }] };
 nb.netbirdGet = async (path) => {
+    // A grant reads each group live before adding a user to it.
+    const gm = String(path).startsWith('/api/groups/') ? [null, String(path).slice('/api/groups/'.length)] : null;
+    if (gm) return { id: decodeURIComponent(gm[1]), name: 'Ordinary group' };
     nbCalls.push(['GET', path]);
     if (path === '/api/users') return [{ id: 'user-1', role: 'user', auto_groups: [] }];
     if (path === '/api/policies') return JSON.parse(JSON.stringify(policies));

@@ -12,6 +12,9 @@ const resources = {
     open: { id: 'res-open', name: 'open', address: '10.0.0.2', groups: [{ id: 'grp-open' }] },
 };
 nb.netbirdGet = async (path) => {
+    // A grant reads each group live before adding a user to it.
+    const gm = String(path).startsWith('/api/groups/') ? [null, String(path).slice('/api/groups/'.length)] : null;
+    if (gm) return { id: decodeURIComponent(gm[1]), name: 'Ordinary group' };
     if (path === '/api/users') return [{ id: 'user-1', role: 'user', auto_groups: [] }];
     if (path === '/api/policies') return typeof policies === 'function' ? policies() : JSON.parse(JSON.stringify(policies));
     if (path === '/api/networks/net1/resources') return networkList ? networkList() : Object.values(resources);

@@ -64,11 +64,12 @@ test('input: IPv4 and clean host names pass, everything else is refused', () => 
     }
 });
 
-test('domain patterns: exact, and a wildcard covers one or more labels below its base only', () => {
+test('domain patterns: a wildcard covers one or more labels below its base only, and is never a browser target', () => {
     assert.deepEqual(domainPattern('*.Internal'), { wildcard: true, base: 'internal', rank: 1 });
     const s = base();
-    assert.equal(ask(s, { name: 'a.corp.example', port: 22 }).ok, true);
-    assert.equal(ask(s, { name: 'a.b.corp.example', port: 22 }).ok, true);
+    // Matched by the wildcard, so refused with its own code - never looked up as another name.
+    assert.equal(ask(s, { name: 'a.corp.example', port: 22 }).code, 'WILDCARD_DOMAIN_NOT_ALLOWED');
+    assert.equal(ask(s, { name: 'a.b.corp.example', port: 22 }).code, 'WILDCARD_DOMAIN_NOT_ALLOWED');
     assert.equal(ask(s, { name: 'corp.example', port: 22 }).code, 'NO_DOMAIN_MATCH');
 });
 

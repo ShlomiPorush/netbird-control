@@ -12,7 +12,7 @@
 
 const { pool } = require('./core');
 const { httpJson } = require('./http');
-const { netbirdApiConfigured, netbirdReq, bustNbCaches, currentTenantAccount } = require('./netbird');
+const { netbirdApiConfigured, currentTenantAccount } = require('./netbird');
 const { getBlocklist, addressBlockedForNetwork, addressesOverlap, addressesEquivalent } = require('./blocklist');
 
 // DB scope of the current context: '' = main account, else the active tenant. Every automations
@@ -23,9 +23,9 @@ const tnt = () => currentTenantAccount() || '';
 // Domain functions that stay in db.js (they call setResourceEnabled/deleteResource/getNetworkDetail
 // /createClientResource/addResourceGroups/listAccessProfiles/recordAudit, which are domain-coupled).
 // db.js injects them once via initAutomations; the sync engine references them by these bindings.
-let listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds;
+let listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds;
 function initAutomations(deps) {
-    ({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds } = deps);
+    ({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds } = deps);
 }
 
 // Find an existing UNMANAGED resource this source item should ADOPT: exact address hit
@@ -57,17 +57,10 @@ function ledgerRowOff(own, live) {
 
 // Update an existing resource's name/description from the source, preserving its
 // address, groups and enabled state. `current` is the resource as returned by getNetworkDetail.
-async function setResourceNameFrom(networkId, current, name, description) {
-    const groups = Array.isArray(current.groups) ? current.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
-    const body = {
-        name, address: current.address,
-        description: description || current.description || '',
-        enabled: current.enabled !== false, groups,
-    };
-    const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(current.id)}`, body);
-    if (!resp || resp.status >= 300) throw new Error('Failed to rename resource: ' + (resp && (resp.raw || resp.error || resp.status)));
-    bustNbCaches('policies');
-    return resp.body;
+// The write itself is db.js renameResource: it reads the resource again under the Browser
+// Gateway target lock, so an older read never puts back or drops a managed target group.
+function setResourceNameFrom(networkId, current, name, description) {
+    return renameResource(networkId, current.id, name, description);
 }
 
 // ─── Automations: external HTTP source → auto-provisioned NetBird resources ───
