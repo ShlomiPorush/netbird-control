@@ -475,3 +475,19 @@ test("a resource's access policy never takes a managed group as its source", asy
     await assert.rejects(db.syncResourcePolicies('n1', 'r1', [pol]), /can't be the source of an access policy/);
     assert.equal(writes('DELETE', /./).length + writes('POST', /./).length, 0);
 });
+
+test('the re-check never joins a snapshot read that started before it', async () => {
+    reset();
+    let reads = 0;
+    let open;
+    state.readHook = async (p) => { if (p === '/api/peers') { reads++; if (reads === 1) await new Promise(r => { open = r; }); } };
+    try {
+        const early = ra._internal.freshSnapshot(10_000); // e.g. a session check
+        await new Promise(r => setTimeout(r, 5));
+        const recheck = ra._internal.freshSnapshot(0);     // what recheckSessions asks for
+        await new Promise(r => setImmediate(r));
+        assert.equal(reads, 2, 'the re-check started its own read');
+        open();
+        await Promise.all([early, recheck]);
+    } finally { state.readHook = null; ra._internal.invalidateSnapshot(); }
+});

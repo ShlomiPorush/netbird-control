@@ -437,7 +437,8 @@ async function fetchSnapshot() {
 const _readOf = new WeakMap(); // snapshot data -> the read it came from ({ at, epoch })
 function snapshotOnce(maxAgeMs) {
     if (snapshotUsable(_snapshot) && Date.now() - _snapshot.at <= maxAgeMs) return Promise.resolve(_snapshot.data);
-    if (snapshotUsable(_snapshotInFlight)) return _snapshotInFlight.promise;
+    // A read still running is as old as its start: the re-check (maxAgeMs 0) never joins one.
+    if (snapshotUsable(_snapshotInFlight) && Date.now() - _snapshotInFlight.at <= maxAgeMs) return _snapshotInFlight.promise;
     const read = { at: Date.now(), epoch: _snapshotEpoch, promise: null };
     read.promise = withDeadline(fetchSnapshot(), SNAPSHOT_DEADLINE_MS, 'Reading NetBird')
         .then(data => {
