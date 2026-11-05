@@ -9410,15 +9410,6 @@ async function setUserGroupMembership(userId, groupId, add) {
 }
 // The unlocked body - only for callers that already hold this user's lock.
 async function applyUserGroupMembership(userId, groupId, add) {
-    // The one place grants add a user to a group (creation and the active-grant reconcile): never
-    // a managed Browser Gateway group, checked against a live read of that group. Removal always
-    // stays possible, so a revoke can undo one.
-    if (add && raMain()) {
-        if (isRemoteAccessManagedGroup(groupId, '')) throw new Error(MANAGED_GROUP_ERROR);
-        const g = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
-        if (!g || typeof g !== 'object' || g.id !== groupId) throw new Error(`Couldn't read group "${groupId}" from NetBird to check it - the user was not added. Try again.`);
-        if (isRemoteAccessManagedGroup(groupId, g.name || '')) throw new Error(MANAGED_GROUP_ERROR);
-    }
     const u = await getNbUser(userId);
     if (!u) {
         // Removing from a user who no longer exists is done - but only when a full read (regular +
@@ -9430,6 +9421,15 @@ async function applyUserGroupMembership(userId, groupId, add) {
     const current = idsOf(u.auto_groups);
     const has = current.includes(groupId);
     if (add ? has : !has) return false;
+    // The one place grants add a user to a group (creation and the active-grant reconcile): never
+    // a managed Browser Gateway group, checked against a live read of that group right before the
+    // write. Removal always stays possible, so a revoke can undo one.
+    if (add && raMain()) {
+        if (isRemoteAccessManagedGroup(groupId, '')) throw new Error(MANAGED_GROUP_ERROR);
+        const g = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
+        if (!g || typeof g !== 'object' || g.id !== groupId) throw new Error(`Couldn't read group "${groupId}" from NetBird to check it - the user was not added. Try again.`);
+        if (isRemoteAccessManagedGroup(groupId, g.name || '')) throw new Error(MANAGED_GROUP_ERROR);
+    }
     const next = add ? [...current, groupId] : current.filter(g => g !== groupId);
     const body = { role: u.role || 'user', auto_groups: next, is_blocked: !!u.is_blocked };
     console.log('[grant] %s group %s %s user %s (role %s)', add ? 'assigning' : 'removing', groupId, add ? 'to' : 'from', u.id, u.role || 'user');

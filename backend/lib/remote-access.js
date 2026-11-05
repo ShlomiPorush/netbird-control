@@ -344,7 +344,10 @@ async function applyGatewayObjects() {
     if (NETBIRD_READONLY) throw new Error('This instance is read-only (NETBIRD_READONLY=true) - the Browser Gateway objects cannot be created.');
     try {
         for (const [kind, k] of Object.entries(KINDS)) {
+            // Each id is recorded as soon as it exists: a group this app created but did not record
+            // would later be refused as a stranger with the managed name.
             _nb[k.groupKey] = await ensureGroup(k.group, _nb[k.groupKey]);
+            await setSetting('remote_access_nb', JSON.stringify(_nb));
             _nb[k.targetKey] = await ensureGroup(k.targets, _nb[k.targetKey]);
             await setSetting('remote_access_nb', JSON.stringify(_nb));
             _nb[k.policyKey] = await ensurePolicy(kind, _cfg.enabled);
