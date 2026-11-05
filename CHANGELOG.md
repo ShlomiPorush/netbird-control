@@ -46,13 +46,16 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
     real resolution, so it stays sharp.
 - **Access Check.** A new section in Access Management answers two questions from a fresh read
-  of NetBird: does this user have access to a resource or a network, and who has access to it.
-  The answer follows what NetBird enforces: each device's own groups, the most specific route when
-  resources overlap, and accept rules minus drop rules on the winning route. It shows, for each
-  device, which policy and group give the access and on which ports, and why a device cannot
-  connect (compliance, an expired sign-in, a blocked user). A policy with posture checks makes the
-  answer "Depends On Posture Checks" with both outcomes. A temporary grant that has ended but is
-  still in NetBird is flagged. Admins and holders of Manage Temporary Access, Manage All Networks
+  of NetBird: is this user authorized for a resource or a network, and who is. The answer uses
+  the same authorization model as Remote Access: the user's groups, their devices' groups and All
+  (temporary-grant groups only while the grant is valid) against the policies, with drop rules
+  winning and Browser Gateway policies never counting; a policy with posture checks makes it
+  "Authorized If Posture Checks Pass". It names the policy, group and ports behind the answer, and
+  needs no device. Collapsed Device Details show what each device can reach right now, following
+  what NetBird enforces (each device's own groups, the most specific route when resources overlap,
+  accept rules minus drop rules on the routing peer), and why a device cannot connect (compliance,
+  an expired sign-in, a blocked user). A temporary grant that has ended but is still in NetBird is
+  flagged there. Admins and holders of Manage Temporary Access, Manage All Networks
   or Troubleshoot All Peers can use it, and Tenant Support users inside a tenant. The user page has
   a **Check Access** button and the resource editor a **Who Has Access** button. It is not part of
   the public API.

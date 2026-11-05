@@ -1,8 +1,15 @@
 'use strict';
-// Access Check: does a user (or a device) have access to a NetBird network resource, and who
-// has access to it? Pure - every input arrives in `snap`, read fresh from NetBird by the caller.
+// Access Check: is a user authorized for a NetBird network resource, and who is? Pure - every
+// input arrives in `snap`, read fresh from NetBird by the caller.
 //
-// The answer mirrors what NetBird enforces, not what the portal would allow:
+// The primary answer is the user's AUTHORIZATION, by the same model Remote Access uses
+// (remote-access-auth.js): the user's source groups come from userSourceGroups() - their
+// auto_groups, the groups of every device they own, and "All", with temporary-grant groups only
+// while the grant is valid - and a policy counts the way evaluatePolicies() counts it. See
+// authorizeUser() below.
+//
+// The device details are secondary: what each of the user's devices can reach right now. That
+// part mirrors what NetBird enforces on the device:
 //   - NetBird evaluates policies on PEER groups. A user's auto_groups never count for a device;
 //     they only feed the "pending" answer (a device that joins would get access).
 //   - Every policy and group counts exactly as NetBird holds it. A temporary grant that ended
@@ -16,7 +23,7 @@
 //     posture-gated policy makes the device's answer "conditional".
 // Anything it does not positively understand is reported as uncertain, never as a grant.
 
-const { parsePrefix, domainPattern, TEMP_POLICY_RE, TEMP_GROUP_RE, grantIsValid } = require('./remote-access-auth');
+const { parsePrefix, domainPattern, TEMP_POLICY_RE, TEMP_GROUP_RE, grantIsValid, userSourceGroups, MANAGED_POLICY_NAMES } = require('./remote-access-auth');
 
 const idOf = (x) => (x && typeof x === 'object') ? x.id : x;
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -200,7 +207,7 @@ function buildIndex(snap) {
                 sources: new Set(arr(rule.sources).map(idOf).filter(Boolean)),
                 sourcePeer: src && String(src.type || '').toLowerCase() === 'peer' ? idOf(src) : null,
                 dest, set: ruleSet(rule), posture: postureIds.length > 0, postureIds,
-                infra: managed.has(p.id),
+                infra: managed.has(p.id), managedName: MANAGED_POLICY_NAMES.has(p.name),
                 tempGrant: (TEMP_POLICY_RE.exec(p.name || '') || [])[1] || null,
             });
         });
@@ -656,6 +663,75 @@ function userVerdict(ix, snap, user, t, query, now) {
     return { verdict: 'denied', devices, ...(peers.length ? {} : { reason: 'no_devices' }) };
 }
 
+// ─── Authorization (the Remote Access model) ───
+//
+// The user is authorized for a resource when an enabled policy rule from one of their source
+// groups (userSourceGroups) targets it, minus what drop rules from those groups block - exactly
+// the rules evaluatePolicies() weighs: the Browser Gateway policies (by id or name) never count,
+// and a temporary policy counts only while its grant is valid. Rules with a device as their
+// direct source are not a user's authorization and do not count. evaluatePolicies() answers
+// for one TCP port; this answers for the query's protocol and port, with the same outcome on a
+// TCP port (the agreement test pins it).
+// One deliberate difference: Remote Access refuses posture-gated policies, because a browser
+// session cannot pass device checks. Here such a policy makes the answer "conditional" - the
+// user is authorized if their device passes the checks.
+function authorizeResource(ix, groups, res, query, now) {
+    const rules = ix.rules.filter(r => r.dest.has(res.id) && !r.infra && !r.managedName
+        && (!r.tempGrant || grantIsValid(ix.grantById.get(r.tempGrant), now))
+        && [...r.sources].some(g => groups.has(g)));
+    let accept = emptySet();
+    let acceptNoPosture = emptySet();
+    let drop = emptySet();
+    let unparsableDrop = false;
+    const grantedBy = [];
+    const drops = [];
+    for (const r of rules) {
+        if (!r.set) { if (r.action === 'drop') unparsableDrop = true; continue; }
+        if (r.action === 'drop') { drop = unionSets(drop, r.set); drops.push(r); continue; }
+        accept = unionSets(accept, r.set);
+        if (!r.posture) acceptNoPosture = unionSets(acceptNoPosture, r.set);
+        const via = [...r.sources].filter(g => groups.has(g));
+        const tempId = r.tempGrant || via.map(g => (TEMP_GROUP_RE.exec(ix.groupName.get(g) || '') || [])[1]).find(Boolean) || null;
+        grantedBy.push({
+            policy: r.policyName, policyId: r.policyId,
+            via: via.map(g => ix.groupName.get(g) || g), ports: describeSet(r.set),
+            ...(r.posture ? { postureChecks: r.postureIds.map(id => ix.postureName.get(id) || id) } : {}),
+            ...(tempId ? { temp: tempNote(ix, tempId, now) } : {}),
+        });
+    }
+    const allowed = subtractSets(accept, drop);
+    const certain = subtractSets(acceptNoPosture, drop);
+    // A drop is worth naming when it removes something the accepts open, or blocks the query.
+    const blockedBy = [...new Set(drops.filter(r => !setIsEmpty(intersectSets(r.set, accept)) || setAnswers(r.set, query)).map(r => r.policyName))];
+    let verdict;
+    let reason;
+    if (unparsableDrop) { verdict = 'cannot_determine'; reason = 'unparsable_rule'; }
+    else if (setAnswers(certain, query)) verdict = 'granted';
+    else if (setAnswers(allowed, query)) verdict = 'conditional';
+    // A drop rule that covers the query blocks it, as in Remote Access (BLOCKED_BY_POLICY).
+    else if (setAnswers(drop, query)) { verdict = 'denied'; reason = 'blocked_by_policy'; }
+    else if (query.protocol !== 'any' && !setIsEmpty(allowed)) verdict = 'port_blocked';
+    else verdict = 'denied';
+    return {
+        resource: resInfo(ix, res), verdict, allowed: describeSet(allowed), grantedBy, blockedBy,
+        ...(reason ? { reason } : {}),
+    };
+}
+
+function authorizeUser(ix, snap, user, t, query, now) {
+    const src = userSourceGroups(snap, user.id, now);
+    if (src.error) return { verdict: 'denied', reason: src.error === 'USER_BLOCKED' ? 'user_blocked' : 'user_not_found', groups: [], resources: [] };
+    const groups = [...src.groups].filter(g => !ix.allIds.includes(g)).map(g => ix.groupName.get(g) || g).sort((a, b) => a.localeCompare(b));
+    const resources = t.resources.map(r => authorizeResource(ix, src.groups, r, query, now));
+    const vs = resources.map(r => r.verdict);
+    let verdict;
+    if (!vs.length) verdict = 'denied';
+    else if (vs.every(v => v === 'granted')) verdict = 'granted';
+    else if (t.type === 'network' && vs.some(v => v === 'granted')) verdict = 'partial';
+    else verdict = best(vs);
+    return { verdict, groups, resources };
+}
+
 function userInfo(u) {
     return { id: u.id, name: u.name || u.email || u.id, email: u.email || '', blocked: !!(u.is_blocked || u.status === 'blocked') };
 }
@@ -675,7 +751,8 @@ function explainUserAccess(snap, { userId, target, query, now = Date.now() }) {
     const q = normalizeQuery(query);
     const out = userVerdict(ix, snap, user, t, q, now);
     return {
-        user: userInfo(user), target: targetInfo(ix, t), query: q, ...out,
+        user: userInfo(user), target: targetInfo(ix, t), query: q,
+        authorization: authorizeUser(ix, snap, user, t, q, now), ...out,
         routers: routerStatus(ix, snap, [...new Set([...t.resources.map(r => (ix.netOf.get(r.id) || {}).id).filter(Boolean), ...networksInAnswers(out.devices)])]),
         legacyRoutes: legacyRouteWarnings(snap, t.resources),
     };
@@ -692,6 +769,22 @@ function whoHasAccess(snap, { target, query, now = Date.now() }) {
     const users = [];
     const pending = [];
     const evaluated = [];
+    const authorized = [];
+    for (const u of people) {
+        const a = authorizeUser(ix, snap, u, t, q, now);
+        if (LISTED.has(a.verdict)) {
+            authorized.push({
+                user: userInfo(u), verdict: a.verdict,
+                resources: a.resources.filter(r => r.verdict !== 'denied').map(r => ({
+                    resource: r.resource, verdict: r.verdict,
+                    policies: [...new Set(r.grantedBy.map(g => g.policy))],
+                    via: [...new Set(r.grantedBy.flatMap(g => g.via))],
+                    ...(r.grantedBy.some(g => g.temp && g.temp.state === 'active') ? { temporary: true } : {}),
+                })),
+            });
+        }
+    }
+    authorized.sort((a, b) => rank(a.verdict) - rank(b.verdict) || a.user.name.localeCompare(b.user.name));
     for (const u of people) {
         const r = userVerdict(ix, snap, u, t, q, now);
         evaluated.push(...r.devices);
@@ -709,7 +802,7 @@ function whoHasAccess(snap, { target, query, now = Date.now() }) {
     }
     const nets = [...new Set([...t.resources.map(r => (ix.netOf.get(r.id) || {}).id).filter(Boolean), ...networksInAnswers(evaluated)])];
     return {
-        target: targetInfo(ix, t), query: q, users, pending, devices,
+        target: targetInfo(ix, t), query: q, authorized, users, pending, devices,
         routers: routerStatus(ix, snap, nets), legacyRoutes: legacyRouteWarnings(snap, t.resources),
     };
 }
@@ -742,5 +835,5 @@ function accessCheckOptions(snap) {
 
 module.exports = {
     explainUserAccess, whoHasAccess, accessCheckOptions, networksForTarget, normalizeQuery,
-    _internal: { ruleSet, subtractSets, unionSets, describeSet, partition, buildIndex, setAnswers },
+    _internal: { ruleSet, subtractSets, unionSets, describeSet, partition, buildIndex, setAnswers, authorizeUser, targetResources },
 };

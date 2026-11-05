@@ -627,3 +627,108 @@ test('one routing peer of uncertain state does not hide a certain answer from th
     assert.equal(u.verdict, 'cannot_determine');
     assert.equal(u.routers[0].status, 'unknown');
 });
+
+// ─── Authorization: the Remote Access model ───
+
+const { evaluatePolicies, userSourceGroups } = require('../lib/remote-access-auth');
+
+// A tenant with every kind of rule the Remote Access model weighs.
+function authzSnap() {
+    const s = base();
+    s.users.push({ id: 'u3', name: 'Noa', email: 'noa@example.com', auto_groups: ['g-temp', 'g-gone'] });
+    s.users.push({ id: 'u4', name: 'Blocked', email: 'b@example.com', auto_groups: ['g-staff'], is_blocked: true });
+    s.groups.push({ id: 'g-temp', name: 'Temp access #7 Noa' }, { id: 'g-gone', name: 'Temp access #8 Noa' });
+    s.grants = [
+        { id: 7, user_id: 'u3', status: 'active', expires_at: LATER, group_id: 'g-temp', assigned_groups: [] },
+        { id: 8, user_id: 'u3', status: 'expired', expires_at: EARLIER, group_id: 'g-gone', assigned_groups: [] },
+        { id: 9, user_id: 'u2', status: 'expired', expires_at: EARLIER, group_id: null, assigned_groups: [] },
+    ];
+    s.policies = [
+        pol('pol-rdp', [rule({ ports: ['3389'], destinations: [{ id: 'g-srv' }] })], { name: 'Staff RDP' }),
+        pol('pol-drop', [rule({ action: 'drop', ports: ['22'], destinationResource: { id: 'r1', type: 'host' } })], { name: 'No SSH' }),
+        pol('pol-ssh', [rule({ ports: ['22'], destinationResource: { id: 'r1', type: 'host' } })], { name: 'Staff SSH' }),
+        pol('pol-web', [rule({ ports: ['443'], destinations: [{ id: 'g-srv' }] })], { name: 'Web', source_posture_checks: ['pc-1'] }),
+        pol('pol-gw', [rule({ ports: ['5900'], sources: [{ id: 'g-all' }], destinations: [{ id: 'g-srv' }] })], { name: 'Browser Gateway' }),
+        pol('pol-dev', [rule({ ports: ['8080'], sources: [{ id: 'g-other' }], destinationResource: { id: 'r-lan', type: 'subnet' } })], { name: 'Other LAN' }),
+        pol('pol-t7', [rule({ ports: ['9000'], sources: [{ id: 'g-temp' }], destinationResource: { id: 'r1', type: 'host' } })], { name: 'Temporary access #7' }),
+        pol('pol-t8', [rule({ ports: ['9100'], sources: [{ id: 'g-gone' }], destinationResource: { id: 'r1', type: 'host' } })], { name: 'Temporary access #8' }),
+        pol('pol-t9', [rule({ ports: ['9200'], sources: [{ id: 'g-all' }], destinationResource: { id: 'r-lab', type: 'subnet' } })], { name: 'Temporary access #9' }),
+        pol('pol-udp', [rule({ protocol: 'udp', ports: ['53'], destinationResource: { id: 'r-lab', type: 'subnet' } })], { name: 'Lab DNS' }),
+    ];
+    return s;
+}
+
+const authz = (s, userId, target, query) => explainUserAccess(s, { userId, target, query, now: NOW }).authorization;
+
+test('authorization agrees with the Remote Access policy check on every TCP port', () => {
+    const s = authzSnap();
+    const map = { OK: 'granted', BLOCKED_BY_POLICY: 'denied', PORT_NOT_ALLOWED: 'port_blocked', POSTURE_REQUIRED: 'conditional', NO_ACCESS: 'denied' };
+    let compared = 0;
+    for (const userId of ['u1', 'u2', 'u3']) {
+        const src = userSourceGroups(s, userId, NOW);
+        for (const res of s.resources) {
+            for (const port of [22, 53, 443, 3389, 5900, 8080, 9000, 9100, 9200, 12345]) {
+                const ra = evaluatePolicies(s, { managedPolicyId: null }, src, res, port, NOW, {});
+                const a = authz(s, userId, { type: 'resource', id: res.id }, { protocol: 'tcp', port });
+                assert.equal(a.verdict, map[ra.code], `${userId} ${res.id}:${port} remote-access=${ra.code} access-check=${a.verdict}`);
+                compared++;
+            }
+        }
+    }
+    assert.equal(compared, 90);
+});
+
+test('authorization does not depend on having a device', () => {
+    const s = authzSnap();
+    s.peers = s.peers.filter(p => p.user_id !== 'u1');
+    const r = explainUserAccess(s, { userId: 'u1', target: { type: 'resource', id: 'r1' }, now: NOW });
+    assert.equal(r.authorization.verdict, 'granted');
+    assert.equal(r.authorization.resources[0].grantedBy.find(g => g.policy === 'Staff RDP').via[0], 'Staff');
+    assert.ok(r.authorization.groups.includes('Staff'));
+    assert.ok(!r.authorization.groups.includes('All'));
+    assert.equal(r.reason, 'no_devices'); // the device details still say so
+});
+
+test('authorization: drops win, posture is conditional, managed and ended temporary policies never count', () => {
+    const s = authzSnap();
+    const r1 = { type: 'resource', id: 'r1' };
+    assert.equal(authz(s, 'u1', r1, { protocol: 'tcp', port: 22 }).verdict, 'denied');
+    const any = authz(s, 'u1', r1, { protocol: 'any' });
+    assert.equal(any.verdict, 'granted');
+    assert.deepEqual(any.resources[0].blockedBy, ['No SSH']);
+    assert.equal(any.resources[0].allowed.tcp, '443, 3389'); // 22 dropped, 5900 is the gateway's
+    const web = authz(s, 'u1', r1, { protocol: 'tcp', port: 443 });
+    assert.equal(web.verdict, 'conditional');
+    assert.deepEqual(web.resources[0].grantedBy.find(g => g.policy === 'Web').postureChecks, ['Min Version']);
+    assert.equal(authz(s, 'u2', r1, { protocol: 'tcp', port: 5900 }).verdict, 'denied');
+    const noa = authz(s, 'u3', r1, { protocol: 'any' });
+    assert.equal(noa.verdict, 'granted');
+    assert.equal(noa.resources[0].allowed.tcp, '9000'); // #8 ended: neither its group nor its policy counts
+    assert.equal(noa.resources[0].grantedBy[0].temp.state, 'active');
+    assert.equal(authz(s, 'u2', { type: 'resource', id: 'r-lab' }, { protocol: 'tcp', port: 9200 }).verdict, 'denied');
+});
+
+test('authorization: device groups count, protocols and networks', () => {
+    const s = authzSnap();
+    // Avi's own groups are empty; his laptop is in Other, which counts as in Remote Access.
+    assert.equal(authz(s, 'u2', { type: 'resource', id: 'r-lan' }, { protocol: 'tcp', port: 8080 }).verdict, 'granted');
+    assert.equal(authz(s, 'u1', { type: 'resource', id: 'r-lab' }, { protocol: 'udp', port: 53 }).verdict, 'granted');
+    assert.equal(authz(s, 'u1', { type: 'resource', id: 'r-lab' }, { protocol: 'tcp' }).verdict, 'port_blocked');
+    assert.equal(authz(s, 'u1', { type: 'resource', id: 'r-lab' }, { protocol: 'icmp' }).verdict, 'port_blocked');
+    const net = authz(s, 'u1', { type: 'network', id: 'n1' }, { protocol: 'any' });
+    assert.equal(net.verdict, 'partial');
+    assert.deepEqual(net.resources.map(r => r.verdict), ['granted', 'denied']);
+    assert.equal(authz(s, 'u4', { type: 'resource', id: 'r1' }, { protocol: 'any' }).reason, 'user_blocked');
+});
+
+test('who has access lists authorized users first, with what authorizes them', () => {
+    const s = authzSnap();
+    s.peers = s.peers.filter(p => p.user_id !== 'u1');
+    const w = whoHasAccess(s, { target: { type: 'resource', id: 'r1' }, now: NOW });
+    assert.deepEqual(w.authorized.map(a => a.user.id), ['u1', 'u3']);
+    const dana = w.authorized[0];
+    assert.ok(dana.resources[0].policies.includes('Staff RDP'));
+    assert.ok(dana.resources[0].via.includes('Staff'));
+    assert.equal(w.authorized[1].resources[0].temporary, true);
+    assert.ok(!w.authorized.some(a => a.user.id === 'u4'));
+});

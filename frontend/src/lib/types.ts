@@ -1915,10 +1915,28 @@ export interface AccessTargetInfo {
   resources?: AccessResourceRef[];
 }
 export interface AccessRouterStatus { network: AccessNetRef; status: 'online' | 'offline' | 'none' | 'unknown'; online?: string[] }
+// Authorization: the Remote Access model (the user's groups, their devices' groups and All,
+// against the policies). The primary answer; the device fields below are the details.
+export interface AccessAuthGrant { policy: string; policyId: string; via: string[]; ports: AccessPortsDesc; postureChecks?: string[]; temp?: AccessTempNote }
+export interface AccessAuthResource {
+  resource: AccessResourceRef;
+  verdict: AccessVerdict;
+  allowed: AccessPortsDesc;
+  grantedBy: AccessAuthGrant[];
+  blockedBy: string[];
+  reason?: 'unparsable_rule' | 'blocked_by_policy';
+}
+export interface AccessAuthorization { verdict: AccessVerdict; reason?: 'user_blocked' | 'user_not_found'; groups: string[]; resources: AccessAuthResource[] }
+export interface WhoAuthorizedUser {
+  user: AccessUserRef;
+  verdict: AccessVerdict;
+  resources: { resource: AccessResourceRef; verdict: AccessVerdict; policies: string[]; via: string[]; temporary?: boolean }[];
+}
 export interface UserAccessResult {
   user: AccessUserRef;
   target: AccessTargetInfo;
   query: AccessQuery;
+  authorization: AccessAuthorization;
   verdict: AccessVerdict;
   pendingAs?: AccessVerdict;
   reason?: 'user_blocked' | 'no_devices' | 'device_cannot_connect';
@@ -1941,6 +1959,7 @@ export interface WhoHasAccessUser { user: AccessUserRef; verdict: AccessVerdict;
 export interface WhoHasAccessResult {
   target: AccessTargetInfo;
   query: AccessQuery;
+  authorized: WhoAuthorizedUser[];
   users: WhoHasAccessUser[];
   pending: WhoHasAccessUser[];
   devices: AccessCompactDevice[];

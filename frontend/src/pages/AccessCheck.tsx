@@ -7,7 +7,7 @@ import { useAccessCheckOptions, useUserAccessCheck, useWhoHasAccess, type Access
 import type {
   AccessVerdict, AccessAnswer, AccessSummary, AccessConditional, AccessNetworkAnswer, AccessPart, AccessDevice,
   AccessDeviceBlocker, AccessPortsDesc, AccessRouterStatus, AccessQuery, AccessTargetInfo, UserAccessResult, WhoHasAccessResult,
-  AccessCompactDevice, WhoHasAccessUser,
+  AccessCompactDevice, WhoHasAccessUser, AccessAuthorization, AccessAuthResource, WhoAuthorizedUser,
 } from '@/lib/types';
 import { Badge, Button, Field, Input, PillTabs, SelectMenu, Spinner, StatusDot, EmptyState, type SelectOption } from '@/components/ui';
 
@@ -47,6 +47,28 @@ const PART_REASON: Record<string, string> = {
   router_unknown: 'The routing peers of a network that covers this part could not be read, or it is not certain they can route (compliance or sign-in state), so the rules that apply here are not known',
   router_differs: 'This network has several routing peers, and they apply different rules here - the answer depends on which one carries the traffic',
 };
+
+// The authorization answer (the primary one) speaks of the user, not of devices.
+const AUTH_LABEL: Record<AccessVerdict, string> = {
+  granted: 'Authorized',
+  partial: 'Partly Authorized',
+  conditional: 'Authorized If Posture Checks Pass',
+  port_blocked: 'Not Authorized On This Port',
+  cannot_determine: 'Cannot Determine',
+  pending: 'Not Authorized',
+  denied: 'Not Authorized',
+};
+
+function authLabel(v: AccessVerdict, q?: AccessQuery) {
+  if (v === 'port_blocked' && q && !q.port) return 'Not Authorized For This Protocol';
+  return AUTH_LABEL[v];
+}
+
+function AuthBadge({ v, q }: { v: AccessVerdict; q?: AccessQuery }) {
+  return <Badge tone={TONE_BADGE[VERDICT[v].tone]} className="py-1 px-2.5">{authLabel(v, q)}</Badge>;
+}
+
+const authorizedVerdict = (v: AccessVerdict) => v === 'granted' || v === 'partial' || v === 'conditional';
 
 function verdictLabel(v: AccessVerdict | 'cannot_connect', q?: AccessQuery) {
   if (v === 'port_blocked' && q && !q.port) return 'Not For This Protocol';
@@ -141,8 +163,9 @@ export default function AccessCheck() {
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-nb-gray-500 dark:text-nb-gray-400 max-w-3xl">
-        Check what NetBird allows right now: whether a user's devices can reach a resource, or everyone who can.
-        The answer follows NetBird's own rules - device groups, the most specific route, and blocking rules.
+        Check whether a user is authorized for a resource, or everyone who is - by the same rules Remote Access uses:
+        the user's groups and their devices' groups against the policies, with blocking rules winning.
+        The device details show what each device can reach right now.
       </p>
 
       <PillTabs
@@ -255,9 +278,102 @@ function targetName(t: AccessTargetInfo) {
 
 // ─── User Access result ───
 
-function userExplanation(r: UserAccessResult): ReactNode[] {
+function authExplanation(a: AccessAuthorization, q: AccessQuery): string {
+  const blocked = a.resources.filter((x) => x.reason === 'blocked_by_policy').flatMap((x) => x.blockedBy);
+  if (a.reason === 'user_blocked') return 'The user is blocked in NetBird.';
+  switch (a.verdict) {
+    case 'granted': return q.protocol === 'any' ? 'A policy from the user\'s groups allows access to it.' : `A policy from the user's groups allows ${queryText(q)}.`;
+    case 'partial': return 'The user is authorized for some of the resources in this network.';
+    case 'conditional': return 'A policy allows it only for a device that passes its posture checks.';
+    case 'port_blocked': return `A policy from the user's groups reaches it, but not for ${queryText(q)}.`;
+    case 'cannot_determine': return 'A blocking rule has a port format this check does not understand.';
+    default:
+      return blocked.length ? `A blocking rule covers it: ${[...new Set(blocked)].join(', ')}.` : 'No policy from the user\'s groups reaches it.';
+  }
+}
+
+// One line on the devices, only when they do not match the authorization.
+function deviceGap(r: UserAccessResult): string | null {
+  if (!authorizedVerdict(r.authorization.verdict) || authorizedVerdict(r.verdict)) return null;
+  if (r.reason === 'no_devices') return 'The user has no devices yet.';
+  if (r.verdict === 'pending') return 'None of the user\'s devices is in the authorized groups yet.';
+  if (r.reason === 'device_cannot_connect') return 'A device of the user cannot connect right now - see Device Details.';
+  if (r.verdict === 'cannot_determine') return 'Whether the user\'s devices can reach it right now cannot be determined - see Device Details.';
+  return 'None of the user\'s devices can reach it right now - see Device Details.';
+}
+
+function UserResult({ r }: { r: UserAccessResult }) {
+  const a = r.authorization;
+  const gap = deviceGap(r);
+  return (
+    <div className="flex flex-col gap-4">
+      <Banner tone={VERDICT[a.verdict].tone} title={`${r.user.name}: ${authLabel(a.verdict, r.query)}`}>
+        <p className="text-nb-gray-500">Target: {targetName(r.target)} · {queryText(r.query)}</p>
+        <p>{authExplanation(a, r.query)}</p>
+        {gap && <p className="flex gap-1.5 items-start"><TriangleAlert size={14} className="text-netbird shrink-0 mt-0.5" />{gap}</p>}
+      </Banner>
+      {a.resources.length > 0 && (
+        <Panel className="p-4 flex flex-col gap-3">
+          <h3 className="text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Why</h3>
+          {a.resources.map((x) => <AuthResourceRow key={x.resource.id} x={x} q={r.query} single={a.resources.length === 1} />)}
+          <p className="text-xs text-nb-gray-500">
+            <span className="font-medium">User's groups:</span> {a.groups.length ? a.groups.join(', ') : 'none'} (plus All) - their own groups and their devices' groups.
+          </p>
+        </Panel>
+      )}
+      <Collapsible title="Device Details" badge={<VerdictBadge v={r.verdict} q={r.query} />}>
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-nb-gray-600 dark:text-nb-gray-300">{userExplanation(r).join(' ')}</p>
+          <Warnings target={r.target} routers={r.routers} legacy={r.legacyRoutes} />
+          {r.devices.map((d) => <DeviceCard key={d.id} d={d} q={r.query} defaultOpen={r.devices.length === 1} />)}
+        </div>
+      </Collapsible>
+    </div>
+  );
+}
+
+function AuthResourceRow({ x, q, single }: { x: AccessAuthResource; q: AccessQuery; single: boolean }) {
+  return (
+    <div className="rounded-md bg-nb-gray-50 dark:bg-nb-gray-920/60 px-3 py-2.5 text-sm flex flex-col gap-1.5">
+      {!single && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-nb-gray-800 dark:text-nb-gray-100">{x.resource.name}</span>
+          <span className="text-xs text-nb-gray-500 break-all">{x.resource.address}</span>
+          <span className="ml-auto"><AuthBadge v={x.verdict} q={q} /></span>
+        </div>
+      )}
+      {x.grantedBy.length === 0 && !x.blockedBy.length && <p className="text-xs text-nb-gray-500">No policy from the user's groups reaches it.</p>}
+      {x.grantedBy.map((g, i) => (
+        <p key={`${g.policyId}-${i}`} className="text-xs text-nb-gray-600 dark:text-nb-gray-400 flex flex-wrap items-center gap-1.5">
+          <span className="font-medium text-nb-gray-700 dark:text-nb-gray-300">{g.policy}</span>
+          <span>({portsText(g.ports)}) through {g.via.join(', ')}</span>
+          {g.postureChecks && <Badge tone="orange" className="py-0.5 px-1.5 text-[0.68rem] whitespace-normal! text-left">Posture: {g.postureChecks.join(', ') || 'checks'}</Badge>}
+          {g.temp?.state === 'active' && <Badge tone="gray" className="py-0.5 px-1.5 text-[0.68rem] whitespace-normal! text-left">Temporary #{g.temp.id}{g.temp.expiresAt ? ` until ${formatMaybeDate(g.temp.expiresAt)}` : ''}</Badge>}
+        </p>
+      ))}
+      {x.grantedBy.length > 0 && <p className="text-xs text-nb-gray-600 dark:text-nb-gray-400"><span className="font-medium">Authorized:</span> {portsText(x.allowed)}</p>}
+      {!!x.blockedBy.length && <p className="text-xs text-nb-gray-600 dark:text-nb-gray-400"><span className="font-medium">Blocked by:</span> {x.blockedBy.join(', ')}</p>}
+    </div>
+  );
+}
+
+function Collapsible({ title, badge, children }: { title: string; badge?: ReactNode; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Panel>
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="w-full flex flex-wrap items-center gap-x-3 gap-y-2 p-4 text-left">
+        {open ? <ChevronDown size={16} className="text-nb-gray-400" /> : <ChevronRight size={16} className="text-nb-gray-400" />}
+        <span className="text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">{title}</span>
+        {badge && <span className="ml-auto">{badge}</span>}
+      </button>
+      {open && <div className="border-t border-nb-gray-100 dark:border-nb-gray-900 p-4">{children}</div>}
+    </Panel>
+  );
+}
+
+function userExplanation(r: UserAccessResult): string[] {
   const q = queryText(r.query);
-  const out: ReactNode[] = [];
+  const out: string[] = [];
   switch (r.verdict) {
     case 'granted': out.push(`At least one of ${r.user.name}'s devices can reach it (${q}).`); break;
     case 'partial': out.push(`A device can reach only part of it (${q}). The breakdown below shows which part.`); break;
@@ -271,26 +387,6 @@ function userExplanation(r: UserAccessResult): ReactNode[] {
   if (r.reason === 'device_cannot_connect') out.splice(0, out.length, 'A device matches a policy, but it cannot connect right now. The reason is shown on the device.');
   if (r.reason === 'no_devices') out.push('The user has no devices.');
   return out;
-}
-
-function UserResult({ r }: { r: UserAccessResult }) {
-  const tone = VERDICT[r.verdict].tone;
-  const title = `${r.user.name}: ${verdictLabel(r.verdict, r.query)}`;
-  return (
-    <div className="flex flex-col gap-4">
-      <Banner tone={tone} title={title}>
-        <p className="text-nb-gray-500">Target: {targetName(r.target)} · {queryText(r.query)}</p>
-        {userExplanation(r).map((t, i) => <p key={i}>{t}</p>)}
-      </Banner>
-      <Warnings target={r.target} routers={r.routers} legacy={r.legacyRoutes} />
-      {r.devices.length > 0 && (
-        <div className="flex flex-col gap-3">
-          <h3 className="text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">{r.devices.length} Device{r.devices.length === 1 ? '' : 's'}</h3>
-          {r.devices.map((d) => <DeviceCard key={d.id} d={d} q={r.query} defaultOpen={r.devices.length === 1 || d.effective === r.verdict} />)}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function DeviceCard({ d, q, defaultOpen }: { d: AccessDevice; q: AccessQuery; defaultOpen: boolean }) {
@@ -418,50 +514,81 @@ function PartRow({ p, single }: { p: AccessPart; single: boolean }) {
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 function WhoResult({ r, onDetails }: { r: WhoHasAccessResult; onDetails: (userId: string) => void }) {
-  // Only granted and partial are proven access; the rest are listed with what they are.
-  const count = (v: AccessVerdict) => r.users.filter((u) => u.verdict === v).length;
+  // The headline counts authorized users (the Remote Access model); devices are the details.
+  const count = (v: AccessVerdict) => r.authorized.filter((u) => u.verdict === v).length;
   const full = count('granted');
-  const proven = full + count('partial');
+  const authorized = full + count('partial');
   const conditional = count('conditional');
   const uncertain = count('cannot_determine');
   const portOnly = count('port_blocked');
-  const devicesWith = r.devices.filter((d) => d.effective === 'granted' || d.effective === 'partial').length;
-  const devicesOther = r.devices.length - devicesWith;
-  const tone: Tone = full ? 'green' : proven || conditional ? 'amber' : uncertain ? 'gray' : 'red';
-  const title = proven ? `${plural(proven, 'User', 'Users')} With Access` : 'No User With Access';
+  const tone: Tone = full ? 'green' : authorized || conditional ? 'amber' : uncertain ? 'gray' : 'red';
+  const title = authorized ? `${plural(authorized, 'User', 'Users')} Authorized` : 'No User Authorized';
+  const deviceCount = r.users.length + r.pending.length + r.devices.length;
   return (
     <div className="flex flex-col gap-4">
       <Banner tone={tone} title={title}>
         <p className="text-nb-gray-500">Target: {targetName(r.target)} · {queryText(r.query)}</p>
-        {proven > full && <p>{plural(proven - full, 'of them reaches', 'of them reach')} only part of it.</p>}
-        {conditional > 0 && <p>{plural(conditional, 'more depends', 'more depend')} on posture checks.</p>}
-        {uncertain > 0 && <p>For {plural(uncertain, 'more user', 'more users')} the answer cannot be determined - the reasons are in their details.</p>}
-        {portOnly > 0 && <p>{plural(portOnly, 'more reaches', 'more reach')} it, but not for {queryText(r.query)}.</p>}
-        {r.pending.length > 0 && <p>{plural(r.pending.length, 'more would', 'more would')} get access once one of their devices joins the right group.</p>}
-        {devicesWith > 0 && <p>{plural(devicesWith, 'device', 'devices')} without a listed owner also {devicesWith === 1 ? 'has' : 'have'} access.</p>}
-        {devicesOther > 0 && <p>{plural(devicesOther, 'other device matches', 'other devices match')} a policy but cannot connect, or the answer is not certain.</p>}
+        {authorized > full && <p>{plural(authorized - full, 'of them is', 'of them are')} authorized for only part of it.</p>}
+        {conditional > 0 && <p>{plural(conditional, 'more is', 'more are')} authorized only for a device that passes posture checks.</p>}
+        {uncertain > 0 && <p>For {plural(uncertain, 'more user', 'more users')} the answer cannot be determined.</p>}
+        {portOnly > 0 && <p>{plural(portOnly, 'more is', 'more are')} authorized for it, but not for {queryText(r.query)}.</p>}
       </Banner>
-      <Warnings target={r.target} routers={r.routers} legacy={r.legacyRoutes} />
-      {r.users.length > 0 && <UsersTable title="Users" rows={r.users} q={r.query} onDetails={onDetails} />}
-      {r.pending.length > 0 && <UsersTable title="Pending - No Device In The Right Group Yet" rows={r.pending} q={r.query} onDetails={onDetails} />}
-      {r.devices.length > 0 && (
-        <Panel className="overflow-hidden">
-          <h3 className="px-4 pt-4 pb-2 text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Other Devices</h3>
-          <p className="px-4 pb-3 text-xs text-nb-gray-500">Devices with access that belong to no listed user, such as servers added with a setup key.</p>
-          <div className="divide-y divide-nb-gray-100 dark:divide-nb-gray-900">
-            {r.devices.map((d) => (
-              <div key={d.id} className="px-4 py-3 flex flex-wrap items-center gap-2">
-                <DeviceChip d={d} q={r.query} />
-                <span className="text-xs text-nb-gray-500">{deviceVia(d)}</span>
-              </div>
-            ))}
+      {r.authorized.length > 0 && <AuthorizedTable rows={r.authorized} q={r.query} onDetails={onDetails} />}
+      {!r.authorized.length && <Panel><EmptyState title="Nobody Is Authorized" hint="No policy from any user's groups reaches this target." /></Panel>}
+      {deviceCount > 0 && (
+        <Collapsible title="Device Details">
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-nb-gray-600 dark:text-nb-gray-300">What devices can reach right now, by the device's own groups and the routes NetBird applies.</p>
+            <Warnings target={r.target} routers={r.routers} legacy={r.legacyRoutes} />
+            {r.users.length > 0 && <UsersTable title="Users' Devices" rows={r.users} q={r.query} onDetails={onDetails} />}
+            {r.pending.length > 0 && <UsersTable title="Pending - No Device In The Right Group Yet" rows={r.pending} q={r.query} onDetails={onDetails} />}
+            {r.devices.length > 0 && (
+              <Panel className="overflow-hidden">
+                <h3 className="px-4 pt-4 pb-2 text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Other Devices</h3>
+                <p className="px-4 pb-3 text-xs text-nb-gray-500">Devices with access that belong to no listed user, such as servers added with a setup key.</p>
+                <div className="divide-y divide-nb-gray-100 dark:divide-nb-gray-900">
+                  {r.devices.map((d) => (
+                    <div key={d.id} className="px-4 py-3 flex flex-wrap items-center gap-2">
+                      <DeviceChip d={d} q={r.query} />
+                      <span className="text-xs text-nb-gray-500">{deviceVia(d)}</span>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            )}
           </div>
-        </Panel>
-      )}
-      {!r.users.length && !r.pending.length && !r.devices.length && (
-        <Panel><EmptyState title="Nobody Has Access" hint="No policy lets any user or device reach this target." /></Panel>
+        </Collapsible>
       )}
     </div>
+  );
+}
+
+function AuthorizedTable({ rows, q, onDetails }: { rows: WhoAuthorizedUser[]; q: AccessQuery; onDetails: (userId: string) => void }) {
+  return (
+    <Panel className="overflow-hidden">
+      <h3 className="px-4 pt-4 pb-3 text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Users</h3>
+      <div className="divide-y divide-nb-gray-100 dark:divide-nb-gray-900">
+        {rows.map((u) => (
+          <div key={u.user.id} className="px-4 py-3 flex flex-col gap-2 md:flex-row md:items-start md:gap-4">
+            <div className="md:w-48 shrink-0 min-w-0">
+              <p className="font-medium text-sm text-nb-gray-900 dark:text-nb-gray-100 break-words">{u.user.name}</p>
+              {u.user.email && u.user.email !== u.user.name && <p className="text-xs text-nb-gray-500 break-all">{u.user.email}</p>}
+            </div>
+            <div className="shrink-0"><AuthBadge v={u.verdict} q={q} /></div>
+            <div className="flex-1 min-w-0 flex flex-col gap-1">
+              {u.resources.map((x) => (
+                <p key={x.resource.id} className="text-xs text-nb-gray-600 dark:text-nb-gray-400 flex flex-wrap items-center gap-1.5">
+                  {u.resources.length > 1 && <span className="font-medium text-nb-gray-700 dark:text-nb-gray-300">{x.resource.name}:</span>}
+                  <span>{x.policies.join(', ')}{x.via.length ? ` through ${x.via.join(', ')}` : ''}</span>
+                  {x.temporary && <Badge tone="gray" className="py-0.5 px-1.5 text-[0.68rem]">Temporary</Badge>}
+                </p>
+              ))}
+            </div>
+            <Button size="sm" variant="ghost" className="self-start" onClick={() => onDetails(u.user.id)}>Details</Button>
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }
 
