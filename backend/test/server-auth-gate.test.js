@@ -670,6 +670,7 @@ const SUBRESOURCES = [
     ['a request for HTML with a parameter', '/version.txt', { accept: 'text/html; charset=utf-8' }],
     ['a request with text/html only inside a quoted value', '/version.txt', { accept: 'application/json; note="x,text/html;x=y"' }],
     ['the same, next to */*', '/version.txt', { accept: 'application/json; note="x,text/html;x=y", */*' }],
+    ['an unterminated quote', '/version.txt', { accept: 'text/plain; a="' + '\\"'.repeat(4000) + ', text/html, */*' }],
 ];
 const refusedWithoutLogin = (r) => r.status === 401 && r.text === 'Sign in required' && !r.location &&
     r.headers.get('cache-control') === 'no-store' && r.headers.getSetCookie().length === 0;

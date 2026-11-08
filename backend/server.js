@@ -398,9 +398,26 @@ const forcedLogin = (req) => isLoginPath(req) && req.query.force === '1';
 // (prefetch or prerender) is not one either: it may never be shown. requiresAuth() itself sends a
 // request to the provider only when req.accepts('html'), so a page load must pass that too, or
 // it would mark a login in flight that never starts.
+// Quoted parameter values may hold commas and media types of their own, so they are dropped
+// (one pass, no regex: the header is client input). An unterminated quote drops the rest.
+function withoutQuotedValues(s) {
+    let out = '';
+    let quoted = false;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (quoted) {
+            if (c === '\\') i++;
+            else if (c === '"') { quoted = false; out += '""'; }
+        } else if (c === '"') {
+            quoted = true;
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
 function acceptsHtmlByName(req) {
-    // Quoted parameter values may hold commas and media types of their own.
-    const accept = String(req.headers.accept || '').replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    const accept = withoutQuotedValues(String(req.headers.accept || ''));
     return !!req.accepts('html') && accept.split(',').some((part) => {
         const [type, ...params] = part.split(';').map((s) => s.trim().toLowerCase());
         const q = params.find((p) => p.startsWith('q='));
