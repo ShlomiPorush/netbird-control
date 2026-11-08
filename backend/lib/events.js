@@ -11,7 +11,7 @@ const { pool, onSettingChange, setSetting, cappedCount } = require('./core');
 // For resolving "proxy-<id>" ingress peer names to service/cluster names at read time, and the
 // tenant ALS so every read/write here scopes to the active account (events -> netbird -> core,
 // still one-way; netbird.js never requires events.js).
-const { getReverseProxyStatus, currentTenantAccount } = require('./netbird');
+const { getReverseProxyStatus, currentTenantAccount, netbirdGet } = require('./netbird');
 // The active account for DB queries: '' = main, else a tenant. Every events/admin_events/
 // ip_assignments query filters on this so one account's rows never surface under another.
 const tnt = () => currentTenantAccount() || '';
@@ -114,8 +114,78 @@ function mapApiTrafficEvent(e) {
     };
 }
 
+// ─── Endpoint type + flow state recovery ───
+// NetBird's event stream (the webhook) started sending source_type / destination_type "UNKNOWN"
+// for real peers and network resources, and Message "TYPE_UNKNOWN" with num_of_* counters. The
+// endpoint ids are still correct, so the type is recovered from them: a network resource id gets
+// its resource type, a peer id gets PEER. Without this the P2P and Routed filters stay empty.
+// The stored raw_json always keeps the payload exactly as NetBird sent it.
+const ROUTED_TYPES = ['HOST_RESOURCE', 'DOMAIN_RESOURCE', 'SUBNET_RESOURCE'];
+const RESOURCE_TYPE_OF = { host: 'HOST_RESOURCE', subnet: 'SUBNET_RESOURCE', domain: 'DOMAIN_RESOURCE' };
+
+// Per-account index of known endpoint ids: { peers: Set | null, resources: Map<id, type> | null }.
+// ONLY the reclassify sweep fills it (inside forEachTenant, which verifies the tenant context), so
+// ingestion never calls NetBird and can never pick up another account's resources. Each source is
+// replaced only when it was read successfully; a failed read keeps the previous one.
+const _typeIndex = new Map();
+function setEndpointTypeIndex(tenant, { peers, resources } = {}) {
+    const cur = _typeIndex.get(tenant) || { peers: null, resources: null };
+    const next = { peers: peers || cur.peers, resources: resources || cur.resources };
+    _typeIndex.set(tenant, next);
+    return next;
+}
+
+// A real type from NetBird is kept as is (PEER, BROWSER_GATEWAY, ...). Only an empty or UNKNOWN
+// type with a string id found in this account's index is replaced. Anything that is not a string
+// is passed on exactly as before this recovery existed, and never classified.
+function resolveEndpointType(id, given, idx) {
+    if (given == null) given = ''; // a missing type is an unknown one
+    if (typeof given !== 'string') return given || '';
+    if (given && given !== 'UNKNOWN') return given;
+    if (typeof id !== 'string' || !id || !idx) return given;
+    const res = idx.resources && idx.resources.get(id);
+    if (res) return res;
+    if (idx.peers && idx.peers.has(id)) return 'PEER';
+    return given;
+}
+
+// NetBird's resource list → Map<id, type>, or null when the response is not a list. Entries
+// without a string id and a known type are skipped, so one odd entry never fails the whole read.
+function parseResourceTypes(list) {
+    if (!Array.isArray(list)) return null;
+    const out = new Map();
+    for (const r of list) {
+        if (!r || typeof r.id !== 'string' || !r.id || typeof r.type !== 'string') continue;
+        const key = r.type.toLowerCase();
+        if (Object.hasOwn(RESOURCE_TYPE_OF, key)) out.set(r.id, RESOURCE_TYPE_OF[key]);
+    }
+    return out;
+}
+
+// A counter counts only as a whole number below 2^53, given as a JSON number or a digit string.
+// Anything else counts as 0. The sweep applies the same pattern in SQL (POSITIVE_COUNTER_SQL), so
+// a stored row is a candidate exactly when this function finds evidence in it.
+const COUNTER_RE = /^(0|[1-9][0-9]{0,14})$/;
+function counterValue(v) {
+    const s = typeof v === 'number' ? String(v) : typeof v === 'string' ? v : null;
+    return s !== null && COUNTER_RE.test(s) ? Number(s) : 0;
+}
+// The flow state for a TYPE_UNKNOWN event, from its counters - the same rule mapApiTrafficEvent
+// uses for API windows. null when no counter is positive: then there is no evidence and the
+// stored value stays TYPE_UNKNOWN.
+function deriveTrafficMessage(meta) {
+    const m = meta || {};
+    const starts = counterValue(m.num_of_starts), ends = counterValue(m.num_of_ends), drops = counterValue(m.num_of_drops);
+    if (drops > 0) return 'TYPE_DROP';
+    if (ends > 0 && starts === 0) return 'TYPE_END';
+    if (starts > 0 || ends > 0) return 'TYPE_START';
+    return null;
+}
+
 async function addEvent(payload) {
     const meta = payload.meta || {};
+    const idx = _typeIndex.get(tnt());
+    const message = payload.Message === 'TYPE_UNKNOWN' ? (deriveTrafficMessage(meta) || payload.Message) : payload.Message;
     const query = `
     INSERT INTO events (
       tenant, id, timestamp, message, initiator_id, target_id,
@@ -143,7 +213,7 @@ async function addEvent(payload) {
     const values = [
         payload.ID,
         payload.Timestamp,
-        payload.Message,
+        message,
         payload.InitiatorID || '',
         payload.target_id || '',
         meta.flow_id || '',
@@ -153,14 +223,14 @@ async function addEvent(payload) {
         meta.source_name || '',
         meta.source_dns_label || '',
         meta.source_id || '',
-        meta.source_type || '',
+        resolveEndpointType(meta.source_id, meta.source_type, idx),
         meta.source_geo_country || '',
         meta.source_geo_city || '',
         meta.destination_addr || '',
         meta.destination_name || '',
         meta.destination_dns_label || '',
         meta.destination_id || '',
-        meta.destination_type || '',
+        resolveEndpointType(meta.destination_id, meta.destination_type, idx),
         meta.destination_geo_country || '',
         meta.destination_geo_city || '',
         meta.policy_id || '',
@@ -313,8 +383,9 @@ function buildEventConds({ search, source, destination, type, protocol, from, to
         params.push('PEER');
         paramIndex++;
     } else if (type === 'Routed') {
-        conditions.push(`destination_type = $${paramIndex}`);
-        params.push('HOST_RESOURCE');
+        // Every network resource kind is routed through a routing peer, not only single hosts.
+        conditions.push(`destination_type = ANY($${paramIndex})`);
+        params.push(ROUTED_TYPES);
         paramIndex++;
     } else if (type === 'Proxy') {
         // Reverse-proxy (ingress) traffic has no explicit marker in NetBird's flow events - the
@@ -504,7 +575,8 @@ async function queryTrafficSummary(opts) {
             MAX(destination_name) AS destination_name,
             MAX(NULLIF(destination_id, '')) AS destination_id,
             MAX(destination_dns_label) AS destination_dns,
-            MAX(destination_type) AS destination_type,
+            -- A known type wins over UNKNOWN or empty in the same pair (plain MAX would pick UNKNOWN).
+            COALESCE(MAX(NULLIF(NULLIF(destination_type, 'UNKNOWN'), '')), MAX(destination_type)) AS destination_type,
             regexp_replace(MAX(destination_addr), ':[0-9]+$', '') AS destination_host,
             MAX(NULLIF(user_id, '')) AS user_id,
             MAX(source_geo_country) AS src_country, MAX(source_geo_city) AS src_city,
@@ -952,8 +1024,173 @@ async function deleteEventsByIds(ids) {
     return r.rowCount || 0;
 }
 
+// ─── Reclassify sweep: fix stored rows with an UNKNOWN type or TYPE_UNKNOWN state ───
+// Runs per account (forEachTenant) after boot and on a fixed interval. It picks rows by their
+// STATE, never by time: a row is fixed on the first run where its id is known, however old it
+// is, and a run cut short (time budget, restart, lock) simply leaves the rest to the next run.
+// Each candidate predicate below is also the WHERE clause of a partial index in LOG_INDEXES
+// (db.js), so the sweep reads only rows it can fix; the texts must stay identical.
+const DST_UNRESOLVED_SQL = `destination_type IN ('', 'UNKNOWN') AND destination_id <> ''`;
+const SRC_UNRESOLVED_SQL = `source_type IN ('', 'UNKNOWN') AND source_id <> ''`;
+const POSITIVE_COUNTER_SQL = `'^[1-9][0-9]{0,14}$'`;
+const MSG_UNKNOWN_SQL = `message = 'TYPE_UNKNOWN' AND (`
+    + `(raw_json->'meta'->>'num_of_starts') ~ ${POSITIVE_COUNTER_SQL}`
+    + ` OR (raw_json->'meta'->>'num_of_ends') ~ ${POSITIVE_COUNTER_SQL}`
+    + ` OR (raw_json->'meta'->>'num_of_drops') ~ ${POSITIVE_COUNTER_SQL})`;
+const EVENT_TYPE_INDEXES = [
+    { name: 'idx_events_dst_unresolved', table: 'events', cols: `(tenant, destination_id) WHERE ${DST_UNRESOLVED_SQL}` },
+    { name: 'idx_events_src_unresolved', table: 'events', cols: `(tenant, source_id) WHERE ${SRC_UNRESOLVED_SQL}` },
+    { name: 'idx_events_msg_unknown', table: 'events', cols: `(tenant, id) WHERE ${MSG_UNKNOWN_SQL}` },
+];
+
+const SWEEP_BATCH = 1000;
+const SWEEP_PHASE_BUDGET_MS = 20000; // per phase, so a busy phase never starves the next one
+// Namespace for the per-account advisory lock (pg_try_advisory_lock(int, int) = (namespace, account)).
+const SWEEP_LOCK_NS = 0x4e425431;
+
+// Read this account's peer ids (local mirror) and network resource ids (NetBird API) into the
+// index ingestion uses. The two sources are independent: one failing never blocks the other.
+async function loadEndpointTypeIndex() {
+    const t = tnt();
+    let peers = null, resources = null;
+    try {
+        const r = await pool.query('SELECT peer_id FROM peers WHERE tenant = $1', [t]);
+        peers = new Set(r.rows.map(x => String(x.peer_id)));
+    } catch (e) {
+        console.error('[EventTypes] peers read failed:', e.message);
+    }
+    try {
+        resources = parseResourceTypes(await netbirdGet('/api/networks/resources'));
+    } catch (e) {
+        console.error('[EventTypes] resources read failed:', e.message);
+    }
+    return setEndpointTypeIndex(t, { peers, resources });
+}
+
+async function eventTypeIndexesValid() {
+    const names = EVENT_TYPE_INDEXES.map(i => i.name);
+    const r = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+         WHERE c.relname = ANY($1) AND i.indisvalid`, [names]);
+    return r.rows[0].n === names.length;
+}
+
+// One short transaction with bounded waits: a batch never queues behind a long lock and never
+// runs long itself. Returns the number of rows changed.
+async function shortTx(fn) {
+    const c = await pool.connect();
+    try {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL lock_timeout = '5s'`);
+        await c.query(`SET LOCAL statement_timeout = '30s'`);
+        const n = await fn(c);
+        await c.query('COMMIT');
+        return n;
+    } catch (e) {
+        await c.query('ROLLBACK').catch(() => { });
+        throw e;
+    } finally {
+        c.release();
+    }
+}
+
+// Set <side>_type for rows whose id is in `known` (Map id → type). SKIP LOCKED leaves rows another
+// writer holds to a later batch; a fixed row leaves the partial index, so every batch progresses.
+async function reclassifyTypeColumn(side, known, deadline) {
+    if (!known.size) return 0;
+    const col = side === 'destination' ? 'destination_type' : 'source_type';
+    const idc = side === 'destination' ? 'destination_id' : 'source_id';
+    const ids = [...known.keys()], types = [...known.values()];
+    let total = 0;
+    while (Date.now() < deadline) {
+        const n = await shortTx(async (c) => (await c.query(
+            // The inner WHERE is DST_/SRC_UNRESOLVED_SQL with the e. alias, so the partial index applies.
+            // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- col/idc are fixed internal column names chosen above; values are parameterized.
+            // LATERAL = one (tenant, id) index probe per known id, so rows with ids nobody knows
+            // (deleted peers/resources) are never read, however many pile up.
+            `WITH m AS (SELECT * FROM unnest($2::text[], $3::text[]) AS m(id, type)),
+                  b AS (SELECT x.tenant, x.id, m.type FROM m CROSS JOIN LATERAL (
+                            SELECT e.tenant, e.id FROM events e
+                            WHERE e.tenant = $1 AND e.${idc} = m.id AND e.${col} IN ('', 'UNKNOWN') AND e.${idc} <> ''
+                            LIMIT ${SWEEP_BATCH} FOR UPDATE SKIP LOCKED) x
+                        LIMIT ${SWEEP_BATCH})
+             UPDATE events e SET ${col} = b.type FROM b WHERE e.tenant = b.tenant AND e.id = b.id`,
+            [tnt(), ids, types])).rowCount);
+        total += n;
+        if (n < SWEEP_BATCH) break;
+    }
+    return total;
+}
+
+// Replace TYPE_UNKNOWN with the state its counters show. Candidates are exactly the rows with a
+// positive counter, so each batch fixes every row it reads.
+async function reclassifyMessages(deadline) {
+    let total = 0;
+    while (Date.now() < deadline) {
+        const n = await shortTx(async (c) => {
+            const r = await c.query(
+                // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- MSG_UNKNOWN_SQL is a fixed internal fragment; values are parameterized.
+                `SELECT id, raw_json->'meta'->>'num_of_starts' AS s, raw_json->'meta'->>'num_of_ends' AS en,
+                        raw_json->'meta'->>'num_of_drops' AS d
+                 FROM events WHERE tenant = $1 AND ${MSG_UNKNOWN_SQL}
+                 LIMIT ${SWEEP_BATCH} FOR UPDATE SKIP LOCKED`, [tnt()]);
+            const ids = [], msgs = [];
+            for (const row of r.rows) {
+                const msg = deriveTrafficMessage({ num_of_starts: row.s, num_of_ends: row.en, num_of_drops: row.d });
+                if (msg) { ids.push(row.id); msgs.push(msg); }
+            }
+            if (!ids.length) return 0;
+            await c.query(
+                `UPDATE events e SET message = m.msg FROM unnest($2::text[], $3::text[]) AS m(id, msg)
+                 WHERE e.tenant = $1 AND e.id = m.id AND e.message = 'TYPE_UNKNOWN'`,
+                [tnt(), ids, msgs]);
+            return r.rows.length;
+        });
+        total += n;
+        if (n < SWEEP_BATCH) break;
+    }
+    return total;
+}
+
+// The per-account sweep. Refreshes the index first (ingestion benefits even when the partial
+// indexes are not built yet), then fixes stored rows only when those indexes are valid, so it
+// never falls back to a full scan of the events table. One run per account at a time across
+// every app instance (advisory lock on a dedicated connection).
+async function reclassifyEventTypes() {
+    const idx = await loadEndpointTypeIndex();
+    if (!(await eventTypeIndexesValid())) return { skipped: 'indexes' };
+    const t = tnt();
+    const lockClient = await pool.connect();
+    let unlockError = null;
+    try {
+        const got = (await lockClient.query('SELECT pg_try_advisory_lock($1, hashtext($2)) AS ok', [SWEEP_LOCK_NS, t])).rows[0].ok;
+        if (!got) return { skipped: 'locked' };
+        try {
+            const known = new Map();
+            if (idx && idx.peers) for (const id of idx.peers) known.set(id, 'PEER');
+            if (idx && idx.resources) for (const [id, type] of idx.resources) known.set(id, type);
+            const out = {
+                destination: await reclassifyTypeColumn('destination', known, Date.now() + SWEEP_PHASE_BUDGET_MS),
+                source: await reclassifyTypeColumn('source', known, Date.now() + SWEEP_PHASE_BUDGET_MS),
+                message: await reclassifyMessages(Date.now() + SWEEP_PHASE_BUDGET_MS),
+            };
+            if (out.destination || out.source || out.message) {
+                console.log(`[EventTypes] ${t || 'main'}: fixed ${out.destination} destination types, ${out.source} source types, ${out.message} states`);
+            }
+            return out;
+        } finally {
+            await lockClient.query('SELECT pg_advisory_unlock($1, hashtext($2))', [SWEEP_LOCK_NS, t]).catch(e => { unlockError = e; });
+        }
+    } finally {
+        // A connection that may still hold the lock must not go back to the pool.
+        lockClient.release(unlockError || undefined);
+    }
+}
+
 module.exports = {
     addEvent, mapApiTrafficEvent, getAdminStats,
+    ROUTED_TYPES, resolveEndpointType, parseResourceTypes, deriveTrafficMessage, counterValue, setEndpointTypeIndex,
+    EVENT_TYPE_INDEXES, reclassifyEventTypes,
     isNoiseTraffic, eventMatchesFilters,
     IP_SORT_COLS, queryIpHistory, getIpHistoryUsers,
     buildEventConds, queryEvents, getDistinctUsers, getDistinctSources, queryTrafficSummary,
