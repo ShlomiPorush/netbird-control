@@ -5,6 +5,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
+const { pageLoad } = require('./helpers/page-load');
 const net = require('net');
 const crypto = require('crypto');
 // Credentials are generated for each run; none is fixed in the repository.
@@ -114,7 +115,7 @@ const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(';')[0]
 
 async function signIn(sub, ageHours) {
     const ip = freshIp();
-    const start = await fetch(`${BASE}/login`, { headers: { accept: 'text/html', 'x-forwarded-for': ip }, redirect: 'manual' });
+    const start = await pageLoad(`${BASE}/login`, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html', 'x-forwarded-for': ip } });
     const authorize = new URL(start.headers.get('location'));
     const code = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);

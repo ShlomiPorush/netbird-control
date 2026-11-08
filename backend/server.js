@@ -389,19 +389,50 @@ function loginInFlight(req) {
 const isLoginPath = (req) => /^\/login\/?$/i.test(req.baseUrl + req.path);
 // "Sign in here instead": starts a login even while another is in flight.
 const forcedLogin = (req) => isLoginPath(req) && req.query.force === '1';
-// Would this request start a login at the provider? Signed out: requiresAuth() does for any
-// request that accepts HTML (any method). Signed in: only GET /login (HEAD is routed there too),
-// when the session fails the in-app caps (see the /login route).
+// Is this a page the user opens (a top-level page load), the only kind of request that can carry
+// a login through the provider and back? A script, image or fetch() of a page whose session ended
+// is not: when one started a login, it set an in-flight mark that no callback would ever clear,
+// so the page's own sign-in then waited on it. Browsers say what a request is in the Fetch
+// Metadata headers (absent from older browsers and non-browser clients); a page load also asks
+// for text/html by name, while a subresource asks for */* or its own type. A speculative load
+// (prefetch or prerender) is not one either: it may never be shown.
+function acceptsHtmlByName(req) {
+    return String(req.headers.accept || '').split(',').some((part) => {
+        const [type, ...params] = part.split(';').map((s) => s.trim().toLowerCase());
+        const q = params.find((p) => p.startsWith('q='));
+        return type === 'text/html' && (!q || Number(q.slice(2)) > 0);
+    });
+}
+function isPageLoad(req) {
+    const mode = req.get('sec-fetch-mode');
+    const dest = req.get('sec-fetch-dest');
+    if ((mode && mode !== 'navigate') || (dest && dest !== 'document')) return false;
+    if (/prefetch|prerender/i.test(`${req.get('sec-purpose') || ''} ${req.get('purpose') || ''}`)) return false;
+    return acceptsHtmlByName(req);
+}
+// Would this request start a login at the provider? Signed out: a page load (any method), which
+// requiresAuth() sends to the provider; any other signed-out request is refused with 401 before
+// it (see the gate). Signed in: only GET /login (HEAD is routed there too), when the session
+// fails the in-app caps (see the /login route).
 function startsLogin(req) {
-    if (!req.oidc.isAuthenticated()) return !!req.accepts('html');
+    if (!req.oidc.isAuthenticated()) return isPageLoad(req);
     return (req.method === 'GET' || req.method === 'HEAD') && isLoginPath(req) && !sessionPassesCaps(req);
+}
+// The answer to a signed-out request that can't sign in (an API call, a script, an image): 401,
+// which the SPA answers by sending the page to /login. Never cached: assets are otherwise cached
+// for good.
+function sendSignInRequired(req, res) {
+    res.set('Cache-Control', 'no-store');
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign in required' });
+    return res.status(401).type('text/plain').send('Sign in required');
 }
 // The "Signing in" page: reloads itself (/login-wait.js; a meta refresh without JavaScript);
 // "Sign in here instead" forces a login from this tab.
 function loginWaitPage(req) {
     const page = isLoginPath(req) ? String(req.query.returnTo || '/') : req.originalUrl;
     const force = `/login?force=1&returnTo=${encodeURIComponent(page.startsWith('/') ? page : '/')}`.replace(/&/g, '&amp;');
-    return '<!doctype html><meta charset="utf-8"><title>Signing in…</title>' +
+    // An empty icon, so the browser doesn't fetch /favicon.ico for this page.
+    return '<!doctype html><meta charset="utf-8"><title>Signing in…</title><link rel="icon" href="data:,">' +
         '<noscript><meta http-equiv="refresh" content="2"></noscript>' +
         '<p>Signing in - another tab is already signing you in. This page continues on its own.</p>' +
         `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js"></script>`;
@@ -479,10 +510,12 @@ app.use(spaLimiter);
 
 if (AUTH_ENABLED) {
     // Equivalent to auth()'s authRequired: true - every route below requires login. A visitor who is
-    // not signed in is sent to login (HTML) or refused with 401 (see the error handler). Only a
-    // request that would start a login draws from the per-IP auth budget, so these automatic login
-    // starts can't bypass the /login limit. A refused JSON request is not charged: the 401s of
-    // several tabs whose session ended must not use up the budget of the login they lead to.
+    // not signed in is sent to login (a page load, see isPageLoad) or refused with 401 here, before
+    // requiresAuth() could send a subresource to the provider. Only a request that would start a
+    // login draws from the per-IP auth budget, so these automatic login starts can't bypass the
+    // /login limit. A refused request is not charged: the 401s of several tabs whose session ended
+    // must not use up the budget of the login they lead to.
+    app.use((req, res, next) => (req.oidc.isAuthenticated() || startsLogin(req) ? next() : sendSignInRequired(req, res)));
     app.use((req, res, next) => (startsLogin(req) ? authLimiter(req, res, next) : next()));
     // One login at a time per browser (see above), wherever a login would start.
     app.use((req, res, next) => {
@@ -4504,12 +4537,9 @@ app.use((err, req, res, next) => {
         setTimeout(() => res.redirect(`/login?retry=${tries + 1}&returnTo=${encodeURIComponent(returnTo)}`), crypto.randomInt(100, 900));
         return;
     }
-    // requiresAuth() refusing a signed-out request that doesn't accept HTML (the SPA's API calls):
-    // a 401, which the SPA answers by signing in. Expected, so not logged.
-    if (err.name === 'UnauthorizedError' && err.status === 401) {
-        if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign in required' });
-        return res.status(401).type('text/plain').send('Sign in required');
-    }
+    // The library refusing a signed-out request: a 401, which the SPA answers by signing in.
+    // Expected, so not logged.
+    if (err.name === 'UnauthorizedError' && err.status === 401) return sendSignInRequired(req, res);
     console.error('Unhandled error on', req.method, req.path, '-', err);
     if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Internal server error' });
     res.status(500).send('Something went wrong. Please go back and try again.');

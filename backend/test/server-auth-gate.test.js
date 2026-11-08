@@ -10,6 +10,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
+const { pageLoad } = require('./helpers/page-load');
 const net = require('net');
 const crypto = require('crypto');
 // Credentials are generated for each run; none is fixed in the repository.
@@ -110,7 +111,7 @@ async function call(method, path, { ip = freshIp(), accept = 'text/html', cookie
     const h = { accept, 'x-forwarded-for': ip, ...headers };
     if (cookie) h.cookie = cookie;
     if (body !== undefined) h['content-type'] = 'application/json';
-    const res = await fetch(BASE + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
+    const res = await pageLoad(BASE + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
     const text = await res.text();
     return { status: res.status, headers: res.headers, text, location: res.headers.get('location') || '' };
 }
@@ -121,7 +122,7 @@ const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(';')[0]
 // A full login through the stub provider: /login → /authorize (skipped) → /callback → session.
 async function signIn(sub, { iat = Math.floor(Date.now() / 1000) } = {}) {
     const ip = freshIp();
-    const start = await fetch(`${BASE}/login`, { headers: { accept: 'text/html', 'x-forwarded-for': ip }, redirect: 'manual' });
+    const start = await pageLoad(`${BASE}/login`, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html', 'x-forwarded-for': ip } });
     const authorize = new URL(start.headers.get('location'));
     assert.equal(authorize.origin + authorize.pathname, `${ISSUER}/authorize`);
     const code = crypto.randomUUID();
@@ -388,7 +389,7 @@ test('the failed-token throttle on the receivers is separate from the rate limit
 const MAX_LOGIN_RETRIES = 3;
 const stateOf = (location) => JSON.parse(Buffer.from(new URL(location).searchParams.get('state'), 'base64url').toString());
 async function beginLogin(ip, path = '/login') {
-    const start = await fetch(BASE + path, { headers: { accept: 'text/html', 'x-forwarded-for': ip }, redirect: 'manual' });
+    const start = await pageLoad(BASE + path, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html', 'x-forwarded-for': ip } });
     assert.ok(start.headers.get('location').startsWith(`${ISSUER}/authorize`), 'starts a login at the provider');
     return { cookie: cookiesOf(start), authorize: new URL(start.headers.get('location')) };
 }
@@ -536,7 +537,7 @@ test('"Sign in here instead" on the waiting page starts a login from this tab', 
     const pending = `login_pending=inflight.${Date.now()}`;
     const wait = await call('GET', '/networks?x=1', { cookie: pending });
     assert.ok(waitsForOtherLogin(wait));
-    const href = /href="([^"]+)"/.exec(wait.text)[1].replace(/&amp;/g, '&');
+    const href = /<a href="([^"]+)"/.exec(wait.text)[1].replace(/&amp;/g, '&');
     assert.equal(href, `/login?force=1&returnTo=${encodeURIComponent('/networks?x=1')}`);
     const forced = await call('GET', href, { cookie: pending });
     assert.ok(startsLogin(forced));
@@ -647,4 +648,76 @@ test('logout ends the session at the provider and returns to the app', async () 
     assert.ok(to.searchParams.get('id_token_hint'), 'id_token_hint is sent');
     assert.equal(to.searchParams.get('post_logout_redirect_uri'), BASE);
     assert.match(r.headers.getSetCookie().join('\n'), /appSession=;/, 'the session cookie is cleared');
+});
+
+// Only a page load can sign in. A signed-out script, image, fetch() or speculative load is refused
+// with 401 and never goes to the provider: when it did, it marked a login in flight that no
+// callback would ever end, and the page's own sign-in then waited on it ("another tab is already
+// signing you in") with only one tab open.
+const NAVIGATE = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+const SUBRESOURCES = [
+    ['a lazy-loaded script', '/assets/Page-x.js', { accept: '*/*', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'script' }],
+    ['an image', '/flags/en.svg', { accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' }],
+    ['the browser icon', '/favicon.ico', { accept: 'image/avif,image/webp,*/*;q=0.8', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' }],
+    ["the app's fetch()", '/version.txt?1', { accept: '*/*', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }],
+    ['a script from an older browser (no Fetch Metadata)', '/assets/Page-x.js', { accept: '*/*' }],
+    ['a frame', '/networks', { accept: 'text/html', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' }],
+    ['a prefetch', '/networks', { accept: 'text/html', ...NAVIGATE, 'sec-purpose': 'prefetch' }],
+    ['a prerender', '/networks', { accept: 'text/html', ...NAVIGATE, 'sec-purpose': 'prefetch;prerender' }],
+    ['a legacy prefetch', '/networks', { accept: 'text/html', ...NAVIGATE, purpose: 'prefetch' }],
+    ['a request that refuses HTML', '/networks', { accept: 'text/html;q=0, */*' }],
+];
+const refusedWithoutLogin = (r) => r.status === 401 && r.text === 'Sign in required' && !r.location &&
+    r.headers.get('cache-control') === 'no-store' && r.headers.getSetCookie().length === 0;
+
+for (const [what, path, headers] of SUBRESOURCES) {
+    test(`signed out, ${what} gets 401 and starts no login; the page load after it signs in`, async () => {
+        const ip = freshIp();
+        const { accept, ...rest } = headers;
+        const r = await call('GET', path, { ip, accept, headers: rest });
+        assert.ok(refusedWithoutLogin(r), `got ${r.status} ${r.location} ${r.headers.getSetCookie()}`);
+        const page = await call('GET', '/networks', { ip, headers: NAVIGATE });
+        assert.ok(startsLogin(page), `the page load should start a login, got ${r.status} ${page.location}`);
+    });
+}
+
+test('a page load starts a login with or without Fetch Metadata, for GET, HEAD and a form POST', async () => {
+    assert.ok(startsLogin(await call('GET', '/networks', { headers: NAVIGATE })));
+    assert.ok(startsLogin(await call('GET', '/networks', { accept: 'text/html,application/xhtml+xml,*/*;q=0.8' })));
+    assert.ok(startsLogin(await call('HEAD', '/networks', { headers: NAVIGATE })));
+    assert.ok(startsLogin(await call('POST', '/networks', { headers: NAVIGATE, body: {} })));
+    const head = await call('HEAD', '/assets/Page-x.js', { accept: '*/*', headers: { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'script' } });
+    assert.ok(head.status === 401 && !head.location && head.headers.getSetCookie().length === 0, 'a HEAD subresource is refused too');
+});
+
+test("a page's subresources while its login is in flight leave that login alone, and it signs in", async () => {
+    const ip = freshIp();
+    const login = await beginLogin(ip, '/login?returnTo=/peers');
+    for (const [, path, headers] of SUBRESOURCES) {
+        const { accept, ...rest } = headers;
+        assert.ok(refusedWithoutLogin(await call('GET', path, { ip, accept, headers: rest, cookie: login.cookie })), path);
+    }
+    const done = await callback(ip, issueCode(login.authorize), login.authorize.searchParams.get('state'), login.cookie);
+    assert.equal(done.status, 302);
+    assert.match(cookiesOf(done), /appSession/, 'the login completes');
+});
+
+test('signed-out subresources do not use up the auth budget', async () => {
+    const ip = freshIp();
+    const r = await inBatches(Array.from({ length: 40 }, (_, i) => i), 20, () =>
+        call('GET', '/assets/Page-x.js', { ip, accept: '*/*', headers: { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'script' } }));
+    assert.ok(r.every(refusedWithoutLogin));
+    assert.ok(startsLogin(await call('GET', '/networks', { ip, headers: NAVIGATE })), 'the page load still starts a login');
+});
+
+test('a signed-in page still gets its subresources', async () => {
+    const cookie = await signIn('subresources');
+    const r = await call('GET', '/version.txt?1', { cookie, accept: '*/*', headers: { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' } });
+    assert.equal(r.status, 200);
+});
+
+test('the waiting page has its own icon, so it does not request /favicon.ico', async () => {
+    const r = await call('GET', '/networks', { cookie: `login_pending=inflight.${Date.now()}`, headers: NAVIGATE });
+    assert.ok(waitsForOtherLogin(r));
+    assert.match(r.text, /<link rel="icon" href="data:,">/);
 });
