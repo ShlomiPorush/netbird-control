@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.2.2] - 2026-11-08
+
 ### Changed
 - **Traffic Events opens on today.** The page shows what is happening now, so it opens on Today
   instead of the last 7 days, and it loads much faster on a large event store. Longer ranges and
