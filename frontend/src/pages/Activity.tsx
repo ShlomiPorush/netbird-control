@@ -12,7 +12,7 @@ import { formatUserId } from '@/lib/logfmt';
 import type { LogEvent, UserRef } from '@/lib/types';
 import { SearchInput, IconButton, LogLoader, useSettledDelay, Pagination, PageHeader, ClearFiltersButton } from '@/components/ui';
 import { ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
-import { DateRangePicker, defaultLogRange } from '@/components/logs/DateRangePicker';
+import { DateRangePicker, defaultLogRange, isDefaultLogRange } from '@/components/logs/DateRangePicker';
 import { UserSelect } from '@/components/logs/UserSelect';
 import { Segmented, ToolbarMenu, FilterPopover } from '@/components/logs/toolbar';
 import { EventsTable } from '@/components/logs/EventsTable';
@@ -41,8 +41,8 @@ export default function Activity() {
   const [type, setType] = useState('All');
   const [protocol, setProtocol] = useState('');
   const [user, setUser] = useState('');
-  // Defaults to the last 7 days (see defaultLogRange) - the grouped views aggregate the whole
-  // selected range, so All Time as a DEFAULT re-scanned the entire history on every visit.
+  // Defaults to today (see defaultLogRange): the page shows live activity, and the grouped views
+  // aggregate the whole selected range, so a wider default re-scanned days of history per visit.
   const [range, setRange] = useState<DateRange | undefined>(() => defaultLogRange());
   const [search, setSearch] = useState('');
   const [source, setSource] = useState('');
@@ -118,8 +118,10 @@ export default function Activity() {
         />
         <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
         <ClearFiltersButton
-          active={!!search || !!source || !!destination || type !== 'All' || !!protocol || !!user || !!range}
-          onClear={() => { setSearch(''); setSource(''); setDestination(''); setType('All'); setProtocol(''); setUser(''); setRange(undefined); }}
+          // Clear returns to the default window (today), never to All Time: All Time aggregates the
+          // whole history and is a deliberate choice in the picker.
+          active={!!search || !!source || !!destination || type !== 'All' || !!protocol || !!user || !isDefaultLogRange(range)}
+          onClear={() => { setSearch(''); setSource(''); setDestination(''); setType('All'); setProtocol(''); setUser(''); setRange(defaultLogRange()); }}
         />
         <IconButton onClick={async () => { await refresh.mutateAsync(); refetch(); }} title="Refresh" className="h-[42px] w-[42px] ml-auto">
           <RefreshCw size={15} className={cn((refresh.isPending || isFetching) && 'animate-spin')} />
