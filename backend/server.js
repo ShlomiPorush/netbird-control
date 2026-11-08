@@ -10,6 +10,7 @@ const { parseTrustProxy, limiterOptions } = require('./lib/rate-limit');
 const { safeReturnTo, isPlausibleEmail } = require('./lib/pure');
 const { missingSsoSettings } = require('./lib/sso-config');
 const { dbPasswordProblem } = require('./lib/db-config');
+const { withCancelOnClose } = require('./lib/core');
 const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
@@ -2682,7 +2683,9 @@ app.get('/api/logs', async (req, res) => {
 
         const viewer = await getViewer(req);
         const { search, source, destination, type, protocol, from, to, user, exclude_addr, page, per_page, sort, dir } = req.query;
-        const result = await queryEvents({
+        // On its own client, so the query stops when the browser drops the request (a newer search).
+        const result = await withCancelOnClose(res, (db) => queryEvents({
+            db,
             search,
             source,
             destination,
@@ -2697,7 +2700,7 @@ app.get('/api/logs', async (req, res) => {
             viewer_oid: (viewer.isAdmin || (viewer.perms && viewer.perms['activity.all'])) ? undefined : (viewer.oid || '__no_match__'),
             page: parseInt(page, 10) || 1,
             per_page: Math.min(200, parseInt(per_page, 10) || 10)
-        });
+        }));
 
         // Resolve user identities for the returned events
         const users = await resolveUsersForEvents(result.events);
@@ -2705,6 +2708,7 @@ app.get('/api/logs', async (req, res) => {
 
         res.json(result);
     } catch (err) {
+        if (err && err.requestClosed) return; // the browser dropped the request; its query was cancelled
         console.error('Error querying logs:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
@@ -2774,7 +2778,8 @@ app.get('/api/logs/summary', async (req, res) => {
     try {
         const viewer = await getViewer(req);
         const { search, source, destination, type, protocol, from, to, user, page, per_page, sort, dir } = req.query;
-        const result = await queryTrafficSummary({
+        const result = await withCancelOnClose(res, (db) => queryTrafficSummary({
+            db,
             search, source, destination, type, protocol,
             sort, dir,
             from: from || undefined,
@@ -2783,11 +2788,12 @@ app.get('/api/logs/summary', async (req, res) => {
             viewer_oid: (viewer.isAdmin || (viewer.perms && viewer.perms['activity.all'])) ? undefined : (viewer.oid || '__no_match__'),
             page: parseInt(page, 10) || 1,
             per_page: Math.min(parseInt(per_page, 10) || 25, 200),
-        });
+        }));
         // Resolve each pair's user_id to a display name/email (same resolver as /api/logs).
         result.users = await resolveUsersForEvents(result.rows.map(r => ({ user_id: r.userId })));
         res.json(result);
     } catch (err) {
+        if (err && err.requestClosed) return; // the browser dropped the request; its query was cancelled
         console.error('Error querying traffic summary:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }

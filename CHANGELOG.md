@@ -11,6 +11,18 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **Traffic Events opens and searches faster.** On a large event store the page was very slow to
+  open and to search:
+  - The user filter read every event ever stored to find a few dozen users, which took about 3
+    seconds on each visit. It now looks up one user at a time on the existing index.
+  - Summary and Detailed counted their rows with a second pass over the whole date range. They
+    now count in the same pass that builds the page.
+  - Summary spent most of its time extracting the port list. It now uses a much cheaper method
+    that gives the same ports.
+  - When you change a search or a filter while the previous one is still loading, the browser
+    cancels that request and the server stops its database query. Before, every pause while
+    typing started another full scan, and all of them ran to the end.
+  The results, totals and sorting are unchanged.
 - **A tab in the background no longer starts a sign-in**, so it can't hold up the tab you are
   using. When a background tab's session ended, it went to the Microsoft sign-in page on its own
   and stayed there unseen, and the tab in front showed "Signing in - another tab is already

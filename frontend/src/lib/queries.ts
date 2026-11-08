@@ -171,7 +171,9 @@ function logsAutoRefresh(params: LogParams): number | false {
 export function useLogs(params: LogParams, enabled = true) {
   return useQuery({
     queryKey: ['logs', params],
-    queryFn: () => api.get<LogsResponse>('/api/logs', params),
+    // The signal aborts the request once its filters are replaced, and the server then stops
+    // the database query, so typing a search never stacks full scans.
+    queryFn: ({ signal }) => api.get<LogsResponse>('/api/logs', params, signal),
     refetchInterval: logsAutoRefresh(params),
     placeholderData: (prev) => prev,
     enabled,
@@ -191,7 +193,7 @@ export function useAdminLogs(params: LogParams) {
 export function useLogSummary(params: LogParams, enabled = true) {
   return useQuery({
     queryKey: ['logs-summary', params],
-    queryFn: () => api.get<TrafficSummaryResponse>('/api/logs/summary', params),
+    queryFn: ({ signal }) => api.get<TrafficSummaryResponse>('/api/logs/summary', params, signal),
     refetchInterval: logsAutoRefresh(params),
     placeholderData: (prev) => prev,
     enabled,

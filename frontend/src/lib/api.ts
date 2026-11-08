@@ -117,8 +117,9 @@ function send(input: string, init: RequestInit): Promise<Response> {
 }
 
 export const api = {
-  get<T>(path: string, query?: Query): Promise<T> {
-    return send(buildUrl(path, query), { headers: baseHeaders() }).then(handle<T>);
+  // `signal` lets React Query abort a request whose result is no longer wanted (a newer search).
+  get<T>(path: string, query?: Query, signal?: AbortSignal): Promise<T> {
+    return send(buildUrl(path, query), { headers: baseHeaders(), signal }).then(handle<T>);
   },
   post<T>(path: string, body?: unknown): Promise<T> {
     return send(path, {
