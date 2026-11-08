@@ -310,14 +310,14 @@ app.get('/api/health', (req, res) => {
 });
 
 // The "Signing in" page's script (see "One login at a time"), public because that page is shown
-// to signed-out visitors; the CSP allows only same-origin scripts. It reloads the page every
-// second while the tab is visible; a hidden tab waits until it is shown, so a tab in the
+// to signed-out visitors; the CSP allows only same-origin scripts. It reloads the page every 2 s
+// while the tab is visible; a hidden tab waits until it is shown, so a tab in the
 // background never starts a login of its own. It stops once a link is clicked, so a reload can't
 // abort "Sign in here instead".
 app.get('/login-wait.js', (req, res) => {
     res.type('application/javascript').set('Cache-Control', 'public, max-age=86400').send(
         "var t,s=false;function v(){return document.visibilityState!=='hidden'}" +
-        "function a(){clearTimeout(t);if(!s&&v())t=setTimeout(function(){if(!s&&v())location.replace(location.href)},1000)}" +
+        "function a(){clearTimeout(t);if(!s&&v())t=setTimeout(function(){if(!s&&v())location.replace(location.href)},2000)}" +
         "a();document.addEventListener('visibilitychange',a);" +
         "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a')){s=true;clearTimeout(t)}});");
 });
@@ -364,17 +364,19 @@ const MAX_LOGIN_RETRIES = 3;
 // while another is in flight overwrites it and breaks the first one - which is what happens when
 // a session expires and every open tab is sent to sign in at once. A login start therefore sets
 // login_pending (<id>.<started ms>), with the same id in the login's state; the callback of THAT
-// login clears it, whether it succeeds or fails, and so does /logout. Another login start within
-// LOGIN_PENDING_MS of it waits on a short page that reloads itself: once the first login finishes,
-// the reload finds the session and goes on. The window covers logins that start together and
-// finish without a prompt. Past it, the other login is taken as left behind (a closed or
-// background sign-in page, or a prompt nobody answers), and the page starts its own login: a
-// page never waits on a login it can't see. The page also offers "Sign in here instead"
-// (/login?force=1). Over HTTPS the cookie is __Host- prefixed, so a sibling subdomain can't plant
-// one; a start time in the future is ignored.
+// login clears it, whether it succeeds or fails, and so does /logout. Another login start that
+// finds it waits on a short page that reloads itself: once the first login finishes, the reload
+// finds the session and goes on. The wait allows for a slow MFA prompt; the page also offers
+// "Sign in here instead" (/login?force=1) for a login that was abandoned, and after
+// LOGIN_PENDING_MS the tab starts its own anyway. A tab in the background never starts a login of
+// its own (the SPA's 401 handling and the page's reload script wait until it is shown), so a
+// sign-in page nobody sees doesn't hold up the tab in front. Taking over sooner is not an option:
+// the library keeps one transaction per browser, so two logins in flight break each other. Over
+// HTTPS the cookie is __Host- prefixed, so a sibling subdomain can't plant one; a start time in
+// the future is ignored.
 const LOGIN_PENDING_SECURE = /^https:/i.test(process.env.BASE_URL || '');
 const LOGIN_PENDING_COOKIE = LOGIN_PENDING_SECURE ? '__Host-login_pending' : 'login_pending';
-const LOGIN_PENDING_MS = 5_000;
+const LOGIN_PENDING_MS = 120_000;
 const loginPendingCookieOptions = () => ({ httpOnly: true, sameSite: 'lax', secure: LOGIN_PENDING_SECURE, path: '/' });
 function readLoginPending(req) {
     for (const part of String(req.headers.cookie || '').split(/;\s*/)) {
@@ -460,7 +462,7 @@ function loginWaitPage(req) {
     const force = `/login?force=1&returnTo=${encodeURIComponent(page.startsWith('/') ? page : '/')}`.replace(/&/g, '&amp;');
     // An empty icon, so the browser doesn't fetch /favicon.ico for this page.
     return '<!doctype html><meta charset="utf-8"><title>Signing in…</title><link rel="icon" href="data:,">' +
-        '<noscript><meta http-equiv="refresh" content="1"></noscript>' +
+        '<noscript><meta http-equiv="refresh" content="2"></noscript>' +
         '<p>Signing in…</p>' +
         // ?v=2 skips a cached copy of the earlier script, which reloaded hidden tabs too.
         `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js?v=2"></script>`;

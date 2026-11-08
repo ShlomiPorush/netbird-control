@@ -11,14 +11,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
-- **A page never waits more than a few seconds for another sign-in.** A sign-in that started and
-  was not finished, such as a closed Microsoft sign-in page, one left open, or one in a background
-  tab, held every page in the browser on the "Signing in" page for up to two minutes. A page now
-  waits only for a sign-in that started in the last 5 seconds. That covers tabs that sign in
-  together, and one of them finishes without a prompt. Past that, the page starts its own
-  sign-in. The waiting page now says only "Signing in…".
-- **A tab in the background no longer starts a sign-in.** When its session ends, it waits until
-  you switch to it. By then the tab you are using has usually signed in, so it just continues.
+- **A tab in the background no longer starts a sign-in**, so it can't hold up the tab you are
+  using. When a background tab's session ended, it went to the Microsoft sign-in page on its own
+  and stayed there unseen, and the tab in front showed "Signing in - another tab is already
+  signing you in" for up to two minutes. Now a background tab waits until you switch to it. By
+  then the tab you use has usually signed in, so it just continues. The waiting page, still shown
+  while another visible tab signs in, now says only "Signing in…" and reloads only while you can
+  see it.
 
 ---
 

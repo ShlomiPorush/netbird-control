@@ -480,7 +480,7 @@ test('a restart while signed in (another tab finished first) returns to the app 
 
 // One login at a time per browser: a second login start waits for the one in flight.
 const waitsForOtherLogin = (r) => r.status === 200 && /<p>Signing in…<\/p>/.test(r.text) && !/another tab/.test(r.text) &&
-    /<script src="\/login-wait\.js\?v=2"><\/script>/.test(r.text) && /<noscript><meta http-equiv="refresh" content="1"><\/noscript>/.test(r.text);
+    /<script src="\/login-wait\.js\?v=2"><\/script>/.test(r.text) && /<noscript><meta http-equiv="refresh" content="2"><\/noscript>/.test(r.text);
 const pendingCleared = (r) => /login_pending=;/.test(r.headers.getSetCookie().join('\n'));
 
 test('a second tab that needs to sign in while a login is in flight waits, then continues signed in', async () => {
@@ -527,19 +527,10 @@ test('waiting-page reloads do not use up the auth budget; /callback still counts
     assert.equal((await call('GET', '/callback', { ip: c, cookie: pending })).status, 429);
 });
 
-test('a login older than the 5 s wait window holds up nothing: the page starts its own and marks it', async () => {
-    // A sign-in page left open, closed, or in a background tab: the page in front never waits on it.
-    const left = `login_pending=left.${Date.now() - 6_000}`;
-    const r = await call('GET', '/networks', { cookie: left, headers: NAVIGATE });
+test('an abandoned login stops holding up new logins after the wait window', async () => {
+    const stale = `login_pending=abandoned.${Date.now() - 121_000}`;
+    const r = await call('GET', '/networks', { cookie: stale, headers: NAVIGATE });
     assert.ok(startsLogin(r), `got ${r.status} ${r.location}`);
-    assert.match(r.headers.getSetCookie().join('\n'), /login_pending=(?!left)/, 'and marks itself as the login in flight');
-    const viaLogin = await call('GET', '/login?returnTo=/networks', { cookie: left });
-    assert.ok(startsLogin(viaLogin), 'also through /login');
-});
-
-test('a login started within the wait window still holds up a second tab', async () => {
-    const recent = `login_pending=recent.${Date.now() - 3_000}`;
-    assert.ok(waitsForOtherLogin(await call('GET', '/networks', { cookie: recent, headers: NAVIGATE })));
 });
 
 test('"Sign in here instead" on the waiting page starts a login from this tab', async () => {
@@ -557,7 +548,7 @@ test('the waiting page reload script is public, reloads only a visible tab, and 
     const r = await call('GET', '/login-wait.js?v=2', { accept: '*/*' });
     assert.equal(r.status, 200);
     assert.match(r.headers.get('content-type'), /javascript/);
-    // Run it against a stand-in page: a visible tab reloads after a second, a hidden one not until
+    // Run it against a stand-in page: a visible tab reloads after 2 s, a hidden one not until
     // it is shown, and a clicked link stops it.
     const run = (state) => {
         const listeners = {};
@@ -572,7 +563,7 @@ test('the waiting page reload script is public, reloads only a visible tab, and 
         return { doc, listeners, timers, fire, reloads: () => reloads };
     };
     const shown = run('visible');
-    assert.equal(shown.timers[0].ms, 1000);
+    assert.equal(shown.timers[0].ms, 2000);
     shown.fire();
     assert.equal(shown.reloads(), 1, 'a visible tab reloads');
     const hidden = run('hidden');
@@ -592,7 +583,7 @@ test('the waiting page reload script is public, reloads only a visible tab, and 
 
 test('a failed forced login ends its own mark, so its restart is not held up', async () => {
     const ip = freshIp();
-    const abandoned = `login_pending=abandoned.${Date.now() - 1_000}`; // a login at the provider, still in its window
+    const abandoned = `login_pending=abandoned.${Date.now() - 60_000}`; // a login left at the provider, still in its window
     const forced = await call('GET', '/login?force=1&returnTo=/peers', { ip, cookie: abandoned });
     assert.ok(startsLogin(forced));
     const authorize = new URL(forced.location);
