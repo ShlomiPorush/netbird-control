@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { Monitor, Copy, Check, ArrowDown, ArrowUp, Share2 } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { getServiceName, formatBytes, type ProtoClass } from '@/lib/logfmt';
+import { getServiceName, formatBytes, isRoutedEvent, type ProtoClass } from '@/lib/logfmt';
 import type { LogEvent } from '@/lib/types';
 
 // NetBird "gray" Badge.
@@ -152,7 +152,7 @@ export function EventDescription({ ev }: { ev: LogEvent }) {
   const dstName = ev.destination_name || '';
   const peer = <span className="text-nb-gray-700 dark:text-nb-gray-300 font-medium">{srcName}</span>;
 
-  if (ev.destination_type === 'HOST_RESOURCE' && dstName) {
+  if (isRoutedEvent(ev) && dstName) {
     const res = <span className="text-netbird font-medium">{dstName}</span>;
     return isStart
       ? <>Routing peer {peer} received connection to Resource {res}</>

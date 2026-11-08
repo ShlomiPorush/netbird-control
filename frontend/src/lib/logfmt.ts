@@ -87,6 +87,10 @@ function getIcmpLabel(t?: number, c?: number): string {
   return ICMP_TYPE_NAMES[t] || (t ? `Type ${t}${c ? ` Code ${c}` : ''}` : '');
 }
 
+// Network resource destinations (host, domain, subnet): traffic to them goes through a routing peer.
+export const RESOURCE_TYPES = new Set(['HOST_RESOURCE', 'DOMAIN_RESOURCE', 'SUBNET_RESOURCE']);
+export const isRoutedEvent = (ev: LogEvent) => RESOURCE_TYPES.has(ev.destination_type || '');
+
 export type ProtoClass = 'tcp' | 'udp' | 'icmp' | 'unknown';
 
 export function getProtocol(num: unknown, ev: LogEvent): { label: string; cls: ProtoClass; icmpLabel: string } {

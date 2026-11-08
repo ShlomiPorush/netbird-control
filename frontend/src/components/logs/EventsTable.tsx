@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Code2, ChevronRight, CornerDownRight, Workflow, Globe, Network, Monitor, Server, User2, Mail, MapPin, Flag } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { getProtocol, formatTimestamp } from '@/lib/logfmt';
+import { getProtocol, formatTimestamp, RESOURCE_TYPES, isRoutedEvent } from '@/lib/logfmt';
 import type { LogEvent, UserRef } from '@/lib/types';
 import { type SortState } from '@/lib/useTableSort';
 import { EmptyState, SortTh } from '@/components/ui';
@@ -30,7 +30,6 @@ const COLUMNS: { label: string; sort?: string }[] = [
 
 // Peer ids for linking source/destination to the peer detail page. Resource
 // destinations (host/domain/subnet) and id-less "Unknown" endpoints aren't peers.
-const RESOURCE_TYPES = new Set(['HOST_RESOURCE', 'DOMAIN_RESOURCE', 'SUBNET_RESOURCE']);
 const srcPeerId = (ev: LogEvent) => (ev.source_id ? String(ev.source_id) : undefined);
 const dstPeerId = (ev: LogEvent) =>
   (ev.destination_id && !RESOURCE_TYPES.has(ev.destination_type || '') ? String(ev.destination_id) : undefined);
@@ -164,7 +163,7 @@ function EventHead({ ev, count }: { ev: LogEvent; count?: number }) {
 }
 
 function RouterCell({ ev, usersMap }: { ev: LogEvent; usersMap: Record<string, UserRef> }) {
-  const isRouted = ev.destination_type === 'HOST_RESOURCE';
+  const isRouted = isRoutedEvent(ev);
   const routerName = ev.reporter_name || '';
   const email = (ev.user_id && usersMap[ev.user_id]?.email) || '';
   if (!isRouted || (!routerName && !email)) {
@@ -299,7 +298,7 @@ function EventCardBody({ ev, usersMap, traffic, showRouter }: {
   ev: LogEvent; usersMap: Record<string, UserRef>; traffic: React.ReactNode; showRouter: boolean;
 }) {
   const proto = getProtocol(ev.protocol, ev);
-  const routed = ev.destination_type === 'HOST_RESOURCE';
+  const routed = isRoutedEvent(ev);
   const routerName = ev.reporter_name || '';
   const routerEmail = (ev.user_id && usersMap[ev.user_id]?.email) || '';
   return (
