@@ -666,6 +666,10 @@ const SUBRESOURCES = [
     ['a prerender', '/networks', { accept: 'text/html', ...NAVIGATE, 'sec-purpose': 'prefetch;prerender' }],
     ['a legacy prefetch', '/networks', { accept: 'text/html', ...NAVIGATE, purpose: 'prefetch' }],
     ['a request that refuses HTML', '/networks', { accept: 'text/html;q=0, */*' }],
+    // Named, but not an HTML that requiresAuth() accepts: it would not go to the provider.
+    ['a request for HTML with a parameter', '/version.txt', { accept: 'text/html; charset=utf-8' }],
+    ['a request with text/html only inside a quoted value', '/version.txt', { accept: 'application/json; note="x,text/html;x=y"' }],
+    ['the same, next to */*', '/version.txt', { accept: 'application/json; note="x,text/html;x=y", */*' }],
 ];
 const refusedWithoutLogin = (r) => r.status === 401 && r.text === 'Sign in required' && !r.location &&
     r.headers.get('cache-control') === 'no-store' && r.headers.getSetCookie().length === 0;

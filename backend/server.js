@@ -395,9 +395,13 @@ const forcedLogin = (req) => isLoginPath(req) && req.query.force === '1';
 // so the page's own sign-in then waited on it. Browsers say what a request is in the Fetch
 // Metadata headers (absent from older browsers and non-browser clients); a page load also asks
 // for text/html by name, while a subresource asks for */* or its own type. A speculative load
-// (prefetch or prerender) is not one either: it may never be shown.
+// (prefetch or prerender) is not one either: it may never be shown. requiresAuth() itself sends a
+// request to the provider only when req.accepts('html'), so a page load must pass that too, or
+// it would mark a login in flight that never starts.
 function acceptsHtmlByName(req) {
-    return String(req.headers.accept || '').split(',').some((part) => {
+    // Quoted parameter values may hold commas and media types of their own.
+    const accept = String(req.headers.accept || '').replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    return !!req.accepts('html') && accept.split(',').some((part) => {
         const [type, ...params] = part.split(';').map((s) => s.trim().toLowerCase());
         const q = params.find((p) => p.startsWith('q='));
         return type === 'text/html' && (!q || Number(q.slice(2)) > 0);
