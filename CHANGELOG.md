@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.2.0] - 2026-11-08
+
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
   missing or empty, or still holds the old `.env.example` value `change-me-to-a-strong-password`,
