@@ -11,6 +11,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Fixed
+- **A tab in the background no longer starts a sign-in**, so it can't hold up the tab you are
+  using. When a background tab's session ended, it went to the Microsoft sign-in page on its own
+  and stayed there unseen, and the tab in front showed "Signing in - another tab is already
+  signing you in" for up to two minutes. Now a background tab waits until you switch to it. By
+  then the tab you use has usually signed in, so it just continues. The waiting page, still shown
+  while another visible tab signs in, now says only "Signing in…" and reloads only while you can
+  see it.
 - **The P2P and Routed traffic filters show traffic again.** NetBird's event stream now sends the
   source and destination type as `UNKNOWN`, even for real peers and network resources, so both
   filters came back empty and every destination showed a generic icon. The app now recovers the

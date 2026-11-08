@@ -311,11 +311,15 @@ app.get('/api/health', (req, res) => {
 
 // The "Signing in" page's script (see "One login at a time"), public because that page is shown
 // to signed-out visitors; the CSP allows only same-origin scripts. It reloads the page every 2 s
-// and stops once a link is clicked, so a reload can't abort "Sign in here instead".
+// while the tab is visible; a hidden tab waits until it is shown, so a tab in the
+// background never starts a login of its own. It stops once a link is clicked, so a reload can't
+// abort "Sign in here instead".
 app.get('/login-wait.js', (req, res) => {
     res.type('application/javascript').set('Cache-Control', 'public, max-age=86400').send(
-        "var t=setTimeout(function(){location.replace(location.href)},2000);" +
-        "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a'))clearTimeout(t)});");
+        "var t,s=false;function v(){return document.visibilityState!=='hidden'}" +
+        "function a(){clearTimeout(t);if(!s&&v())t=setTimeout(function(){if(!s&&v())location.replace(location.href)},2000)}" +
+        "a();document.addEventListener('visibilitychange',a);" +
+        "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a')){s=true;clearTimeout(t)}});");
 });
 
 // Telegram webhook - receives inline-button presses (callback_query). Public (Telegram can't
@@ -364,8 +368,12 @@ const MAX_LOGIN_RETRIES = 3;
 // finds it waits on a short page that reloads itself: once the first login finishes, the reload
 // finds the session and goes on. The wait allows for a slow MFA prompt; the page also offers
 // "Sign in here instead" (/login?force=1) for a login that was abandoned, and after
-// LOGIN_PENDING_MS the tab starts its own anyway. Over HTTPS the cookie is __Host- prefixed, so a
-// sibling subdomain can't plant one; a start time in the future is ignored.
+// LOGIN_PENDING_MS the tab starts its own anyway. A tab in the background never starts a login of
+// its own (the SPA's 401 handling and the page's reload script wait until it is shown), so a
+// sign-in page nobody sees doesn't hold up the tab in front. Taking over sooner is not an option:
+// the library keeps one transaction per browser, so two logins in flight break each other. Over
+// HTTPS the cookie is __Host- prefixed, so a sibling subdomain can't plant one; a start time in
+// the future is ignored.
 const LOGIN_PENDING_SECURE = /^https:/i.test(process.env.BASE_URL || '');
 const LOGIN_PENDING_COOKIE = LOGIN_PENDING_SECURE ? '__Host-login_pending' : 'login_pending';
 const LOGIN_PENDING_MS = 120_000;
@@ -455,8 +463,9 @@ function loginWaitPage(req) {
     // An empty icon, so the browser doesn't fetch /favicon.ico for this page.
     return '<!doctype html><meta charset="utf-8"><title>Signing in…</title><link rel="icon" href="data:,">' +
         '<noscript><meta http-equiv="refresh" content="2"></noscript>' +
-        '<p>Signing in - another tab is already signing you in. This page continues on its own.</p>' +
-        `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js"></script>`;
+        '<p>Signing in…</p>' +
+        // ?v=2 skips a cached copy of the earlier script, which reloaded hidden tabs too.
+        `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js?v=2"></script>`;
 }
 // The decoded OIDC state of a /callback request ({} when missing or not ours).
 function callbackState(req) {
