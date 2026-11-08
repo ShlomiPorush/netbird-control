@@ -2683,9 +2683,9 @@ app.get('/api/logs', async (req, res) => {
 
         const viewer = await getViewer(req);
         const { search, source, destination, type, protocol, from, to, user, exclude_addr, page, per_page, sort, dir } = req.query;
-        // On its own client, so the query stops when the browser drops the request (a newer search).
-        const result = await withCancelOnClose(res, (db) => queryEvents({
-            db,
+        // The SQL runs on its own client, so it stops when the browser drops the request (a newer search).
+        const result = await queryEvents({
+            run: (sql) => withCancelOnClose(res, sql),
             search,
             source,
             destination,
@@ -2700,7 +2700,7 @@ app.get('/api/logs', async (req, res) => {
             viewer_oid: (viewer.isAdmin || (viewer.perms && viewer.perms['activity.all'])) ? undefined : (viewer.oid || '__no_match__'),
             page: parseInt(page, 10) || 1,
             per_page: Math.min(200, parseInt(per_page, 10) || 10)
-        }));
+        });
 
         // Resolve user identities for the returned events
         const users = await resolveUsersForEvents(result.events);
@@ -2778,8 +2778,8 @@ app.get('/api/logs/summary', async (req, res) => {
     try {
         const viewer = await getViewer(req);
         const { search, source, destination, type, protocol, from, to, user, page, per_page, sort, dir } = req.query;
-        const result = await withCancelOnClose(res, (db) => queryTrafficSummary({
-            db,
+        const result = await queryTrafficSummary({
+            run: (sql) => withCancelOnClose(res, sql),
             search, source, destination, type, protocol,
             sort, dir,
             from: from || undefined,
@@ -2788,7 +2788,7 @@ app.get('/api/logs/summary', async (req, res) => {
             viewer_oid: (viewer.isAdmin || (viewer.perms && viewer.perms['activity.all'])) ? undefined : (viewer.oid || '__no_match__'),
             page: parseInt(page, 10) || 1,
             per_page: Math.min(parseInt(per_page, 10) || 25, 200),
-        }));
+        });
         // Resolve each pair's user_id to a display name/email (same resolver as /api/logs).
         result.users = await resolveUsersForEvents(result.rows.map(r => ({ user_id: r.userId })));
         res.json(result);

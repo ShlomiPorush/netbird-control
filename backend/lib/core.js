@@ -58,11 +58,17 @@ function capTotal(n) {
 //   pool, so it can never reach a query of another request.
 // - Only a dropped request is marked `requestClosed = true` (so the route skips answering a client
 //   that is gone); any other database error keeps reaching the log.
+// - If the cancel itself fails (the server refuses another connection), it is logged and the query
+//   runs to its end, as every query did before this existed.
+// - Both clients listen for 'error', as node-postgres requires of a client used outside
+//   pool.query: a connection that breaks mid-query also emits 'error', and an unhandled one would
+//   stop the process. A broken pooled connection is discarded, not returned to the pool.
 // `opts.db` (the pool) and `opts.cancel` (the cancel call) are injectable for tests.
 const closedEarly = (res) => res.closed && !res.writableFinished;
 const requestClosedError = () => Object.assign(new Error('The client closed the request'), { requestClosed: true });
 async function cancelBackend(pid) {
     const c = new Client(DB_CONNECTION);
+    c.on('error', () => { }); // the same failure rejects connect/query below, which the caller logs
     try {
         await c.connect();
         await c.query('SELECT pg_cancel_backend($1)', [pid]);
@@ -72,14 +78,21 @@ async function cancelBackend(pid) {
 }
 async function withCancelOnClose(res, fn, { db = pool, cancel = cancelBackend } = {}) {
     if (closedEarly(res)) throw requestClosedError();
-    let client = null, finished = false, cancelling = null;
+    let client = null, finished = false, cancelling = null, broken = false;
     const onClose = () => {
         if (finished || !client || res.writableFinished || cancelling) return;
-        cancelling = cancel(client.processID).catch(() => { });
+        cancelling = cancel(client.processID).catch((e) => {
+            console.error(`[Logs] could not cancel the query of a closed request, it runs to its end: ${e.message}`);
+        });
+    };
+    const onClientError = (e) => {
+        broken = true;
+        console.error(`[Logs] database connection error during a log read: ${e.message}`);
     };
     res.on('close', onClose);
     try {
         client = await db.connect();
+        client.on('error', onClientError);
         if (closedEarly(res)) throw requestClosedError(); // closed while waiting for a connection
         return await fn(client);
     } catch (err) {
@@ -90,7 +103,10 @@ async function withCancelOnClose(res, fn, { db = pool, cancel = cancelBackend } 
         finished = true;
         res.off('close', onClose);
         if (cancelling) await cancelling;
-        if (client) client.release(cancelling ? true : undefined);
+        if (client) {
+            client.off('error', onClientError);
+            client.release(cancelling || broken ? true : undefined);
+        }
     }
 }
 

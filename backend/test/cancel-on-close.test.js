@@ -10,7 +10,7 @@ const { withCancelOnClose } = require('../lib/core');
 
 function fakeDb({ connect } = {}) {
     const log = [];
-    const client = { processID: 4242, release: (discard) => log.push(['release', discard]) };
+    const client = Object.assign(new EventEmitter(), { processID: 4242, release: (discard) => log.push(['release', discard]) });
     return {
         log,
         client,
@@ -84,4 +84,39 @@ test('a database failure other than the cancel is not hidden as a dropped reques
         withCancelOnClose(fakeRes(), async () => { throw new Error('boom'); }, { db: fakeDb() }),
         (err) => err.message === 'boom' && err.requestClosed === undefined,
     );
+});
+
+test('a connection that breaks mid-query does not stop the process and is not reused', async () => {
+    const db = fakeDb();
+    const res = fakeRes();
+    let fail;
+    const running = withCancelOnClose(res, () => new Promise((_, reject) => { fail = reject; }), { db, cancel: db.cancel });
+    await new Promise(setImmediate);
+    const lost = new Error('Connection terminated unexpectedly');
+    db.client.emit('error', lost); // would throw (and stop the process) with no listener
+    fail(lost);
+    await assert.rejects(running, (err) => err === lost && err.requestClosed === undefined);
+    assert.deepEqual(db.log, [['release', true]]);
+    assert.equal(db.client.listenerCount('error'), 0);
+});
+
+test('a cancel that cannot connect is logged, and the connection still goes back only after the query', async () => {
+    const db = fakeDb();
+    db.cancel = async () => { throw new Error('too many clients already'); };
+    const res = fakeRes();
+    let finish;
+    const running = withCancelOnClose(res, () => new Promise((resolve) => { finish = resolve; }), { db, cancel: db.cancel });
+    await new Promise(setImmediate);
+    const logged = [];
+    const orig = console.error;
+    console.error = (m) => logged.push(m);
+    try {
+        dropped(res);
+        await new Promise(setImmediate);
+    } finally { console.error = orig; }
+    assert.match(logged.join('\n'), /could not cancel.*too many clients already/);
+    assert.deepEqual(db.log, []); // still held by the running query
+    finish('rows');
+    assert.equal(await running, 'rows');
+    assert.deepEqual(db.log, [['release', true]]);
 });

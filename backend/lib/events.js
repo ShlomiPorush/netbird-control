@@ -460,8 +460,10 @@ async function queryEvents(opts) {
     // renders fewer rows and the footer over-counts. Group key: the flow_id, or the event's own
     // id when it has none (a solo event is its own group).
     const GKEY = `COALESCE(NULLIF(flow_id, ''), id)`;
-    // A cancellable request passes its own client (see opts.db); everything else uses the pool.
-    const db = (opts && opts.db) || pool;
+    // opts.run runs the SQL on a client of the caller's choice (a request that can be cancelled
+    // passes withCancelOnClose); by default it uses the pool. Only the SQL runs inside it, so the
+    // client is free again before the label lookup below waits on the NetBird API.
+    const run = (opts && opts.run) || ((sql) => sql(pool));
 
     // Page = the per_page most recent flows; then every matching event of those flows, ordered
     // by flow recency so the client-side grouping reassembles them in the same order. The peers
@@ -471,43 +473,46 @@ async function queryEvents(opts) {
     // sortval is the whitelisted flow-level aggregate; ts stays the stable tiebreak so
     // grouped sub-events still reassemble under their flow in a deterministic order.
     const flowSort = sortCol ? `${sortCol} ` : 'MAX(timestamp) ';
-    // The flow total comes from the same aggregation as the page: COUNT(*) OVER () runs after
-    // GROUP BY and before LIMIT, so it counts every flow at the cost of a small window over the
-    // grouped rows. A separate count query read the whole filtered slice from disk a second time.
-    const dataResult = await db.query(
-        // The events table is read TWICE here (once aggregated into flows, once for the rows of the
-        // chosen flows) instead of through one `matched` CTE referenced twice: a multiply-referenced
-        // CTE is MATERIALIZED by Postgres, which spooled the entire filtered slice - raw_json and
-        // all - into a tuplestore on every page load. Two plain scans of the same WHERE (identical
-        // $n placeholders, same params array) let the planner use the indexes and keep the second
-        // scan hash-joined to the 10-25 flows it actually needs.
-        // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- GKEY/whereClause/flowSort/sortDir are internal fixed fragments (flowSort comes from the EVENT_SORT_COLS whitelist, sortDir is a two-value ternary); user values are parameterized via dataParams.
-        `WITH flows AS (
-             SELECT ${GKEY} AS gkey, MAX(timestamp) AS ts, ${flowSort} AS sortval,
-                    COUNT(*) OVER () AS flow_total
-             FROM events ${whereClause}
-             GROUP BY 1
-             ORDER BY sortval ${sortDir} NULLS LAST, ts DESC
-             LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-         )
-         SELECT e.*, p.name AS reporter_name, f.flow_total AS _flow_total
-         FROM flows f
-         JOIN (SELECT * FROM events ${whereClause}) e ON COALESCE(NULLIF(e.flow_id, ''), e.id) = f.gkey
-         LEFT JOIN peers p ON p.tenant = e.tenant AND p.peer_id = e.reporter_id
-         ORDER BY f.sortval ${sortDir} NULLS LAST, f.ts DESC, e.timestamp DESC`,
-        dataParams
-    );
+    const { dataResult, total, totalCapped } = await run(async (db) => {
+        // The flow total comes from the same aggregation as the page: COUNT(*) OVER () runs after
+        // GROUP BY and before LIMIT, so it counts every flow at the cost of a small window over the
+        // grouped rows. A separate count query read the whole filtered slice from disk a second time.
+        const dataResult = await db.query(
+            // The events table is read TWICE here (once aggregated into flows, once for the rows of the
+            // chosen flows) instead of through one `matched` CTE referenced twice: a multiply-referenced
+            // CTE is MATERIALIZED by Postgres, which spooled the entire filtered slice - raw_json and
+            // all - into a tuplestore on every page load. Two plain scans of the same WHERE (identical
+            // $n placeholders, same params array) let the planner use the indexes and keep the second
+            // scan hash-joined to the 10-25 flows it actually needs.
+            // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- GKEY/whereClause/flowSort/sortDir are internal fixed fragments (flowSort comes from the EVENT_SORT_COLS whitelist, sortDir is a two-value ternary); user values are parameterized via dataParams.
+            `WITH flows AS (
+                 SELECT ${GKEY} AS gkey, MAX(timestamp) AS ts, ${flowSort} AS sortval,
+                        COUNT(*) OVER () AS flow_total
+                 FROM events ${whereClause}
+                 GROUP BY 1
+                 ORDER BY sortval ${sortDir} NULLS LAST, ts DESC
+                 LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+             )
+             SELECT e.*, p.name AS reporter_name, f.flow_total AS _flow_total
+             FROM flows f
+             JOIN (SELECT * FROM events ${whereClause}) e ON COALESCE(NULLIF(e.flow_id, ''), e.id) = f.gkey
+             LEFT JOIN peers p ON p.tenant = e.tenant AND p.peer_id = e.reporter_id
+             ORDER BY f.sortval ${sortDir} NULLS LAST, f.ts DESC, e.timestamp DESC`,
+            dataParams
+        );
 
-    // Past the cap the footer shows "50,000+", as before. A page past the last flow has no row to
-    // carry the window count, so only then is the total counted on its own.
-    const { total, totalCapped } = dataResult.rows.length
-        ? capTotal(Number(dataResult.rows[0]._flow_total) || 0)
-        : offset > 0
-            ? await cappedCount(
-                // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- GKEY is a const SQL fragment defined above; whereClause is assembled by buildEventConds from fixed fragments with $n placeholders - every user value travels in `params`.
-                `SELECT 1 FROM events ${whereClause} GROUP BY ${GKEY}`,
-                params, db)
-            : { total: 0, totalCapped: false };
+        // Past the cap the footer shows "50,000+", as before. A page past the last flow has no row to
+        // carry the window count, so only then is the total counted on its own.
+        const { total, totalCapped } = dataResult.rows.length
+            ? capTotal(Number(dataResult.rows[0]._flow_total) || 0)
+            : offset > 0
+                ? await cappedCount(
+                    // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- GKEY is a const SQL fragment defined above; whereClause is assembled by buildEventConds from fixed fragments with $n placeholders - every user value travels in `params`.
+                    `SELECT 1 FROM events ${whereClause} GROUP BY ${GKEY}`,
+                    params, db)
+                : { total: 0, totalCapped: false };
+        return { dataResult, total, totalCapped };
+    });
 
     // Ingress peers ("proxy-<id>") → readable labels for display.
     const pmap = await proxyLabelMap();
@@ -577,55 +582,58 @@ async function queryTrafficSummary(opts) {
     const SRC = `COALESCE(NULLIF(source_id, ''), regexp_replace(source_addr, ':[0-9]+$', ''))`;
     const DST = `COALESCE(NULLIF(destination_id, ''), NULLIF(destination_name, ''), regexp_replace(destination_addr, ':[0-9]+$', ''))`;
 
-    const db = (opts && opts.db) || pool;
+    const run = (opts && opts.run) || ((sql) => sql(pool)); // see queryEvents
     const offset = (Math.max(1, page) - 1) * per_page;
     // pair_total counts every pair in the same pass as the page (see queryEvents): a separate
     // count query read the whole filtered slice from disk a second time.
-    const r = await db.query(
-        // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- SRC/DST/whereClause are internal fixed fragments (see above); user values are parameterized.
-        `SELECT
-            MAX(source_name) AS source_name,
-            MAX(NULLIF(source_id, '')) AS source_id,
-            MAX(source_dns_label) AS source_dns,
-            regexp_replace(MAX(source_addr), ':[0-9]+$', '') AS source_host,
-            MAX(destination_name) AS destination_name,
-            MAX(NULLIF(destination_id, '')) AS destination_id,
-            MAX(destination_dns_label) AS destination_dns,
-            -- A known type wins over UNKNOWN or empty in the same pair (plain MAX would pick UNKNOWN).
-            COALESCE(MAX(NULLIF(NULLIF(destination_type, 'UNKNOWN'), '')), MAX(destination_type)) AS destination_type,
-            regexp_replace(MAX(destination_addr), ':[0-9]+$', '') AS destination_host,
-            MAX(NULLIF(user_id, '')) AS user_id,
-            MAX(source_geo_country) AS src_country, MAX(source_geo_city) AS src_city,
-            MAX(destination_geo_country) AS dst_country, MAX(destination_geo_city) AS dst_city,
-            COUNT(DISTINCT COALESCE(NULLIF(flow_id, ''), id))::int AS connections,
-            COUNT(*)::int AS event_count,
-            COALESCE(SUM(rx_bytes), 0)::bigint AS rx,
-            COALESCE(SUM(tx_bytes), 0)::bigint AS tx,
-            MIN(timestamp) AS first_seen,
-            MAX(timestamp) AS last_seen,
-            -- The FILTER keeps only addresses ending in ":<digits>", so the text after the last
-            -- ':' is exactly that port. split_part costs a fraction of a capture-group
-            -- substring(... from ':([0-9]+)$'), which was most of this query's CPU time.
-            array_agg(DISTINCT split_part(destination_addr, ':', -1))
-                FILTER (WHERE destination_addr ~ ':[0-9]+$') AS ports,
-            array_agg(DISTINCT protocol) AS protocols,
-            COUNT(*) OVER () AS pair_total
-         FROM events ${whereClause}
-         GROUP BY ${SRC}, ${DST}
-         ORDER BY ${sumSort} ${sumDir} NULLS LAST, MAX(timestamp) DESC
-         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
-        [...params, per_page, offset]
-    );
+    const { r, total, totalCapped } = await run(async (db) => {
+        const r = await db.query(
+            // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- SRC/DST/whereClause are internal fixed fragments (see above); user values are parameterized.
+            `SELECT
+                MAX(source_name) AS source_name,
+                MAX(NULLIF(source_id, '')) AS source_id,
+                MAX(source_dns_label) AS source_dns,
+                regexp_replace(MAX(source_addr), ':[0-9]+$', '') AS source_host,
+                MAX(destination_name) AS destination_name,
+                MAX(NULLIF(destination_id, '')) AS destination_id,
+                MAX(destination_dns_label) AS destination_dns,
+                -- A known type wins over UNKNOWN or empty in the same pair (plain MAX would pick UNKNOWN).
+                COALESCE(MAX(NULLIF(NULLIF(destination_type, 'UNKNOWN'), '')), MAX(destination_type)) AS destination_type,
+                regexp_replace(MAX(destination_addr), ':[0-9]+$', '') AS destination_host,
+                MAX(NULLIF(user_id, '')) AS user_id,
+                MAX(source_geo_country) AS src_country, MAX(source_geo_city) AS src_city,
+                MAX(destination_geo_country) AS dst_country, MAX(destination_geo_city) AS dst_city,
+                COUNT(DISTINCT COALESCE(NULLIF(flow_id, ''), id))::int AS connections,
+                COUNT(*)::int AS event_count,
+                COALESCE(SUM(rx_bytes), 0)::bigint AS rx,
+                COALESCE(SUM(tx_bytes), 0)::bigint AS tx,
+                MIN(timestamp) AS first_seen,
+                MAX(timestamp) AS last_seen,
+                -- The FILTER keeps only addresses ending in ":<digits>", so the text after the last
+                -- ':' is exactly that port. split_part costs a fraction of a capture-group
+                -- substring(... from ':([0-9]+)$'), which was most of this query's CPU time.
+                array_agg(DISTINCT split_part(destination_addr, ':', -1))
+                    FILTER (WHERE destination_addr ~ ':[0-9]+$') AS ports,
+                array_agg(DISTINCT protocol) AS protocols,
+                COUNT(*) OVER () AS pair_total
+             FROM events ${whereClause}
+             GROUP BY ${SRC}, ${DST}
+             ORDER BY ${sumSort} ${sumDir} NULLS LAST, MAX(timestamp) DESC
+             LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+            [...params, per_page, offset]
+        );
 
-    // Capped like every log list. Only a page past the last pair has no row to carry the count.
-    const { total, totalCapped } = r.rows.length
-        ? capTotal(Number(r.rows[0].pair_total) || 0)
-        : offset > 0
-            ? await cappedCount(
-                // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- SRC/DST are const SQL fragments defined above; whereClause comes from buildEventConds (fixed fragments, $n placeholders); user values ride in `params`.
-                `SELECT 1 FROM events ${whereClause} GROUP BY ${SRC}, ${DST}`,
-                params, db)
-            : { total: 0, totalCapped: false };
+        // Capped like every log list. Only a page past the last pair has no row to carry the count.
+        const { total, totalCapped } = r.rows.length
+            ? capTotal(Number(r.rows[0].pair_total) || 0)
+            : offset > 0
+                ? await cappedCount(
+                    // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- SRC/DST are const SQL fragments defined above; whereClause comes from buildEventConds (fixed fragments, $n placeholders); user values ride in `params`.
+                    `SELECT 1 FROM events ${whereClause} GROUP BY ${SRC}, ${DST}`,
+                    params, db)
+                : { total: 0, totalCapped: false };
+        return { r, total, totalCapped };
+    });
 
     const pmap = await proxyLabelMap();
     return {
