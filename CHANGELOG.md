@@ -23,6 +23,15 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   and then set the same value in `.env`; changing `.env` alone does not change an existing
   database's password. The steps are in the README, under Upgrading.
 
+### Fixed
+- **A tab whose session ended goes straight to sign-in** instead of waiting up to two minutes on
+  "Signing in - another tab is already signing you in", even with only one tab open. The page's
+  background requests (scripts, images, the browser icon) were taken for sign-ins. Each one
+  marked a sign-in as in progress, and the page's real sign-in waited for it. Now only opening a
+  page starts a sign-in. Any other signed-out request gets `401` at once and does not count
+  against the sign-in limit. A client other than a browser that sends only `Accept: */*`, such as
+  `curl`, now gets `401` instead of a redirect to the identity provider.
+
 ---
 
 ## [1.1.1] - 2026-10-31
