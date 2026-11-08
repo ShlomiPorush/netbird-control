@@ -97,7 +97,9 @@ export default function Activity() {
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3 mb-5">
-        <SearchInput value={search} onChange={setSearch} placeholder="Search by ip, port, peer or resource…" />
+        {/* The toolbar fits on one row on a desktop screen: the search box gives up width first
+            (down to min-w), the rows-per-page menu shows just the number, and Clear is an icon. */}
+        <SearchInput value={search} onChange={setSearch} placeholder="Search by ip, port, peer or resource…" className="flex-1 min-w-[220px]" />
         <Segmented
           options={[{ value: 'summary', label: 'Summary' }, { value: 'detailed', label: 'Detailed' }]}
           value={view}
@@ -116,8 +118,9 @@ export default function Activity() {
           destination={destination} onDestination={setDestination}
           onClear={() => { setProtocol(''); setSource(''); setDestination(''); }}
         />
-        <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
+        <ToolbarMenu icon={<Rows3 size={15} />} label={String(perPage)} title={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} triggerWidth={0} />
         <ClearFiltersButton
+          compact
           // Clear returns to the default window (today), never to All Time: All Time aggregates the
           // whole history and is a deliberate choice in the picker.
           active={!!search || !!source || !!destination || type !== 'All' || !!protocol || !!user || !isDefaultLogRange(range)}
