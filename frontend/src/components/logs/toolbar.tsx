@@ -63,9 +63,12 @@ function usePopover() {
 /** Button-triggered single-select dropdown (Users, rows-per-page).
  *  `portal` renders the menu in a fixed-position body portal so an `overflow` ancestor (e.g. a
  *  modal's scroll container) can't clip it. Anchored (default) behaviour is unchanged. */
-export function ToolbarMenu({ icon, label, options, value, onChange, align = 'start', width = 210, portal = false }: {
+export function ToolbarMenu({ icon, label, options, value, onChange, align = 'start', width = 210, portal = false, title, triggerWidth }: {
   icon: ReactNode; label: ReactNode; options: { value: string; label: string }[];
   value: string; onChange: (v: string) => void; align?: 'start' | 'end'; width?: number; portal?: boolean;
+  // A compact trigger (a short label such as "25") names itself through `title` (tooltip and
+  // accessible name) and sets its own `triggerWidth`; the open menu keeps `width`.
+  title?: string; triggerWidth?: number;
 }) {
   const { open, setOpen, ref, menuRef } = usePopover();
   const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
@@ -107,7 +110,8 @@ export function ToolbarMenu({ icon, label, options, value, onChange, align = 'st
 
   return (
     <div className="relative" ref={ref}>
-      <button onClick={() => setOpen((o) => !o)} className={cn(secondaryBtn, 'justify-between')} style={{ minWidth: width }}>
+      <button onClick={() => setOpen((o) => !o)} className={cn(secondaryBtn, 'justify-between')} style={{ minWidth: triggerWidth ?? width }}
+        title={title} aria-label={title}>
         <span className="inline-flex items-center gap-2 min-w-0">
           <span className="text-nb-gray-500 dark:text-nb-gray-300 shrink-0">{icon}</span>
           <span className="truncate">{label}</span>

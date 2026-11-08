@@ -10,6 +10,19 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Traffic Events opens on today.** The page shows what is happening now, so it opens on Today
+  instead of the last 7 days, and it loads much faster on a large event store. Longer ranges and
+  All Time are still in the date picker.
+- **The Traffic Events toolbar fits on one row on a desktop screen.** The search box narrows
+  when space runs short, the rows-per-page menu shows just the number, and Clear is an icon. Each
+  keeps its full name as a tooltip.
+
+### Fixed
+- **Clear Filters on Traffic Events no longer switches to All Time.** It reset the date range to
+  All Time, so the page then summarized the whole event history and was very slow. Clear now
+  returns to Today, and the button is shown as active only when something differs from that.
+
 ---
 
 ## [1.2.1] - 2026-11-08
