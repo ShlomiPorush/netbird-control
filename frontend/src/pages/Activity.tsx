@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { RefreshCw, Rows3 } from 'lucide-react';
 import type { DateRange } from 'react-day-picker';
 import { cn } from '@/lib/cn';
@@ -27,7 +28,14 @@ export default function Activity() {
   const seesAll = !restricted || can('activity.all');
   // Summary (aggregated conversations) is the default; the raw event list is behind "Detailed".
   const [view, setView] = useState<TrafficView>(() => (localStorage.getItem(VIEW_KEY) === 'detailed' ? 'detailed' : 'summary'));
-  const switchView = (v: string) => { setView(v as TrafficView); try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } };
+  const qc = useQueryClient();
+  const switchView = (v: string) => {
+    // The Detailed query stays mounted (only disabled) under Summary, and disabling it does not
+    // abort a request already running, so cancel it here: it would compete with the summary.
+    if (v !== 'detailed') qc.cancelQueries({ queryKey: ['logs', params], exact: true });
+    setView(v as TrafficView);
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ }
+  };
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(25);
   const [type, setType] = useState('All');

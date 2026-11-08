@@ -3,18 +3,22 @@
 // This is the base of the lib/ dependency graph - it requires only pg, never db.js and never any
 // other lib/ module (keep the dependency direction one-way: everything -> lib/core.js).
 
-const { Pool } = require('pg');
+const { Pool, Client } = require('pg');
 
-const pool = new Pool({
+const DB_CONNECTION = {
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT, 10) || 5432,
     database: process.env.DB_NAME || 'netbird_logs',
     user: process.env.DB_USER || 'netbird',
     // No default: server.js refuses to start without DB_PASSWORD (lib/db-config.js).
     password: process.env.DB_PASSWORD,
+    connectionTimeoutMillis: 5000,
+};
+
+const pool = new Pool({
+    ...DB_CONNECTION,
     max: 20,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
 });
 
 // ─── Capped row counts for paginated log lists ───
@@ -46,28 +50,47 @@ function capTotal(n) {
 // Runs fn(client) on a dedicated pool client and cancels its running query when the HTTP response
 // closes before it was sent, for example when a newer search replaced the request in the browser.
 // Without this, every abandoned search kept scanning the events table to the end, competing with
-// the one the user is waiting for. pg_cancel_backend is awaited, and a cancelled connection is
-// discarded rather than returned to the pool, so the cancel can never reach a query of another
-// request. An error thrown after a cancel carries `requestClosed = true`, so the route can skip
-// answering a client that is gone. `db` is injectable for tests.
-async function withCancelOnClose(res, fn, db = pool) {
-    const client = await db.connect();
-    let finished = false, cancelling = null;
+// the one the user is waiting for.
+// - A request already gone, before or while it waits for a pool connection, never starts its query.
+// - The cancel runs on a short-lived connection of its own, never from the pool: the pool can be
+//   full of the very reads that need cancelling.
+// - The cancel is awaited and the cancelled connection is discarded rather than returned to the
+//   pool, so it can never reach a query of another request.
+// - Only a dropped request is marked `requestClosed = true` (so the route skips answering a client
+//   that is gone); any other database error keeps reaching the log.
+// `opts.db` (the pool) and `opts.cancel` (the cancel call) are injectable for tests.
+const closedEarly = (res) => res.closed && !res.writableFinished;
+const requestClosedError = () => Object.assign(new Error('The client closed the request'), { requestClosed: true });
+async function cancelBackend(pid) {
+    const c = new Client(DB_CONNECTION);
+    try {
+        await c.connect();
+        await c.query('SELECT pg_cancel_backend($1)', [pid]);
+    } finally {
+        await c.end().catch(() => { });
+    }
+}
+async function withCancelOnClose(res, fn, { db = pool, cancel = cancelBackend } = {}) {
+    if (closedEarly(res)) throw requestClosedError();
+    let client = null, finished = false, cancelling = null;
     const onClose = () => {
-        if (finished || res.writableFinished || cancelling) return;
-        cancelling = db.query('SELECT pg_cancel_backend($1)', [client.processID]).catch(() => { });
+        if (finished || !client || res.writableFinished || cancelling) return;
+        cancelling = cancel(client.processID).catch(() => { });
     };
     res.on('close', onClose);
     try {
+        client = await db.connect();
+        if (closedEarly(res)) throw requestClosedError(); // closed while waiting for a connection
         return await fn(client);
     } catch (err) {
-        if (cancelling && err && typeof err === 'object') err.requestClosed = true;
+        // 57014 = query_canceled: the cancel above stopped this request's query.
+        if (cancelling && err && err.code === '57014') err.requestClosed = true;
         throw err;
     } finally {
         finished = true;
         res.off('close', onClose);
         if (cancelling) await cancelling;
-        client.release(cancelling ? true : undefined);
+        if (client) client.release(cancelling ? true : undefined);
     }
 }
 
