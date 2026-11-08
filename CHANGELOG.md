@@ -18,6 +18,21 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   then the tab you use has usually signed in, so it just continues. The waiting page, still shown
   while another visible tab signs in, now says only "Signing in…" and reloads only while you can
   see it.
+- **The P2P and Routed traffic filters show traffic again.** NetBird's event stream now sends the
+  source and destination type as `UNKNOWN`, even for real peers and network resources, so both
+  filters came back empty and every destination showed a generic icon. The app now recovers the
+  type from the endpoint id: a network resource id gets its resource type and a peer id gets
+  `PEER`. It reads this account's peers and network resources every 10 minutes. Events already
+  stored are fixed by the same job in the background, old ones included, in small batches. Rows
+  whose peer or resource no longer exists in NetBird keep `UNKNOWN`. The raw JSON of each event
+  stays exactly as NetBird sent it.
+- **Routed now covers every network resource kind.** It showed only single-host resources and
+  left out domain and subnet resources. The event description and the Router column treat all
+  three as routed too.
+- **A streamed event's state comes from its counters.** NetBird now sends `TYPE_UNKNOWN` with
+  start, end and drop counters, and every such event read as a stopped connection. The app sets
+  the state from the counters, the same way as for the Traffic Events API pull. When no counter
+  shows anything, the state stays `TYPE_UNKNOWN`.
 
 ---
 
