@@ -404,11 +404,48 @@ const restarts = (r, n) => r.status === 302 && r.location.startsWith(`/login?ret
 const stops = (r) => r.status === 400 && /Sign-in failed/.test(r.text) && !r.location;
 const encodedState = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
 
+// A browser's cookies after a response: the jar, with what the response set or cleared.
+function applyCookies(jar, res) {
+    const map = new Map(jar.split(/;\s*/).filter(Boolean).map((c) => [c.slice(0, c.indexOf('=')), c]));
+    for (const c of res.headers.getSetCookie().map((h) => h.split(';')[0])) {
+        const name = c.slice(0, c.indexOf('='));
+        if (c.endsWith('=')) map.delete(name); else map.set(name, c);
+    }
+    return [...map.values()].join('; ');
+}
+
+test("the callback of a login another tab replaced goes back to /login and leaves the newer login whole", async () => {
+    // Tab A's login is at the provider; more than 5 s on, tab B starts its own, which replaces A's
+    // transaction. A's callback then arrives, before B's.
+    const ip = freshIp();
+    const a = await beginLogin(ip, '/login?returnTo=/peers');
+    const aged = a.cookie.replace(/login_pending=([^.;]+)\.\d+/, `login_pending=$1.${Date.now() - 6_000}`);
+    const bStart = await call('GET', '/networks', { ip, cookie: aged, headers: NAVIGATE });
+    assert.ok(startsLogin(bStart), 'tab B starts its own login');
+    const jar = applyCookies(aged, bStart);
+    const late = await callback(ip, issueCode(a.authorize), a.authorize.searchParams.get('state'), jar);
+    assert.equal(late.status, 302);
+    assert.equal(late.location, `/login?returnTo=${encodeURIComponent('/peers')}`, 'A goes back to /login for its own page');
+    assert.equal(late.headers.getSetCookie().length, 0, "and B's transaction and mark are left alone");
+    // A's /login waits for B's login, which is in flight.
+    assert.ok(waitsForOtherLogin(await call('GET', late.location, { ip, cookie: jar, headers: NAVIGATE })));
+    const bAuthorize = new URL(bStart.location);
+    const done = await callback(ip, issueCode(bAuthorize), bAuthorize.searchParams.get('state'), jar);
+    assert.equal(done.status, 302);
+    assert.match(cookiesOf(done), /appSession/, "B's login completes");
+    const signedIn = applyCookies(jar, done);
+    const back = await call('GET', late.location, { ip, cookie: signedIn, headers: NAVIGATE });
+    assert.equal(back.location, '/peers', 'and A then returns to its own page, signed in');
+});
+
 test('a callback with a mismatched state (two tabs) restarts the login, and the retry signs in', async () => {
     const ip = freshIp();
     const first = await beginLogin(ip, '/login?returnTo=/peers');
-    const otherTab = await beginLogin(ip); // overwrites the first login's transaction cookie
-    const r = await callback(ip, issueCode(first.authorize), first.authorize.searchParams.get('state'), otherTab.cookie);
+    // Overwrites the first login's transaction cookie; without an in-flight mark (one that expired,
+    // or a browser that dropped it), the callback can't be recognized as replaced and fails.
+    const otherTab = await beginLogin(ip);
+    const noMark = otherTab.cookie.replace(/login_pending=[^;]+(; )?/, '');
+    const r = await callback(ip, issueCode(first.authorize), first.authorize.searchParams.get('state'), noMark);
     assert.ok(restarts(r, 1), `expected a restart, got ${r.status} ${r.location}`);
     assert.equal(new URL(r.location, BASE).searchParams.get('returnTo'), '/peers', 'the restart keeps the page, one level deep');
     const retry = await beginLogin(ip, r.location);
