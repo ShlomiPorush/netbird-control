@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.2.1] - 2026-11-08
+
 ### Fixed
 - **Traffic Events opens and searches faster.** On a large event store the page was very slow to
   open and to search:
