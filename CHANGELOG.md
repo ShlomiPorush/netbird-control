@@ -16,9 +16,7 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   tab, held every page in the browser on the "Signing in" page for up to two minutes. A page now
   waits only for a sign-in that started in the last 5 seconds. That covers tabs that sign in
   together, and one of them finishes without a prompt. Past that, the page starts its own
-  sign-in. If the earlier sign-in is finished after all, it no longer breaks the newer one: it
-  goes back to its own page once the newer one completes. The waiting page now says only
-  "Signing in…".
+  sign-in. The waiting page now says only "Signing in…".
 - **A tab in the background no longer starts a sign-in.** When its session ends, it waits until
   you switch to it. By then the tab you are using has usually signed in, so it just continues.
 

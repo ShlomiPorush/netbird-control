@@ -370,15 +370,11 @@ const MAX_LOGIN_RETRIES = 3;
 // finish without a prompt. Past it, the other login is taken as left behind (a closed or
 // background sign-in page, or a prompt nobody answers), and the page starts its own login: a
 // page never waits on a login it can't see. The page also offers "Sign in here instead"
-// (/login?force=1). The mark itself lasts LOGIN_MARK_MS, so the callback of a login that another
-// one replaced is still recognized: it is not passed to the library, whose failing callback would
-// delete the newer login's transaction cookie and break that one too. It goes back to /login for
-// its page instead, which waits for the newer login or finds its session. Over HTTPS the cookie is
-// __Host- prefixed, so a sibling subdomain can't plant one; a start time in the future is ignored.
+// (/login?force=1). Over HTTPS the cookie is __Host- prefixed, so a sibling subdomain can't plant
+// one; a start time in the future is ignored.
 const LOGIN_PENDING_SECURE = /^https:/i.test(process.env.BASE_URL || '');
 const LOGIN_PENDING_COOKIE = LOGIN_PENDING_SECURE ? '__Host-login_pending' : 'login_pending';
 const LOGIN_PENDING_MS = 5_000;
-const LOGIN_MARK_MS = 120_000;
 const loginPendingCookieOptions = () => ({ httpOnly: true, sameSite: 'lax', secure: LOGIN_PENDING_SECURE, path: '/' });
 function readLoginPending(req) {
     for (const part of String(req.headers.cookie || '').split(/;\s*/)) {
@@ -482,15 +478,11 @@ function callbackState(req) {
 if (AUTH_ENABLED) {
     // Per client IP, before the OIDC middleware below handles /callback and /logout itself.
     app.use(['/login', '/callback', '/logout'], authLimiter);
-    // A login's own callback (success or failure), or a logout, ends its in-flight mark; the
-    // callback of a login that a newer one replaced goes back to /login - see "One login at a time".
+    // A login's own callback (success or failure), or a logout, ends its in-flight mark - see "One
+    // login at a time".
     app.use('/callback', (req, res, next) => {
         const pending = readLoginPending(req);
-        const state = callbackState(req);
-        if (pending && state.lid && state.lid !== pending.id) {
-            return res.redirect(`/login?returnTo=${encodeURIComponent(loginStateReturnTo(state))}`);
-        }
-        if (pending && state.lid === pending.id) res.clearCookie(LOGIN_PENDING_COOKIE, loginPendingCookieOptions());
+        if (pending && callbackState(req).lid === pending.id) res.clearCookie(LOGIN_PENDING_COOKIE, loginPendingCookieOptions());
         next();
     });
     app.use('/logout', (req, res, next) => {
@@ -563,7 +555,7 @@ if (AUTH_ENABLED) {
             return res.status(200).type('html').send(loginWaitPage(req));
         }
         req.loginId = crypto.randomBytes(9).toString('base64url');
-        res.cookie(LOGIN_PENDING_COOKIE, `${req.loginId}.${Date.now()}`, { ...loginPendingCookieOptions(), maxAge: LOGIN_MARK_MS });
+        res.cookie(LOGIN_PENDING_COOKIE, `${req.loginId}.${Date.now()}`, { ...loginPendingCookieOptions(), maxAge: LOGIN_PENDING_MS });
         next();
     });
     app.use(requiresAuth());
