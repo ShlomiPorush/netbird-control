@@ -227,8 +227,12 @@ test('NetBird answers an empty list as null: such a group is still cleaned up an
 });
 
 test("a user found through one group loses every managed group, so an earlier failure isn't hidden", async () => {
-    reset();
+    reset({ putHook: (p) => (p === '/api/users/u1' ? { status: 500, raw: 'user-busy' } : null) });
     state.users[0].auto_groups = ['g-team', 'g-gwt'];
+    await enforce({ users: clone(state.users) });
+    assert.match(ra._internal.lastMembershipForTest().error, /user-busy/);
+    state.putHook = null;
+    ra._internal.passMembershipRetryForTest();
     state.groups[0].peers.push({ id: 'p-u1' });
     await enforce({ peers: [{ id: 'p-u1', name: 'laptop', user_id: 'u1', groups: [{ id: 'g-gw' }] }] });
     assert.deepEqual(state.users[0].auto_groups, ['g-team'], 'the target group the device did not show is removed too');
