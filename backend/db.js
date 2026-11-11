@@ -28,7 +28,7 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 // writes, grants and routers never add, remove or reuse the groups (helpers below).
 const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite,
-    loadRemoteAccessConfig,
+    loadRemoteAccessConfig, enforceManagedMembership,
 } = require('./lib/remote-access');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
@@ -122,6 +122,33 @@ async function refuseManagedGroupTargets(targets) {
     if (!ids.length) return;
     const isManaged = await managedGroupCheck();
     if (ids.some(isManaged)) { const e = new Error(MANAGED_GROUP_ERROR); e.status = 400; throw e; }
+}
+// The group screens (members, rename, delete) and setup keys never add anyone to a managed group,
+// rename it or delete it: its members are the gateways, set by the app. Removing members stays
+// possible. Main account only; a stored id, or a managed name in NetBird's live list.
+const MANAGED_GROUP_EDIT_ERROR = 'This group is managed by Browser Remote Access. NetBird Control sets its members and name, so it can\'t be changed here.';
+async function refuseManagedGroupEdit(groupIds) {
+    const ids = (Array.isArray(groupIds) ? groupIds : []).map(gid).filter(Boolean).map(String);
+    if (!raMain() || !ids.length) return;
+    const isManaged = await managedGroupCheck();
+    if (ids.some(isManaged)) { const e = new Error(MANAGED_GROUP_EDIT_ERROR); e.status = 400; throw e; }
+}
+// Takes managed groups out of one user's own groups (the membership clean-up in remote-access.js).
+// The user's lock first, then the target lock, as the grant revoke path takes them. Written from a
+// fresh read of the user; a user whose role, groups or block state are not all there is not
+// written. Returns { name, removed } or null when there was nothing to remove.
+async function removeUserManagedGroups(userId, groupIds) {
+    return withNbUserLock(userId, () => withTargetLock(async () => {
+        const u = (await liveUsersById([userId])).get(String(userId));
+        if (!u) return null;
+        if (typeof u.role !== 'string' || !u.role || !Array.isArray(u.auto_groups)) throw new Error(`Couldn't read user "${userId}" from NetBird in full - nothing was changed.`);
+        const cur = u.auto_groups.map(gid).filter(Boolean).map(String);
+        const drop = cur.filter(g => groupIds.includes(g));
+        if (!drop.length) return null;
+        const resp = await asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(u.id), { role: u.role, auto_groups: cur.filter(g => !drop.includes(g)), is_blocked: u.is_blocked }));
+        if (!nbWriteOk(resp)) throw new Error(`NetBird did not take the update of user "${u.email || u.name || u.id}": ${(resp && (resp.raw || resp.error || resp.status)) || 'no response'}`);
+        return { name: u.email || u.name || String(u.id), removed: drop };
+    }));
 }
 // A resource's own access policies never use a managed group as their source (it would give the
 // gateway, or whoever is in that group, access the app did not decide). Checked live, before any
@@ -5024,6 +5051,7 @@ async function createGroup(name) {
 async function deleteGroup(id) {
     const grp = await netbirdGet('/api/groups/' + encodeURIComponent(id));
     if (grp && grp.name === 'All') throw new Error('The "All" group cannot be deleted.');
+    await refuseManagedGroupEdit([id]);
     const resp = await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(id));
     if (!resp || (resp.status >= 300 && resp.status !== 404)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'group may still be in use';
@@ -5045,6 +5073,9 @@ async function setGroupPeers(groupId, peerIds) {
     if (!g || !g.id) { const e = new Error('Group not found.'); e.status = 400; throw e; }
     if (g.name === 'All') { const e = new Error('The "All" group is managed automatically - its peers cannot be changed.'); e.status = 400; throw e; }
     const peers = Array.from(new Set((Array.isArray(peerIds) ? peerIds : []).map(x => String(x || '')).filter(Boolean)));
+    // A managed group's peers can only be taken out here, never added.
+    const had = new Set((Array.isArray(g.peers) ? g.peers : []).map(p => String((p && p.id) || p || '')));
+    if (peers.some(p => !had.has(p))) await refuseManagedGroupEdit([groupId]);
     const body = { name: g.name, peers };
     if (Array.isArray(g.resources)) body.resources = g.resources; // preserve resources across the replace
     const resp = await asRealUser(() => netbirdPut('/api/groups/' + encodeURIComponent(groupId), body));
@@ -5071,6 +5102,7 @@ async function renameGroup(groupId, newName) {
     if (!g || !g.id) { const e = new Error('Group not found.'); e.status = 400; throw e; }
     if (g.name === 'All') { const e = new Error('The "All" group cannot be renamed.'); e.status = 400; throw e; }
     if ((g.issued || 'api') !== 'api') { const e = new Error('This group is managed by your identity provider and cannot be renamed here.'); e.status = 400; throw e; }
+    await refuseManagedGroupEdit([groupId]);
     const peers = Array.isArray(g.peers) ? g.peers.map(p => (typeof p === 'string' ? p : (p && p.id))).filter(Boolean) : [];
     const body = { name, peers };
     if (Array.isArray(g.resources)) body.resources = g.resources;
@@ -5117,6 +5149,8 @@ async function setUserGroups(userId, groupIds) {
     const resp = await withNbUserLock(userId, async () => {
         const live = (await liveUsersById([userId])).get(String(userId));
         if (!live) throw new Error(STALE_USER_ERR);
+        const had = new Set((Array.isArray(live.auto_groups) ? live.auto_groups : []).map(g => String((g && g.id) || g)));
+        await refuseManagedGroupEdit(groups.filter(g => !had.has(g)));
         return asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(userId), { role: live.role || 'user', auto_groups: groups, is_blocked: live.is_blocked }));
     });
     if (!resp || resp.status >= 300) {
@@ -5133,6 +5167,7 @@ async function setUserGroups(userId, groupIds) {
 async function _applyUsersGroup(groupId, userIds, mode) {
     const acct = tnt();
     const ids = Array.from(new Set((Array.isArray(userIds) ? userIds : []).map(x => String(x || '')).filter(Boolean)));
+    if (mode === 'add' && ids.length) await refuseManagedGroupEdit([groupId]);
     let updated = 0;
     const failed = [];
     const live = ids.length ? await liveUsersById(ids) : new Map(); // throws (no writes) when unreadable
@@ -8334,6 +8369,8 @@ async function pullUsersCache() {
         await upsertUsers(users);
         // Only a user the list returned now has NetBird's state in the mirror.
         for (const u of users) if (u && u.id) _unrecordedBlocks.delete(`${t}|${u.id}`);
+        // Members added to the Browser Remote Access groups outside the app are removed.
+        if (!t) enforceManagedMembership({ users }).catch(() => { });
         // Prune users deleted in NetBird. Only when the regular user list answered and at least one
         // user came back (an account always has its owner, so an empty result means a transient
         // error - don't wipe; without the regular list every human user would be dropped).
@@ -8407,6 +8444,7 @@ function inviterHint(message) {
 // state and mails the invitation itself (the self-hosted invite-LINK flow is not used here).
 // Runs in the CURRENT account context - main or a managed MSP tenant.
 async function inviteUser({ name, email, role, autoGroups }) {
+    await refuseManagedGroupEdit(autoGroups);
     const body = {
         name: String(name || '').trim().slice(0, 100),
         email: String(email || '').trim(),
@@ -9135,6 +9173,7 @@ async function refreshPeersCache() {
     const peers = await fetchPeersFromApi();
     if (peers) {
         await upsertPeers(peers);
+        if (!t) enforceManagedMembership({ peers }).catch(() => { });
         // Prune peers that were deleted in NetBird so they stop appearing in the app - the cache
         // mirrors NetBird. Only when the API returned at least one peer (don't wipe on a transient
         // empty/error response).
@@ -12207,7 +12246,7 @@ module.exports = {
     addResourceGroups, removeResourceGroups, fetchUserGroupsFresh, // used by browser remote access (server.js)
     pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
-    getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
+    getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, refuseManagedGroupEdit, removeUserManagedGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
     getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, getResourceInNetwork, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
     setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups,
     getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate,

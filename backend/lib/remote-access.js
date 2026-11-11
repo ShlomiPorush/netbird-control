@@ -25,17 +25,18 @@ const dns = require('dns');
 const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { pool, getSetting, setSetting } = require('./core');
-const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY } = require('./netbird');
+const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount } = require('./netbird');
 const { addEvent } = require('./events');
-const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus } = require('./remote-access-auth');
+const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName } = require('./remote-access-auth');
 
-// The managed NetBird objects of each gateway.
+// The managed NetBird objects of each gateway. In NetBird each is named "<base> (<installation
+// name>)", so installations that share one NetBird account (production and DEV) never collide.
 const KINDS = {
     ip: { group: 'Browser Gateway', targets: 'Browser Gateway Targets', policy: 'Browser Gateway', groupKey: 'gatewayGroupId', targetKey: 'targetGroupId', policyKey: 'policyId' },
-    names: { group: 'Browser Gateway Names', targets: 'Browser Gateway Name Targets', policy: 'Browser Gateway (Names)', groupKey: 'namesGroupId', targetKey: 'namesTargetGroupId', policyKey: 'namesPolicyId' },
+    names: { group: 'Browser Gateway Names', targets: 'Browser Gateway Name Targets', policy: 'Browser Gateway Names', groupKey: 'namesGroupId', targetKey: 'namesTargetGroupId', policyKey: 'namesPolicyId' },
 };
-const POLICY_NAMES = new Set(Object.values(KINDS).map(k => k.policy));
-const GROUP_NAMES = new Set(Object.values(KINDS).flatMap(k => [k.group, k.targets]));
+const DEFAULT_INSTALL_NAME = 'NetBird Control';
+const NB_NAME_MAX = 100;
 const NAME_LOOKUP_TIMEOUT_MS = 3000;
 const SOURCE_TYPE = 'BROWSER_GATEWAY';
 
@@ -173,16 +174,18 @@ function setRemoteAccessDeps(deps) { _deps = { ..._deps, ...deps }; }
 function isRemoteAccessManagedPolicy(p) {
     if (!p) return false;
     const ids = [_nb.policyId, _nb.namesPolicyId].filter(Boolean);
-    return ids.includes(p.id) || POLICY_NAMES.has(p.name);
+    return ids.includes(p.id) || isManagedGatewayName(p.name, 'policy');
 }
 
 // The managed gateway and target groups are app-owned too: resource writes, grants and routers
 // never add, remove or reuse them. Matched by stored id, and by the group's LIVE name from
 // NetBird (callers pass that name, never one a client sent): the name covers the old objects
-// when the stored ids are gone, for example after a settings import into a new database.
+// when the stored ids are gone, for example after a settings import into a new database, and the
+// objects of another installation on the same NetBird account.
+const managedGroupIds = () => Object.values(KINDS).flatMap(k => [_nb[k.groupKey], _nb[k.targetKey]]).filter(Boolean);
 function isRemoteAccessManagedGroup(id, liveName) {
     if (!id) return false;
-    return Object.values(KINDS).some(k => _nb[k.groupKey] === id || _nb[k.targetKey] === id) || GROUP_NAMES.has(liveName);
+    return managedGroupIds().includes(id) || isManagedGatewayName(liveName, 'group');
 }
 const targetGroupIds = () => [_nb.targetGroupId, _nb.namesTargetGroupId].filter(Boolean);
 
@@ -264,17 +267,64 @@ function remoteAccessAvailable() { return _cfg.enabled && netbirdApiConfigured()
 const nbOk = (r) => r && r.status >= 200 && r.status < 300;
 const nbErr = (what, r) => new Error(`${what} failed: ${(r && (r.raw || r.error || r.status)) || 'no response'}`);
 
+// The installation name in the managed object names: the app name from Settings, whitespace
+// (line breaks included) collapsed to single spaces. Read again on every apply, so renaming the
+// app renames the objects.
+let _installName = DEFAULT_INSTALL_NAME;
+async function loadInstallName() {
+    const v = await getSetting('app_name');
+    _installName = String(v || '').replace(/\s+/g, ' ').trim() || DEFAULT_INSTALL_NAME;
+    return _installName;
+}
+const nbName = (base) => `${base} (${_installName})`;
+const managedGroupName = (id) => {
+    for (const k of Object.values(KINDS)) {
+        if (_nb[k.groupKey] === id) return nbName(k.group);
+        if (_nb[k.targetKey] === id) return nbName(k.targets);
+    }
+    return id;
+};
+
+// A managed group as NetBird returns it, only when the whole object is there: a PUT replaces the
+// peers and the resources, so a partial or malformed read must never become the new state.
+const refId = (x) => String((x && typeof x === 'object' ? x.id : x) || '');
+function fullGroup(g, id) {
+    if (!g || typeof g !== 'object' || g.id !== id || typeof g.name !== 'string' || !g.name) return null;
+    if (!Array.isArray(g.peers) || !g.peers.every(p => refId(p))) return null;
+    if (!Array.isArray(g.resources) || !g.resources.every(r => r && typeof r.id === 'string' && r.id && typeof r.type === 'string' && r.type)) return null;
+    return { name: g.name, peers: g.peers.map(refId), resources: g.resources.map(r => ({ id: r.id, type: r.type })) };
+}
+// Change a managed group from a fresh read of it. The caller holds the target lock. `change` gets
+// { name, peers } and returns the new { name, peers }, or null for no write. Resources are kept.
+async function putManagedGroup(id, change) {
+    const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(id)), id);
+    if (!g) throw new Error(`Couldn't read the group "${managedGroupName(id)}" from NetBird in full - nothing was changed.`);
+    const next = change({ name: g.name, peers: [...g.peers] });
+    if (!next) return null;
+    const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), { name: next.name, peers: next.peers, resources: g.resources });
+    if (r && r.status === 0) { noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
+    if (!nbOk(r)) throw nbErr(`Updating the "${g.name}" group`, r);
+    bustNbCaches('gref', 'groups', 'usage');
+    invalidateSnapshot();
+    return { before: g, after: next };
+}
+
 // A managed group is found only by the id this app stored when it created it. A group that merely
 // has the name is never taken over: an empty peer list does not prove it is unused (resources,
 // policies, users and setup keys can point at it), and its members would get the gateway's
 // standing all-TCP policy. The save then stops and says how to fix it; nothing references it.
+// A group found by id whose name differs (the app name changed, or the name is from before the
+// installation name was added) is renamed; its peers and resources stay. Runs under the target lock.
 async function ensureGroup(name, knownId) {
     const groups = await netbirdGet('/api/groups');
     if (!Array.isArray(groups)) throw new Error("Couldn't read the groups from NetBird");
     const found = knownId && groups.find(g => g && g.id === knownId);
-    if (found) return found.id;
-    if (groups.some(g => g && g.name === name)) {
+    if (groups.some(g => g && g.name === name && g.id !== (found && found.id))) {
         throw new Error(`NetBird already has a group named "${name}" that NetBird Control did not create or no longer has on record. Delete or rename that group in NetBird, then save again. If it was the gateway's group, enroll the gateway again afterwards with a new setup key.`);
+    }
+    if (found) {
+        if (found.name !== name) await putManagedGroup(found.id, g => (g.name === name ? null : { name, peers: g.peers }));
+        return found.id;
     }
     const r = await netbirdPost('/api/groups', { name });
     if (!nbOk(r) || !r.body || !r.body.id) throw nbErr(`Creating the "${name}" group`, r);
@@ -284,14 +334,15 @@ async function ensureGroup(name, knownId) {
 function policyBody(kind, enabled) {
     const k = KINDS[kind];
     return {
-        name: k.policy,
-        description: kind === 'names'
+        name: nbName(k.policy),
+        description: (kind === 'names'
             ? 'Managed by NetBird Control: lets the Browser Gateway for host names reach the domain resources of the networks enabled for browser remote access. Who may connect is decided per session by NetBird Control.'
-            : 'Managed by NetBird Control: lets the Browser Gateway reach the networks enabled for browser remote access. Who may connect is decided per session by NetBird Control.',
+            : 'Managed by NetBird Control: lets the Browser Gateway reach the networks enabled for browser remote access. Who may connect is decided per session by NetBird Control.')
+            + ` Installation: ${_installName}.`,
         enabled,
         source_posture_checks: [],
         rules: [{
-            name: k.policy, enabled: true, action: 'accept', bidirectional: false,
+            name: nbName(k.policy), enabled: true, action: 'accept', bidirectional: false,
             protocol: 'tcp', ports: [], sources: [_nb[k.groupKey]], destinations: [_nb[k.targetKey]],
         }],
     };
@@ -301,17 +352,18 @@ async function ensurePolicy(kind, enabled) {
     const k = KINDS[kind];
     const pols = await netbirdGet('/api/policies');
     if (!Array.isArray(pols)) throw new Error("Couldn't read the policies from NetBird");
+    const name = nbName(k.policy);
     const found = _nb[k.policyKey] && pols.find(p => p && p.id === _nb[k.policyKey]);
-    if (!found && pols.some(p => p && p.name === k.policy)) {
-        throw new Error(`NetBird already has a policy named "${k.policy}" that NetBird Control did not create or no longer has on record. Delete or rename that policy in NetBird, then save again.`);
+    if (!found && pols.some(p => p && p.name === name)) {
+        throw new Error(`NetBird already has a policy named "${name}" that NetBird Control did not create or no longer has on record. Delete or rename that policy in NetBird, then save again.`);
     }
     if (found) {
         const r = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(found.id), policyBody(kind, enabled));
-        if (!nbOk(r)) throw nbErr(`Updating the "${k.policy}" policy`, r);
+        if (!nbOk(r)) throw nbErr(`Updating the "${name}" policy`, r);
         return found.id;
     }
     const r = await netbirdPost('/api/policies', policyBody(kind, enabled));
-    if (!nbOk(r) || !r.body || !r.body.id) throw nbErr(`Creating the "${k.policy}" policy`, r);
+    if (!nbOk(r) || !r.body || !r.body.id) throw nbErr(`Creating the "${name}" policy`, r);
     return r.body.id;
 }
 
@@ -355,13 +407,20 @@ async function syncTargetGroupLocked() {
 async function applyGatewayObjects() {
     if (!netbirdApiConfigured()) throw new Error('Connect the NetBird API first (Settings → NetBird API).');
     if (NETBIRD_READONLY) throw new Error('This instance is read-only (NETBIRD_READONLY=true) - the Browser Gateway objects cannot be created.');
+    // One writer of the managed groups at a time (the target sync, the membership clean-up, renames).
+    return withTargetLock(applyGatewayObjectsLocked);
+}
+async function applyGatewayObjectsLocked() {
     try {
+        await loadInstallName();
+        const tooLong = Object.values(KINDS).flatMap(k => [k.group, k.targets, k.policy]).map(nbName).find(n => n.length > NB_NAME_MAX);
+        if (tooLong) throw new Error(`The Application Name (Settings > General) is too long for the NetBird object names, such as "${tooLong}". Shorten it to 60 characters or less, then save again.`);
         for (const [kind, k] of Object.entries(KINDS)) {
             // Each id is recorded as soon as it exists: a group this app created but did not record
             // would later be refused as a stranger with the managed name.
-            _nb[k.groupKey] = await ensureGroup(k.group, _nb[k.groupKey]);
+            _nb[k.groupKey] = await ensureGroup(nbName(k.group), _nb[k.groupKey]);
             await setSetting('remote_access_nb', JSON.stringify(_nb));
-            _nb[k.targetKey] = await ensureGroup(k.targets, _nb[k.targetKey]);
+            _nb[k.targetKey] = await ensureGroup(nbName(k.targets), _nb[k.targetKey]);
             await setSetting('remote_access_nb', JSON.stringify(_nb));
             _nb[k.policyKey] = await ensurePolicy(kind, _cfg.enabled);
             await setSetting('remote_access_nb', JSON.stringify(_nb));
@@ -397,7 +456,123 @@ async function reconcileRemoteAccess() {
 async function createGatewaySetupKey(kind = 'ip') {
     const k = KINDS[kind] || KINDS.ip;
     if (!_nb[k.groupKey]) await applyGatewayObjects();
-    return _deps.createSetupKey({ name: k.group, type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
+    await loadInstallName();
+    return _deps.createSetupKey({ name: nbName(k.group), type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
+}
+
+// ─── Members added outside the app ───
+// Nobody belongs in the managed groups but the gateways: a user's device in a gateway group, or
+// any device in a target group, gets the standing policy's TCP access through NetBird itself.
+// Members added outside the app (the NetBird dashboard, the API) are removed when the app next
+// reads users or peers from NetBird anyway (the session check, the 60 s re-check while sessions are
+// open, the regular users and peers refresh); this never reads NetBird on its own schedule.
+//   - a user whose own groups (auto_groups) hold a managed group loses that group;
+//   - a device enrolled by a user (a non-empty user_id) is taken out of a gateway group, and its
+//     owner loses the group too (NetBird would otherwise add the owner's next device). A gateway
+//     is enrolled with a setup key, which leaves user_id empty; one enrolled by a user login is
+//     removed as well and has to be enrolled again with a setup key;
+//   - any device is taken out of a target group (those hold only resources).
+// Only this installation's stored groups are touched. Each removal is written from a fresh read of
+// the group or user, and recorded in the app's audit log.
+const MEMBERSHIP_RETRY_MS = 5 * 60_000;
+let _membershipRun = null;
+let _membershipPending = null;
+const _membershipFailedAt = new Map(); // 'group:<id>' / 'user:<id>' -> time of the last failure
+let _lastMembership = { at: null, removed: [], error: '' };
+
+function enforceManagedMembership(data = {}) {
+    if ((typeof currentTenantAccount === 'function' && currentTenantAccount()) || NETBIRD_READONLY || !netbirdApiConfigured()) return Promise.resolve(null);
+    if (!managedGroupIds().length) return Promise.resolve(null);
+    if (_membershipRun) {
+        // One run at a time; what arrives meanwhile is checked right after it.
+        const p = _membershipPending || {};
+        _membershipPending = { users: data.users || p.users, peers: data.peers || p.peers };
+        return _membershipRun;
+    }
+    // Started outside the caller's lock context, so it queues for the locks like everyone else.
+    _membershipRun = _targetLockCtx.exit(() => new Promise(r => setImmediate(r)).then(() => runMembership(data)))
+        .catch(e => {
+            console.error('[remote-access] membership clean-up failed:', e.message);
+            _lastMembership = { ..._lastMembership, error: e.message || String(e) };
+            return null;
+        })
+        .finally(() => {
+            _membershipRun = null;
+            const next = _membershipPending;
+            _membershipPending = null;
+            if (next) enforceManagedMembership(next);
+        });
+    return _membershipRun;
+}
+
+async function runMembership({ users, peers }) {
+    const gateways = Object.values(KINDS).map(k => _nb[k.groupKey]).filter(Boolean);
+    const targets = targetGroupIds();
+    const managed = new Set([...gateways, ...targets]);
+    const add = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
+    const fromGroups = new Map(); // group id -> peer ids to take out
+    const fromUsers = new Map();  // user id -> group ids to take away
+    const peerName = new Map();
+    for (const u of Array.isArray(users) ? users : []) {
+        // Service users have no devices: a group on one gives no network access.
+        if (!u || !u.id || u.is_service_user) continue;
+        for (const g of Array.isArray(u.auto_groups) ? u.auto_groups : []) if (managed.has(refId(g))) add(fromUsers, String(u.id), refId(g));
+    }
+    for (const p of Array.isArray(peers) ? peers : []) {
+        if (!p || !p.id) continue;
+        const owner = typeof p.user_id === 'string' ? p.user_id : '';
+        for (const g of Array.isArray(p.groups) ? p.groups : []) {
+            const gid = refId(g);
+            const gateway = gateways.includes(gid);
+            if (!targets.includes(gid) && !(gateway && owner)) continue;
+            add(fromGroups, gid, String(p.id));
+            peerName.set(String(p.id), p.name || String(p.id));
+            if (gateway) add(fromUsers, owner, gid);
+        }
+    }
+    if (!fromGroups.size && !fromUsers.size) return null;
+    const due = (key) => Date.now() - (_membershipFailedAt.get(key) || 0) >= MEMBERSHIP_RETRY_MS;
+    const removed = [];
+    const errors = [];
+    for (const [gid, ids] of fromGroups) {
+        const key = 'group:' + gid;
+        if (!due(key)) continue;
+        try {
+            const out = await withTargetLock(() => putManagedGroup(gid, g => {
+                const keep = g.peers.filter(id => !ids.has(id));
+                return keep.length === g.peers.length ? null : { name: g.name, peers: keep };
+            }));
+            _membershipFailedAt.delete(key);
+            if (out) for (const id of out.before.peers.filter(id => ids.has(id))) removed.push({ kind: 'device', id, name: peerName.get(id) || id, group: out.before.name });
+        } catch (e) { _membershipFailedAt.set(key, Date.now()); errors.push(e.message); }
+    }
+    // After the group writes, outside the target lock: a user write takes the user's lock first
+    // and the target lock inside it (the order the grant revoke path uses).
+    for (const [uid, gids] of fromUsers) {
+        const key = 'user:' + uid;
+        if (!due(key) || !_deps.removeUserManagedGroups) continue;
+        try {
+            const out = await _deps.removeUserManagedGroups(uid, [...gids]);
+            _membershipFailedAt.delete(key);
+            if (out) for (const gid of out.removed) removed.push({ kind: 'user', id: uid, name: out.name || uid, group: managedGroupName(gid) });
+        } catch (e) { _membershipFailedAt.set(key, Date.now()); errors.push(e.message); }
+    }
+    const at = new Date().toISOString();
+    for (const r of removed) {
+        console.warn('[remote-access] removed %s %s from the managed group %s', r.kind, r.name, r.group);
+        if (_deps.recordAudit) {
+            Promise.resolve(_deps.recordAudit({
+                actorId: '', actorEmail: '', actorName: 'System', action: 'remote_access.member_remove', target: r.name,
+                meta: { group: r.group, member: r.kind, reason: 'Added outside NetBird Control' },
+            })).catch(() => { });
+        }
+    }
+    _lastMembership = {
+        at,
+        removed: [...removed.map(r => ({ ...r, at })), ..._lastMembership.removed].slice(0, 10),
+        error: errors.join(' '),
+    };
+    return removed;
 }
 
 // ─── NetBird snapshot (fresh, bounded in time) ───
@@ -430,6 +605,8 @@ async function fetchSnapshot() {
          FROM temporary_access_grants
          WHERE tenant = '' AND (status IN ('active', 'creating') OR issued_at > NOW() - interval '90 days')`);
     data.grants = g.rows;
+    // The users and peers were read anyway: members added outside the app are removed from them.
+    enforceManagedMembership({ users: data.users, peers: data.peers }).catch(() => { });
     return data;
 }
 
@@ -1094,6 +1271,7 @@ async function getRemoteAccessStatus() {
         names: { guacdReachable: null, gateway: { enrolled: false, online: false, peers: [] }, extraReach: [], targets: 0 },
         conflicts: [],
         lastApply: { ..._lastApply },
+        membership: { ..._lastMembership, removed: [..._lastMembership.removed] },
     };
     [out.guacdReachable, out.names.guacdReachable] = await Promise.all([
         probeGuacd(_cfg.guacdHost, _cfg.guacdPort), probeGuacd(_cfg.namesGuacdHost, _cfg.namesGuacdPort)]);
@@ -1134,7 +1312,7 @@ async function getRemoteAccessStatus() {
 module.exports = {
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, remoteAccessTargetGroupsFor, withManagedTargets,
-    withTargetLock, noteUncertainTargetWrite, beginStartupSettling,
+    withTargetLock, noteUncertainTargetWrite, beginStartupSettling, enforceManagedMembership,
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
@@ -1150,5 +1328,9 @@ module.exports = {
         settleTimerPendingForTest: () => !!_settleTimer,
         clearSettleTimerForTest: () => { clearTimeout(_settleTimer); _settleTimer = null; },
         freshSnapshot, invalidateSnapshot,
+        membershipIdleForTest: async () => { while (_membershipRun) await _membershipRun; },
+        resetMembershipForTest: () => { _membershipFailedAt.clear(); _lastMembership = { at: null, removed: [], error: '' }; _membershipPending = null; },
+        installNameForTest: () => _installName,
+        lastMembershipForTest: () => ({ ..._lastMembership }),
     },
 };

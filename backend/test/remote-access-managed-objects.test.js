@@ -87,8 +87,8 @@ function reset(over = {}) {
     state = {
         groups: [
             { id: 'g-all', name: 'All', peers: [{ id: 'p-gw' }, { id: 'p-r1' }] },
-            { id: 'g-gw', name: 'Browser Gateway', peers: [{ id: 'p-gw' }] }, { id: 'g-gwt', name: 'Browser Gateway Targets', peers: [] },
-            { id: 'g-ngw', name: 'Browser Gateway Names', peers: [] }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets', peers: [] },
+            { id: 'g-gw', name: 'Browser Gateway', peers: [{ id: 'p-gw' }], resources: [] }, { id: 'g-gwt', name: 'Browser Gateway Targets', peers: [], resources: [] },
+            { id: 'g-ngw', name: 'Browser Gateway Names', peers: [], resources: [] }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets', peers: [], resources: [] },
             { id: 'g-own', name: 'Team', peers: [] }, { id: 'g-new', name: 'New', peers: [] },
             { id: 'g-routers', name: 'Routers', peers: [{ id: 'p-r1' }] }, { id: 'g-mixed', name: 'Mixed', peers: [{ id: 'p-r1' }, { id: 'p-gw' }] },
         ],
@@ -330,22 +330,22 @@ test('the Browser Gateway is never a routing peer, for any caller', async () => 
 // ─── Setup: nothing is adopted by name ───
 test('the setup never takes over a group or policy that only has the managed name', async () => {
     const variants = {
-        'a jwt group with members': [{ id: 'jwt-gw', name: 'Browser Gateway', issued: 'jwt', peers: [{ id: 'p-x' }] }],
-        'an empty api group': [{ id: 'api-gw', name: 'Browser Gateway', issued: 'api', peers: [] }],
-        'duplicates': [{ id: 'd1', name: 'Browser Gateway', issued: 'api' }, { id: 'd2', name: 'Browser Gateway', issued: 'jwt' }],
+        'a jwt group with members': [{ id: 'jwt-gw', name: 'Browser Gateway (NetBird Control)', issued: 'jwt', peers: [{ id: 'p-x' }] }],
+        'an empty api group': [{ id: 'api-gw', name: 'Browser Gateway (NetBird Control)', issued: 'api', peers: [] }],
+        'duplicates': [{ id: 'd1', name: 'Browser Gateway (NetBird Control)', issued: 'api' }, { id: 'd2', name: 'Browser Gateway (NetBird Control)', issued: 'jwt' }],
     };
     for (const [label, groups] of Object.entries(variants)) {
         reset({ groups, policies: [] });
         ra._internal.setManagedForTest({});
         delete settings.remote_access_nb;
-        await assert.rejects(ra._internal.applyGatewayObjects(), /already has a group named "Browser Gateway"/, label);
+        await assert.rejects(ra._internal.applyGatewayObjects(), /already has a group named "Browser Gateway \(NetBird Control\)"/, label);
         assert.match(ra._internal.lastApplyForTest().error, /Delete or rename that group/, label);
         assert.equal(writes('POST', /^\/api\/policies$/).length + writes('PUT', /^\/api\/policies\//).length, 0, label);
         assert.equal(String(settings.remote_access_nb || '').includes(groups[0].id), false, `${label}: never stored`);
     }
-    reset({ policies: [{ id: 'foreign', name: 'Browser Gateway', enabled: true, rules: [] }] });
+    reset({ policies: [{ id: 'foreign', name: 'Browser Gateway (NetBird Control)', enabled: true, rules: [] }] });
     ra._internal.setManagedForTest({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt' }); // groups known, policy id lost
-    await assert.rejects(ra._internal.applyGatewayObjects(), /already has a policy named "Browser Gateway"/);
+    await assert.rejects(ra._internal.applyGatewayObjects(), /already has a policy named "Browser Gateway \(NetBird Control\)"/);
     assert.equal(writes('PUT', /^\/api\/policies\/foreign$/).length, 0, 'the foreign policy is not overwritten');
     reset({ resources: [], networks: [] });
     state.policies.push({ id: 'pol-ngw', name: 'Browser Gateway (Names)', enabled: true, rules: [] });

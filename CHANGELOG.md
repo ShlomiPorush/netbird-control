@@ -42,6 +42,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     resources and special addresses (loopback, link-local, NetBird peers, multicast, the gateways'
     own networks) are never targets. A policy rule whose source the app can't read blocks sessions
     until it is changed. After a restart, new sessions wait about a minute and a half.
+  - **Members added outside the app are removed.** A user, or a device a user enrolled, that
+    someone adds to a Browser Gateway group in the NetBird dashboard is taken out again when the
+    app next reads users or devices; each removal is in the audit log. The Groups page,
+    invitations and setup keys can't add anyone to these groups, rename them or delete them.
+  - **The gateway's objects carry the installation name**, from the Application Name in
+    **Settings → General**, such as *Browser Gateway (NetBird Control DEV)*, so installations that
+    share a NetBird account never collide. Existing objects are renamed on the next save.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is

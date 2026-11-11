@@ -41,7 +41,9 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   peers, by IP address or host name, only to servers the user's own NetBird access already
   reaches. Several sessions stay open as tabs while you use the rest of the portal. Each session
   is checked live and recorded on the Activity page. The gateway's NetBird groups, policies and
-  peers belong to the app: resource edits, grants and routing peers can't use them. Wildcard
+  peers belong to the app and carry the installation's name: resource edits, grants, routing
+  peers and the Groups page can't use them, and members added in the NetBird dashboard are
+  removed again. Wildcard
   domain resources, loopback, link-local, NetBird peer and the gateways' own addresses are never
   targets ([setup and security model](docs/remote-access.md)).
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and

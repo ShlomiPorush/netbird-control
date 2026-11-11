@@ -266,9 +266,22 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
     return evaluatePolicies(snap, cfg, src, best.res, port, now, { resource, network });
 }
 
+// The managed gateway objects' names: a fixed base, alone (the names before the installation name
+// was added) or followed by " (<installation name>)". Every installation recognizes every other
+// installation's objects on the same NetBird account, whatever characters its name has.
+const MANAGED_NAME_BASES = {
+    group: ['Browser Gateway', 'Browser Gateway Targets', 'Browser Gateway Names', 'Browser Gateway Name Targets'],
+    policy: ['Browser Gateway', 'Browser Gateway Names'],
+};
+function isManagedGatewayName(name, kind) {
+    if (typeof name !== 'string' || !name) return false;
+    return (MANAGED_NAME_BASES[kind] || []).some(base => name === base
+        || (name.length > base.length + 3 && name.startsWith(base + ' (') && name.endsWith(')')));
+}
+
 // The managed gateway policies are infrastructure, never a user's access: matched by id, and by
-// name for one whose id was not saved yet (re-created after a deletion, then interrupted).
-const MANAGED_POLICY_NAMES = new Set(['Browser Gateway', 'Browser Gateway (Names)']);
+// name (another installation's, or one whose id was not saved yet). Only their accept rules are
+// ignored: a matching drop rule in a policy with such a name still denies.
 function managedPolicyIds(cfg) {
     return new Set([cfg && cfg.managedPolicyId, ...arr(cfg && cfg.managedPolicyIds)].filter(Boolean));
 }
@@ -284,7 +297,8 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
     let postureOnly = false;
     let portMismatch = false;
     for (const p of arr(snap.policies)) {
-        if (!p || p.enabled === false || managed.has(p.id) || MANAGED_POLICY_NAMES.has(p.name)) continue;
+        if (!p || p.enabled === false) continue;
+        const infra = managed.has(p.id) || isManagedGatewayName(p.name, 'policy');
         const tm = TEMP_POLICY_RE.exec(p.name || '');
         if (tm && !grantIsValid(grantById.get(tm[1]), now)) continue;
         const posture = arr(p.source_posture_checks).length > 0;
@@ -298,7 +312,7 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
                 if (opens) return deny('BLOCKED_BY_POLICY', { policy: p.name || p.id });
                 continue;
             }
-            if (action !== 'accept') continue;
+            if (action !== 'accept' || infra) continue;
             if (!opens) { portMismatch = true; continue; }
             if (posture) { postureOnly = true; continue; }
             granting.push(p.name || p.id);
@@ -436,7 +450,7 @@ function pathStatus(snap, cfg, routers) {
 
 module.exports = {
     evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
-    gatewayReach, extraReach, pathStatus, isRefusedTarget, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
+    gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, MANAGED_NAME_BASES, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt,
     TEMP_POLICY_RE, TEMP_GROUP_RE,
 };

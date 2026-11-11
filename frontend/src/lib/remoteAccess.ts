@@ -107,6 +107,8 @@ export interface RemoteAccessStatus {
   };
   conflicts: { address: string; networks: string[] }[];
   lastApply: { at: string | null; error: string };
+  // Members added to the managed groups outside the app, and taken out again (newest first).
+  membership?: { at: string | null; error: string; removed: { at: string; kind: 'user' | 'device'; name: string; group: string }[] };
 }
 
 // What the user typed or pasted into the address field, cleaned to what the field is for: a

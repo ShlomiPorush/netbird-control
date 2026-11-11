@@ -30,19 +30,49 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
 - **NetBird sees every browser session as traffic from a gateway peer**, not from the user.
   So NetBird Control decides who may connect where, for every session.
 - **One standing policy per gateway** that the app manages (*Browser Gateway* and
-  *Browser Gateway (Names)*) lets each gateway reach its targets in the networks that an
+  *Browser Gateway Names*) lets each gateway reach its targets in the networks that an
   administrator selects. The app puts the *Browser Gateway Targets* group on the IPv4 host and
   subnet resources of those networks, and *Browser Gateway Name Targets* on their exact domain
   resources (never on a wildcard such as `*.example.com`). No temporary policies are created per
   session.
+- **Every object name ends with the installation name** in parentheses, taken from the
+  **Application Name** in **Settings → General**, for example
+  *Browser Gateway (NetBird Control DEV)*. Two installations that share one NetBird account, such
+  as production and a test instance, each get their own objects. When the Application Name
+  changes, the next save on the Remote Access page (or the background reconcile within 10
+  minutes) renames them. Members, resources and setup keys stay. Objects from before this naming
+  are renamed the same way. The Application Name may be at most 60 characters, so the longest
+  object name stays within NetBird's limit.
 - **The gateway groups, their policies and the gateway peers belong to the app.** Only the app
   decides which resources carry the target groups, whoever edits, creates, moves or merges a
   resource: groups sent for a resource are ignored for those, and the app sets them by the rule
   above. No temporary grant, approved request or recurring rule can put a user into a gateway
   group. A gateway peer can't be a routing peer, and neither can a group it is in, nor *All*
   (a gateway that enrolls later joins it). Deleting a resource never deletes these groups or
-  policies, and merging, moving or editing a resource never changes these policies. This is the
-  same for administrators.
+  policies, and merging, moving or editing a resource never changes these policies. The Groups
+  page, user invitations and setup keys can't add anyone to these groups, rename them or delete
+  them; taking a member out still works. This is the same for administrators, and covers the
+  groups of every installation on the NetBird account.
+- **Members added outside the app are removed.** Only the gateways belong in these groups. When
+  someone adds a member in the NetBird dashboard or through its API, the app takes it out again:
+  - a user who has one of these groups among their own groups loses it;
+  - a device that a user enrolled (by signing in) is taken out of a gateway group, and its owner
+    loses the group too, so their next device is not added. A gateway enrolled with a setup key
+    from the Remote Access page has no user and stays. A gateway that was enrolled by signing in
+    as a user is removed as well and has to be enrolled again with a setup key;
+  - any device is taken out of a target group, which holds only resources.
+
+  The app does this when it reads users or devices from NetBird anyway: when a session starts,
+  every minute while sessions are open, and on its regular users and devices refresh (about every
+  10 minutes). It does not poll NetBird for this, so the time until a removal is not fixed. Until
+  then, the added member has the gateway policy's access through NetBird itself. Each removal is
+  recorded in the audit log and shown on the Remote Access settings page. Only this installation's
+  groups are cleaned up; another installation cleans up its own.
+
+  Removing a group from a user rewrites the user in NetBird (role, groups and blocked state, read
+  right before the write). If NetBird does not answer and the write lands late, after someone
+  else changed the same user (for example blocked them), it can undo that change. Every user
+  update the app makes has this limit; check the user in NetBird if a write timed out.
 - **Sessions open as tabs** in one full-screen view. They keep running while the user moves around
   the portal, and a button brings them back. Closing the browser tab ends them.
 

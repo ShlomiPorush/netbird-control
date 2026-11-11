@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { useNetworks } from '@/lib/queries';
+import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
 import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
 
@@ -166,6 +167,11 @@ export function RemoteAccessSettings() {
                 <div className="text-[0.8rem] ml-6"><Link className="text-netbird hover:underline" to="/networks">Open Networks</Link></div>
               </>
             )}
+            {st.membership && st.membership.removed.length > 0 && (
+              <StatusLine ok={false} warn label="Members Added Outside NetBird Control Were Removed"
+                detail={`${st.membership.removed.slice(0, 5).map((r) => `${r.kind === 'user' ? 'User' : 'Device'} ${r.name} from ${r.group} (${formatTimestamp(r.at)})`).join('; ')}. Only the gateways belong in these groups. A gateway enrolled by signing in as a user is removed too: enroll it again with a setup key from this page.`} />
+            )}
+            {st.membership?.error && <StatusLine ok={false} label="Couldn't Remove A Member Added Outside NetBird Control" detail={`${st.membership.error} It is tried again on the next read from NetBird.`} />}
             {(st.error || st.lastApply.error) && <StatusLine ok={false} label="Problem" detail={st.error || st.lastApply.error} />}
             <div className="text-[0.78rem] text-nb-gray-500 mt-1">{st.activeSessions} active session(s)</div>
           </>
