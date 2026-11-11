@@ -49,6 +49,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   - **The gateway's objects carry the installation name**, from the Application Name in
     **Settings → General**, such as *Browser Gateway (NetBird Control DEV)*, so installations that
     share a NetBird account never collide. Existing objects are renamed on the next save.
+  - **What the browser may send.** The app passes to guacd only input, the screen size, the
+    clipboard and the sign-in values that guacd asks for. The server address and port never come
+    from the browser. A browser message is limited to 16 KiB; a larger or malformed one closes the
+    session.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
