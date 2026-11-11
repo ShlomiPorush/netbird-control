@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { useNetworks } from '@/lib/queries';
+import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
 import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
 
@@ -136,6 +137,7 @@ export function RemoteAccessSettings() {
             <StatusLine ok={st.guacdReachable} label={st.guacdReachable ? 'guacd Reachable' : 'guacd Not Reachable'}
               detail={st.guacdReachable ? `${form.guacdHost}:${form.guacdPort}` : `No answer from ${form.guacdHost}:${form.guacdPort}. Are the gateway containers running (docker-compose.remote-access.yml)?`} />
             <StatusLine ok={st.targets > 0} warn label={`${st.targets} Resource${st.targets === 1 ? '' : 's'} Open To The Gateway`} />
+            {st.reachError && <StatusLine ok={false} label="Unreadable Policy Blocks Every Session" detail={st.reachError} />}
             {st.domainRoutes.length > 0 && (
               <StatusLine ok={false} label="Domain Routes Block Every Session"
                 detail={`The gateway receives domain-based routes (${st.domainRoutes.slice(0, 4).map((d) => d.name || d.address).join(', ')}). They can't be bounded to addresses, so all sessions are refused. Change those policies' or routes' groups so they don't include the gateway (often the All group).`} />
@@ -153,6 +155,7 @@ export function RemoteAccessSettings() {
                 detail={st.names.guacdReachable ? `${form.namesGuacdHost}:${form.namesGuacdPort}` : `No answer from ${form.namesGuacdHost}:${form.namesGuacdPort}. Is the names gateway running (profile remote-names)?`} />
             )}
             {st.names.gateway.enrolled && <StatusLine ok={st.names.targets > 0} warn label={`${st.names.targets} Domain Resource${st.names.targets === 1 ? '' : 's'} Open To The Names Gateway`} />}
+            {st.names.reachError && <StatusLine ok={false} label="Unreadable Policy Blocks Connecting By Name" detail={st.names.reachError} />}
             {st.names.extraReach.length > 0 && (
               <StatusLine ok={false} label="Address Routes Block Connecting By Name"
                 detail={`The names gateway receives address routes (${st.names.extraReach.slice(0, 5).map((e) => `${e.name} (${e.address})`).join(', ')}${st.names.extraReach.length > 5 ? ` and ${st.names.extraReach.length - 5} more` : ''}). One of them could capture the address a name resolves to, so connecting by name is refused. Usually caused by policies whose source is All.`} />
@@ -164,6 +167,11 @@ export function RemoteAccessSettings() {
                 <div className="text-[0.8rem] ml-6"><Link className="text-netbird hover:underline" to="/networks">Open Networks</Link></div>
               </>
             )}
+            {st.membership && st.membership.removed.length > 0 && (
+              <StatusLine ok={false} warn label="Members Added Outside NetBird Control Were Removed"
+                detail={`${st.membership.removed.slice(0, 5).map((r) => `${r.kind === 'user' ? 'User' : 'Device'} ${r.name} from ${r.group} (${formatTimestamp(r.at)})`).join('; ')}. Only the gateways belong in these groups. A gateway enrolled by signing in as a user is removed too: enroll it again with a setup key from this page.`} />
+            )}
+            {st.membership?.error && <StatusLine ok={false} label="Couldn't Remove A Member Added Outside NetBird Control" detail={`${st.membership.error} It is tried again on the next read from NetBird.`} />}
             {(st.error || st.lastApply.error) && <StatusLine ok={false} label="Problem" detail={st.error || st.lastApply.error} />}
             <div className="text-[0.78rem] text-nb-gray-500 mt-1">{st.activeSessions} active session(s)</div>
           </>

@@ -74,6 +74,7 @@ initAutomations({
         enableCalls.push([id, enabled]);
         resources.get(id).enabled = enabled;
     },
+    renameResource: async (networkId, id, name) => { resources.get(id).name = name; },
     createClientResource: async (networkId, { name, address }) => {
         const id = `c${resources.size + 1}`;
         resources.set(id, { id, name, address, enabled: true, groups: [] });

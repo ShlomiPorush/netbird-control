@@ -36,6 +36,19 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
     color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
     real resolution, so it stays sharp.
+  - **The gateway's objects belong to the app.** Resource edits, grants, recurring rules and
+    routing peers can't add, remove or reuse the Browser Gateway groups, policies or peers, and
+    setup never takes over an existing group or policy with one of their names. Wildcard domain
+    resources and special addresses (loopback, link-local, NetBird peers, multicast, the gateways'
+    own networks) are never targets. A policy rule whose source the app can't read blocks sessions
+    until it is changed. After a restart, new sessions wait about a minute and a half.
+  - **Members added outside the app are removed.** A user, or a device a user enrolled, that
+    someone adds to a Browser Gateway group in the NetBird dashboard is taken out again when the
+    app next reads users or devices; each removal is in the audit log. The Groups page,
+    invitations and setup keys can't add anyone to these groups, rename them or delete them.
+  - **The gateway's objects carry the installation name**, from the Application Name in
+    **Settings → General**, such as *Browser Gateway (NetBird Control DEV)*, so installations that
+    share a NetBird account never collide. Existing objects are renamed on the next save.
   - **What the browser may send.** The app passes to guacd only input, the screen size, the
     clipboard and the sign-in values that guacd asks for. The server address and port never come
     from the browser. A browser message is limited to 16 KiB; a larger or malformed one closes the

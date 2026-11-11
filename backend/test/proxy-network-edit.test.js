@@ -26,6 +26,7 @@ nb.netbirdGet = async (path) => {
     if ((m = path.match(/^\/api\/networks\/[^/]+\/resources\/(.+)$/))) return clone(state.resources[m[1]] || null);
     if ((m = path.match(/^\/api\/networks\/([^/]+)\/resources$/))) return clone((state.networks.find(n => n.id === m[1]) || { resources: [] }).resources.map(id => state.resources[id]));
     if (path === '/api/policies') return [];
+    if (path === '/api/groups') return []; // the routing-peer check reads the groups
     return null;
 };
 let nextId = 0;
