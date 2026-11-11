@@ -562,11 +562,12 @@ async function runMembership({ users, peers }) {
     }
     // After the group writes, outside the target lock: a user write takes the user's lock first
     // and the target lock inside it (the order the grant revoke path uses).
-    for (const [uid, gids] of fromUsers) {
+    for (const uid of fromUsers.keys()) {
         const key = 'user:' + uid;
         if (!due(key) || !_deps.removeUserManagedGroups) continue;
         try {
-            const out = await _deps.removeUserManagedGroups(uid, [...gids]);
+            // Every managed group, not only the ones this data showed: the fresh read decides.
+            const out = await _deps.removeUserManagedGroups(uid, [...managed]);
             _membershipFailed.delete(key);
             if (out) for (const gid of out.removed) removed.push({ kind: 'user', id: uid, name: out.name || uid, group: managedGroupName(gid) });
         } catch (e) { failed(key, e); }

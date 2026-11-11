@@ -226,6 +226,15 @@ test('NetBird answers an empty list as null: such a group is still cleaned up an
     assert.equal(groupOf('g-gwt').name, 'Browser Gateway Targets (Prod)', 'a target group without devices is renamed');
 });
 
+test("a user found through one group loses every managed group, so an earlier failure isn't hidden", async () => {
+    reset();
+    state.users[0].auto_groups = ['g-team', 'g-gwt'];
+    state.groups[0].peers.push({ id: 'p-u1' });
+    await enforce({ peers: [{ id: 'p-u1', name: 'laptop', user_id: 'u1', groups: [{ id: 'g-gw' }] }] });
+    assert.deepEqual(state.users[0].auto_groups, ['g-team'], 'the target group the device did not show is removed too');
+    assert.equal(ra._internal.lastMembershipForTest().error, '');
+});
+
 test('a user whose state NetBird does not return in full is not written, and the failure is reported', async () => {
     reset();
     state.users[0].auto_groups = ['g-gw'];
