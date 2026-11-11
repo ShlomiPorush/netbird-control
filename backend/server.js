@@ -201,16 +201,18 @@ async function resolveWebhookAccount(acct) {
 }
 
 // Constant-time Bearer check against the account's expected token (empty = open - no auth required).
-// Returns true when authenticated; on failure it sends the response itself and returns false. Only
-// FAILED attempts count toward the per-IP throttle (legit webhook bursts are never throttled).
+// Returns true when authenticated; on failure it sends the response itself and returns false. The
+// token is checked first, so the correct token always works; only FAILED attempts consult and count
+// toward the per-IP throttle (legit webhook bursts are never throttled).
 function checkWebhookAuth(req, res, expected) {
     if (!expected) return true;
-    if (tooManyAuthFails(req.ip)) { res.status(429).json({ error: 'Too many failed attempts - try again later' }); return false; }
     const authHeader = req.headers['authorization'];
-    if (!authHeader) { noteAuthFail(req.ip); res.status(401).json({ error: 'Missing Authorization header' }); return false; }
-    const token = authHeader.replace(/^Bearer\s+/i, '');
-    if (!safeEqual(token, expected)) { noteAuthFail(req.ip); res.status(403).json({ error: 'Invalid token' }); return false; }
-    return true;
+    if (authHeader && safeEqual(authHeader.replace(/^Bearer\s+/i, ''), expected)) return true;
+    if (tooManyAuthFails(req.ip)) { res.status(429).json({ error: 'Too many failed attempts - try again later' }); return false; }
+    noteAuthFail(req.ip);
+    if (!authHeader) res.status(401).json({ error: 'Missing Authorization header' });
+    else res.status(403).json({ error: 'Invalid token' });
+    return false;
 }
 
 // ────────────── Traffic Noise Filter (DB-backed; managed in Settings) ──────────────
@@ -329,8 +331,9 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
         const secret = getTelegramWebhookSecret();
         // No secret is stored until the webhook is registered, so nothing can prove the update came from Telegram.
         if (!secret) return res.status(403).json({ error: 'forbidden' });
-        if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
+        // The secret is checked first, so the right one always works; only a wrong one meets the throttle.
         if (!safeEqual(req.headers['x-telegram-bot-api-secret-token'], secret)) {
+            if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
             noteAuthFail(req.ip);
             return res.status(403).json({ error: 'forbidden' });
         }

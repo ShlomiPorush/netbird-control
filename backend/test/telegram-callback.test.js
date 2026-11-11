@@ -84,3 +84,16 @@ test('with a stored secret, the matching secret header passes the update to the 
     assert.equal(r.status, 200);
     assert.deepEqual(handled, [UPDATE]);
 });
+
+// Last: the block it builds up lasts for the rest of this file (every request comes from 127.0.0.1).
+test('the right secret works from an address that failed too often; a wrong one from it gets 429', async () => {
+    secret = REGISTERED_SECRET;
+    let last = 0;
+    for (let i = 0; i < 25 && last !== 429; i++) last = (await callback(withToken('wrong-secret'))).status;
+    assert.equal(last, 429, 'the address is blocked');
+    assert.equal((await callback()).status, 429, 'no secret');
+    const r = await callback(withToken(secret));
+    assert.equal(r.status, 200);
+    assert.deepEqual(handled, [UPDATE]);
+    assert.equal((await callback(withToken('wrong-secret'))).status, 429, 'the right secret does not lift the block');
+});
