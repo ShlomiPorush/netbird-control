@@ -286,13 +286,17 @@ const managedGroupName = (id) => {
 };
 
 // A managed group as NetBird returns it, only when the whole object is there: a PUT replaces the
-// peers and the resources, so a partial or malformed read must never become the new state.
+// peers and the resources, so a partial or malformed read must never become the new state. NetBird
+// answers an empty list as null; a field that is missing altogether is refused.
 const refId = (x) => String((x && typeof x === 'object' ? x.id : x) || '');
+const listField = (g, key) => (!(key in g) ? undefined : g[key] === null ? [] : Array.isArray(g[key]) ? g[key] : undefined);
 function fullGroup(g, id) {
     if (!g || typeof g !== 'object' || g.id !== id || typeof g.name !== 'string' || !g.name) return null;
-    if (!Array.isArray(g.peers) || !g.peers.every(p => refId(p))) return null;
-    if (!Array.isArray(g.resources) || !g.resources.every(r => r && typeof r.id === 'string' && r.id && typeof r.type === 'string' && r.type)) return null;
-    return { name: g.name, peers: g.peers.map(refId), resources: g.resources.map(r => ({ id: r.id, type: r.type })) };
+    const peers = listField(g, 'peers');
+    const resources = listField(g, 'resources');
+    if (!peers || !peers.every(p => refId(p))) return null;
+    if (!resources || !resources.every(r => r && typeof r.id === 'string' && r.id && typeof r.type === 'string' && r.type)) return null;
+    return { name: g.name, peers: peers.map(refId), resources: resources.map(r => ({ id: r.id, type: r.type })) };
 }
 // Change a managed group from a fresh read of it. The caller holds the target lock. `change` gets
 // { name, peers } and returns the new { name, peers }, or null for no write. Resources are kept.
@@ -477,8 +481,11 @@ async function createGatewaySetupKey(kind = 'ip') {
 const MEMBERSHIP_RETRY_MS = 5 * 60_000;
 let _membershipRun = null;
 let _membershipPending = null;
-const _membershipFailedAt = new Map(); // 'group:<id>' / 'user:<id>' -> time of the last failure
+// 'group:<id>' / 'user:<id>' -> { at, message } of the last failure. Kept, and shown, until that
+// object is cleaned up or no longer needs it.
+const _membershipFailed = new Map();
 let _lastMembership = { at: null, removed: [], error: '' };
+const membershipError = () => [...new Set([..._membershipFailed.values()].map(f => f.message))].join(' ');
 
 function enforceManagedMembership(data = {}) {
     if ((typeof currentTenantAccount === 'function' && currentTenantAccount()) || NETBIRD_READONLY || !netbirdApiConfigured()) return Promise.resolve(null);
@@ -530,10 +537,17 @@ async function runMembership({ users, peers }) {
             if (gateway) add(fromUsers, owner, gid);
         }
     }
-    if (!fromGroups.size && !fromUsers.size) return null;
-    const due = (key) => Date.now() - (_membershipFailedAt.get(key) || 0) >= MEMBERSHIP_RETRY_MS;
+    // A failure is forgotten once the data this run covers no longer shows that member.
+    for (const key of [..._membershipFailed.keys()]) {
+        const kind = key.slice(0, key.indexOf(':'));
+        const id = key.slice(key.indexOf(':') + 1);
+        if (kind === 'group' && Array.isArray(peers) && !fromGroups.has(id)) _membershipFailed.delete(key);
+        if (kind === 'user' && Array.isArray(users) && Array.isArray(peers) && !fromUsers.has(id)) _membershipFailed.delete(key);
+    }
+    if (!fromGroups.size && !fromUsers.size) { _lastMembership = { ..._lastMembership, error: membershipError() }; return null; }
+    const due = (key) => Date.now() - ((_membershipFailed.get(key) || {}).at || 0) >= MEMBERSHIP_RETRY_MS;
+    const failed = (key, e) => _membershipFailed.set(key, { at: Date.now(), message: e.message || String(e) });
     const removed = [];
-    const errors = [];
     for (const [gid, ids] of fromGroups) {
         const key = 'group:' + gid;
         if (!due(key)) continue;
@@ -542,9 +556,9 @@ async function runMembership({ users, peers }) {
                 const keep = g.peers.filter(id => !ids.has(id));
                 return keep.length === g.peers.length ? null : { name: g.name, peers: keep };
             }));
-            _membershipFailedAt.delete(key);
+            _membershipFailed.delete(key);
             if (out) for (const id of out.before.peers.filter(id => ids.has(id))) removed.push({ kind: 'device', id, name: peerName.get(id) || id, group: out.before.name });
-        } catch (e) { _membershipFailedAt.set(key, Date.now()); errors.push(e.message); }
+        } catch (e) { failed(key, e); }
     }
     // After the group writes, outside the target lock: a user write takes the user's lock first
     // and the target lock inside it (the order the grant revoke path uses).
@@ -553,9 +567,9 @@ async function runMembership({ users, peers }) {
         if (!due(key) || !_deps.removeUserManagedGroups) continue;
         try {
             const out = await _deps.removeUserManagedGroups(uid, [...gids]);
-            _membershipFailedAt.delete(key);
+            _membershipFailed.delete(key);
             if (out) for (const gid of out.removed) removed.push({ kind: 'user', id: uid, name: out.name || uid, group: managedGroupName(gid) });
-        } catch (e) { _membershipFailedAt.set(key, Date.now()); errors.push(e.message); }
+        } catch (e) { failed(key, e); }
     }
     const at = new Date().toISOString();
     for (const r of removed) {
@@ -570,7 +584,7 @@ async function runMembership({ users, peers }) {
     _lastMembership = {
         at,
         removed: [...removed.map(r => ({ ...r, at })), ..._lastMembership.removed].slice(0, 10),
-        error: errors.join(' '),
+        error: membershipError(),
     };
     return removed;
 }
@@ -1329,7 +1343,8 @@ module.exports = {
         clearSettleTimerForTest: () => { clearTimeout(_settleTimer); _settleTimer = null; },
         freshSnapshot, invalidateSnapshot,
         membershipIdleForTest: async () => { while (_membershipRun) await _membershipRun; },
-        resetMembershipForTest: () => { _membershipFailedAt.clear(); _lastMembership = { at: null, removed: [], error: '' }; _membershipPending = null; },
+        resetMembershipForTest: () => { _membershipFailed.clear(); _lastMembership = { at: null, removed: [], error: '' }; _membershipPending = null; },
+        passMembershipRetryForTest: () => { for (const f of _membershipFailed.values()) f.at -= MEMBERSHIP_RETRY_MS; },
         installNameForTest: () => _installName,
         lastMembershipForTest: () => ({ ..._lastMembership }),
     },

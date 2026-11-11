@@ -38,6 +38,7 @@ nb.netbirdGet = async (p) => {
     if (p === '/api/policies') return clone(state.policies);
     if (p === '/api/networks') return [];
     if (p === '/api/networks/resources') return [];
+    if (p === '/api/peers') return clone(state.peers || []);
     return [];
 };
 nb.netbirdPost = async (p, body) => {
@@ -197,11 +198,41 @@ test('a failed removal waits before it is tried again; a later success clears th
     await enforce(data);
     await enforce(data);
     assert.equal(writes('PUT', /^\/api\/groups\//).length, 1, 'not retried right away');
+    assert.match(ra._internal.lastMembershipForTest().error, /busy/, 'the failure stays visible while it waits');
     state.putHook = null;
-    ra._internal.resetMembershipForTest();
+    ra._internal.passMembershipRetryForTest();
     await enforce(data);
     assert.deepEqual(peerIds('g-gwt'), []);
     assert.equal(ra._internal.lastMembershipForTest().error, '');
+});
+
+test('a group write that gets no answer holds new sessions back and is reported', async () => {
+    reset({ putHook: () => ({ status: 0, error: 'timeout' }) });
+    state.groups[1].peers = [{ id: 'p-x' }];
+    await enforce({ peers: [{ id: 'p-x', user_id: 'u1', groups: [{ id: 'g-gwt' }] }] });
+    assert.equal(ra._internal.settlingForTest(), true);
+    assert.match(ra._internal.lastMembershipForTest().error, /timeout/);
+    ra._internal.clearSettleTimerForTest();
+});
+
+test('NetBird answers an empty list as null: such a group is still cleaned up and renamed', async () => {
+    reset({ groupShape: (g) => ({ ...g, peers: g.peers.length ? g.peers : null, resources: g.resources && g.resources.length ? g.resources : null }) });
+    state.groups[0].peers.push({ id: 'p-u1' });
+    await enforce({ peers: [{ id: 'p-u1', user_id: 'u1', groups: [{ id: 'g-gw' }] }] });
+    assert.deepEqual(peerIds('g-gw'), ['p-gw']);
+    assert.deepEqual(writes('PUT', /^\/api\/groups\/g-gw$/)[0][2].resources, []);
+    settings.app_name = 'Prod';
+    await ra._internal.applyGatewayObjects();
+    assert.equal(groupOf('g-gwt').name, 'Browser Gateway Targets (Prod)', 'a target group without devices is renamed');
+});
+
+test('a user whose state NetBird does not return in full is not written, and the failure is reported', async () => {
+    reset();
+    state.users[0].auto_groups = ['g-gw'];
+    delete state.users[0].is_blocked;
+    await enforce({ users: clone(state.users) });
+    assert.equal(writes('PUT', /^\/api\/users\//).length, 0);
+    assert.match(ra._internal.lastMembershipForTest().error, /in full/);
 });
 
 test('nothing is written for another account, without stored groups, or for ordinary groups', async () => {
@@ -248,13 +279,20 @@ test("a user write waits for the target lock after taking the user's lock", asyn
     assert.deepEqual(await removing, { name: 'u1@example.com', removed: ['g-gw'] });
 });
 
-test('the regular users and peers refresh runs the clean-up for the main account', async () => {
+test('the regular users refresh and devices refresh run the clean-up for the main account', async () => {
     reset();
     state.users[0].auto_groups = ['g-gw'];
     db.resetNbCaches();
     await db.ensureUsersFresh();
     await ra._internal.membershipIdleForTest();
     assert.deepEqual(state.users[0].auto_groups, []);
+    reset();
+    state.groups[1].peers = [{ id: 'p-x' }];
+    state.peers = [{ id: 'p-x', name: 'x', user_id: 'u1', groups: [{ id: 'g-gwt' }] }];
+    db.resetNbCaches();
+    await db.ensurePeersFresh();
+    await ra._internal.membershipIdleForTest();
+    assert.deepEqual(peerIds('g-gwt'), []);
 });
 
 // ─── Screens, invites and setup keys ───
@@ -262,8 +300,8 @@ test('the group screens never add to, rename or delete a managed group; removing
     reset();
     state.groups[0].peers.push({ id: 'p-extra' });
     await assert.rejects(db.setGroupPeers('g-gw', ['p-gw', 'p-extra', 'p-new']), /managed by Browser Remote Access/);
-    await db.setGroupPeers('g-gw', ['p-gw']);
-    assert.deepEqual(peerIds('g-gw'), ['p-gw'], 'taking a member out is allowed');
+    await assert.rejects(db.setGroupPeers('g-gw', ['p-gw']), /managed by Browser Remote Access/, 'devices are set by the app only');
+    assert.deepEqual(peerIds('g-gw'), ['p-gw', 'p-extra']);
     await assert.rejects(db.renameGroup('g-gwt', 'Renamed'), /managed by Browser Remote Access/);
     await assert.rejects(db.deleteGroup('g-ngw'), /managed by Browser Remote Access/);
     await assert.rejects(db.addUsersToGroup('g-ngwt', ['u1']), /managed by Browser Remote Access/);

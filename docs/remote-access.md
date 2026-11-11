@@ -51,8 +51,9 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
   (a gateway that enrolls later joins it). Deleting a resource never deletes these groups or
   policies, and merging, moving or editing a resource never changes these policies. The Groups
   page, user invitations and setup keys can't add anyone to these groups, rename them or delete
-  them; taking a member out still works. This is the same for administrators, and covers the
-  groups of every installation on the NetBird account.
+  them, and the Groups page can't change their devices; taking a user out still works. This is
+  the same for administrators, and covers the groups of every installation on the NetBird
+  account.
 - **Members added outside the app are removed.** Only the gateways belong in these groups. When
   someone adds a member in the NetBird dashboard or through its API, the app takes it out again:
   - a user who has one of these groups among their own groups loses it;

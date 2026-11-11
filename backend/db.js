@@ -135,13 +135,19 @@ async function refuseManagedGroupEdit(groupIds) {
 }
 // Takes managed groups out of one user's own groups (the membership clean-up in remote-access.js).
 // The user's lock first, then the target lock, as the grant revoke path takes them. Written from a
-// fresh read of the user; a user whose role, groups or block state are not all there is not
-// written. Returns { name, removed } or null when there was nothing to remove.
+// fresh read of the user (regular and service users, as the real user that writes); a user whose
+// role, groups or block state are not all there is not written and the clean-up reports it.
+// Returns { name, removed }, or null when the user is gone or had nothing to remove.
 async function removeUserManagedGroups(userId, groupIds) {
     return withNbUserLock(userId, () => withTargetLock(async () => {
-        const u = (await liveUsersById([userId])).get(String(userId));
+        const [regular, service] = await asRealUser(() => Promise.all([
+            netbirdGet('/api/users').catch(() => null),
+            netbirdGet('/api/users?service_user=true').catch(() => null),
+        ]));
+        if (!Array.isArray(regular) || !Array.isArray(service)) throw new Error("Couldn't read the users from NetBird - nothing was changed.");
+        const u = [...regular, ...service].find(x => x && String(x.id) === String(userId));
         if (!u) return null;
-        if (typeof u.role !== 'string' || !u.role || !Array.isArray(u.auto_groups)) throw new Error(`Couldn't read user "${userId}" from NetBird in full - nothing was changed.`);
+        if (typeof u.role !== 'string' || !u.role || !Array.isArray(u.auto_groups) || typeof u.is_blocked !== 'boolean') throw new Error(`Couldn't read user "${u.email || userId}" from NetBird in full - nothing was changed.`);
         const cur = u.auto_groups.map(gid).filter(Boolean).map(String);
         const drop = cur.filter(g => groupIds.includes(g));
         if (!drop.length) return null;
@@ -5072,10 +5078,10 @@ async function setGroupPeers(groupId, peerIds) {
     const g = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
     if (!g || !g.id) { const e = new Error('Group not found.'); e.status = 400; throw e; }
     if (g.name === 'All') { const e = new Error('The "All" group is managed automatically - its peers cannot be changed.'); e.status = 400; throw e; }
+    // A managed group's devices are set by NetBird Control only (members added outside it are
+    // removed by the Browser Remote Access clean-up, under its lock).
+    await refuseManagedGroupEdit([groupId]);
     const peers = Array.from(new Set((Array.isArray(peerIds) ? peerIds : []).map(x => String(x || '')).filter(Boolean)));
-    // A managed group's peers can only be taken out here, never added.
-    const had = new Set((Array.isArray(g.peers) ? g.peers : []).map(p => String((p && p.id) || p || '')));
-    if (peers.some(p => !had.has(p))) await refuseManagedGroupEdit([groupId]);
     const body = { name: g.name, peers };
     if (Array.isArray(g.resources)) body.resources = g.resources; // preserve resources across the replace
     const resp = await asRealUser(() => netbirdPut('/api/groups/' + encodeURIComponent(groupId), body));

@@ -450,7 +450,7 @@ function pathStatus(snap, cfg, routers) {
 
 module.exports = {
     evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
-    gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, MANAGED_NAME_BASES, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
+    gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt,
     TEMP_POLICY_RE, TEMP_GROUP_RE,
 };
