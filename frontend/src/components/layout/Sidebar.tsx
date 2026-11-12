@@ -44,7 +44,7 @@ const NAV: NavItem[] = [
 ];
 
 function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: () => void }) {
-  const { restricted, tenantAdmin, canApprove, can, viewer } = useViewer();
+  const { restricted, tenantAdmin, canApprove, can, canCheckAccess, viewer } = useViewer();
   // Tenants shows only for admins of an activated MSP account (checked once, cached long).
   const mspAvailable = !!useMspStatus(!restricted).data?.available;
   const inTenantMode = !!getTenantMode();
@@ -55,7 +55,7 @@ function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: 
     // Tenants stays admin-only (never shown to support users): `restricted`, not tenantAdmin.
     if (n.mspOnly && (!mspAvailable || restricted)) return false;
     if (n.remoteAccess) return !!viewer?.remoteAccess;
-    if (n.accessHub) return !restricted || canApprove || can('temp.manage') || tenantAdmin;
+    if (n.accessHub) return !restricted || canApprove || can('temp.manage') || tenantAdmin || canCheckAccess;
     // Admin-gated items open to a Tenant Support holder WHILE managing a tenant (tenantAdmin);
     // outside tenant mode tenantAdmin === isAdmin, so a support user sees exactly what a
     // restricted user sees today.

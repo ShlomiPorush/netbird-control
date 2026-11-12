@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ClipboardCheck, ChevronRight, Inbox, Clock, RotateCcw } from 'lucide-react';
+import { ClipboardCheck, ChevronRight, Inbox, Clock, RotateCcw, ShieldCheck } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useViewer } from '@/contexts/ViewerContext';
@@ -9,6 +9,7 @@ import { usePendingRequestCount } from '@/lib/queries';
 import AccessRequests from '@/pages/AccessRequests';
 import TemporaryAccess from '@/pages/TemporaryAccess';
 import AccessReview from '@/pages/AccessReview';
+import AccessCheck from '@/pages/AccessCheck';
 
 // One roof for the access lifecycle, mirroring the Settings layout: a request is
 // APPROVED into a temporary grant, grants are the STANDING access, and the review
@@ -16,10 +17,10 @@ import AccessReview from '@/pages/AccessReview';
 // admins see only Requests; temp.manage holders only Temporary Access).
 // NOTE: the hub uses ?section= - the inner pages already own ?tab= for their own
 // sub-tabs (Grants/Recurring, Requests/History), so the two never collide.
-type Section = 'requests' | 'grants' | 'review';
+type Section = 'requests' | 'grants' | 'review' | 'check';
 
 export default function AccessManagement() {
-  const { restricted, canApprove, can } = useViewer();
+  const { restricted, canApprove, can, canCheckAccess } = useViewer();
   // Access requests are a MAIN-only feature (requesters are main users); while managing a tenant
   // only the converted per-tenant sections show - Temporary Access (grants) + Access Review.
   const inTenantMode = !!getTenantMode();
@@ -29,7 +30,8 @@ export default function AccessManagement() {
     ...(canApprove && !inTenantMode ? [{ key: 'requests' as Section, label: 'Access Requests', icon: Inbox }] : []),
     ...((!restricted || can('temp.manage')) ? [{ key: 'grants' as Section, label: 'Temporary Access', icon: Clock }] : []),
     ...(!restricted ? [{ key: 'review' as Section, label: 'Access Review', icon: RotateCcw }] : []),
-  ] as { key: Section; label: string; icon: LucideIcon }[]), [restricted, canApprove, can, inTenantMode]);
+    ...(canCheckAccess ? [{ key: 'check' as Section, label: 'Access Check', icon: ShieldCheck }] : []),
+  ] as { key: Section; label: string; icon: LucideIcon }[]), [restricted, canApprove, can, canCheckAccess, inTenantMode]);
 
   const [params, setParams] = useSearchParams();
   const isSection = (v: string | null): v is Section => !!v && TABS.some((t) => t.key === v);
@@ -77,7 +79,8 @@ export default function AccessManagement() {
         <h1 className="text-2xl font-bold text-nb-gray-900 dark:text-nb-gray-50 mb-2">{active.label}</h1>
         {active.key === 'requests' ? <AccessRequests />
           : active.key === 'grants' ? <TemporaryAccess />
-            : <AccessReview />}
+            : active.key === 'check' ? <AccessCheck />
+              : <AccessReview />}
       </div>
     </div>
   );

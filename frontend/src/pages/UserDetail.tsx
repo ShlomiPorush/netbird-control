@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Users as UsersIcon, User2, Mail, Shield, Activity as ActivityIcon, History,
-  FolderGit2, RefreshCw, Rows3, Trash2, Ban, ShieldCheck, KeyRound,
+  FolderGit2, RefreshCw, Rows3, Trash2, Ban, ShieldCheck, KeyRound, UserSearch,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { initials, avatarColor } from '@/lib/str';
@@ -31,7 +31,7 @@ function statusBadge(u: UserDetailT): { label: string; tone: 'green' | 'red' | '
 export default function UserDetail() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
-  const { viewer, restricted, tenantAdmin } = useViewer();
+  const { viewer, restricted, tenantAdmin, canCheckAccess } = useViewer();
   const { data: user, isLoading, isError, refetch, isFetching } = useUserDetail(id);
   const refresh = useNetbirdRefresh();
   const del = useDeleteUser();
@@ -119,9 +119,14 @@ export default function UserDetail() {
           <span className="truncate">{name}</span>
           {user.is_service_user && <Badge tone="gray" className="shrink-0">Service User</Badge>}
         </h1>
-        {/* Admin actions - resend a pending invite, reset MFA, block/unblock, delete. */}
-        {tenantAdmin && (st.label === 'Invited' || canResetMfa || canBlock || canDelete) && (
-          <div className="ml-auto shrink-0 flex items-center gap-2">
+        {/* Check Access, and the admin actions - resend a pending invite, reset MFA, block/unblock, delete. */}
+        {((canCheckAccess && !user.is_service_user) || (tenantAdmin && (st.label === 'Invited' || canResetMfa || canBlock || canDelete))) && (
+          <div className="ml-auto shrink-0 flex flex-wrap justify-end items-center gap-2">
+            {canCheckAccess && !user.is_service_user && (
+              <Button variant="secondary" size="sm" onClick={() => navigate(`/access?section=check&user=${encodeURIComponent(user.id)}`)}>
+                <UserSearch size={14} /> Check Access
+              </Button>
+            )}
             {st.label === 'Invited' && <ResendInviteButton userId={user.id} email={user.email} variant="button" />}
             {canResetMfa && (
               // NetBird MFA reset runs on the AUTH service, unreachable through the management API on

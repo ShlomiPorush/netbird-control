@@ -4,6 +4,7 @@ import { api, getTenantMode } from './api';
 import type {
   Viewer, LogsResponse, AdminLogsResponse, AuditResponse, IpHistoryResponse, TrafficSummaryResponse, ReverseProxyStatus, ProxyLogsResponse, ProxyLogsSummaryResponse, ProxyServiceStats, ProxyDomain, EditableProxyService, ProxyTargetOptions, NbUser, Peer, PeerDetail, NbGroup, GroupDetail, UserDetail,
   Network, NetworkDetail, Policy, PolicyOptions, TemplatesResponse, GroupRef, FilterRulesResponse, AppConfig, NetbirdApiConfig, WebhookConfig, NetbirdWebhookStatus, TelegramConfig, SmtpConfig, ApproverConfig, AutoApprovalConfig, FeaturePermsConfig, RecurringAccessRule, SecurityConfig, EdrAutoBypassConfig, RetentionStatus, SearchResult, AccessProfile, NetworkDefaultProfiles, PostureCheck, Country, CityRef, Automation, AutomationRun, AutomationManaged, BlocklistEntry, TemporaryAccessGrant, AccessRequest, RequestTargetResult, SystemHealth, Recertification, RecertRoundSummary, RecertRoundDetail, ResourceConflict, OutboundEntry, OutboundBody, CleanupReport, DiagnosticsInfo, NbNotice, MspStatus, MspTenant, MspBillingPlans, TenantOverview, MspSwitcherItem, TenantDrift, TenantDefaultsResponse, NetbirdSettingsResponse, FleetReport, MspDigestConfig, InternalBackupStatus, InviteDefaultGroups, TrafficPullStatus, AuditPullStatus,
+  AccessCheckOptions, UserAccessResult, WhoHasAccessResult,
 } from './types';
 
 export type LogParams = {
@@ -132,6 +133,30 @@ export function useRecertRound(id: number | null) {
     queryKey: ['recert-round', id],
     queryFn: () => api.get<RecertRoundDetail>(`/api/recertification/rounds/${id!}`),
     enabled: id != null,
+  });
+}
+
+// Access Check - who has access to what, read fresh from NetBird on every check (no polling).
+export function useAccessCheckOptions(enabled = true) {
+  return useQuery({ queryKey: ['access-check-options'], queryFn: () => api.get<AccessCheckOptions>('/api/access-check/options'), enabled, staleTime: 60_000 });
+}
+export type AccessCheckParams = { type: 'resource' | 'network'; id: string; protocol: string; port: string };
+export function useUserAccessCheck(userId: string, p: AccessCheckParams | null) {
+  return useQuery({
+    queryKey: ['access-check-user', userId, p],
+    queryFn: () => api.get<UserAccessResult>('/api/access-check/user', { user_id: userId, ...p! }),
+    enabled: !!userId && !!p,
+    retry: false,
+    staleTime: 0,
+  });
+}
+export function useWhoHasAccess(p: AccessCheckParams | null) {
+  return useQuery({
+    queryKey: ['access-check-target', p],
+    queryFn: () => api.get<WhoHasAccessResult>('/api/access-check/target', { ...p! }),
+    enabled: !!p,
+    retry: false,
+    staleTime: 0,
   });
 }
 

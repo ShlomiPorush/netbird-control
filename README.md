@@ -49,6 +49,9 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   failed attempts block an address, but never a valid key, webhook token or Telegram secret.
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and
   what to do next, plus a downloadable Windows diagnostics script.
+- **Access Check** - see whether a user is authorized for a resource or network, or everyone who
+  is, by the same rules Remote Access uses, with the policy, group and ports behind each answer and
+  the per-device details underneath.
 - **Guardrails** - an address blocklist, overlap and conflict detection, a cleanup report and a
   read-only mode for the NetBird API.
 - **Notifications** - Telegram topics per category, email to people who request access, anomaly

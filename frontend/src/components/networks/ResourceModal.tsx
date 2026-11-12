@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Share2, Plus, MoreVertical, Edit2, Trash2, Lock, ShieldCheck, Copy, ClipboardPaste, Check, X as XIcon, Rows3 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Share2, Plus, MoreVertical, Edit2, Trash2, Lock, ShieldCheck, Copy, ClipboardPaste, Check, X as XIcon, Rows3, ScanSearch } from 'lucide-react';
 import {
   Modal, Tabs, Input, Field, Button, Spinner, GroupMultiSelect, SearchInput, SortTh, Pagination,
 } from '@/components/ui';
@@ -146,7 +147,8 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
   const blockedBy = address.trim() ? addressBlockedForNetwork(address.trim(), networkId, blocklist || []) : null;
   // The blocklist blocks everyone EXCEPT admins - an admin may knowingly override (audited
   // server-side as blocklist.override), so for them it's a warning, not a hard stop.
-  const { isAdmin } = useViewer();
+  const { isAdmin, canCheckAccess } = useViewer();
+  const navigate = useNavigate();
   const blockedHard = !!blockedBy && !isAdmin;
 
   const policyLabel = name.trim() ? `${name.trim()} Policy` : 'Policy';
@@ -260,6 +262,13 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
       }
       footer={
         <>
+          {isEdit && canCheckAccess && resource?.id && (
+            // What NetBird allows for the SAVED resource - unsaved edits are not part of the answer.
+            <Button variant="ghost" size="sm" className="mr-auto" title="See who can reach this resource now (saved settings)"
+              onClick={() => navigate(`/access?section=check&mode=who&target=${encodeURIComponent(`resource:${resource.id}`)}`)}>
+              <ScanSearch size={14} /> Who Has Access
+            </Button>
+          )}
           <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
           <Button variant="primary" size="sm" onClick={submit} disabled={save.isPending || nameExists || addressExists || blockedHard}>
             {save.isPending ? '…' : isEdit ? 'Save Changes' : 'Create'}

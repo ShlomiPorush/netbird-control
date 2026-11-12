@@ -1858,3 +1858,116 @@ export interface InternalBackupRestoreResult {
   tables?: Record<string, number>;
   skipped?: Record<string, number>;
 }
+
+// ─── Access Check (Access Management → Access Check) ───
+export type AccessVerdict = 'granted' | 'partial' | 'conditional' | 'port_blocked' | 'cannot_determine' | 'pending' | 'denied';
+export type AccessProtocol = 'any' | 'tcp' | 'udp' | 'icmp';
+export interface AccessQuery { protocol: AccessProtocol; port: number | null }
+export interface AccessNetRef { id: string; name: string }
+export interface AccessResourceRef { id: string; name: string; address: string; network: AccessNetRef | null; enabled?: boolean }
+export interface AccessPortsDesc { tcp: string; udp: string; icmp: boolean }
+export interface AccessTempNote { id: string; state: 'active' | 'ended' | 'unknown'; expiresAt?: string | null; status?: string }
+export interface AccessGrantedBy { policy: string; policyId: string; infra: boolean; via: string[]; ports: AccessPortsDesc; temp?: AccessTempNote }
+export interface AccessPart {
+  label: string;
+  answer: 'yes' | 'no' | 'unknown';
+  reason?: 'no_route' | 'ambiguous_route' | 'unparsable_rule' | 'not_checked' | 'router_unknown' | 'router_differs';
+  winner?: AccessResourceRef;
+  winners?: AccessResourceRef[];
+  overlapping?: boolean;
+  allowed?: AccessPortsDesc;
+  grantedBy?: AccessGrantedBy[];
+  blockedBy?: string[];
+  note?: 'unparsable_accept';
+  variesByRouter?: boolean;
+}
+export interface AccessSummary { verdict: AccessVerdict; parts: AccessPart[]; overlapNotChecked?: boolean; postureIndependent?: { policy: string; checks: string[] }[] }
+export interface AccessConditional {
+  verdict: 'conditional';
+  ifChecksFail: AccessSummary;
+  ifChecksPass: AccessSummary;
+  posturePolicies: { policy: string; checks: string[] }[];
+}
+export type AccessAnswer = AccessSummary | AccessConditional;
+export interface AccessNetworkAnswer {
+  verdict: AccessVerdict;
+  perResource: { resource: AccessResourceRef; verdict: AccessVerdict; answer: AccessAnswer }[];
+}
+export type AccessDeviceBlocker = 'user_blocked' | 'login_expired' | 'compliance' | 'compliance_unknown';
+export interface AccessDevice {
+  id: string;
+  name: string;
+  connected: boolean;
+  userId: string;
+  effective: AccessVerdict | 'cannot_connect';
+  blockers: AccessDeviceBlocker[];
+  infrastructure?: boolean;
+  answer: AccessAnswer | AccessNetworkAnswer;
+}
+export interface AccessUserRef { id: string; name: string; email: string; blocked: boolean }
+export interface AccessTargetInfo {
+  type: 'resource' | 'network';
+  id: string;
+  name: string;
+  address?: string;
+  network?: AccessNetRef | null;
+  enabled?: boolean;
+  resources?: AccessResourceRef[];
+}
+export interface AccessRouterStatus { network: AccessNetRef; status: 'online' | 'offline' | 'none' | 'unknown'; online?: string[] }
+// Authorization: the Remote Access model (the user's groups, their devices' groups and All,
+// against the policies). The primary answer; the device fields below are the details.
+export interface AccessAuthGrant { policy: string; policyId: string; via: string[]; ports: AccessPortsDesc; postureChecks?: string[]; temp?: AccessTempNote }
+export interface AccessAuthResource {
+  resource: AccessResourceRef;
+  verdict: AccessVerdict;
+  allowed: AccessPortsDesc;
+  grantedBy: AccessAuthGrant[];
+  blockedBy: string[];
+  reason?: 'blocked_by_policy';
+}
+export interface AccessAuthorization { verdict: AccessVerdict; reason?: 'user_blocked' | 'user_not_found'; groups: string[]; resources: AccessAuthResource[] }
+export interface WhoAuthorizedUser {
+  user: AccessUserRef;
+  verdict: AccessVerdict;
+  resources: { resource: AccessResourceRef; verdict: AccessVerdict; policies: string[]; via: string[]; temporary?: boolean }[];
+}
+export interface UserAccessResult {
+  user: AccessUserRef;
+  target: AccessTargetInfo;
+  query: AccessQuery;
+  authorization: AccessAuthorization;
+  verdict: AccessVerdict;
+  pendingAs?: AccessVerdict;
+  reason?: 'user_blocked' | 'no_devices' | 'device_cannot_connect';
+  devices: AccessDevice[];
+  routers: AccessRouterStatus[];
+  legacyRoutes: { resource: string; route: string }[];
+}
+export interface AccessCompactDevice {
+  id: string;
+  name: string;
+  connected: boolean;
+  effective: AccessVerdict | 'cannot_connect';
+  blockers: AccessDeviceBlocker[];
+  infrastructure?: boolean;
+  endedGrant?: boolean;
+  policies?: string[];
+  resources?: { resource: AccessResourceRef; verdict: AccessVerdict }[];
+}
+export interface WhoHasAccessUser { user: AccessUserRef; verdict: AccessVerdict; pendingAs?: AccessVerdict; devices: AccessCompactDevice[] }
+export interface WhoHasAccessResult {
+  target: AccessTargetInfo;
+  query: AccessQuery;
+  authorized: WhoAuthorizedUser[];
+  users: WhoHasAccessUser[];
+  pending: WhoHasAccessUser[];
+  devices: AccessCompactDevice[];
+  routers: AccessRouterStatus[];
+  legacyRoutes: { resource: string; route: string }[];
+}
+export interface AccessCheckOptions {
+  users: AccessUserRef[];
+  resources: AccessResourceRef[];
+  networks: AccessNetRef[];
+}
