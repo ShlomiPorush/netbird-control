@@ -14,7 +14,7 @@ const { initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEven
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
-const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
+const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, refuseManagedGroupEdit, removeUserManagedGroups, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
 
 // AD group whose members are treated as admins (in addition to NetBird owner/admin)
 const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID || '';
@@ -2252,6 +2252,7 @@ const {
     renewLease: renewRemoteLease, endSession: endRemoteSession, takeToken: takeRemoteToken, attachTunnel: attachRemoteTunnel,
     recheckSessions: recheckRemoteSessions, sweepSessions: sweepRemoteSessions, closeOrphanSessions: closeRemoteOrphans,
     getRemoteAccessStatusLite, RECHECK_INTERVAL_MS: REMOTE_RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD: REMOTE_WS_MAX_PAYLOAD,
+    beginStartupSettling: beginRemoteTargetSettling,
 } = require('./lib/remote-access');
 app.post('/api/access-requests', async (req, res) => {
     try {
@@ -3117,7 +3118,7 @@ app.post('/api/users/invite', requireAdmin, async (req, res) => {
         res.json(user);
     } catch (err) {
         console.error('Error inviting user:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to invite the user' });
+        res.status(err.status || 502).json({ error: err.message || 'Failed to invite the user' });
     }
 });
 
@@ -3225,6 +3226,9 @@ app.post('/api/setup-keys', requireAdmin, async (req, res) => {
     try {
         const b = req.body || {};
         const name = String(b.name || '').trim().slice(0, 100);
+        // A setup key never enrolls a device into a Browser Remote Access group: only the keys the
+        // Browser Remote Access settings create (for the gateways) do.
+        await refuseManagedGroupEdit(Array.isArray(b.autoGroups) ? b.autoGroups : []);
         const key = await createSetupKey({
             name,
             type: b.type === 'reusable' ? 'reusable' : 'one-off',
@@ -3241,7 +3245,7 @@ app.post('/api/setup-keys', requireAdmin, async (req, res) => {
         res.json(key);
     } catch (err) {
         console.error('Error creating setup key:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to create the setup key' });
+        res.status(err.status || 502).json({ error: err.message || 'Failed to create the setup key' });
     }
 });
 
@@ -4585,7 +4589,7 @@ app.post('/api/networks/:id/routers', async (req, res) => {
         res.json({ status: 'ok', router: out });
     } catch (err) {
         console.error('Error adding routing peer:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to add routing peer' });
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to add routing peer' });
     }
 });
 
@@ -4891,7 +4895,7 @@ async function start() {
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
-            addResourceGroups, removeResourceGroups, createSetupKey, scanResourceConflicts,
+            addResourceGroups, removeResourceGroups, createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).
             stillPermitted: async ({ oid, email, userId, snap }) => {
@@ -4913,6 +4917,9 @@ async function start() {
                 return permitted([...adGroups, ...nbGroups]);
             },
         });
+        // A resource write sent before a restart may still land in NetBird: no session is approved
+        // until a target sync that starts 90 s from now has finished.
+        beginRemoteTargetSettling();
         await closeRemoteOrphans().then(n => { if (n) console.log(`[remote-access] closed ${n} session(s) left open by a restart`); })
             .catch(err => console.error('[remote-access] orphan cleanup error:', err.message));
         setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);

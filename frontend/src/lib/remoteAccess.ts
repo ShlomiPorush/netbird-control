@@ -96,15 +96,19 @@ export interface RemoteAccessStatus {
   domainRoutes: { name: string; address: string; network: string }[];
   extraReach: { name: string; address: string; network: string }[];
   targets: number;
+  reachError?: string;
   error: string;
   names: {
     guacdReachable: boolean | null;
     gateway: { enrolled: boolean; online: boolean; peers: { id: string; name: string; connected: boolean; ip: string }[] };
     extraReach: { name: string; address: string; network: string }[];
     targets: number;
+    reachError?: string;
   };
   conflicts: { address: string; networks: string[] }[];
   lastApply: { at: string | null; error: string };
+  // Members added to the managed groups outside the app, and taken out again (newest first).
+  membership?: { at: string | null; error: string; removed: { at: string; kind: 'user' | 'device'; name: string; group: string }[] };
 }
 
 // What the user typed or pasted into the address field, cleaned to what the field is for: a

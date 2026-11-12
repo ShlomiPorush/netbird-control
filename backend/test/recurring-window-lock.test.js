@@ -9,7 +9,12 @@ let nbUser, gateAdd = null;
 nb.netbirdApiConfigured = () => true;
 nb.bustNbCaches = () => { };
 nb.ensureGroupsFresh = async () => { };
-nb.netbirdGet = async (path) => (String(path).startsWith('/api/users') ? [clone(nbUser)] : []);
+nb.netbirdGet = async (path) => {
+    // A grant reads each group live before adding a user to it.
+    const gm = String(path).startsWith('/api/groups/') ? [null, String(path).slice('/api/groups/'.length)] : null;
+    if (gm) return { id: decodeURIComponent(gm[1]), name: 'Ordinary group' };
+    return String(path).startsWith('/api/users') ? [clone(nbUser)] : [];
+};
 nb.netbirdReq = async (method, path, body) => {
     if (method === 'PUT' && String(path).startsWith('/api/users/')) {
         if (gateAdd && body.auto_groups.includes('g-target')) { const g = gateAdd; gateAdd = null; await g; }

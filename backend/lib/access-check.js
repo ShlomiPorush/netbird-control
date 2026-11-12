@@ -23,7 +23,7 @@
 //     posture-gated policy makes the device's answer "conditional".
 // Anything it does not positively understand is reported as uncertain, never as a grant.
 
-const { parsePrefix, domainPattern, TEMP_POLICY_RE, TEMP_GROUP_RE, grantIsValid, userSourceGroups, MANAGED_POLICY_NAMES } = require('./remote-access-auth');
+const { parsePrefix, domainPattern, TEMP_POLICY_RE, TEMP_GROUP_RE, grantIsValid, userSourceGroups, isManagedGatewayName } = require('./remote-access-auth');
 
 const idOf = (x) => (x && typeof x === 'object') ? x.id : x;
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -238,7 +238,7 @@ function buildIndex(snap) {
                 dest, set: ruleSet(rule), authSet: authRuleSet(rule), exactAction: (rule.action || 'accept') === action,
                 posture: postureIds.length > 0, postureIds,
                 authPosture: arr(p.source_posture_checks).length > 0,
-                infra: managed.has(p.id), managedName: MANAGED_POLICY_NAMES.has(p.name),
+                infra: managed.has(p.id), managedName: isManagedGatewayName(p.name, 'policy'),
                 tempGrant: (TEMP_POLICY_RE.exec(p.name || '') || [])[1] || null,
             });
         });
@@ -698,7 +698,8 @@ function userVerdict(ix, snap, user, t, query, now) {
 //
 // The user is authorized for a resource when an enabled policy rule from one of their source
 // groups (userSourceGroups) targets it, minus what drop rules from those groups block - exactly
-// the rules evaluatePolicies() weighs: the Browser Gateway policies (by id or name) never count,
+// the rules evaluatePolicies() weighs: the accept rules of the Browser Gateway policies (by id, or
+// by the name of any installation's) never count, while their drop rules still deny,
 // and a temporary policy counts only while its grant is valid. Rules with a device as their
 // direct source are not a user's authorization and do not count. evaluatePolicies() answers
 // for one TCP port; this answers for the query's protocol and port, with the same outcome on a
@@ -707,7 +708,8 @@ function userVerdict(ix, snap, user, t, query, now) {
 // session cannot pass device checks. Here such a policy makes the answer "conditional" - the
 // user is authorized if their device passes the checks.
 function authorizeResource(ix, groups, res, query, now) {
-    const rules = ix.rules.filter(r => r.dest.has(res.id) && !r.infra && !r.managedName && r.exactAction
+    const rules = ix.rules.filter(r => r.dest.has(res.id) && r.exactAction
+        && (r.action === 'drop' || (!r.infra && !r.managedName))
         && (!r.tempGrant || grantIsValid(ix.grantById.get(r.tempGrant), now))
         && [...r.sources].some(g => groups.has(g)));
     const accepts = rules.filter(r => r.action === 'accept');

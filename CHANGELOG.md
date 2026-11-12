@@ -32,6 +32,27 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     instead of ending there. Password fields can show what was typed.
   - **Request Access.** When a user has no access to a server, Request Access opens with that
     server's resource already chosen.
+  - **Display settings.** Settings → Remote Access sets the RDP colors, keyboard layout, font
+    smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
+    color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
+    real resolution, so it stays sharp.
+  - **The gateway's objects belong to the app.** Resource edits, grants, recurring rules and
+    routing peers can't add, remove or reuse the Browser Gateway groups, policies or peers, and
+    setup never takes over an existing group or policy with one of their names. Wildcard domain
+    resources and special addresses (loopback, link-local, NetBird peers, multicast, the gateways'
+    own networks) are never targets. A policy rule whose source the app can't read blocks sessions
+    until it is changed. After a restart, new sessions wait about a minute and a half.
+  - **Members added outside the app are removed.** A user, or a device a user enrolled, that
+    someone adds to a Browser Gateway group in the NetBird dashboard is taken out again when the
+    app next reads users or devices; each removal is in the audit log. The Groups page,
+    invitations and setup keys can't add anyone to these groups, rename them or delete them.
+  - **The gateway's objects carry the installation name**, from the Application Name in
+    **Settings → General**, such as *Browser Gateway (NetBird Control DEV)*, so installations that
+    share a NetBird account never collide. Existing objects are renamed on the next save.
+  - **What the browser may send.** The app passes to guacd only input, the screen size, the
+    clipboard and the sign-in values that guacd asks for. The server address and port never come
+    from the browser. A browser message is limited to 16 KiB; a larger or malformed one closes the
+    session.
 - **API keys and a public API.** Admins create API keys in **Settings → API Keys**. A key does only
   what its permissions allow, can be limited to addresses and an expiry date, is shown once, and is
   stored only as a hash. The audit log records keys being created and revoked, every connection
@@ -42,15 +63,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   minutes, the credentials never reach the browser, and the user's own access is checked as for a
   manual connection. See [docs/api.md](docs/api.md) and
   [docs/remote-launch-integration.md](docs/remote-launch-integration.md).
-  - **Display settings.** Settings → Remote Access sets the RDP colors, keyboard layout, font
-    smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
-    color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
-    real resolution, so it stays sharp.
 - **Access Check.** A new section in Access Management answers two questions from a fresh read
   of NetBird: is this user authorized for a resource or a network, and who is. The answer uses
   the same authorization model as Remote Access: the user's groups, their devices' groups and All
   (temporary-grant groups only while the grant is valid) against the policies, with drop rules
-  winning and Browser Gateway policies never counting; a policy with posture checks makes it
+  winning and Browser Gateway policies never granting; a policy with posture checks makes it
   "Authorized If Posture Checks Pass". It names the policy, group and ports behind the answer, and
   needs no device. Collapsed Device Details show what each device can reach right now, following
   what NetBird enforces (each device's own groups, the most specific route when resources overlap,

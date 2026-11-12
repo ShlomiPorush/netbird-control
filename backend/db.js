@@ -23,9 +23,13 @@ const {
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
 const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
-// Browser remote access (one-way: db.js -> lib/remote-access.js). Only the managed-policy check is
-// needed here: exposure-mirroring code must skip the Browser Gateway's standing policy.
-const { isRemoteAccessManagedPolicy, loadRemoteAccessConfig } = require('./lib/remote-access');
+// Browser remote access (one-way: db.js -> lib/remote-access.js). Its standing policies and its
+// gateway and target groups are app-owned: exposure-mirroring code skips the policies, and resource
+// writes, grants and routers never add, remove or reuse the groups (helpers below).
+const {
+    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite,
+    loadRemoteAccessConfig, enforceManagedMembership,
+} = require('./lib/remote-access');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
 // notify*Email helpers stay in db.js and use the imported sendMail/mailLayout/mailRows/htmlEsc.
@@ -86,6 +90,94 @@ const {
 // tenant-aware table carries a `tenant` column; feature queries converted to multi-tenant
 // filter on tnt(), so tenant A's rows can never surface under tenant B or under main.
 const tnt = () => currentTenantAccount() || '';
+
+// ─── Browser Gateway objects are app-owned (main account only: remote access never runs in a
+// tenant, so a tenant keeps every path below exactly as before) ───
+const raMain = () => !tnt();
+const gid = (g) => (g && g.id) || g;
+const groupIdsOf = (list) => (Array.isArray(list) ? list.map(gid).filter(Boolean) : []);
+// Which group ids are managed: stored ids, or a managed name in NetBird's LIVE group list. An
+// unreadable list refuses the write (fail closed).
+async function managedGroupCheck() {
+    if (!raMain()) return () => false;
+    const groups = await netbirdGet('/api/groups');
+    if (!Array.isArray(groups)) {
+        const e = new Error("Couldn't read the groups from NetBird to check them - nothing was changed. Try again."); e.status = 502; throw e;
+    }
+    const nameOf = new Map(groups.filter(g => g && g.id).map(g => [g.id, g.name || '']));
+    return (id) => isRemoteAccessManagedGroup(id, nameOf.get(id));
+}
+const MANAGED_GROUP_ERROR = "This group is managed by Browser Remote Access and can't be granted. Choose another group.";
+// Group targets, and the destination group of each Access Profile target (a profile whose group is
+// a managed one - possible on old data - would grant through it just the same).
+async function refuseManagedGroupTargets(targets) {
+    if (!raMain()) return;
+    const list = Array.isArray(targets) ? targets.filter(t => t && t.id) : [];
+    const ids = list.filter(t => t.type === 'group').map(t => String(t.id));
+    const profiles = list.filter(t => t.type === 'profile');
+    if (profiles.length) {
+        const byId = new Map((await listAccessProfiles()).map(p => [String(p.id), p.groupId]));
+        for (const t of profiles) for (const g of [t.groupId, byId.get(String(t.id))]) if (g) ids.push(String(g));
+    }
+    if (!ids.length) return;
+    const isManaged = await managedGroupCheck();
+    if (ids.some(isManaged)) { const e = new Error(MANAGED_GROUP_ERROR); e.status = 400; throw e; }
+}
+// The group screens (members, rename, delete) and setup keys never add anyone to a managed group,
+// rename it or delete it: its members are the gateways, set by the app. Removing members stays
+// possible. Main account only; a stored id, or a managed name in NetBird's live list.
+const MANAGED_GROUP_EDIT_ERROR = 'This group is managed by Browser Remote Access. NetBird Control sets its members and name, so it can\'t be changed here.';
+async function refuseManagedGroupEdit(groupIds) {
+    const ids = (Array.isArray(groupIds) ? groupIds : []).map(gid).filter(Boolean).map(String);
+    if (!raMain() || !ids.length) return;
+    const isManaged = await managedGroupCheck();
+    if (ids.some(isManaged)) { const e = new Error(MANAGED_GROUP_EDIT_ERROR); e.status = 400; throw e; }
+}
+// Takes managed groups out of one user's own groups (the membership clean-up in remote-access.js).
+// The user's lock first, then the target lock, as the grant revoke path takes them. Written from a
+// fresh read of the user (regular and service users, as the real user that writes); a user whose
+// role, groups or block state are not all there is not written and the clean-up reports it.
+// Returns { name, removed }, or null when the user is gone or had nothing to remove.
+async function removeUserManagedGroups(userId, groupIds) {
+    return withNbUserLock(userId, () => withTargetLock(async () => {
+        const [regular, service] = await asRealUser(() => Promise.all([
+            netbirdGet('/api/users').catch(() => null),
+            netbirdGet('/api/users?service_user=true').catch(() => null),
+        ]));
+        if (!Array.isArray(regular) || !Array.isArray(service)) throw new Error("Couldn't read the users from NetBird - nothing was changed.");
+        const u = [...regular, ...service].find(x => x && String(x.id) === String(userId));
+        if (!u) return null;
+        if (typeof u.role !== 'string' || !u.role || !Array.isArray(u.auto_groups) || typeof u.is_blocked !== 'boolean') throw new Error(`Couldn't read user "${u.email || userId}" from NetBird in full - nothing was changed.`);
+        const cur = u.auto_groups.map(gid).filter(Boolean).map(String);
+        const drop = cur.filter(g => groupIds.includes(g));
+        if (!drop.length) return null;
+        const resp = await asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(u.id), { role: u.role, auto_groups: cur.filter(g => !drop.includes(g)), is_blocked: u.is_blocked }));
+        if (!nbWriteOk(resp)) throw new Error(`NetBird did not take the update of user "${u.email || u.name || u.id}": ${(resp && (resp.raw || resp.error || resp.status)) || 'no response'}`);
+        return { name: u.email || u.name || String(u.id), removed: drop };
+    }));
+}
+// A resource's own access policies never use a managed group as their source (it would give the
+// gateway, or whoever is in that group, access the app did not decide). Checked live, before any
+// write.
+async function refuseManagedPolicySources(policies) {
+    if (!raMain()) return;
+    const ids = (Array.isArray(policies) ? policies : []).flatMap(p => (p && Array.isArray(p.sources) ? p.sources : [])).map(gid).filter(Boolean);
+    if (!ids.length) return;
+    const isManaged = await managedGroupCheck();
+    if (ids.some(isManaged)) {
+        const e = new Error("A Browser Remote Access group can't be the source of an access policy. Choose another group - nothing was changed.");
+        e.status = 400; throw e;
+    }
+}
+// Resource writes run under the target lock, and set the managed target groups by the one rule.
+const withTargets = (fn) => (raMain() ? withTargetLock(fn) : fn());
+const targetsFor = (networkId, address, ids) => (raMain() ? withManagedTargets(networkId, address, ids) : ids);
+// No answer is not "not written": a resource write that timed out may still land.
+function noteResourceWrite(resp) {
+    if (raMain() && resp && resp.status === 0) noteUncertainTargetWrite();
+    return resp;
+}
+const sameIdSet = (a, b) => { const A = new Set(a), B = new Set(b); return A.size === B.size && [...A].every(x => B.has(x)); };
 // resetNbCaches (delegated to lib/netbird.js) must also drop db.js's own peers/users caches to
 // match its original full-reset behavior; register that via the hook. _usersLastRefresh /
 // _peersLastRefresh are per-account Maps declared further down (initialized before any reset
@@ -1733,12 +1825,9 @@ async function syncLinkedProxyResources(changes, mode) {
                 await deleteResource(networkId, rid);
                 done.push(name);
             } else {
-                const enabled = mode === 'enable';
-                const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`, {
-                    name: r.name, address: r.address, description: r.description || '', enabled,
-                    groups: (Array.isArray(r.groups) ? r.groups : []).map(g => (g && g.id) || g).filter(Boolean),
-                });
-                if (!resp || resp.status >= 300) throw new Error((resp && (resp.raw || resp.error || resp.status)) || 'update failed');
+                // Read again and write under the target lock (setResourceEnabled), never from the
+                // earlier read: the groups may have changed since.
+                await setResourceEnabled(networkId, rid, mode === 'enable');
                 done.push(r.name || rid);
             }
         } catch (e) { console.error('[proxy] linked resource sync failed:', mode, rid, e.message); }
@@ -4989,6 +5078,7 @@ async function createGroup(name) {
 async function deleteGroup(id) {
     const grp = await netbirdGet('/api/groups/' + encodeURIComponent(id));
     if (grp && grp.name === 'All') throw new Error('The "All" group cannot be deleted.');
+    await refuseManagedGroupEdit([id]);
     const resp = await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(id));
     if (!resp || (resp.status >= 300 && resp.status !== 404)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'group may still be in use';
@@ -5009,6 +5099,9 @@ async function setGroupPeers(groupId, peerIds) {
     const g = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
     if (!g || !g.id) { const e = new Error('Group not found.'); e.status = 400; throw e; }
     if (g.name === 'All') { const e = new Error('The "All" group is managed automatically - its peers cannot be changed.'); e.status = 400; throw e; }
+    // A managed group's devices are set by NetBird Control only (members added outside it are
+    // removed by the Browser Remote Access clean-up, under its lock).
+    await refuseManagedGroupEdit([groupId]);
     const peers = Array.from(new Set((Array.isArray(peerIds) ? peerIds : []).map(x => String(x || '')).filter(Boolean)));
     const body = { name: g.name, peers };
     if (Array.isArray(g.resources)) body.resources = g.resources; // preserve resources across the replace
@@ -5036,6 +5129,7 @@ async function renameGroup(groupId, newName) {
     if (!g || !g.id) { const e = new Error('Group not found.'); e.status = 400; throw e; }
     if (g.name === 'All') { const e = new Error('The "All" group cannot be renamed.'); e.status = 400; throw e; }
     if ((g.issued || 'api') !== 'api') { const e = new Error('This group is managed by your identity provider and cannot be renamed here.'); e.status = 400; throw e; }
+    await refuseManagedGroupEdit([groupId]);
     const peers = Array.isArray(g.peers) ? g.peers.map(p => (typeof p === 'string' ? p : (p && p.id))).filter(Boolean) : [];
     const body = { name, peers };
     if (Array.isArray(g.resources)) body.resources = g.resources;
@@ -5082,6 +5176,8 @@ async function setUserGroups(userId, groupIds) {
     const resp = await withNbUserLock(userId, async () => {
         const live = (await liveUsersById([userId])).get(String(userId));
         if (!live) throw new Error(STALE_USER_ERR);
+        const had = new Set((Array.isArray(live.auto_groups) ? live.auto_groups : []).map(g => String((g && g.id) || g)));
+        await refuseManagedGroupEdit(groups.filter(g => !had.has(g)));
         return asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(userId), { role: live.role || 'user', auto_groups: groups, is_blocked: live.is_blocked }));
     });
     if (!resp || resp.status >= 300) {
@@ -5098,6 +5194,7 @@ async function setUserGroups(userId, groupIds) {
 async function _applyUsersGroup(groupId, userIds, mode) {
     const acct = tnt();
     const ids = Array.from(new Set((Array.isArray(userIds) ? userIds : []).map(x => String(x || '')).filter(Boolean)));
+    if (mode === 'add' && ids.length) await refuseManagedGroupEdit([groupId]);
     let updated = 0;
     const failed = [];
     const live = ids.length ? await liveUsersById(ids) : new Map(); // throws (no writes) when unreadable
@@ -5633,6 +5730,29 @@ async function createNetwork({ name, description }) {
     return resp.body;
 }
 
+// The Browser Gateway is never a routing peer, for anyone (admins included): no configuration
+// routes a network through it. Refused: a gateway peer, a managed group, "All" (a gateway that
+// enrolls later joins it), and any group with a gateway peer in it. One live group read; an
+// unreadable list refuses.
+async function refuseGatewayRouter(body) {
+    if (!raMain()) return;
+    const groups = await netbirdGet('/api/groups');
+    if (!Array.isArray(groups)) {
+        const e = new Error("Couldn't read the groups from NetBird to check the routing peer - nothing was changed. Try again."); e.status = 502; throw e;
+    }
+    const managed = (g) => !!g && isRemoteAccessManagedGroup(g.id, g.name || '');
+    // Gateway peers: every peer in a managed group (only the gateways join them).
+    const gatewayPeers = new Set(groups.filter(managed).flatMap(g => groupIdsOf(g.peers)));
+    const refuse = (msg) => { const e = new Error(msg); e.status = 400; throw e; };
+    const NOT_GATEWAY = "The Browser Gateway can't be a routing peer, so this peer or group can't route a network. Choose another peer, or a group without the gateway.";
+    if (body.peer && gatewayPeers.has(body.peer)) refuse(NOT_GATEWAY);
+    for (const id of (body.peer_groups || [])) {
+        const g = groups.find(x => x && x.id === id);
+        if (!g) refuse("That peer group wasn't found in NetBird. Refresh the page and choose it again.");
+        if (managed(g) || g.name === 'All' || groupIdsOf(g.peers).some(p => gatewayPeers.has(p))) refuse(NOT_GATEWAY);
+    }
+}
+
 // Add a routing peer (router) to a network - either a single peer or one+ peer groups.
 async function createNetworkRouter(networkId, { peer, peerGroups, metric, masquerade, enabled }) {
     const body = {
@@ -5643,6 +5763,7 @@ async function createNetworkRouter(networkId, { peer, peerGroups, metric, masque
     if (peer) body.peer = peer;
     else if (Array.isArray(peerGroups) && peerGroups.length) body.peer_groups = peerGroups.filter(Boolean);
     else throw new Error('a peer or at least one peer group is required');
+    await refuseGatewayRouter(body);
     const resp = await netbirdPost(`/api/networks/${encodeURIComponent(networkId)}/routers`, body);
     if (!resp || resp.status >= 300 || !resp.body || !resp.body.id) {
         throw new Error('Failed to add routing peer: ' + (resp && (resp.raw || resp.error || resp.status)));
@@ -6619,9 +6740,16 @@ async function assertAddressUniqueInNetwork(networkId, address, excludeId) {
 // policy per provided entry (its source groups → the resource, with protocol/ports).
 // A resource with no policies is reachable by no one (NetBird's model).
 async function createClientResource(networkId, { name, address, description, groups, policies, allowBlocked }) {
-    const groupIds = Array.isArray(groups) ? groups.filter(Boolean) : [];
+    let groupIds = Array.isArray(groups) ? groups.filter(Boolean) : [];
+    // The managed Browser Gateway groups are never the caller's to set: dropped here, and the
+    // target group is set by the rule (open network, address type) under the target lock.
+    if (groupIds.length && raMain()) {
+        const isManaged = await managedGroupCheck();
+        groupIds = groupIds.filter(g => !isManaged(g));
+    }
     // Refuse an unusable policy before anything is created - never leave a resource behind.
     for (const p of (policies || [])) if (p) editorProtocol(p.protocol);
+    await refuseManagedPolicySources(policies);
     // allowBlocked = an ADMIN acting deliberately (the route audits the override).
     if (!allowBlocked) {
         const blocked = addressBlockedForNetwork(String(address || '').trim(), networkId, await getBlocklist());
@@ -6631,10 +6759,10 @@ async function createClientResource(networkId, { name, address, description, gro
 
     // Network resource - groups are optional (a management convenience). NetBird
     // derives host/subnet/domain from the address.
-    const resp = await netbirdPost(`/api/networks/${encodeURIComponent(networkId)}/resources`, {
-        name, address, description: description || '', enabled: true, groups: groupIds,
-    });
-    if (!resp || resp.status >= 300) {
+    const resp = await withTargets(async () => noteResourceWrite(await netbirdPost(`/api/networks/${encodeURIComponent(networkId)}/resources`, {
+        name, address, description: description || '', enabled: true, groups: targetsFor(networkId, String(address || '').trim(), groupIds),
+    })));
+    if (!nbWriteOk(resp)) {
         throw new Error('Failed to create resource: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
     const resourceId = resp.body && resp.body.id;
@@ -6728,7 +6856,25 @@ function refuseSourcedResources(names, verb) {
     throw e;
 }
 
-async function mergeResources(networkId, resourceIds, keepId) {
+// The Browser Gateway's standing policies are app-owned: merge, move and the resource editor
+// never re-point or delete one (only reachable after someone pointed it at a resource directly).
+function refuseManagedPolicies(pols, resourceIds, verb) {
+    if (!raMain()) return;
+    const ids = new Set(resourceIds);
+    const hit = (Array.isArray(pols) ? pols : []).filter(p => p && isRemoteAccessManagedPolicy(p) && (p.rules || []).some(rule => {
+        const dr = rule && rule.destinationResource;
+        return dr && ids.has(String(dr.id || dr));
+    }));
+    if (!hit.length) return;
+    const e = new Error(`Can't ${verb}: the Browser Gateway's own policy "${hit[0].name || hit[0].id}" targets this resource directly. NetBird Control manages that policy, so this can't change it - nothing was changed.`);
+    e.status = 409;
+    throw e;
+}
+
+function mergeResources(networkId, resourceIds, keepId) {
+    return withTargets(() => mergeResourcesLocked(networkId, resourceIds, keepId));
+}
+async function mergeResourcesLocked(networkId, resourceIds, keepId) {
     const ids = [...new Set((Array.isArray(resourceIds) ? resourceIds : []).map(String).filter(Boolean))];
     if (ids.length < 2) throw new Error('pick at least two resources to merge');
     // Locate every selected resource across ALL networks (a conflict cluster may span them).
@@ -6764,6 +6910,7 @@ async function mergeResources(networkId, resourceIds, keepId) {
     const pols = await netbirdGet('/api/policies');
     if (!Array.isArray(pols)) { const e = new Error("Couldn't read the current policies from NetBird - nothing was changed. Try again."); e.status = 502; throw e; }
     refuseSourcedResources(policiesSourcingResources(pols, [...loserIds]), 'merge');
+    refuseManagedPolicies(pols, [...loserIds], 'merge');
     let movedPolicies = 0;
     const repointed = []; // { policy, prevRules } for rollback
     try {
@@ -6810,7 +6957,10 @@ async function mergeResources(networkId, resourceIds, keepId) {
     }
 
     // 2. Union the losers' group memberships onto the survivor (in ITS network).
-    const loserGroups = losers.flatMap(r => (Array.isArray(r.groups) ? r.groups : []).map(g => (g && g.id) || g)).filter(Boolean);
+    // Never the managed Browser Gateway groups: the survivor's are set by the rule.
+    const loserGroups = losers.flatMap(r => (Array.isArray(r.groups) ? r.groups : [])
+        .filter(g => !(raMain() && isRemoteAccessManagedGroup(gid(g), (g && g.name) || '')))
+        .map(gid)).filter(Boolean);
     if (loserGroups.length) await addResourceGroups(survivor.__netId, survivor.id, loserGroups).catch(e => console.error('[Merge] group union failed:', e.message));
 
     // 3. Delete the losers - each in its own network; their direct policies were re-pointed.
@@ -6828,7 +6978,12 @@ async function mergeResources(networkId, resourceIds, keepId) {
 // re-point every policy that targets it directly (policies are account-wide), then delete the
 // original. Any failure after creation rolls the new resource back - per-resource, so one
 // failure never blocks the rest of the batch.
-async function moveResources(sourceNetworkId, resourceIds, targetNetworkId) {
+// The whole move holds the target lock: the copy's groups are set by the rule for the target
+// network (re-entrant, so the writers it calls don't wait on it).
+function moveResources(sourceNetworkId, resourceIds, targetNetworkId) {
+    return withTargets(() => moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId));
+}
+async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId) {
     const ids = [...new Set((Array.isArray(resourceIds) ? resourceIds : []).map(String).filter(Boolean))];
     if (!ids.length) throw new Error('pick at least one resource to move');
     const target = String(targetNetworkId || '').trim();
@@ -6843,6 +6998,7 @@ async function moveResources(sourceNetworkId, resourceIds, targetNetworkId) {
     if (!Array.isArray(pols)) { const e = new Error("Couldn't read the current policies from NetBird - nothing was changed. Try again."); e.status = 502; throw e; }
     const polArr = pols;
     refuseSourcedResources(policiesSourcingResources(polArr, ids), 'move');
+    refuseManagedPolicies(polArr, ids, 'move');
 
     const moved = [];
     const failed = [];
@@ -6851,7 +7007,8 @@ async function moveResources(sourceNetworkId, resourceIds, targetNetworkId) {
         if (!r) { failed.push({ id: rid, name: rid, error: 'no longer exists in the source network' }); continue; }
         const label = r.name || r.address || rid;
         try {
-            const groups = (Array.isArray(r.groups) ? r.groups : []).map(g => (g && g.id) || g).filter(Boolean);
+            // The managed target groups follow the rule for the TARGET network.
+            const groups = targetsFor(target, String(r.address || '').trim(), groupIdsOf(r.groups));
             // A resource attached to an ACTIVE temporary grant must not move - the grant's
             // cleanup bookkeeping points at the old network/resource id and would leak.
             const inTempGroup = (Array.isArray(r.groups) ? r.groups : []).some(g => /^Temp (access|resources) #\d+/.test((g && g.name) || ''));
@@ -6865,10 +7022,10 @@ async function moveResources(sourceNetworkId, resourceIds, targetNetworkId) {
             // at this point - so create under a temporary name and rename back at the end,
             // after the original is gone.
             const tempName = `${r.name} [moving]`;
-            const resp = await netbirdPost(`/api/networks/${encodeURIComponent(target)}/resources`, {
+            const resp = noteResourceWrite(await netbirdPost(`/api/networks/${encodeURIComponent(target)}/resources`, {
                 name: tempName, address: r.address, description: r.description || '',
                 enabled: r.enabled !== false, groups,
-            });
+            }));
             if (!resp || resp.status >= 300 || !resp.body || !resp.body.id) {
                 throw new Error('create in target failed: ' + (resp && (resp.raw || resp.error || resp.status)));
             }
@@ -6916,7 +7073,7 @@ async function moveResources(sourceNetworkId, resourceIds, targetNetworkId) {
                 const rn = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`, {
                     name: r.name, address: r.address, description: r.description || '',
                     enabled: r.enabled !== false, groups,
-                }).catch(() => null);
+                }).then(noteResourceWrite).catch(() => null);
                 if (!rn || rn.status >= 300) {
                     moved.push(`${label} (moved, but renaming back failed - currently named "${tempName}")`);
                 } else {
@@ -7903,6 +8060,7 @@ async function scanResourceConflicts() {
 // (the route calls it before saving the resource too); returns the dedicated policies.
 async function checkResourcePolicySync(resourceId, policies) {
     for (const p of (policies || [])) if (p) editorProtocol(p.protocol);
+    await refuseManagedPolicySources(policies);
     const pols = await netbirdGet('/api/policies').catch(() => null);
     if (!Array.isArray(pols)) {
         const e = new Error("Couldn't read the current policies from NetBird - nothing was changed. Try again."); e.status = 502; throw e;
@@ -7919,6 +8077,7 @@ async function checkResourcePolicySync(resourceId, policies) {
         const dr = rule && rule.destinationResource;
         return !!(dr && ((dr.id) || dr) === resourceId);
     }));
+    refuseManagedPolicies(targeting, [resourceId], 'change the access policies');
     const locked = targeting.filter(p => p.rules.length > 1 || p.rules.some(r => ruleHasUnmodeled(r) || (r.action || 'accept') !== 'accept' || (r.enabled !== false) !== (p.enabled !== false)));
     if (locked.length) {
         const e = new Error(`This resource's access is set by ${locked.length === 1 ? 'a policy' : 'policies'} this editor can't reproduce exactly (${locked.map(p => `"${p.name || p.id}"`).join(', ')} - an SSH, Drop, disabled or multi-rule policy). Change ${locked.length === 1 ? 'it' : 'them'} on the Policies page; nothing was changed.`);
@@ -7990,23 +8149,58 @@ async function editResource(networkId, resourceId, { name, address, description,
     // Preserve the enabled flag when the caller sends it - editing must not silently re-enable
     // a disabled resource. Callers that omit it keep the legacy always-on behavior.
     const body = { name, address, description: description || '', enabled: enabled === undefined ? true : !!enabled };
-    if (Array.isArray(groups)) body.groups = groups;
-    const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
-    if (!resp || resp.status >= 300) throw new Error('Failed to update resource: ' + (resp && (resp.raw || resp.error || resp.status)));
+    if (!raMain()) {
+        if (Array.isArray(groups)) body.groups = groups;
+        return putEditedResource(networkId, resourceId, body);
+    }
+    // Main account: the caller can neither add nor drop a managed Browser Gateway group. Groups it
+    // omits stay as they are; the managed ones the resource has stay too, and the target groups
+    // follow the rule for the NEW address (an address that changes type swaps them).
+    return withTargets(async () => {
+        const cur = await getResourceInNetwork(networkId, resourceId);
+        const curIds = groupIdsOf(cur.groups);
+        const isManaged = await managedGroupCheck();
+        const requested = Array.isArray(groups) ? groups.filter(Boolean) : curIds;
+        body.groups = targetsFor(networkId, String(address || '').trim(), [...requested.filter(g => !isManaged(g)), ...curIds.filter(isManaged)]);
+        return putEditedResource(networkId, resourceId, body);
+    });
+}
+async function putEditedResource(networkId, resourceId, body) {
+    const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+    if (!nbWriteOk(resp)) throw new Error('Failed to update resource: ' + (resp && (resp.raw || resp.error || resp.status)));
     bustNbCaches('policies', 'gref', 'usage');
     return resp.body;
 }
 
 // Toggle a resource's enabled flag without clobbering its other fields (GET-then-PUT).
 async function setResourceEnabled(networkId, resourceId, enabled) {
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
-    if (!r || !r.id) throw new Error('Resource not found');
-    const groups = Array.isArray(r.groups) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
-    const body = { name: r.name, address: r.address, description: r.description || '', enabled: !!enabled, groups };
-    const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
-    if (!resp || resp.status >= 300) throw new Error('Failed to set resource enabled: ' + (resp && (resp.raw || resp.error || resp.status)));
-    bustNbCaches('policies');
-    return resp.body;
+    return withTargets(async () => {
+        const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+        if (!r || !r.id) throw new Error('Resource not found');
+        const groups = targetsFor(networkId, r.address, groupIdsOf(r.groups));
+        const body = { name: r.name, address: r.address, description: r.description || '', enabled: !!enabled, groups };
+        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        if (!nbWriteOk(resp)) throw new Error('Failed to set resource enabled: ' + (resp && (resp.raw || resp.error || resp.status)));
+        bustNbCaches('policies');
+        return resp.body;
+    });
+}
+
+// Rename a resource from an automation's source, keeping its address, enabled state and groups
+// (the managed target groups by the rule). Read fresh under the target lock.
+async function renameResource(networkId, resourceId, name, description) {
+    return withTargets(async () => {
+        const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+        if (!r || !r.id) throw new Error('Resource not found');
+        const body = {
+            name, address: r.address, description: description || r.description || '',
+            enabled: r.enabled !== false, groups: targetsFor(networkId, r.address, groupIdsOf(r.groups)),
+        };
+        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        if (!nbWriteOk(resp)) throw new Error('Failed to rename resource: ' + (resp && (resp.raw || resp.error || resp.status)));
+        bustNbCaches('policies');
+        return resp.body;
+    });
 }
 
 // resourceHasGroups (pure "already in every wanted group?" check) and setResourceNameFrom (rename
@@ -8017,20 +8211,33 @@ async function setResourceEnabled(networkId, resourceId, enabled) {
 // Ensure a resource belongs to every group in `wantGroupIds` (e.g. its automation's Access
 // Profile groups). GET-then-PUT unions with the resource's current groups so name/address/
 // description/enabled are preserved. Returns true only if it actually added a group.
+// The managed target groups follow the rule (the target sync adds them through here too), so a
+// read that is out of date can't put one back or take one off.
 async function addResourceGroups(networkId, resourceId, wantGroupIds) {
     const want = [...new Set((wantGroupIds || []).filter(Boolean))];
     if (!want.length) return false;
-    const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
-    if (!r || !r.id) throw new Error('Resource not found');
-    const current = Array.isArray(r.groups) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
-    const have = new Set(current);
-    const missing = want.filter(g => !have.has(g));
-    if (!missing.length) return false;
-    const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: [...current, ...missing] };
-    const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
-    if (!resp || resp.status >= 300) throw new Error('Failed to assign access-profile group(s): ' + (resp && (resp.raw || resp.error || resp.status)));
-    bustNbCaches('policies', 'gref', 'usage');
-    return true;
+    return withTargets(async () => {
+        const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+        if (!r || !r.id) throw new Error('Resource not found');
+        const current = groupIdsOf(r.groups);
+        const have = new Set(current);
+        let missing = want.filter(g => !have.has(g));
+        // Never a managed group from the caller (an Access Profile's group may be one on old data):
+        // stored ids are dropped at once, anything else is checked against NetBird's live names.
+        // The target groups come back below only where the rule wants them.
+        missing = missing.filter(g => !(raMain() && isRemoteAccessManagedGroup(g, '')));
+        if (missing.length && raMain()) {
+            const isManaged = await managedGroupCheck();
+            missing = missing.filter(g => !isManaged(g));
+        }
+        const next = targetsFor(networkId, r.address, [...current, ...missing]);
+        if (sameIdSet(next, current)) return false;
+        const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
+        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        if (!nbWriteOk(resp)) throw new Error('Failed to assign access-profile group(s): ' + (resp && (resp.raw || resp.error || resp.status)));
+        bustNbCaches('policies', 'gref', 'usage');
+        return missing.some(g => next.includes(g));
+    });
 }
 
 // Remove group(s) from a resource (GET-then-PUT). Used to detach a temporary-access destination
@@ -8038,20 +8245,23 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
 async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
     const drop = new Set((dropGroupIds || []).filter(Boolean));
     if (!drop.size || !networkId || !resourceId) return false;
-    // Read with the HTTP status: only a 404 means the resource is gone (nothing to detach); any
-    // other failed read must not pass for "already detached".
-    const got = await netbirdReq('GET', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
-    if (got && got.status === 404) return false;
-    const r = got && got.body;
-    if (!nbWriteOk(got) || !r || !r.id) throw new Error('Failed to read the resource: ' + ((got && (got.raw || got.error || got.status)) || 'no response'));
-    const current = Array.isArray(r.groups) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
-    const next = current.filter(g => !drop.has(g));
-    if (next.length === current.length) return false;
-    const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
-    const resp = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
-    if (!nbWriteOk(resp)) throw new Error('Failed to detach resource group: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
-    bustNbCaches('policies', 'gref', 'usage');
-    return true;
+    return withTargets(async () => {
+        // Read with the HTTP status: only a 404 means the resource is gone (nothing to detach); any
+        // other failed read must not pass for "already detached".
+        const got = await netbirdReq('GET', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+        if (got && got.status === 404) return false;
+        const r = got && got.body;
+        if (!nbWriteOk(got) || !r || !r.id) throw new Error('Failed to read the resource: ' + ((got && (got.raw || got.error || got.status)) || 'no response'));
+        const current = groupIdsOf(r.groups);
+        // A target group the rule still wants stays: only the rule (the target sync) changes them.
+        const next = targetsFor(networkId, r.address, current.filter(g => !drop.has(g)));
+        if (sameIdSet(next, current)) return false;
+        const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
+        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        if (!nbWriteOk(resp)) throw new Error('Failed to detach resource group: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
+        bustNbCaches('policies', 'gref', 'usage');
+        return current.some(g => drop.has(g) && !next.includes(g));
+    });
 }
 
 // Name of the fixed Access-Control source group (for display in the modal)
@@ -8103,9 +8313,12 @@ async function deleteResource(networkId, resourceId) {
 
     // Delete policies that target this resource directly (NetBird blocks deleting a
     // resource still referenced by a policy's destinationResource).
+    // The Browser Gateway's own policies and groups are never deleted here (main account).
+    const appOwnedPolicy = (p) => raMain() && isRemoteAccessManagedPolicy(p);
     const polsBefore = await netbirdGet('/api/policies');
     if (Array.isArray(polsBefore)) {
         for (const p of polsBefore) {
+            if (appOwnedPolicy(p)) continue;
             const targets = (p.rules || []).some(rule => {
                 const dr = rule.destinationResource;
                 return dr && ((dr.id) || dr) === resourceId;
@@ -8120,12 +8333,16 @@ async function deleteResource(networkId, resourceId) {
     // Clean up groups that are now empty (and the policies that targeted them)
     for (const gid of groupIds) {
         try {
+            if (raMain() && isRemoteAccessManagedGroup(gid, '')) continue;
             const g = await netbirdGet('/api/groups/' + encodeURIComponent(gid));
+            // Only a confirmed read of THIS group (an error body is no group) may lead to a delete.
+            if (raMain() && (!g || typeof g !== 'object' || g.id !== gid || isRemoteAccessManagedGroup(gid, g.name || ''))) continue;
             const stillUsed = g && ((g.resources_count || (g.resources ? g.resources.length : 0)) > 0 || (g.peers_count || 0) > 0);
             if (g && !stillUsed) {
                 const pols = await netbirdGet('/api/policies');
                 if (Array.isArray(pols)) {
                     for (const p of pols) {
+                        if (appOwnedPolicy(p)) continue;
                         const targets = (p.rules || []).some(rule => (rule.destinations || []).some(d => ((d && d.id) || d) === gid));
                         if (targets) await netbirdReq('DELETE', '/api/policies/' + encodeURIComponent(p.id));
                     }
@@ -8219,6 +8436,8 @@ async function pullUsersCache() {
         await upsertUsers(users);
         // Only a user the list returned now has NetBird's state in the mirror.
         for (const u of users) if (u && u.id) _unrecordedBlocks.delete(`${t}|${u.id}`);
+        // Members added to the Browser Remote Access groups outside the app are removed.
+        if (!t) enforceManagedMembership({ users }).catch(() => { });
         // Prune users deleted in NetBird. Only when the regular user list answered and at least one
         // user came back (an account always has its owner, so an empty result means a transient
         // error - don't wipe; without the regular list every human user would be dropped).
@@ -8292,6 +8511,7 @@ function inviterHint(message) {
 // state and mails the invitation itself (the self-hosted invite-LINK flow is not used here).
 // Runs in the CURRENT account context - main or a managed MSP tenant.
 async function inviteUser({ name, email, role, autoGroups }) {
+    await refuseManagedGroupEdit(autoGroups);
     const body = {
         name: String(name || '').trim().slice(0, 100),
         email: String(email || '').trim(),
@@ -9020,6 +9240,7 @@ async function refreshPeersCache() {
     const peers = await fetchPeersFromApi();
     if (peers) {
         await upsertPeers(peers);
+        if (!t) enforceManagedMembership({ peers }).catch(() => { });
         // Prune peers that were deleted in NetBird so they stop appearing in the app - the cache
         // mirrors NetBird. Only when the API returned at least one peer (don't wipe on a transient
         // empty/error response).
@@ -9253,7 +9474,7 @@ const {
     getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations,
     getAutomationManaged, repairAutomation, forgetAutomation, dryRunAutomation,
 } = require('./lib/automations');
-initAutomations({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds });
+initAutomations({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds });
 
 
 // ─── Temporary access grants: time-boxed user→resource access, auto-revoked on expiry ───
@@ -9339,6 +9560,15 @@ async function applyUserGroupMembership(userId, groupId, add) {
     const current = idsOf(u.auto_groups);
     const has = current.includes(groupId);
     if (add ? has : !has) return false;
+    // The one place grants add a user to a group (creation and the active-grant reconcile): never
+    // a managed Browser Gateway group, checked against a live read of that group right before the
+    // write. Removal always stays possible, so a revoke can undo one.
+    if (add && raMain()) {
+        if (isRemoteAccessManagedGroup(groupId, '')) throw new Error(MANAGED_GROUP_ERROR);
+        const g = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
+        if (!g || typeof g !== 'object' || g.id !== groupId) throw new Error(`Couldn't read group "${groupId}" from NetBird to check it - the user was not added. Try again.`);
+        if (isRemoteAccessManagedGroup(groupId, g.name || '')) throw new Error(MANAGED_GROUP_ERROR);
+    }
     const next = add ? [...current, groupId] : current.filter(g => g !== groupId);
     const body = { role: u.role || 'user', auto_groups: next, is_blocked: !!u.is_blocked };
     console.log('[grant] %s group %s %s user %s (role %s)', add ? 'assigning' : 'removing', groupId, add ? 'to' : 'from', u.id, u.role || 'user');
@@ -9412,6 +9642,9 @@ async function createGrantTracked(cfg, actor, run) {
     const targets = Array.isArray(cfg.targets) ? cfg.targets.filter(t => t && t.id && t.type) : [];
     if (!targets.length) throw new Error('at least one target is required');
     const expiresAt = grantExpiryFrom(cfg);
+    // The Browser Gateway groups are infrastructure: no grant (manual, approved, auto-approved or a
+    // recurring window) puts anyone into them. Checked live, before anything is recorded.
+    await refuseManagedGroupTargets(targets);
 
     const peers = await getUserPeers(userId);
     const label = String(cfg.userLabel || (peers[0] && (peers[0].owner_name || peers[0].owner_email)) || userId);
@@ -9724,6 +9957,7 @@ async function extendTemporaryAccessGrant(id, cfg, actor) {
     if (!r.rows.length) throw new Error('grant not found');
     const g = r.rows[0];
     if (g.status !== 'active') throw new Error('only an active grant can be extended');
+    await refuseManagedGroupTargets(g.targets);
     const newExp = grantExpiryFrom(cfg);
     await pool.query('UPDATE temporary_access_grants SET expires_at=$2 WHERE id=$1 AND tenant=$3', [id, newExp.toISOString(), tnt()]);
     recordAudit({
@@ -9912,6 +10146,7 @@ async function listRecurringAccess() {
 }
 async function createRecurringAccess(cfg, actor) {
     const c = normRecurCfg(cfg);
+    await refuseManagedGroupTargets(c.targets);
     const r = await pool.query(`
         INSERT INTO recurring_access (user_id, user_label, user_email, targets, days, start_time, end_time, valid_until, enabled, note, created_by, tenant)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *
@@ -9945,6 +10180,8 @@ async function updateRecurringLocked(id, cfg, actor) {
     const old = await pool.query('SELECT * FROM recurring_access WHERE id=$1 AND tenant=$2', [id, tnt()]);
     if (!old.rows.length) throw new Error('rule not found');
     const c = normRecurCfg(cfg);
+    // A disabling save stays possible, so such a rule (from before) can always be switched off.
+    if (c.enabled) await refuseManagedGroupTargets(c.targets);
     const r = await pool.query(`
         UPDATE recurring_access SET user_id=$2, user_label=$3, user_email=$4, targets=$5, days=$6,
                start_time=$7, end_time=$8, valid_until=$9, enabled=$10, note=$11
@@ -12076,7 +12313,7 @@ module.exports = {
     addResourceGroups, removeResourceGroups, fetchUserGroupsFresh, // used by browser remote access (server.js)
     pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
-    getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
+    getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, refuseManagedGroupEdit, removeUserManagedGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
     loadAccessCheckSnapshot, loadAccessCheckRouters,
     getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, getResourceInNetwork, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
     setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups,

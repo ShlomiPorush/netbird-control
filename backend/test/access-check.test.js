@@ -662,6 +662,9 @@ function authzSnap() {
         pol('pol-x-bad', [rule({ ports: ['abc'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Bad Token' }),
         pol('pol-x-7000', [rule({ ports: ['7000'], sources: [{ id: 'g-other' }], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Other 7000' }),
         pol('pol-x-null', [rule({ ports: ['9500'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Null Posture', source_posture_checks: [null] }),
+        pol('pol-x-gwname', [rule({ ports: ['9600'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Browser Gateway Names (Other Install)' }),
+        pol('pol-x-9700', [rule({ ports: ['9700'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Open 9700' }),
+        pol('pol-x-gwdrop', [rule({ action: 'drop', ports: ['9700'], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'Browser Gateway (Other Install)' }),
         pol('pol-x-7000d', [rule({ action: 'drop', ports: ['7000'], sources: [{ id: 'g-other' }], destinationResource: { id: 'r-x', type: 'subnet' } })], { name: 'No 7000' }),
     ];
     s.resources.push({ id: 'r-x', name: 'edge', type: 'subnet', address: '10.8.0.0/24', enabled: true, groups: [] });
@@ -678,7 +681,7 @@ test('authorization agrees with the Remote Access policy check on every TCP port
     for (const userId of ['u1', 'u2', 'u3']) {
         const src = userSourceGroups(s, userId, NOW);
         for (const res of s.resources) {
-            for (const port of [22, 53, 443, 3389, 5050, 5900, 7000, 8050, 8080, 9000, 9100, 9200, 9300, 9400, 9500, 12345]) {
+            for (const port of [22, 53, 443, 3389, 5050, 5900, 7000, 8050, 8080, 9000, 9100, 9200, 9300, 9400, 9500, 9600, 9700, 12345]) {
                 const ra = evaluatePolicies(s, { managedPolicyId: null }, src, res, port, NOW, {});
                 const a = authz(s, userId, { type: 'resource', id: res.id }, { protocol: 'tcp', port });
                 assert.equal(a.verdict, map[ra.code], `${userId} ${res.id}:${port} remote-access=${ra.code} access-check=${a.verdict}`);
@@ -686,7 +689,23 @@ test('authorization agrees with the Remote Access policy check on every TCP port
             }
         }
     }
-    assert.equal(compared, 192);
+    assert.equal(compared, 216);
+});
+
+test('a Browser Gateway policy of any installation never grants, but its drop rule still denies', () => {
+    const s = authzSnap();
+    const x = { type: 'resource', id: 'r-x' };
+    const named = authz(s, 'u1', x, { protocol: 'tcp', port: 9600 });
+    // u1 reaches r-x on other ports, so 9600 is 'not on this port' (PORT_NOT_ALLOWED in Remote Access).
+    assert.equal(named.verdict, 'port_blocked');
+    assert.ok(!named.resources[0].grantedBy.some(g => g.policyId === 'pol-x-gwname'));
+    const dropped = authz(s, 'u1', x, { protocol: 'tcp', port: 9700 });
+    assert.equal(dropped.verdict, 'denied');
+    assert.equal(dropped.resources[0].reason, 'blocked_by_policy');
+    assert.ok(dropped.resources[0].blockedBy.includes('Browser Gateway (Other Install)'));
+    // The same policies under ordinary names grant and block as any other.
+    for (const p of s.policies) if (p.id === 'pol-x-gwname') p.name = 'Partner Gateway';
+    assert.equal(authz(s, 'u1', x, { protocol: 'tcp', port: 9600 }).verdict, 'granted');
 });
 
 test('authorization reads rules as Remote Access does, and credits only the policies behind the answer', () => {

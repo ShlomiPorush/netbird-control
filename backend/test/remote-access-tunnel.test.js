@@ -53,6 +53,9 @@ const SECRET = crypto.randomBytes(12).toString('base64url');
 // ─── Fake guacd ───
 let guacdSeen = [];
 let guacdSockets = [];
+// What the fake guacd sends right after "ready", in the same write.
+const DEFAULT_AFTER_READY = encodeInstruction('name', 'srv1 ✓');
+let afterReady = DEFAULT_AFTER_READY;
 const guacd = net.createServer((sock) => {
     guacdSockets.push(sock);
     const parser = new GuacParser(1 << 20);
@@ -60,7 +63,7 @@ const guacd = net.createServer((sock) => {
         for (const ins of parser.push(d.toString('utf8'))) {
             guacdSeen.push(ins);
             if (ins.opcode === 'select') sock.write(encodeInstruction('args', 'VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'host-key'));
-            if (ins.opcode === 'connect') sock.write(encodeInstruction('ready', '$conn-1') + encodeInstruction('name', 'srv1 ✓'));
+            if (ins.opcode === 'connect') sock.write(encodeInstruction('ready', '$conn-1') + afterReady);
         }
     });
 });
@@ -300,4 +303,188 @@ test('a domain resource name opens on the names gateway, with an absolute name f
     assert.equal(insert.params[12], 'mosessafe.com');
     assert.equal(insert.params[13], 'names');
     ws.close();
+});
+
+// ─── Parse work and size bounds ───
+
+test('parse work does not depend on how an instruction arrives', () => {
+    const body = ('1.x,' + '2.a😀,').repeat(2048); // many elements, some with surrogate pairs
+    const whole = new GuacParser(1 << 20);
+    assert.deepEqual(whole.push(body), []);
+    const split = new GuacParser(1 << 20);
+    for (let k = 0; k < body.length; k++) assert.deepEqual(split.push(body[k]), []);
+    assert.equal(whole.examined, body.length, 'no unit read twice');
+    assert.equal(split.examined, body.length, 'no unit read twice, one unit per push');
+    const x = whole.push('1.y;'), y = split.push('1.y;');
+    assert.equal(x.length, 1);
+    assert.deepEqual(y, x);
+    assert.equal(x[0].raw, body + '1.y;');
+    assert.equal(x[0].args.length, 4096);
+});
+
+test('a long element is read once, however it arrives', () => {
+    const value = 'a'.repeat(32 * 1024);
+    const text = encodeInstruction('blob', '1', value);
+    const p = new GuacParser(1 << 20);
+    const got = [];
+    for (let k = 0; k < text.length; k++) got.push(...p.push(text[k]));
+    assert.equal(got.length, 1);
+    assert.equal(got[0].args[1], value);
+    assert.equal(got[0].raw, text);
+    assert.equal(p.examined, text.length);
+});
+
+test('surrogate pairs and UTF-8 split anywhere parse to the same instructions and raw text', () => {
+    const { StringDecoder } = require('string_decoder');
+    const text = encodeInstruction('name', 'a😀b') + encodeInstruction('', 'ping', '1') + encodeInstruction('name', '😀');
+    const expected = new GuacParser(1024).push(text);
+    assert.equal(expected.length, 3);
+    for (let cut = 1; cut < text.length; cut++) {
+        const p = new GuacParser(1024);
+        assert.deepEqual([...p.push(text.slice(0, cut)), ...p.push(text.slice(cut))], expected, `split at ${cut}`);
+    }
+    const bytes = Buffer.from(text, 'utf8');
+    for (let cut = 1; cut < bytes.length; cut++) {
+        const d = new StringDecoder('utf8');
+        const p = new GuacParser(1024);
+        assert.deepEqual([...p.push(d.write(bytes.subarray(0, cut))), ...p.push(d.write(bytes.subarray(cut)))], expected, `byte split at ${cut}`);
+    }
+});
+
+test('the parser refuses too many elements and an oversized pending instruction', () => {
+    assert.equal(new GuacParser(1024, { maxElements: 3 }).push('1.a,1.b,1.c;').length, 1);
+    assert.throws(() => new GuacParser(1024, { maxElements: 3 }).push('1.a,1.b,1.c,1.d;'), /too many elements/);
+    const p = new GuacParser(1024, { maxInstruction: 64 });
+    p.push('4.blob,1.1,100.');
+    assert.throws(() => { for (let k = 0; k < 10; k++) p.push('a'.repeat(10)); }, /too large/);
+    // Without maxInstruction (guacd's side) only an unfinished instruction is bounded, as before.
+    const many = encodeInstruction('img', ...Array.from({ length: 20 }, () => 'v'.repeat(10)));
+    assert.equal(new GuacParser(10).push(many).length, 1);
+    assert.throws(() => new GuacParser(10).push(many.slice(0, -1)), /too large/);
+    assert.throws(() => new GuacParser(1024).push('12345678901.'), /malformed/);
+    assert.throws(() => new GuacParser(1024).push('.x;'), /malformed/);
+});
+
+// Opens a session's tunnel and waits until guacd's output (after "ready") reaches the browser.
+async function openReady(port, extra = {}) {
+    ra.closeAllSessions('next test');
+    const out = await ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice', ...extra }, '203.0.113.9');
+    const sockets = guacdSockets.length;
+    const t = await open(port, out.token);
+    await waitFor(() => guacdSockets.length > sockets && t.msgs.length >= 2);
+    let closed = null;
+    t.ws.on('close', (code, reason) => { closed = { code, reason: String(reason) }; });
+    return { ...t, sock: guacdSockets[guacdSockets.length - 1], closed: () => closed };
+}
+
+test('a browser instruction past the size limit closes the session', async () => {
+    const port = app.address().port;
+    const t = await openReady(port);
+    // Well-formed so far, but longer than any instruction the browser client sends.
+    t.ws.send('4.blob,1.0,10000.');
+    for (let k = 0; k < 10; k++) t.ws.send('a'.repeat(1000));
+    t.ws.send(',10000.');
+    for (let k = 0; k < 8; k++) t.ws.send('a'.repeat(1000));
+    await waitFor(() => t.closed() !== null);
+    assert.ok(t.msgs.some(m => m.startsWith('5.error,') && m.includes('could not be read')));
+});
+
+test('a browser instruction with more elements than any client sends closes the session', async () => {
+    const port = app.address().port;
+    const t = await openReady(port);
+    const before = guacdSeen.length;
+    t.ws.send(encodeInstruction('key', ...Array.from({ length: ra._internal.CLIENT_MAX_ELEMENTS }, (_, k) => String(k))));
+    await waitFor(() => t.closed() !== null);
+    assert.ok(t.msgs.some(m => m.startsWith('5.error,')));
+    assert.ok(!guacdSeen.slice(before).some(i => i.opcode === 'key'));
+});
+
+test('a browser message over the payload limit closes the session', async () => {
+    const port = app.address().port;
+    const t = await openReady(port);
+    // 20 KiB: well over the client's largest message (a blob of 8064 base64 characters).
+    t.ws.send(encodeInstruction('blob', '0', 'x'.repeat(20 * 1024)));
+    await waitFor(() => t.closed() !== null);
+    assert.equal(t.closed().code, 1009);
+});
+
+test('the largest blob the browser client sends still reaches guacd', async () => {
+    const port = app.address().port;
+    const t = await openReady(port);
+    const before = guacdSeen.length;
+    const chunk = Buffer.alloc(6048, 0xA5).toString('base64');
+    t.ws.send(encodeInstruction('clipboard', '0', 'text/plain'));
+    t.ws.send(encodeInstruction('blob', '0', chunk));
+    t.ws.send(encodeInstruction('end', '0'));
+    await waitFor(() => guacdSeen.slice(before).some(i => i.opcode === 'end'));
+    assert.equal(guacdSeen.slice(before).find(i => i.opcode === 'blob').args[1], chunk);
+    ra.closeAllSessions('test over');
+});
+
+test('large guacd frames still reach the browser intact', async () => {
+    const port = app.address().port;
+    const t = await openReady(port);
+    const big = encodeInstruction('blob', '3', 'Q'.repeat(256 * 1024));
+    for (let k = 0; k < big.length; k += 1000) t.sock.write(big.slice(k, k + 1000));
+    await waitFor(() => t.msgs.join('').includes(big));
+    assert.equal(t.closed(), null);
+    ra.closeAllSessions('test over');
+});
+
+// ─── Connection parameters from the browser ───
+
+test('only the parameter names guacd asks for reach guacd, never the target', async () => {
+    const port = app.address().port;
+    afterReady = encodeInstruction('required', 'password', 'hostname');
+    let t;
+    try {
+        t = await openReady(port);
+    } finally { afterReady = DEFAULT_AFTER_READY; }
+    const before = guacdSeen.length;
+    const b64 = (v) => Buffer.from(v).toString('base64');
+    const stream = (idx, name, value) => [encodeInstruction('argv', idx, 'text/plain', name), encodeInstruction('blob', idx, b64(value)), encodeInstruction('end', idx)];
+    const send = (list) => { for (const m of list) t.ws.send(m); };
+    send(stream('1', 'hostname', '10.9.9.9'));   // asked for, but never from the browser
+    send(stream('2', 'port', '4444'));           // never asked for, never allowed
+    send(stream('3', 'password', 'pw'));         // asked for
+    send(stream('4', 'font-size', '14'));        // SSH terminal setting
+    send(stream('5', 'username', 'root'));       // not asked for
+    send(stream('08', 'password', 'pw'));        // not a plain stream index
+    send(stream('600', 'password', 'pw'));       // outside guacd's stream range
+    t.ws.send(encodeInstruction('blob', '7', b64('x')));   // a stream that was never opened
+    t.ws.send(encodeInstruction('blob', '3', b64('late'))); // a stream already ended
+    send(stream('1', 'password', 'pw2'));        // the index of a dropped stream, reused for an allowed one
+    send([encodeInstruction('clipboard', '6', 'text/plain'), encodeInstruction('blob', '6', b64('clip')), encodeInstruction('end', '6')]);
+    t.ws.send(encodeInstruction('ack', '9', 'OK', '0'));   // answers a guacd stream, passes as before
+    // A later request from guacd opens one more name.
+    t.sock.write(encodeInstruction('required', 'passphrase'));
+    await waitFor(() => t.msgs.some(m => m.includes('10.passphrase')));
+    send(stream('2', 'passphrase', 'pp'));
+    t.ws.send(encodeInstruction('nop'));
+    await waitFor(() => guacdSeen.slice(before).some(i => i.opcode === 'nop'));
+
+    const seen = guacdSeen.slice(before).filter(i => ['argv', 'blob', 'end', 'clipboard', 'ack'].includes(i.opcode)).map(i => [i.opcode, ...i.args]);
+    assert.deepEqual(seen, [
+        ['argv', '3', 'text/plain', 'password'], ['blob', '3', b64('pw')], ['end', '3'],
+        ['argv', '4', 'text/plain', 'font-size'], ['blob', '4', b64('14')], ['end', '4'],
+        ['argv', '1', 'text/plain', 'password'], ['blob', '1', b64('pw2')], ['end', '1'],
+        ['clipboard', '6', 'text/plain'], ['blob', '6', b64('clip')], ['end', '6'],
+        ['ack', '9', 'OK', '0'],
+        ['argv', '2', 'text/plain', 'passphrase'], ['blob', '2', b64('pp')], ['end', '2'],
+    ]);
+    assert.equal(t.closed(), null, 'dropping is silent, the session stays open');
+    ra.closeAllSessions('test over');
+});
+
+test('clipboard streams stay within guacd\'s stream range', async () => {
+    const port = app.address().port;
+    const t = await openReady(port);
+    const before = guacdSeen.length;
+    for (let k = 0; k < 600; k++) t.ws.send(encodeInstruction('clipboard', String(k), 'text/plain'));
+    t.ws.send(encodeInstruction('nop'));
+    await waitFor(() => guacdSeen.slice(before).some(i => i.opcode === 'nop'));
+    const idx = guacdSeen.slice(before).filter(i => i.opcode === 'clipboard').map(i => Number(i.args[0]));
+    assert.equal(idx.length, 512);
+    assert.ok(idx.every(n => n < 512));
+    ra.closeAllSessions('test over');
 });

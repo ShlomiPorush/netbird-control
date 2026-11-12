@@ -53,6 +53,16 @@ function parsePrefix(addr) {
 
 const prefixCovers = (p, ip) => !!p && ip >= p.start && ip <= p.end;
 
+// The internal Docker networks of the Browser Gateways (docker-compose.remote-access.yml): the
+// gateways' own addresses and the egress bridge. A test keeps this list in step with the file.
+const GATEWAY_INTERNAL_SUBNETS = ['172.31.250.0/24', '172.31.251.0/24'];
+// Never browser targets, whatever a resource or policy says: "this network", loopback, link-local,
+// NetBird peers (100.64.0.0/10 - peers are not targets), multicast, reserved and broadcast, and the
+// gateways' own networks (guacd would dial them from inside the gateway's network namespace).
+const REFUSED_TARGET_PREFIXES = ['0.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '100.64.0.0/10', '224.0.0.0/4', '240.0.0.0/4', ...GATEWAY_INTERNAL_SUBNETS]
+    .map(parsePrefix);
+const isRefusedTarget = (ip) => REFUSED_TARGET_PREFIXES.some(p => prefixCovers(p, ip));
+
 function grantIsValid(g, now) {
     if (!g || g.status !== 'active' || g.revoke_requested_at) return false;
     const exp = g.expires_at ? new Date(g.expires_at).getTime() : NaN;
@@ -129,6 +139,28 @@ function ruleTargetsResource(rule, res) {
 
 const ruleIsUsable = (rule) => rule && rule.enabled !== false && Array.isArray(rule.sources);
 
+const isEmptyValue = (v) => v === undefined || v === null || v === '' || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+
+// Does this enabled accept rule carry gateway traffic? A rule's source is either groups
+// (`sources`) or one `sourceResource` (backend/db.js ruleForPut). 'yes' / 'no', or 'unknown' for a
+// source this code can't read - the caller then denies every session (fail closed).
+function ruleSourceIsGateway(rule, gwGroups, gwPeerIds) {
+    let unknown = false;
+    if (Array.isArray(rule.sources)) {
+        if (rule.sources.some(s => gwGroups.has(idOf(s)))) return 'yes';
+    } else if (!isEmptyValue(rule.sources)) unknown = true;
+    const sr = rule.sourceResource;
+    if (!isEmptyValue(sr)) {
+        const id = typeof sr === 'string' ? sr : (sr && typeof sr === 'object' ? sr.id : null);
+        const type = sr && typeof sr === 'object' ? sr.type : undefined;
+        if (id && typeof id === 'string' && gwPeerIds.has(id) && (type === undefined || type === 'peer')) return 'yes';
+        // Another peer is not gateway traffic; anything else (no id, no type, a resource as source)
+        // can't be bounded here.
+        if (!id || typeof id !== 'string' || type !== 'peer') unknown = true;
+    }
+    return unknown ? 'unknown' : 'no';
+}
+
 function networkIndex(snap) {
     const netOf = new Map();
     for (const n of arr(snap.networks)) for (const rid of arr(n.resources)) netOf.set(idOf(rid), n);
@@ -136,15 +168,18 @@ function networkIndex(snap) {
 }
 
 // Every address the gateway peer can route to: resources reached by any enabled policy whose
-// sources include one of the gateway's groups (including the implicit "All"), plus legacy
-// network routes distributed to those groups. Domain-based routes cannot be bounded to
-// addresses, so they are reported separately and block every session (fail closed).
+// source is one of the gateway's groups (including the implicit "All") or the gateway peer itself
+// (sourceResource), plus legacy network routes distributed to those groups. Domain-based routes
+// cannot be bounded to addresses, so they are reported separately and block every session (fail
+// closed). An accept rule whose source can't be read gives GATEWAY_REACH_UNKNOWN: the reach can't
+// be proven, so every session is denied.
 function gatewayReach(snap, cfg) {
     const gwGroup = cfg && cfg.gatewayGroupId;
     const gwPeers = gwGroup ? arr(snap.peers).filter(p => p && arr(p.groups).some(g => idOf(g) === gwGroup)) : [];
     if (!gwPeers.length) return { error: 'GATEWAY_NOT_ENROLLED', entries: [], domain: [], peers: [] };
     const gwGroups = new Set(allGroupIds(snap));
     for (const p of gwPeers) for (const g of arr(p.groups)) if (idOf(g)) gwGroups.add(idOf(g));
+    const gwPeerIds = new Set(gwPeers.map(p => p.id));
 
     const netOf = networkIndex(snap);
     const selected = new Set(arr(cfg.networks));
@@ -162,8 +197,10 @@ function gatewayReach(snap, cfg) {
     for (const p of arr(snap.policies)) {
         if (!p || p.enabled === false) continue;
         for (const rule of arr(p.rules)) {
-            if (!ruleIsUsable(rule) || (rule.action && rule.action !== 'accept')) continue;
-            if (!rule.sources.some(s => gwGroups.has(idOf(s)))) continue;
+            if (!rule || rule.enabled === false || (rule.action && rule.action !== 'accept')) continue;
+            const source = ruleSourceIsGateway(rule, gwGroups, gwPeerIds);
+            if (source === 'unknown') return { error: 'GATEWAY_REACH_UNKNOWN', entries: [], domain: [], peers: gwPeers };
+            if (source !== 'yes') continue;
             for (const res of resources) if (res && ruleTargetsResource(rule, res)) addResource(res);
         }
     }
@@ -188,6 +225,8 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
     const ip = ipv4ToInt(address);
     if (ip === null) return deny('INVALID_ADDRESS');
     if (!Number.isInteger(port) || port < 1 || port > 65535) return deny('INVALID_PORT');
+    // Before any resource match: no resource or policy makes these a target.
+    if (isRefusedTarget(ip)) return deny('ADDRESS_NOT_ALLOWED');
 
     const src = userSourceGroups(snap, userId, now);
     if (src.error) return deny(src.error);
@@ -227,9 +266,22 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
     return evaluatePolicies(snap, cfg, src, best.res, port, now, { resource, network });
 }
 
+// The managed gateway objects' names: a fixed base, alone (the names before the installation name
+// was added) or followed by " (<installation name>)". Every installation recognizes every other
+// installation's objects on the same NetBird account, whatever characters its name has.
+const MANAGED_NAME_BASES = {
+    group: ['Browser Gateway', 'Browser Gateway Targets', 'Browser Gateway Names', 'Browser Gateway Name Targets'],
+    policy: ['Browser Gateway', 'Browser Gateway Names'],
+};
+function isManagedGatewayName(name, kind) {
+    if (typeof name !== 'string' || !name) return false;
+    return (MANAGED_NAME_BASES[kind] || []).some(base => name === base
+        || (name.length > base.length + 3 && name.startsWith(base + ' (') && name.endsWith(')')));
+}
+
 // The managed gateway policies are infrastructure, never a user's access: matched by id, and by
-// name for one whose id was not saved yet (re-created after a deletion, then interrupted).
-const MANAGED_POLICY_NAMES = new Set(['Browser Gateway', 'Browser Gateway (Names)']);
+// name (another installation's, or one whose id was not saved yet). Only their accept rules are
+// ignored: a matching drop rule in a policy with such a name still denies.
 function managedPolicyIds(cfg) {
     return new Set([cfg && cfg.managedPolicyId, ...arr(cfg && cfg.managedPolicyIds)].filter(Boolean));
 }
@@ -245,7 +297,8 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
     let postureOnly = false;
     let portMismatch = false;
     for (const p of arr(snap.policies)) {
-        if (!p || p.enabled === false || managed.has(p.id) || MANAGED_POLICY_NAMES.has(p.name)) continue;
+        if (!p || p.enabled === false) continue;
+        const infra = managed.has(p.id) || isManagedGatewayName(p.name, 'policy');
         const tm = TEMP_POLICY_RE.exec(p.name || '');
         if (tm && !grantIsValid(grantById.get(tm[1]), now)) continue;
         const posture = arr(p.source_posture_checks).length > 0;
@@ -259,7 +312,7 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
                 if (opens) return deny('BLOCKED_BY_POLICY', { policy: p.name || p.id });
                 continue;
             }
-            if (action !== 'accept') continue;
+            if (action !== 'accept' || infra) continue;
             if (!opens) { portMismatch = true; continue; }
             if (posture) { postureOnly = true; continue; }
             granting.push(p.name || p.id);
@@ -313,6 +366,9 @@ function patternMatches(p, name) {
 }
 
 const isDomainResource = (res) => !!res && !parsePrefix(res.address) && !!domainPattern(res.address);
+// Browser access goes only through exact domain resources: a wildcard (*.example.com) would let a
+// user pick any name below it, and the names gateway connects to whatever that name resolves to.
+const isExactDomainResource = (res) => isDomainResource(res) && !domainPattern(res.address).wildcard;
 
 // May this user open a session to name:port through a domain resource? The answer is
 // { ok: false, code: 'NO_DOMAIN_MATCH' } when no domain resource in any network matches the
@@ -331,10 +387,14 @@ function evaluateNameAccess(snap, cfg, { userId, name, port, now = Date.now() })
         const p = domainPattern(res.address);
         if (!patternMatches(p, name)) continue;
         const net = netOf.get(res.id);
-        matches.push({ res, net, rank: p.rank, selected: !!net && selected.has(net.id) });
+        matches.push({ res, net, rank: p.rank, wildcard: p.wildcard, selected: !!net && selected.has(net.id) });
     }
     if (!matches.length) return deny('NO_DOMAIN_MATCH');
-    const open = matches.filter(m => m.selected);
+    // Only exact domain resources are browser targets. A name that only a wildcard covers is
+    // refused here - it never falls through to the server's own name lookup either.
+    const exact = matches.filter(m => !m.wildcard);
+    if (!exact.length) return deny('WILDCARD_DOMAIN_NOT_ALLOWED');
+    const open = exact.filter(m => m.selected);
     if (!open.length) return deny('NETWORK_NOT_ENABLED');
     open.sort((a, b) => b.rank - a.rank);
     const best = open[0];
@@ -352,7 +412,7 @@ function evaluateNameAccess(snap, cfg, { userId, name, port, now = Date.now() })
     // least as specifically (NetBird resolves a name through its most specific match, so a
     // broader wildcard elsewhere never takes it).
     const reach = gatewayReach(snap, cfg);
-    if (reach.error) return deny('NAMES_GATEWAY_NOT_ENROLLED', { resource, network });
+    if (reach.error) return deny(reach.error === 'GATEWAY_NOT_ENROLLED' ? 'NAMES_GATEWAY_NOT_ENROLLED' : reach.error, { resource, network });
     if (reach.entries.length) return deny('NAMES_GATEWAY_EXTRA_REACH', { resource, network });
     const inReach = reach.domain.some(d => d.kind === 'resource' && d.id === best.res.id);
     if (!inReach) return deny('GATEWAY_NOT_SYNCED', { resource, network });
@@ -364,21 +424,24 @@ function evaluateNameAccess(snap, cfg, { userId, name, port, now = Date.now() })
 }
 
 // Is the path up: a connected gateway peer, and an enabled, connected routing peer for the
-// network (a router targets one peer or every peer of its peer groups).
+// network (a router targets one peer or every peer of its peer groups). A Browser Gateway peer
+// (of either gateway) never counts as a routing peer.
 function pathStatus(snap, cfg, routers) {
     const gw = gatewayReach(snap, cfg);
     if (gw.error) return { ok: false, code: gw.error };
     if (!gw.peers.some(p => p.connected)) return { ok: false, code: 'GATEWAY_OFFLINE' };
+    const gwGroupIds = new Set([cfg && cfg.gatewayGroupId, ...arr(cfg && cfg.gatewayGroupIds)].filter(Boolean));
+    const isGatewayPeer = (p) => arr(p.groups).some(g => gwGroupIds.has(idOf(g)));
     const peersById = new Map(arr(snap.peers).map(p => [p.id, p]));
     const groupsById = new Map(arr(snap.groups).map(g => [g.id, g]));
+    const routes = (p) => !!p && p.connected && !isGatewayPeer(p);
     for (const r of arr(routers)) {
         if (!r || r.enabled === false) continue;
-        if (r.peer && peersById.get(r.peer) && peersById.get(r.peer).connected) return { ok: true, code: 'OK' };
+        if (r.peer && routes(peersById.get(r.peer))) return { ok: true, code: 'OK' };
         for (const gref of arr(r.peer_groups)) {
             const g = groupsById.get(idOf(gref));
             for (const m of arr(g && g.peers)) {
-                const p = peersById.get(idOf(m));
-                if (p && p.connected) return { ok: true, code: 'OK' };
+                if (routes(peersById.get(idOf(m)))) return { ok: true, code: 'OK' };
             }
         }
     }
@@ -386,8 +449,8 @@ function pathStatus(snap, cfg, routers) {
 }
 
 module.exports = {
-    evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource,
-    gatewayReach, extraReach, pathStatus,
+    evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
+    gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt, evaluatePolicies,
-    TEMP_POLICY_RE, TEMP_GROUP_RE, MANAGED_POLICY_NAMES,
+    TEMP_POLICY_RE, TEMP_GROUP_RE,
 };

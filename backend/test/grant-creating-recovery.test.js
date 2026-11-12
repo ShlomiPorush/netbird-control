@@ -13,6 +13,9 @@ nb.ensureGroupsFresh = async () => { };
 nb.netbirdGet = async (path) => {
     if (!nbReads) return null; // NetBird unreachable
     path = String(path);
+    // A grant reads each group live before adding a user to it.
+    const gm = String(path).startsWith('/api/groups/') ? [null, String(path).slice('/api/groups/'.length)] : null;
+    if (gm) return { id: decodeURIComponent(gm[1]), name: 'Ordinary group' };
     if (path.startsWith('/api/users')) return [clone(nbUser)];
     if (path === '/api/groups') return clone(tempGroups);
     if (path === '/api/networks/n1/resources') return [{ id: 'r1', groups: [] }];
