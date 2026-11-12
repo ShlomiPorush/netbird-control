@@ -42,10 +42,18 @@ async function burn(get, path, n, headers) {
 }
 
 test('limits and window are fixed', () => {
-    assert.deepEqual({ ...LIMITS }, { auth: 30, api: 600, spa: 300 });
+    assert.deepEqual({ ...LIMITS }, { auth: 30, api: 600, spa: 300, apikey: 30 });
     assert.equal(WINDOW_MS, 60_000);
     assert.equal(limiterOptions('api').limit, 600);
     assert.throws(() => limiterOptions('nope'));
+});
+
+test('the public API is counted per API key, not per address', () => {
+    const { keyGenerator, limit } = limiterOptions('apikey');
+    assert.equal(limit, 30);
+    assert.equal(keyGenerator({ apiKey: { id: 7 }, ip: '203.0.113.1' }), 'apikey:7');
+    assert.equal(keyGenerator({ apiKey: { id: 7 }, ip: '198.51.100.1' }), 'apikey:7');
+    assert.notEqual(keyGenerator({ apiKey: { id: 8 }, ip: '203.0.113.1' }), 'apikey:7');
 });
 
 test('429 with a JSON error, RateLimit headers and Retry-After after the limit', async () => {

@@ -363,3 +363,13 @@ that the real end time is unknown.
 
 The gateways' NetBird object ids are account-specific, so they are not part of the settings
 export.
+
+## Sessions opened from another system
+
+Another system can open a session with stored credentials through
+`POST /api/v1/remote-access/launch` and an API key from **Settings → API Keys**. It gets a one-time
+link that expires after five minutes. The credentials stay on this server and go to guacd; the
+browser never sees them. The person who opens the link goes through every check on this page, as
+for a manual connection. When the request names a user by email, only that user can open the link.
+When it names nobody, the first signed-in user whose access allows the target gets the session.
+See the [public API reference](api.md) and the [integration guide](remote-launch-integration.md).

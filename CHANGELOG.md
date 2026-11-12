@@ -53,6 +53,30 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
     clipboard and the sign-in values that guacd asks for. The server address and port never come
     from the browser. A browser message is limited to 16 KiB; a larger or malformed one closes the
     session.
+- **API keys and a public API.** Admins create API keys in **Settings → API Keys**. A key does only
+  what its permissions allow, can be limited to addresses and an expiry date, is shown once, and is
+  stored only as a hash. The audit log records keys being created and revoked, every connection
+  link a key makes or that is opened, and link requests it refuses (collapsed per key and error
+  code). The first action,
+  `POST /api/v1/remote-access/launch`, lets another system, such as a customer file, open a browser
+  RDP or SSH session with stored credentials: it returns a one-time link that expires after five
+  minutes, the credentials never reach the browser, and the user's own access is checked as for a
+  manual connection. See [docs/api.md](docs/api.md) and
+  [docs/remote-launch-integration.md](docs/remote-launch-integration.md).
+- **Access Check.** A new section in Access Management answers two questions from a fresh read
+  of NetBird: is this user authorized for a resource or a network, and who is. The answer uses
+  the same authorization model as Remote Access: the user's groups, their devices' groups and All
+  (temporary-grant groups only while the grant is valid) against the policies, with drop rules
+  winning and Browser Gateway policies never granting; a policy with posture checks makes it
+  "Authorized If Posture Checks Pass". It names the policy, group and ports behind the answer, and
+  needs no device. Collapsed Device Details show what each device can reach right now, following
+  what NetBird enforces (each device's own groups, the most specific route when resources overlap,
+  accept rules minus drop rules on the routing peer), and why a device cannot connect (compliance,
+  an expired sign-in, a blocked user). A temporary grant that has ended but is still in NetBird is
+  flagged there. Admins and holders of Manage Temporary Access, Manage All Networks
+  or Troubleshoot All Peers can use it, and Tenant Support users inside a tenant. The user page has
+  a **Check Access** button and the resource editor a **Who Has Access** button. It is not part of
+  the public API.
 
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
@@ -69,6 +93,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
   cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
   revoke fails. On upgrade, active grants with a recorded error are marked once.
+- **Correct credentials always work from an address that failed too often.** The webhook receivers
+  and the Telegram callback check the token or secret first. While an address is blocked after
+  repeated failures, only its failed attempts get `429`; the correct webhook token and the correct
+  Telegram secret are accepted as usual.
 
 ---
 

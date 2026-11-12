@@ -2,7 +2,8 @@ import { lazy } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
 import { useViewer } from '@/contexts/ViewerContext';
-import { getTenantMode } from '@/lib/api';
+import { currentLaunchLink, getTenantMode, switchAccount } from '@/lib/api';
+import { Button } from '@/components/ui';
 import type { ReactNode } from 'react';
 
 // Route-level code splitting: each page is its own chunk, fetched on first visit
@@ -39,8 +40,8 @@ function AdminRoute({ children }: { children: ReactNode }) {
 // The Access Management hub: admins, approvers, and Manage Temporary Access holders -
 // each sees only the sections their rights unlock (filtered inside the page).
 function AccessMgmtRoute({ children }: { children: ReactNode }) {
-  const { restricted, canApprove, can } = useViewer();
-  return (!restricted || canApprove || can('temp.manage')) ? <>{children}</> : <Navigate to="/" replace />;
+  const { restricted, canApprove, can, canCheckAccess } = useViewer();
+  return (!restricted || canApprove || can('temp.manage') || canCheckAccess) ? <>{children}</> : <Navigate to="/" replace />;
 }
 
 // Pages open to admins AND holders of a fine-grained feature permission (Settings → Permissions).
@@ -53,7 +54,24 @@ function PermRoute({ perm, children }: { perm: string; children: ReactNode }) {
 // (history, app features, settings) belongs to the main account and bounces to Peers.
 // Mirrors the server-side allowlist, which is the actual enforcement.
 function TenantSafeRoute({ children }: { children: ReactNode }) {
-  return getTenantMode() ? <Navigate to="/peers" replace /> : <>{children}</>;
+  if (!getTenantMode()) return <>{children}</>;
+  // A launch link from another system: say where it opens instead of dropping it.
+  if (currentLaunchLink()) return <LaunchInMainAccount />;
+  return <Navigate to="/peers" replace />;
+}
+
+function LaunchInMainAccount() {
+  return (
+    <div className="max-w-xl rounded-xl border border-netbird/40 bg-netbird/5 p-5">
+      <h1 className="text-lg font-semibold text-nb-gray-900 dark:text-nb-gray-100">Open The Connection In The Main Account</h1>
+      <p className="mt-2 text-sm text-nb-gray-600 dark:text-nb-gray-300">
+        You were sent here to open a remote connection. Remote connections open in the main account, and this tab is managing a tenant.
+      </p>
+      <Button variant="primary" className="mt-4" onClick={() => switchAccount(null, currentLaunchLink() || '/')}>
+        Switch To The Main Account And Connect
+      </Button>
+    </div>
+  );
 }
 
 export default function App() {
