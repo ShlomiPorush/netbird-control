@@ -31,10 +31,18 @@ async function handle<T>(res: Response): Promise<T> {
     // Not authenticated → kick off the OIDC login flow, remembering WHERE the user was -
     // after the (frequent, by security design) re-login they land back on the same page
     // instead of being dumped on Home.
+    // A tab in the background waits until it is shown: a login it started there would sit at the
+    // provider unseen, and the tab the user is looking at would have to wait for it.
     if (!redirectingToLogin) {
       redirectingToLogin = true;
-      const here = window.location.pathname + window.location.search + window.location.hash;
-      window.location.href = '/login?returnTo=' + encodeURIComponent(here);
+      const go = () => {
+        if (document.visibilityState === 'hidden') return;
+        document.removeEventListener('visibilitychange', go);
+        const here = window.location.pathname + window.location.search + window.location.hash;
+        window.location.href = '/login?returnTo=' + encodeURIComponent(here);
+      };
+      document.addEventListener('visibilitychange', go);
+      go();
     }
     throw new ApiError(401, 'Unauthorized');
   }
@@ -128,8 +136,9 @@ function send(input: string, init: RequestInit): Promise<Response> {
 }
 
 export const api = {
-  get<T>(path: string, query?: Query): Promise<T> {
-    return send(buildUrl(path, query), { headers: baseHeaders() }).then(handle<T>);
+  // `signal` lets React Query abort a request whose result is no longer wanted (a newer search).
+  get<T>(path: string, query?: Query, signal?: AbortSignal): Promise<T> {
+    return send(buildUrl(path, query), { headers: baseHeaders(), signal }).then(handle<T>);
   },
   post<T>(path: string, body?: unknown): Promise<T> {
     return send(path, {

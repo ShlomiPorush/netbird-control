@@ -10,11 +10,16 @@ const sod = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return
 const eod = (d: Date) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
 const sameDay = (a?: Date, b?: Date) => !!a && !!b && a.toDateString() === b.toDateString();
 
-/** The Activity page's DEFAULT window - grouped log views aggregate their whole range, so an
- * unbounded default meant scanning the entire tenant history on every page load. Last 7 days
- * keeps page loads index-bounded; All Time remains one click away in the picker. */
+/** The Activity page's DEFAULT window: today. The page shows what is happening now, and its
+ * grouped views aggregate their whole range, so a wider default made every visit (and every
+ * Clear) scan days or the whole history. Longer ranges and All Time stay one click away. */
 export function defaultLogRange(): { from: Date; to: Date } {
-  return quickRanges().last7Days;
+  return quickRanges().today;
+}
+/** True when `r` is the default window, so a Clear button can tell it from a chosen range. */
+export function isDefaultLogRange(r?: DateRange): boolean {
+  const d = defaultLogRange();
+  return sameDay(r?.from, d.from) && sameDay(r?.to, d.to);
 }
 
 function quickRanges(): Record<string, { from: Date; to: Date }> {

@@ -19,6 +19,7 @@ const {
     queryEvents, getDistinctUsers, getDistinctSources, queryTrafficSummary,
     getStats, getHourlyEventCounts, getFilterConfig, getBuiltinNoise, setBuiltinNoise, getFilterRules,
     createFilterRule, updateFilterRule, deleteFilterRule, invalidateFilterCache, scanEvents, deleteEventsByIds,
+    EVENT_TYPE_INDEXES, reclassifyEventTypes,
 } = require('./lib/events');
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
@@ -4486,6 +4487,9 @@ const LOG_INDEXES = [
     // The Activity toolbar's user dropdown filters `tenant = $1 AND user_id = $n` and still orders
     // by time; with only the plain (user_id) index that page had to sort the whole matched set.
     { name: 'idx_events_tenant_user_ts', table: 'events', cols: '(tenant, user_id, timestamp DESC)' },
+    // Partial indexes over traffic rows that still need their endpoint type or flow state
+    // recovered (see reclassifyEventTypes in lib/events.js). They hold only rows still to be fixed.
+    ...EVENT_TYPE_INDEXES,
 ];
 // Dropped once their composite exists: each is either the same columns in the useless order
 // (timestamp-first) or a strict prefix of a composite. Every query on these tables filters tenant
@@ -4500,17 +4504,32 @@ const LOG_INDEXES_OBSOLETE = [
     { name: 'idx_app_audit_tenant', needs: 'idx_app_audit_tenant_ts' },
 ];
 
-let _logIndexesRan = false;
-// Fired AFTER the server is listening (see start() in server.js) - never awaited by boot.
-async function ensureLogIndexes() {
-    if (_logIndexesRan) return;
-    _logIndexesRan = true;
+// Fired AFTER the server is listening (see start() in server.js) - never awaited by boot - and again
+// by the event-type sweep tick, so a build that failed is retried without a restart. Concurrent
+// callers in this process share one run; once every index is present and valid, it is a no-op.
+let _logIndexesDone = false, _logIndexesRun = null;
+function ensureLogIndexes() {
+    if (_logIndexesDone) return Promise.resolve();
+    if (!_logIndexesRun) _logIndexesRun = runLogIndexes().finally(() => { _logIndexesRun = null; });
+    return _logIndexesRun;
+}
+// Advisory lock key for index maintenance: one instance at a time across the whole database. An
+// index being built CONCURRENTLY shows as invalid, so a second instance must never treat it as an
+// interrupted build and drop it.
+const LOG_INDEX_LOCK = 0x4e42494e;
+async function runLogIndexes() {
     // A DEDICATED client, used with single standalone statements: CREATE INDEX CONCURRENTLY cannot
     // run inside a transaction block, and pooled clients here are otherwise transaction-free but
     // shared. client.query() with no parameter array sends one simple-protocol statement, which is
     // exactly what CONCURRENTLY requires.
     const client = await pool.connect();
+    let locked = false, unlockError = null;
     try {
+        locked = (await client.query('SELECT pg_try_advisory_lock($1) AS ok', [LOG_INDEX_LOCK])).rows[0].ok;
+        if (!locked) {
+            console.log('[Index] another instance is maintaining the log indexes - checking again on the next tick');
+            return;
+        }
         // Presence AND validity in one look-up (pg_indexes alone cannot tell a half-built index
         // from a usable one).
         const exists = async (name) => (await client.query(
@@ -4560,10 +4579,20 @@ async function ensureLogIndexes() {
                 console.error(`[Index] could not drop ${old.name}: ${e.message}`);
             }
         }
+
+        // Done only when every index is there and valid; otherwise the next call tries again.
+        let allValid = true;
+        for (const idx of LOG_INDEXES) {
+            const cur = await exists(idx.name);
+            if (!cur || cur.indisvalid === false) allValid = false;
+        }
+        _logIndexesDone = allValid;
     } catch (e) {
         console.error('[Index] log index maintenance failed:', e.message);
     } finally {
-        client.release();
+        if (locked) await client.query('SELECT pg_advisory_unlock($1)', [LOG_INDEX_LOCK]).catch(e => { unlockError = e; });
+        // A connection that may still hold the lock must not go back to the pool.
+        client.release(unlockError || undefined);
     }
 }
 
@@ -12311,7 +12340,7 @@ async function handleTelegramReplyMessage(msg) {
 
 module.exports = {
     addResourceGroups, removeResourceGroups, fetchUserGroupsFresh, // used by browser remote access (server.js)
-    pool, initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
+    pool, initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
     getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, refuseManagedGroupEdit, removeUserManagedGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
     loadAccessCheckSnapshot, loadAccessCheckRouters,

@@ -4,6 +4,7 @@
 // a tenant), that it reads the tenant it runs in, and how it answers bad input and NetBird
 // read failures.
 const { test, before, after } = require('node:test');
+const { pageLoad } = require('./helpers/page-load');
 const assert = require('node:assert/strict');
 const http = require('http');
 const net = require('net');
@@ -137,7 +138,7 @@ const sessions = new Map();
 async function signIn(sub) {
     if (sessions.has(sub)) return sessions.get(sub);
     const ip = freshIp();
-    const start = await fetch(`${BASE}/login`, { headers: { accept: 'text/html', 'x-forwarded-for': ip }, redirect: 'manual' });
+    const start = await pageLoad(`${BASE}/login`, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html', 'x-forwarded-for': ip } });
     const authorize = new URL(start.headers.get('location'));
     const code = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);

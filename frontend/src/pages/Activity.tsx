@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { RefreshCw, Rows3 } from 'lucide-react';
 import type { DateRange } from 'react-day-picker';
 import { cn } from '@/lib/cn';
@@ -11,7 +12,7 @@ import { formatUserId } from '@/lib/logfmt';
 import type { LogEvent, UserRef } from '@/lib/types';
 import { SearchInput, IconButton, LogLoader, useSettledDelay, Pagination, PageHeader, ClearFiltersButton } from '@/components/ui';
 import { ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
-import { DateRangePicker, defaultLogRange } from '@/components/logs/DateRangePicker';
+import { DateRangePicker, defaultLogRange, isDefaultLogRange } from '@/components/logs/DateRangePicker';
 import { UserSelect } from '@/components/logs/UserSelect';
 import { Segmented, ToolbarMenu, FilterPopover } from '@/components/logs/toolbar';
 import { EventsTable } from '@/components/logs/EventsTable';
@@ -27,14 +28,21 @@ export default function Activity() {
   const seesAll = !restricted || can('activity.all');
   // Summary (aggregated conversations) is the default; the raw event list is behind "Detailed".
   const [view, setView] = useState<TrafficView>(() => (localStorage.getItem(VIEW_KEY) === 'detailed' ? 'detailed' : 'summary'));
-  const switchView = (v: string) => { setView(v as TrafficView); try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } };
+  const qc = useQueryClient();
+  const switchView = (v: string) => {
+    // The Detailed query stays mounted (only disabled) under Summary, and disabling it does not
+    // abort a request already running, so cancel it here: it would compete with the summary.
+    if (v !== 'detailed') qc.cancelQueries({ queryKey: ['logs', params], exact: true });
+    setView(v as TrafficView);
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ }
+  };
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(25);
   const [type, setType] = useState('All');
   const [protocol, setProtocol] = useState('');
   const [user, setUser] = useState('');
-  // Defaults to the last 7 days (see defaultLogRange) - the grouped views aggregate the whole
-  // selected range, so All Time as a DEFAULT re-scanned the entire history on every visit.
+  // Defaults to today (see defaultLogRange): the page shows live activity, and the grouped views
+  // aggregate the whole selected range, so a wider default re-scanned days of history per visit.
   const [range, setRange] = useState<DateRange | undefined>(() => defaultLogRange());
   const [search, setSearch] = useState('');
   const [source, setSource] = useState('');
@@ -89,7 +97,9 @@ export default function Activity() {
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3 mb-5">
-        <SearchInput value={search} onChange={setSearch} placeholder="Search by ip, port, peer or resource…" />
+        {/* The toolbar fits on one row on a desktop screen: the search box gives up width first
+            (down to min-w), the rows-per-page menu shows just the number, and Clear is an icon. */}
+        <SearchInput value={search} onChange={setSearch} placeholder="Search by ip, port, peer or resource…" className="flex-1 min-w-[220px]" />
         <Segmented
           options={[{ value: 'summary', label: 'Summary' }, { value: 'detailed', label: 'Detailed' }]}
           value={view}
@@ -108,10 +118,13 @@ export default function Activity() {
           destination={destination} onDestination={setDestination}
           onClear={() => { setProtocol(''); setSource(''); setDestination(''); }}
         />
-        <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
+        <ToolbarMenu icon={<Rows3 size={15} />} label={String(perPage)} title={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} triggerWidth={0} />
         <ClearFiltersButton
-          active={!!search || !!source || !!destination || type !== 'All' || !!protocol || !!user || !!range}
-          onClear={() => { setSearch(''); setSource(''); setDestination(''); setType('All'); setProtocol(''); setUser(''); setRange(undefined); }}
+          compact
+          // Clear returns to the default window (today), never to All Time: All Time aggregates the
+          // whole history and is a deliberate choice in the picker.
+          active={!!search || !!source || !!destination || type !== 'All' || !!protocol || !!user || !isDefaultLogRange(range)}
+          onClear={() => { setSearch(''); setSource(''); setDestination(''); setType('All'); setProtocol(''); setUser(''); setRange(defaultLogRange()); }}
         />
         <IconButton onClick={async () => { await refresh.mutateAsync(); refetch(); }} title="Refresh" className="h-[42px] w-[42px] ml-auto">
           <RefreshCw size={15} className={cn((refresh.isPending || isFetching) && 'animate-spin')} />

@@ -10,7 +10,8 @@ const { parseTrustProxy, limiterOptions } = require('./lib/rate-limit');
 const { safeReturnTo, isPlausibleEmail } = require('./lib/pure');
 const { missingSsoSettings } = require('./lib/sso-config');
 const { dbPasswordProblem } = require('./lib/db-config');
-const { initializeDatabase, ensureLogIndexes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
+const { withCancelOnClose } = require('./lib/core');
+const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
@@ -316,11 +317,15 @@ app.get('/api/health', (req, res) => {
 
 // The "Signing in" page's script (see "One login at a time"), public because that page is shown
 // to signed-out visitors; the CSP allows only same-origin scripts. It reloads the page every 2 s
-// and stops once a link is clicked, so a reload can't abort "Sign in here instead".
+// while the tab is visible; a hidden tab waits until it is shown, so a tab in the
+// background never starts a login of its own. It stops once a link is clicked, so a reload can't
+// abort "Sign in here instead".
 app.get('/login-wait.js', (req, res) => {
     res.type('application/javascript').set('Cache-Control', 'public, max-age=86400').send(
-        "var t=setTimeout(function(){location.replace(location.href)},2000);" +
-        "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a'))clearTimeout(t)});");
+        "var t,s=false;function v(){return document.visibilityState!=='hidden'}" +
+        "function a(){clearTimeout(t);if(!s&&v())t=setTimeout(function(){if(!s&&v())location.replace(location.href)},2000)}" +
+        "a();document.addEventListener('visibilitychange',a);" +
+        "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a')){s=true;clearTimeout(t)}});");
 });
 
 // Telegram webhook - receives inline-button presses (callback_query). Public (Telegram can't
@@ -416,8 +421,12 @@ const MAX_LOGIN_RETRIES = 3;
 // finds it waits on a short page that reloads itself: once the first login finishes, the reload
 // finds the session and goes on. The wait allows for a slow MFA prompt; the page also offers
 // "Sign in here instead" (/login?force=1) for a login that was abandoned, and after
-// LOGIN_PENDING_MS the tab starts its own anyway. Over HTTPS the cookie is __Host- prefixed, so a
-// sibling subdomain can't plant one; a start time in the future is ignored.
+// LOGIN_PENDING_MS the tab starts its own anyway. A tab in the background never starts a login of
+// its own (the SPA's 401 handling and the page's reload script wait until it is shown), so a
+// sign-in page nobody sees doesn't hold up the tab in front. Taking over sooner is not an option:
+// the library keeps one transaction per browser, so two logins in flight break each other. Over
+// HTTPS the cookie is __Host- prefixed, so a sibling subdomain can't plant one; a start time in
+// the future is ignored.
 const LOGIN_PENDING_SECURE = /^https:/i.test(process.env.BASE_URL || '');
 const LOGIN_PENDING_COOKIE = LOGIN_PENDING_SECURE ? '__Host-login_pending' : 'login_pending';
 const LOGIN_PENDING_MS = 120_000;
@@ -441,22 +450,75 @@ function loginInFlight(req) {
 const isLoginPath = (req) => /^\/login\/?$/i.test(req.baseUrl + req.path);
 // "Sign in here instead": starts a login even while another is in flight.
 const forcedLogin = (req) => isLoginPath(req) && req.query.force === '1';
-// Would this request start a login at the provider? Signed out: requiresAuth() does for any
-// request that accepts HTML (any method). Signed in: only GET /login (HEAD is routed there too),
-// when the session fails the in-app caps (see the /login route).
+// Is this a page the user opens (a top-level page load), the only kind of request that can carry
+// a login through the provider and back? A script, image or fetch() of a page whose session ended
+// is not: when one started a login, it set an in-flight mark that no callback would ever clear,
+// so the page's own sign-in then waited on it. Browsers say what a request is in the Fetch
+// Metadata headers (absent from older browsers and non-browser clients); a page load also asks
+// for text/html by name, while a subresource asks for */* or its own type. A speculative load
+// (prefetch or prerender) is not one either: it may never be shown. requiresAuth() itself sends a
+// request to the provider only when req.accepts('html'), so a page load must pass that too, or
+// it would mark a login in flight that never starts.
+// Quoted parameter values may hold commas and media types of their own, so they are dropped
+// (one pass, no regex: the header is client input). An unterminated quote drops the rest.
+function withoutQuotedValues(s) {
+    let out = '';
+    let quoted = false;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (quoted) {
+            if (c === '\\') i++;
+            else if (c === '"') { quoted = false; out += '""'; }
+        } else if (c === '"') {
+            quoted = true;
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+function acceptsHtmlByName(req) {
+    const accept = withoutQuotedValues(String(req.headers.accept || ''));
+    return !!req.accepts('html') && accept.split(',').some((part) => {
+        const [type, ...params] = part.split(';').map((s) => s.trim().toLowerCase());
+        const q = params.find((p) => p.startsWith('q='));
+        return type === 'text/html' && (!q || Number(q.slice(2)) > 0);
+    });
+}
+function isPageLoad(req) {
+    const mode = req.get('sec-fetch-mode');
+    const dest = req.get('sec-fetch-dest');
+    if ((mode && mode !== 'navigate') || (dest && dest !== 'document')) return false;
+    if (/prefetch|prerender/i.test(`${req.get('sec-purpose') || ''} ${req.get('purpose') || ''}`)) return false;
+    return acceptsHtmlByName(req);
+}
+// Would this request start a login at the provider? Signed out: a page load (any method), which
+// requiresAuth() sends to the provider; any other signed-out request is refused with 401 before
+// it (see the gate). Signed in: only GET /login (HEAD is routed there too), when the session
+// fails the in-app caps (see the /login route).
 function startsLogin(req) {
-    if (!req.oidc.isAuthenticated()) return !!req.accepts('html');
+    if (!req.oidc.isAuthenticated()) return isPageLoad(req);
     return (req.method === 'GET' || req.method === 'HEAD') && isLoginPath(req) && !sessionPassesCaps(req);
+}
+// The answer to a signed-out request that can't sign in (an API call, a script, an image): 401,
+// which the SPA answers by sending the page to /login. Never cached: assets are otherwise cached
+// for good.
+function sendSignInRequired(req, res) {
+    res.set('Cache-Control', 'no-store');
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign in required' });
+    return res.status(401).type('text/plain').send('Sign in required');
 }
 // The "Signing in" page: reloads itself (/login-wait.js; a meta refresh without JavaScript);
 // "Sign in here instead" forces a login from this tab.
 function loginWaitPage(req) {
     const page = isLoginPath(req) ? String(req.query.returnTo || '/') : req.originalUrl;
     const force = `/login?force=1&returnTo=${encodeURIComponent(page.startsWith('/') ? page : '/')}`.replace(/&/g, '&amp;');
-    return '<!doctype html><meta charset="utf-8"><title>Signing in…</title>' +
+    // An empty icon, so the browser doesn't fetch /favicon.ico for this page.
+    return '<!doctype html><meta charset="utf-8"><title>Signing in…</title><link rel="icon" href="data:,">' +
         '<noscript><meta http-equiv="refresh" content="2"></noscript>' +
-        '<p>Signing in - another tab is already signing you in. This page continues on its own.</p>' +
-        `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js"></script>`;
+        '<p>Signing in…</p>' +
+        // ?v=2 skips a cached copy of the earlier script, which reloaded hidden tabs too.
+        `<p><a href="${force}">Sign in here instead</a></p><script src="/login-wait.js?v=2"></script>`;
 }
 // The decoded OIDC state of a /callback request ({} when missing or not ours).
 function callbackState(req) {
@@ -531,10 +593,12 @@ app.use(spaLimiter);
 
 if (AUTH_ENABLED) {
     // Equivalent to auth()'s authRequired: true - every route below requires login. A visitor who is
-    // not signed in is sent to login (HTML) or refused with 401 (see the error handler). Only a
-    // request that would start a login draws from the per-IP auth budget, so these automatic login
-    // starts can't bypass the /login limit. A refused JSON request is not charged: the 401s of
-    // several tabs whose session ended must not use up the budget of the login they lead to.
+    // not signed in is sent to login (a page load, see isPageLoad) or refused with 401 here, before
+    // requiresAuth() could send a subresource to the provider. Only a request that would start a
+    // login draws from the per-IP auth budget, so these automatic login starts can't bypass the
+    // /login limit. A refused request is not charged: the 401s of several tabs whose session ended
+    // must not use up the budget of the login they lead to.
+    app.use((req, res, next) => (req.oidc.isAuthenticated() || startsLogin(req) ? next() : sendSignInRequired(req, res)));
     app.use((req, res, next) => (startsLogin(req) ? authLimiter(req, res, next) : next()));
     // One login at a time per browser (see above), wherever a login would start.
     app.use((req, res, next) => {
@@ -2685,7 +2749,9 @@ app.get('/api/logs', async (req, res) => {
 
         const viewer = await getViewer(req);
         const { search, source, destination, type, protocol, from, to, user, exclude_addr, page, per_page, sort, dir } = req.query;
+        // The SQL runs on its own client, so it stops when the browser drops the request (a newer search).
         const result = await queryEvents({
+            run: (sql) => withCancelOnClose(res, sql),
             search,
             source,
             destination,
@@ -2708,6 +2774,7 @@ app.get('/api/logs', async (req, res) => {
 
         res.json(result);
     } catch (err) {
+        if (err && err.requestClosed) return; // the browser dropped the request; its query was cancelled
         console.error('Error querying logs:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
@@ -2778,6 +2845,7 @@ app.get('/api/logs/summary', async (req, res) => {
         const viewer = await getViewer(req);
         const { search, source, destination, type, protocol, from, to, user, page, per_page, sort, dir } = req.query;
         const result = await queryTrafficSummary({
+            run: (sql) => withCancelOnClose(res, sql),
             search, source, destination, type, protocol,
             sort, dir,
             from: from || undefined,
@@ -2791,6 +2859,7 @@ app.get('/api/logs/summary', async (req, res) => {
         result.users = await resolveUsersForEvents(result.rows.map(r => ({ user_id: r.userId })));
         res.json(result);
     } catch (err) {
+        if (err && err.requestClosed) return; // the browser dropped the request; its query was cancelled
         console.error('Error querying traffic summary:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
@@ -4828,12 +4897,9 @@ app.use((err, req, res, next) => {
         setTimeout(() => res.redirect(`/login?retry=${tries + 1}&returnTo=${encodeURIComponent(returnTo)}`), crypto.randomInt(100, 900));
         return;
     }
-    // requiresAuth() refusing a signed-out request that doesn't accept HTML (the SPA's API calls):
-    // a 401, which the SPA answers by signing in. Expected, so not logged.
-    if (err.name === 'UnauthorizedError' && err.status === 401) {
-        if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign in required' });
-        return res.status(401).type('text/plain').send('Sign in required');
-    }
+    // The library refusing a signed-out request: a 401, which the SPA answers by signing in.
+    // Expected, so not logged.
+    if (err.name === 'UnauthorizedError' && err.status === 401) return sendSignInRequired(req, res);
     console.error('Unhandled error on', req.method, req.path, '-', err);
     if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Internal server error' });
     res.status(500).send('Something went wrong. Please go back and try again.');
@@ -4983,6 +5049,17 @@ async function start() {
         const trafficPullTick = () => tracked('trafficPull', () => forEachTenant(syncTrafficEvents));
         setTimeout(trafficPullTick, 25000);
         setInterval(trafficPullTick, 5 * 60 * 1000);
+
+        // Traffic event type recovery: NetBird's event stream sends UNKNOWN endpoint types and a
+        // TYPE_UNKNOWN state; this refreshes each account's peer/resource index (used by ingest)
+        // and fixes stored rows, old ones included. It first retries any log index that is still
+        // missing (a no-op once all are built). Only writes the app's own DB - read-only safe.
+        const eventTypesTick = () => tracked('eventTypes', async () => {
+            await ensureLogIndexes();
+            await forEachTenant(reclassifyEventTypes);
+        });
+        setTimeout(eventTypesTick, 40000);
+        setInterval(eventTypesTick, 10 * 60 * 1000);
 
         // Audit Events API pull: the same 5-minute cadence, staggered off the traffic pull (25s) so
         // two multi-page NetBird walks never start together. Each account self-gates on its own

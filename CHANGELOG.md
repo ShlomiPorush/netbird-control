@@ -78,6 +78,77 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   a **Check Access** button and the resource editor a **Who Has Access** button. It is not part of
   the public API.
 
+
+### Changed
+- **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
+  cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
+  revoke fails. On upgrade, active grants with a recorded error are marked once.
+- **Correct credentials always work from an address that failed too often.** The webhook receivers
+  and the Telegram callback check the token or secret first. While an address is blocked after
+  repeated failures, only its failed attempts get `429`; the correct webhook token and the correct
+  Telegram secret are accepted as usual.
+
+---
+
+## [1.2.2] - 2026-11-08
+
+### Changed
+- **Traffic Events opens on today.** The page shows what is happening now, so it opens on Today
+  instead of the last 7 days, and it loads much faster on a large event store. Longer ranges and
+  All Time are still in the date picker.
+- **The Traffic Events toolbar fits on one row on a desktop screen.** The search box narrows
+  when space runs short, the rows-per-page menu shows just the number, and Clear is an icon. Each
+  keeps its full name as a tooltip.
+
+### Fixed
+- **Clear Filters on Traffic Events no longer switches to All Time.** It reset the date range to
+  All Time, so the page then summarized the whole event history and was very slow. Clear now
+  returns to Today, and the button is shown as active only when something differs from that.
+
+---
+
+## [1.2.1] - 2026-11-08
+
+### Fixed
+- **Traffic Events opens and searches faster.** On a large event store the page was very slow to
+  open and to search:
+  - The user filter read every event ever stored to find a few dozen users, which took about 3
+    seconds on each visit. It now looks up one user at a time on the existing index.
+  - Summary and Detailed counted their rows with a second pass over the whole date range. They
+    now count in the same pass that builds the page.
+  - Summary spent most of its time extracting the port list. It now uses a much cheaper method
+    that gives the same ports.
+  - When you change a search or a filter while the previous one is still loading, the browser
+    cancels that request and the server stops its database query. Before, every pause while
+    typing started another full scan, and all of them ran to the end.
+  The results, totals and sorting are unchanged.
+- **A tab in the background no longer starts a sign-in**, so it can't hold up the tab you are
+  using. When a background tab's session ended, it went to the Microsoft sign-in page on its own
+  and stayed there unseen, and the tab in front showed "Signing in - another tab is already
+  signing you in" for up to two minutes. Now a background tab waits until you switch to it. By
+  then the tab you use has usually signed in, so it just continues. The waiting page, still shown
+  while another visible tab signs in, now says only "Signing in…" and reloads only while you can
+  see it.
+- **The P2P and Routed traffic filters show traffic again.** NetBird's event stream now sends the
+  source and destination type as `UNKNOWN`, even for real peers and network resources, so both
+  filters came back empty and every destination showed a generic icon. The app now recovers the
+  type from the endpoint id: a network resource id gets its resource type and a peer id gets
+  `PEER`. It reads this account's peers and network resources every 10 minutes. Events already
+  stored are fixed by the same job in the background, old ones included, in small batches. Rows
+  whose peer or resource no longer exists in NetBird keep `UNKNOWN`. The raw JSON of each event
+  stays exactly as NetBird sent it.
+- **Routed now covers every network resource kind.** It showed only single-host resources and
+  left out domain and subnet resources. The event description and the Router column treat all
+  three as routed too.
+- **A streamed event's state comes from its counters.** NetBird now sends `TYPE_UNKNOWN` with
+  start, end and drop counters, and every such event read as a stopped connection. The app sets
+  the state from the counters, the same way as for the Traffic Events API pull. When no counter
+  shows anything, the state stays `TYPE_UNKNOWN`.
+
+---
+
+## [1.2.0] - 2026-11-08
+
 ### Changed
 - **The database password has no default any more.** The app does not start when `DB_PASSWORD` is
   missing or empty, or still holds the old `.env.example` value `change-me-to-a-strong-password`,
@@ -90,13 +161,15 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   starting. Both values were public, so change the database user's password in PostgreSQL first
   and then set the same value in `.env`; changing `.env` alone does not change an existing
   database's password. The steps are in the README, under Upgrading.
-- **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
-  cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
-  revoke fails. On upgrade, active grants with a recorded error are marked once.
-- **Correct credentials always work from an address that failed too often.** The webhook receivers
-  and the Telegram callback check the token or secret first. While an address is blocked after
-  repeated failures, only its failed attempts get `429`; the correct webhook token and the correct
-  Telegram secret are accepted as usual.
+
+### Fixed
+- **A tab whose session ended goes straight to sign-in** instead of waiting up to two minutes on
+  "Signing in - another tab is already signing you in", even with only one tab open. The page's
+  background requests (scripts, images, the browser icon) were taken for sign-ins. Each one
+  marked a sign-in as in progress, and the page's real sign-in waited for it. Now only opening a
+  page starts a sign-in. Any other signed-out request gets `401` at once and does not count
+  against the sign-in limit. A client other than a browser that sends only `Accept: */*`, such as
+  `curl`, now gets `401` instead of a redirect to the identity provider.
 
 ---
 
