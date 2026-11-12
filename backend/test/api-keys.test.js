@@ -19,6 +19,8 @@ const fakeClient = {
 };
 core.pool.connect = async () => fakeClient;
 let queryTimeouts = []; // query_timeout of every query sent as a config object
+let touches = []; // last-use updates: { sql, params }
+let failTouch = false;
 core.pool.query = async (sql, params = []) => {
     if (typeof sql !== 'string') { queryTimeouts.push(sql.query_timeout); params = sql.values; sql = sql.text; }
     const s = sql.trim();
@@ -42,7 +44,11 @@ core.pool.query = async (sql, params = []) => {
         return { rows: [r] };
     }
     if (s.startsWith('SELECT 1 FROM api_keys')) return { rows: rows.filter(r => r.id === params[0]) };
-    if (s.startsWith('UPDATE api_keys SET last_used_at')) return { rows: [] };
+    if (s.startsWith('UPDATE api_keys SET last_used_at')) {
+        touches.push({ sql: s, params });
+        if (failTouch) throw new Error('db down');
+        return { rows: [] };
+    }
     if (s.startsWith('SELECT * FROM api_keys ORDER BY')) return { rows };
     throw new Error('unexpected query: ' + s.slice(0, 60));
 };
@@ -51,7 +57,7 @@ const keys = require('../lib/api-keys');
 const { parseAllowedIps, ipAllowed, sha256 } = keys._internal;
 const admin = { user_id: 'u-admin', email: 'admin@example.test', name: 'Admin' };
 
-test.beforeEach(() => { rows = []; audits = []; failAudit = false; txLog = []; queryTimeouts = []; });
+test.beforeEach(() => { rows = []; audits = []; failAudit = false; txLog = []; queryTimeouts = []; touches = []; failTouch = false; });
 
 test('a new key is shown once and only its hash and prefix are stored', async () => {
     const { key, apiKey } = await keys.createApiKey({ name: 'Customer File', scopes: ['remote-access:launch'] }, admin);
@@ -221,6 +227,50 @@ test('a real key used from a non-allowed address, or after it was revoked, is re
     // A guess from the same address still counts.
     await runMiddleware(mw, { authorization: 'Bearer nbc_nope' }, '203.0.113.9');
     assert.deepEqual(fails, ['203.0.113.9']);
+});
+
+test('the key check records no use; recordKeyUse does, once a minute, with the time check in the update and a time limit', async () => {
+    const { key } = await keys.createApiKey({ name: 'k', scopes: ['remote-access:launch'] }, admin);
+    const mw = keys.requireApiKey('remote-access:launch', { tooManyAuthFails: () => false, noteAuthFail: () => { } });
+    const ok = await runMiddleware(mw, { authorization: `Bearer ${key}` });
+    assert.equal(ok.status, 'next');
+    assert.equal(touches.length, 0, 'the key check itself writes nothing');
+    assert.equal(ok.req.apiKey.lastUsedAt, null);
+
+    const record = (apiKey) => { let nexts = 0; keys.recordKeyUse({ apiKey, ip: '::ffff:203.0.113.9' }, {}, () => { nexts++; }); return nexts; };
+    queryTimeouts = [];
+    assert.equal(record(ok.req.apiKey), 1);
+    assert.equal(touches.length, 1);
+    assert.match(touches[0].sql, /WHERE id = \$1 AND \(last_used_at IS NULL OR last_used_at < NOW\(\) - make_interval\(secs => \$3\)\)/);
+    assert.deepEqual(touches[0].params, [ok.req.apiKey.id, '203.0.113.9', 60]);
+    assert.deepEqual(queryTimeouts, [keys.QUERY_TIMEOUT_MS]);
+
+    // A use recorded less than a minute ago: no query at all.
+    assert.equal(record({ ...ok.req.apiKey, lastUsedAt: new Date(Date.now() - 30_000) }), 1);
+    assert.equal(touches.length, 1);
+    assert.equal(record({ ...ok.req.apiKey, lastUsedAt: new Date(Date.now() - 61_000) }), 1);
+    assert.equal(touches.length, 2);
+
+    // A failed write never fails the request and leaves no unhandled rejection.
+    const unhandled = [];
+    const onUnhandled = (e) => unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    const origError = console.error;
+    console.error = () => { };
+    try {
+        failTouch = true;
+        assert.equal(record({ ...ok.req.apiKey, lastUsedAt: null }), 1);
+        await new Promise((r) => setTimeout(r, 20));
+    } finally { console.error = origError; process.off('unhandledRejection', onUnhandled); }
+    assert.equal(touches.length, 3);
+    assert.deepEqual(unhandled, []);
+});
+
+test('the key check when a launch link is opened has a time limit', async () => {
+    const { apiKey } = await keys.createApiKey({ name: 'k', scopes: ['remote-access:launch'] }, admin);
+    queryTimeouts = [];
+    assert.equal(await keys.keyStillValid(apiKey.id, 'remote-access:launch'), true);
+    assert.deepEqual(queryTimeouts, [keys.QUERY_TIMEOUT_MS]);
 });
 
 test('only the listed permission names are accepted, never inherited object names', async () => {

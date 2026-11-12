@@ -201,17 +201,28 @@ async function authenticateKey(raw, ip) {
     return row;
 }
 
-// Last use, at most once a minute per key (never blocks the request).
-function touchKey(row, ip) {
-    const last = row.last_used_at ? new Date(row.last_used_at).getTime() : 0;
+// Last use, at most once a minute per key (never blocks or fails the request). `key` is
+// req.apiKey; its lastUsedAt is the value read with the key. The time check is repeated in the
+// UPDATE, so concurrent calls that read the same old value change the row once.
+function touchKey(key, ip) {
+    const last = key.lastUsedAt ? new Date(key.lastUsedAt).getTime() : 0;
     if (Date.now() - last < TOUCH_EVERY_MS) return;
-    pool.query('UPDATE api_keys SET last_used_at = NOW(), last_used_ip = $2 WHERE id = $1', [row.id, normalizeIp(ip)])
-        .catch((e) => console.error('[api-keys] could not record last use:', e.message));
+    pool.query({
+        text: `UPDATE api_keys SET last_used_at = NOW(), last_used_ip = $2
+               WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < NOW() - make_interval(secs => $3))`,
+        values: [key.id, normalizeIp(ip), TOUCH_EVERY_MS / 1000], query_timeout: QUERY_TIMEOUT_MS,
+    }).catch((e) => console.error('[api-keys] could not record last use:', e.message));
+}
+
+// Express middleware, mounted after the per-key limit: records the key's last use.
+function recordKeyUse(req, res, next) {
+    if (req.apiKey) touchKey(req.apiKey, req.ip);
+    next();
 }
 
 // Is the key still usable for this scope? (A launch link is checked again when it is opened.)
 async function keyStillValid(id, scope) {
-    const r = await pool.query('SELECT * FROM api_keys WHERE id = $1', [id]);
+    const r = await pool.query({ text: 'SELECT * FROM api_keys WHERE id = $1', values: [id], query_timeout: QUERY_TIMEOUT_MS });
     const row = r.rows[0];
     return !!(row && isUsable(row) && (row.scopes || []).includes(scope));
 }
@@ -240,8 +251,7 @@ function requireApiKey(scope, { tooManyAuthFails, noteAuthFail }) {
                 return refuse(e.status, e.code, e.message);
             }
             if (!(row.scopes || []).includes(scope)) return res.status(403).json({ error: 'This API key has no permission for this action.', code: 'SCOPE_MISSING' });
-            req.apiKey = { id: row.id, name: row.name, prefix: row.key_prefix, scopes: row.scopes || [] };
-            touchKey(row, req.ip);
+            req.apiKey = { id: row.id, name: row.name, prefix: row.key_prefix, scopes: row.scopes || [], lastUsedAt: row.last_used_at || null };
             next();
         } catch (e) {
             console.error('[api-keys] auth error:', e.message);
@@ -252,6 +262,6 @@ function requireApiKey(scope, { tooManyAuthFails, noteAuthFail }) {
 
 module.exports = {
     SCOPES, KEY_PREFIX_LEN, QUERY_TIMEOUT_MS, apiError, writeAuditStrict, keyActor,
-    listApiKeys, createApiKey, revokeApiKey, authenticateKey, keyStillValid, requireApiKey,
-    _internal: { normalizeIp, parseAllowedIps, ipAllowed, sha256, isUsable },
+    listApiKeys, createApiKey, revokeApiKey, authenticateKey, keyStillValid, requireApiKey, recordKeyUse,
+    _internal: { normalizeIp, parseAllowedIps, ipAllowed, sha256, isUsable, touchKey, TOUCH_EVERY_MS },
 };

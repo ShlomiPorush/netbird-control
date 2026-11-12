@@ -12,6 +12,8 @@ const crypto = require('crypto');
 const CLIENT_SECRET = crypto.randomBytes(32).toString('hex');
 const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
 const API_KEY = 'nbc_' + crypto.randomBytes(32).toString('base64url');
+// A second key with its own per-key bucket, for the test that uses up a key's limit.
+const API_KEY2 = 'nbc_' + crypto.randomBytes(32).toString('base64url');
 const SECRET_IN_BODY = crypto.randomBytes(16).toString('hex');
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -32,6 +34,8 @@ const deadDb = net.createServer((socket) => socket.destroy());
 const appServer = http.createServer();
 let BASE = '';
 const logs = [];
+let keyLookups = 0; // api_keys lookups by prefix (the key check)
+const touches = []; // key ids whose last use was written
 const orig = { error: console.error, log: console.log, warn: console.warn };
 
 before(async () => {
@@ -46,12 +50,17 @@ before(async () => {
     // The key row: the only database read the API key check makes.
     const core = require('../lib/core');
     const realQuery = core.pool.query.bind(core.pool);
-    const keyHash = crypto.createHash('sha256').update(API_KEY).digest('hex');
+    const keyRow = (id, key, lastUsedAt) => ({ id, name: `Test ${id}`, key_prefix: key.slice(0, 12), key_hash: crypto.createHash('sha256').update(key).digest('hex'), scopes: ['remote-access:launch'], allowed_ips: [], revoked_at: null, expires_at: null, last_used_at: lastUsedAt });
     core.pool.query = async (sql, params) => {
         if (typeof sql !== 'string') ({ text: sql, values: params } = sql);
         if (/FROM api_keys WHERE key_prefix/.test(sql)) {
-            return { rows: params[0] === API_KEY.slice(0, 12) ? [{ id: 1, name: 'Test', key_prefix: API_KEY.slice(0, 12), key_hash: keyHash, scopes: ['remote-access:launch'], allowed_ips: [], revoked_at: null, expires_at: null, last_used_at: new Date() }] : [] };
+            keyLookups++;
+            // Key 1 was used just now; key 2 not for an hour.
+            if (params[0] === API_KEY.slice(0, 12)) return { rows: [keyRow(1, API_KEY, new Date())] };
+            if (params[0] === API_KEY2.slice(0, 12)) return { rows: [keyRow(2, API_KEY2, new Date(Date.now() - 3_600_000))] };
+            return { rows: [] };
         }
+        if (/^s*UPDATE api_keys SET last_used_at/.test(sql)) { touches.push(params[0]); return { rows: [] }; }
         return realQuery(sql, params);
     };
     for (const k of ['error', 'log', 'warn']) console[k] = (...args) => { logs.push(args.map(String).join(' ')); };
@@ -107,6 +116,41 @@ test('a valid key works from an address that failed too often; a bad or missing 
         assert.equal(JSON.parse(good.text).code, 'DISABLED', 'the valid key reached the action');
     }
     assert.equal((await post('/api/v1/remote-access/launch', { ...body, key: 'nbc_' + 'y'.repeat(43) })).status, 429, 'a valid key does not lift the block');
+});
+
+test('a key used within the last minute writes no last use', async () => {
+    const before = touches.length;
+    assert.equal((await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '10.0.0.5', port: 3389 } })).status, 403);
+    assert.equal(touches.length, before);
+});
+
+test("only a call within the key's own limit writes its last use; calls past it write nothing", async () => {
+    const body = { json: { protocol: 'rdp', address: '10.0.0.5', port: 3389 }, key: API_KEY2 };
+    const statuses = await Promise.all(Array.from({ length: 35 }, () => post('/api/v1/remote-access/launch', body).then(r => r.status)));
+    const passed = statuses.filter(s => s === 403).length;
+    assert.equal(passed, 30, "the key's own limit");
+    assert.equal(statuses.filter(s => s === 429).length, 5);
+    assert.equal(touches.filter(id => id === 2).length, passed, 'one write per call that passed, none for a 429');
+});
+
+test('every /api/v1 call counts per address before the key is looked up; past 300 a minute nothing reaches the database', async () => {
+    const ip = '10.77.0.1';
+    // Use up the address's budget on an unknown path: no key, no lookup, no failed attempt.
+    for (let done = 0; done < 300; done += 20) {
+        const batch = await Promise.all(Array.from({ length: 20 }, () => post('/api/v1/nothing-here', { ip })));
+        assert.ok(batch.every(r => r.status === 404));
+    }
+    const lookups = keyLookups;
+    const guessed = await post('/api/v1/remote-access/launch', { ip, key: 'nbc_' + crypto.randomBytes(32).toString('base64url'), json: {} });
+    assert.equal(guessed.status, 429);
+    assert.deepEqual(JSON.parse(guessed.text), { error: 'Too many requests - try again in a moment' }, 'the address limit, not the failed-attempt block');
+    const valid = await post('/api/v1/remote-access/launch', { ip, key: API_KEY, json: {} });
+    assert.equal(valid.status, 429, 'a valid key from a flooding address waits too');
+    assert.equal(keyLookups, lookups, 'no key lookup past the limit');
+    // Another address is not affected.
+    const other = await post('/api/v1/remote-access/launch', { ip: '10.77.0.2', key: API_KEY, json: { protocol: 'rdp', address: '10.0.0.5', port: 3389 } });
+    assert.equal(other.status, 403);
+    assert.equal(JSON.parse(other.text).code, 'DISABLED');
 });
 
 test('a body that is not JSON: 400, and its contents appear in no log line or response, on every path form', async () => {

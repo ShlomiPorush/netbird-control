@@ -62,7 +62,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   RDP or SSH session with stored credentials: it returns a one-time link that expires after five
   minutes, the credentials never reach the browser, and the user's own access is checked as for a
   manual connection. See [docs/api.md](docs/api.md) and
-  [docs/remote-launch-integration.md](docs/remote-launch-integration.md).
+  [docs/remote-launch-integration.md](docs/remote-launch-integration.md). Each client address may
+  make 300 public API calls a minute, counted before the key is checked, so guessed keys can't
+  flood the database; each key may make 30.
 - **Access Check.** A new section in Access Management answers two questions from a fresh read
   of NetBird: is this user authorized for a resource or a network, and who is. The answer uses
   the same authorization model as Remote Access: the user's groups, their devices' groups and All

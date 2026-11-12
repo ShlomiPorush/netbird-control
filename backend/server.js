@@ -358,6 +358,7 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
 const apiKeysLib = require('./lib/api-keys');
 const remoteAccessLib = require('./lib/remote-access');
 const apiV1 = express.Router();
+const apiV1IpLimiter = rateLimit(limiterOptions('apiv1'));
 const apiKeyLimiter = rateLimit(limiterOptions('apikey'));
 const apiV1JsonParser = express.json({ limit: '64kb' });
 // Bodies are JSON only. Any other type (a form, for example) is refused by name, instead of being
@@ -366,7 +367,10 @@ const apiV1Json = (req, res, next) => (req.is('application/json')
     ? apiV1JsonParser(req, res, next)
     : res.status(415).json({ error: 'Send the body as JSON (Content-Type: application/json).', code: 'UNSUPPORTED_MEDIA_TYPE' }));
 const apiKeyAuth = (scope) => apiKeysLib.requireApiKey(scope, { tooManyAuthFails, noteAuthFail });
-apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLimiter, apiV1Json, async (req, res) => {
+// Every /api/v1 request counts per client IP before its key is looked up; a valid key then counts
+// per key, and only a call within both limits records the key's last use.
+apiV1.use(apiV1IpLimiter);
+apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLimiter, apiKeysLib.recordKeyUse, apiV1Json, async (req, res) => {
     try {
         if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
         const out = await remoteAccessLib.issueLaunch(req.apiKey, req.body || {});

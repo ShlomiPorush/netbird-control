@@ -51,6 +51,12 @@ but does not count as a failure. The failure limit never refuses a valid key: th
 first, so a valid key works from a blocked address too. A valid key may make 30 calls a minute
 (`429`, no code).
 
+Each client address may make 300 calls a minute to `/api/v1` in total, with any key or none. This
+limit is checked before the key, so a flood of guessed keys never reaches the database; past it,
+every call from that address gets `429` with no code, a valid key's too, until the minute is over.
+IPv6 addresses count per /56 network, so addresses in one /56 share the limit. The client address is
+the connection's, unless `TRUST_PROXY` names the proxy in front of the app.
+
 Request bodies are JSON (`Content-Type: application/json`), up to 64 KB. A form or any other
 body type gets `415 UNSUPPORTED_MEDIA_TYPE`.
 

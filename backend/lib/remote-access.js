@@ -1567,7 +1567,7 @@ async function issueLaunchChecked(key, body) {
     const hash = ticketHash(ticket);
     const audit = { ...apiKeys.keyActor(key), target: `${protocol}://${address}:${port}` };
     try {
-        await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_issue', meta: { ticketRef: ticketRef(hash), keyId: key.id, user: email || null } });
+        await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_issue', meta: { ticketRef: ticketRef(hash), keyId: key.id, user: email || null }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS });
     } catch (e) {
         console.error('[remote-access] launch audit failed:', e.message);
         throw httpError(503, 'AUDIT_FAILED', "The request couldn't be recorded, so no link was made. Try again.");
@@ -1575,7 +1575,7 @@ async function issueLaunchChecked(key, body) {
     // Checked again with no await before the insert: other requests may have filled the room
     // while the audit record was written.
     if (!launchRoom()) {
-        const recorded = await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_discard', meta: { ticketRef: ticketRef(hash), reason: 'busy' } }).then(() => true, () => false);
+        const recorded = await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_discard', meta: { ticketRef: ticketRef(hash), reason: 'busy' }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS }).then(() => true, () => false);
         const busy = httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
         busy.audited = recorded; // the discard record already says why; else the refusal record does
         throw busy;
@@ -1601,12 +1601,12 @@ async function redeemLaunch(viewer, body, clientIp) {
     try { valid = await apiKeys.keyStillValid(entry.keyId, LAUNCH_SCOPE); } catch { throw httpError(503, 'UNAVAILABLE', "The link couldn't be checked. Open the connection again."); }
     if (!valid) throw httpError(410, 'KEY_REVOKED', 'The API key that made this link was revoked or expired. Open the connection again from the system that sent you here.');
     if (entry.userId && entry.userId !== viewer.user_id) {
-        await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_wrong_user', target, meta: { ticketRef: ref, keyId: entry.keyId, intendedUser: entry.email } })
+        await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_wrong_user', target, meta: { ticketRef: ref, keyId: entry.keyId, intendedUser: entry.email }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS })
             .catch((e) => console.error('[remote-access] launch audit failed:', e.message));
         throw httpError(403, 'WRONG_USER', 'This link was made for another user. Sign in as that user, or open the connection again from the system that sent you here.');
     }
     try {
-        await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_open', target, meta: { ticketRef: ref, keyId: entry.keyId, keyName: entry.keyName } });
+        await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_open', target, meta: { ticketRef: ref, keyId: entry.keyId, keyName: entry.keyName }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS });
     } catch (e) {
         console.error('[remote-access] launch audit failed:', e.message);
         throw httpError(503, 'AUDIT_FAILED', "The connection couldn't be recorded, so it was not opened. Open it again from the system that sent you here.");
