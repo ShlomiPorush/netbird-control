@@ -32,6 +32,7 @@ Notes:
 - A user qualifies by being selected **directly** or via **any selected group** (group membership is resolved the same way as admin/approver groups, so the Graph group-read permission applies). A direct selection - like an approval delegation - applies only while the person is an existing, unblocked NetBird user.
 - **Deleting a user** in the main account also removes them from the directly selected users here, from approval delegations and from the Telegram approver mapping.
 - **Admins always have every capability**; permission changes are **audited** (`Updated feature permissions`).
+- **Access Check** (Access Management → Access Check) is open to admins and to holders of **Manage Temporary Access**, **Manage All Networks** or **Troubleshoot All Peers** - and to Tenant Support users while they manage a tenant. It shows other people's access (users, devices, policies), so a regular user gets `403` from `/api/access-check/*`. It only reads NetBird and is not part of the public API.
 - Manage Temporary Access still respects **read-only mode** - grants can't be created or revoked while `NETBIRD_READONLY=true`.
 
 ## Three different "access" concepts (don't confuse them)

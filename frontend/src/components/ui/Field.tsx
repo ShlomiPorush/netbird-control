@@ -1,4 +1,5 @@
-import { forwardRef, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode } from 'react';
+import { forwardRef, useState, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode } from 'react';
+import { Eye, EyeOff } from 'lucide-react';
 import { cn } from '@/lib/cn';
 
 const fieldColors =
@@ -12,6 +13,24 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
   ({ className, ...rest }, ref) => <input ref={ref} className={cn(fieldBase, className)} autoComplete="off" {...rest} />,
 );
 Input.displayName = 'Input';
+
+/** A password field with a button that shows what was typed. It starts hidden on every mount. */
+export const PasswordInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>>(
+  ({ className, ...rest }, ref) => {
+    const [shown, setShown] = useState(false);
+    return (
+      <div className="relative">
+        <Input ref={ref} type={shown ? 'text' : 'password'} className={cn('w-full pr-10', className)} {...rest} />
+        <button type="button" onClick={() => setShown((s) => !s)}
+          aria-label={shown ? 'Hide Password' : 'Show Password'} title={shown ? 'Hide Password' : 'Show Password'}
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1.5 text-nb-gray-400 hover:text-nb-gray-700 dark:hover:text-nb-gray-100">
+          {shown ? <EyeOff size={15} /> : <Eye size={15} />}
+        </button>
+      </div>
+    );
+  },
+);
+PasswordInput.displayName = 'PasswordInput';
 
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
   ({ className, ...rest }, ref) => <textarea ref={ref} className={cn(fieldColors, 'min-h-[84px] py-2.5 leading-relaxed resize-y', className)} {...rest} />,

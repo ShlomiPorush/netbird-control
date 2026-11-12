@@ -14,7 +14,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:3000',
+      // ws: the Remote Access tunnel (/api/remote-access/tunnel) is a WebSocket upgrade.
+      '/api': { target: 'http://localhost:3000', ws: true },
       '/login': 'http://localhost:3000',
       '/logout': 'http://localhost:3000',
       '/callback': 'http://localhost:3000',

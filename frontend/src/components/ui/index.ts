@@ -4,7 +4,7 @@ export { SearchInput } from './SearchInput';
 export { Tabs, PillTabs } from './Tabs';
 export type { TabItem, PillTabItem } from './Tabs';
 export { Modal } from './Modal';
-export { Input, Textarea, Select, Label, FieldHint, Field, Checkbox } from './Field';
+export { Input, PasswordInput, Textarea, Select, Label, FieldHint, Field, Checkbox } from './Field';
 export { GroupMultiSelect } from './GroupMultiSelect';
 export { SelectMenu } from './SelectMenu';
 export type { SelectOption } from './SelectMenu';

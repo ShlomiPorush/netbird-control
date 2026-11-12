@@ -12,7 +12,9 @@ import { PeerCell, TrafficCell } from '@/components/logs/cells';
 
 const PROTO_NAME: Record<number, string> = { 1: 'ICMP', 6: 'TCP', 17: 'UDP' };
 
-const rowKey = (r: TrafficSummaryRow) => `${r.sourceId || r.sourceHost}→${r.destinationId || r.destinationName || r.destinationHost}`;
+// Browser remote sessions pair per user (several users may share one NAT address).
+const isBrowserSession = (r: TrafficSummaryRow) => r.sourceType === 'BROWSER_GATEWAY';
+const rowKey = (r: TrafficSummaryRow) => `${isBrowserSession(r) ? 'bgw:' + r.userId : (r.sourceId || r.sourceHost)}→${r.destinationId || r.destinationName || r.destinationHost}`;
 
 // Header metrics match the plain <th>s. SortTh renders the shared <Th> (h-12/px-6/text-xs) and
 // cn() is a plain join (no tailwind-merge), so we force the tighter metrics with `!` to keep the
@@ -89,8 +91,10 @@ function PairEvents({ base, row, onDrill }: { base: LogParams; row: TrafficSumma
   const [limit, setLimit] = useState(5);
   const { data, isLoading, isFetching } = useLogs({
     ...base,
-    source: row.sourceHost || row.sourceName || undefined,
+    // A browser-session row is one user's sessions, from any address.
+    source: isBrowserSession(row) ? row.sourceName : (row.sourceHost || row.sourceName || undefined),
     destination: row.destinationName || row.destinationHost || undefined,
+    ...(isBrowserSession(row) && row.userId ? { user: row.userId } : {}),
     page: 1,
     per_page: limit,
   });

@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const nb = require('../lib/netbird');
 let stored = {}, sent = [];
 nb.netbirdGet = async (path) => {
+    if (path === '/api/groups') return []; // policy sources are checked against the live groups
     const id = decodeURIComponent(String(path).split('/').pop());
     return stored[id] ? JSON.parse(JSON.stringify(stored[id])) : null;
 };

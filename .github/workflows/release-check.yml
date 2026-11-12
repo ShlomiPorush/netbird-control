@@ -2,9 +2,12 @@ name: Release Check
 
 # Runs on every pull request to main. A pull request that changes VERSION is a release pull
 # request (opened by scripts/release.sh) and must be releasable once merged; any other pull
-# request only runs the changelog helper tests. Read-only: no secrets, no publishing.
+# request only runs the changelog helper tests. It also runs when a pull request is edited, so a
+# pull request moved to main (as when the pull request under it in a stack is merged) is checked.
+# Read-only: no secrets, no publishing.
 on:
   pull_request:
+    types: [ opened, synchronize, reopened, edited ]
     branches: [ main ]
 
 permissions:

@@ -37,8 +37,26 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   to keep or revoke each item.
 - **Automation** - create, update and remove NetBird resources from an external HTTP source on a
   schedule, with a dry run before anything is written.
+- **Browser remote access** - RDP and SSH sessions from the browser through NetBird gateway
+  peers, by IP address or host name, only to servers the user's own NetBird access already
+  reaches. Several sessions stay open as tabs while you use the rest of the portal. Each session
+  is checked live and recorded on the Activity page. The gateway's NetBird groups, policies and
+  peers belong to the app and carry the installation's name: resource edits, grants, routing
+  peers and the Groups page can't use them, and members added in the NetBird dashboard are
+  removed again. Wildcard
+  domain resources, loopback, link-local, NetBird peer and the gateways' own addresses are never
+  targets ([setup and security model](docs/remote-access.md)).
+  Another system, such as a customer file, can open a session with stored credentials through the
+  public API ([API reference](docs/api.md), [integration guide](docs/remote-launch-integration.md)).
+- **Public API and API keys** - admins create keys in **Settings → API Keys**, each limited to the
+  actions, addresses and dates it needs. The audit log records keys being created and revoked,
+  every connection link a key makes or that is opened, and link requests it refuses. Repeated
+  failed attempts block an address, but never a valid key, webhook token or Telegram secret.
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and
   what to do next, plus a downloadable Windows diagnostics script.
+- **Access Check** - see whether a user is authorized for a resource or network, or everyone who
+  is, by the same rules Remote Access uses, with the policy, group and ports behind each answer and
+  the per-device details underneath.
 - **Guardrails** - an address blocklist, overlap and conflict detection, a cleanup report and a
   read-only mode for the NetBird API.
 - **Notifications** - Telegram topics per category, email to people who request access, anomaly
@@ -121,6 +139,7 @@ covers the database, SSO and a few locked values:
 | `TRUST_PROXY` | The reverse proxy allowed to report the client address (`X-Forwarded-For`): its address or CIDR (comma-separated for several), or a hop count. Empty (default) uses the connecting address and ignores the header. Behind a proxy, set it to that proxy, and make sure the app port is not also reachable directly |
 | `TELEGRAM_BOT_TOKEN`, `SMTP_*` | Notifications (can also be set in the app) |
 | `EVENT_PURGE_ADMINS` | Emails allowed to delete stored events |
+| `REMOTE_GATEWAY_SETUP_KEY`, `REMOTE_NAMES_GATEWAY_SETUP_KEY`, `REMOTE_GATEWAY_MANAGEMENT_URL` | Browser Remote Access only: the setup keys and management URL of the Browser Gateway containers (`docker-compose.remote-access.yml`). Keep the keys after enrollment. The feature itself is configured in **Settings → Remote Access** ([docs](docs/remote-access.md)) |
 
 [`.env.example`](.env.example) documents every variable.
 
@@ -160,7 +179,8 @@ same value in `.env` (after `chmod 600 .env`).
   app does not start and logs which ones are missing. A user blocked in NetBird has no role or
   permissions when signed in to the app.
 - **Rate limits** apply to everything except the webhook receivers (sign-in 30 requests a minute per
-  client address, the API 600 and pages 300 a minute per user). The receivers are not rate limited, so
+  client address, the API 600 and pages 300 a minute per user, and the public API 300 a minute per
+  client address, checked before the key, and 30 a minute per key). The receivers are not rate limited, so
   any deployment that others can reach should set `WEBHOOK_AUTH_TOKEN` (and the notifications token
   in **Settings → Webhook**). The Telegram callback rejects every update until the Telegram webhook
   is registered, which sets its secret.
@@ -196,6 +216,6 @@ This project interoperates with NetBird and its UI **look-and-feel is derived fr
 
 The original application code in this repository (backend, the React app structure, the automation engine, etc.) is provided under the **MIT License** - see [`LICENSE`](LICENSE). Because the visual layer is derived from AGPL-licensed work, **if you redistribute or publicly host a modified version, review NetBird's AGPL-3.0 terms** and ensure your use complies. This README is not legal advice.
 
-Third-party material (the country flags) and its licenses are listed in [`NOTICE`](NOTICE).
+Third-party material (the country flags and the Apache Guacamole client library) and its licenses are listed in [`NOTICE`](NOTICE).
 
 "NetBird" and related marks belong to their respective owner; this project is independent and not affiliated with NetBird.
