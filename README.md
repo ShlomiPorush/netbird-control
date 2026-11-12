@@ -179,7 +179,8 @@ same value in `.env` (after `chmod 600 .env`).
   app does not start and logs which ones are missing. A user blocked in NetBird has no role or
   permissions when signed in to the app.
 - **Rate limits** apply to everything except the webhook receivers (sign-in 30 requests a minute per
-  client address, the API 600 and pages 300 a minute per user). The receivers are not rate limited, so
+  client address, the API 600 and pages 300 a minute per user, and the public API 300 a minute per
+  client address, checked before the key, and 30 a minute per key). The receivers are not rate limited, so
   any deployment that others can reach should set `WEBHOOK_AUTH_TOKEN` (and the notifications token
   in **Settings → Webhook**). The Telegram callback rejects every update until the Telegram webhook
   is registered, which sets its secret.

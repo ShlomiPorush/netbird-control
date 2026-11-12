@@ -42,7 +42,7 @@ async function burn(get, path, n, headers) {
 }
 
 test('limits and window are fixed', () => {
-    assert.deepEqual({ ...LIMITS }, { auth: 30, api: 600, spa: 300, apikey: 30 });
+    assert.deepEqual({ ...LIMITS }, { auth: 30, api: 600, spa: 300, apikey: 30, apiv1: 300 });
     assert.equal(WINDOW_MS, 60_000);
     assert.equal(limiterOptions('api').limit, 600);
     assert.throws(() => limiterOptions('nope'));
@@ -54,6 +54,27 @@ test('the public API is counted per API key, not per address', () => {
     assert.equal(keyGenerator({ apiKey: { id: 7 }, ip: '203.0.113.1' }), 'apikey:7');
     assert.equal(keyGenerator({ apiKey: { id: 7 }, ip: '198.51.100.1' }), 'apikey:7');
     assert.notEqual(keyGenerator({ apiKey: { id: 8 }, ip: '203.0.113.1' }), 'apikey:7');
+});
+
+test('the public API is also counted per client address, IPv6 by /56, whatever the key', () => {
+    const { keyGenerator, limit } = limiterOptions('apiv1');
+    assert.equal(limit, 300);
+    const k = (ip, apiKey) => keyGenerator({ ip, apiKey });
+    assert.equal(k('203.0.113.1'), k('203.0.113.1', { id: 7 }), 'the key plays no part');
+    assert.equal(k('203.0.113.1'), k('::ffff:203.0.113.1'), 'an IPv4 client over an IPv6 socket is the same address');
+    assert.notEqual(k('203.0.113.1'), k('203.0.113.2'));
+    assert.equal(k('2001:db8:1:100::1'), k('2001:db8:1:1ff::2'));
+    assert.notEqual(k('2001:db8:1:100::1'), k('2001:db8:2::1'));
+});
+
+test('with no trusted proxy, the public API limit keys on the connection, not X-Forwarded-For', async () => {
+    const { get, close } = await serve(limitedApp('apiv1', { trustProxy: false, sso: false, mount: '/api/v1' }));
+    try {
+        await burn(get, '/api/v1/x', LIMITS.apiv1, { 'x-forwarded-for': '198.51.100.1' });
+        const r = await get('/api/v1/x', { 'x-forwarded-for': '198.51.100.2' });
+        assert.equal(r.status, 429);
+        assert.deepEqual(await r.json(), { error: MESSAGE });
+    } finally { await close(); }
 });
 
 test('429 with a JSON error, RateLimit headers and Retry-After after the limit', async () => {

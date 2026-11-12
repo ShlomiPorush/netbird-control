@@ -17,8 +17,15 @@ let failAudit = false;
 let failActions = new Set();
 const keyRows = new Map();
 const auditTimeouts = []; // query_timeout of each app_audit insert sent as a config object
+const keyCheckTimeouts = []; // query_timeout of each key check when a link is opened
+let failKeyCheck = false;
 core.pool.query = async (sql, params = []) => {
-    if (typeof sql !== 'string') { params = sql.values; if (/app_audit/.test(sql.text)) auditTimeouts.push([sql.values[3], sql.query_timeout]); sql = sql.text; }
+    if (typeof sql !== 'string') {
+        params = sql.values;
+        if (/app_audit/.test(sql.text)) auditTimeouts.push([sql.values[3], sql.query_timeout]);
+        if (/FROM api_keys WHERE id/.test(sql.text)) keyCheckTimeouts.push(sql.query_timeout);
+        sql = sql.text;
+    }
     const s = sql.trim();
     if (s.startsWith('INSERT INTO app_audit')) {
         auditAttempts.push(params[3]);
@@ -27,6 +34,7 @@ core.pool.query = async (sql, params = []) => {
         audits.push({ actor: params[1], action: params[3], target: params[4], meta: params[5] });
         return { rows: [] };
     }
+    if (s.startsWith('SELECT * FROM api_keys WHERE id') && failKeyCheck) throw new Error('db down');
     if (s.startsWith('SELECT * FROM api_keys WHERE id')) return { rows: keyRows.has(params[0]) ? [keyRows.get(params[0])] : [] };
     return { rows: [] };
 };
@@ -74,7 +82,7 @@ test.before(async () => {
 });
 test.beforeEach(() => {
     keyRows.set(7, { id: 7, name: 'Customer File', scopes: ['remote-access:launch'], revoked_at: null, expires_at: null });
-    audits.length = 0; auditAttempts.length = 0; failAudit = false; failActions = new Set(); auditDelay = 0;
+    audits.length = 0; auditAttempts.length = 0; failAudit = false; failActions = new Set(); auditDelay = 0; failKeyCheck = false;
     ra._internal.clearRefusals();
 });
 test.after(() => ra.closeAllSessions('test over'));
@@ -145,6 +153,25 @@ test('without a user, the first signed-in user who passes the checks gets the li
     const carol = { user_id: 'u3', email: 'carol@example.test', name: 'Carol', oid: 'oid-3', authEnabled: true };
     await assert.rejects(ra.redeemLaunch(carol, { ticket: t2 }, '203.0.113.3'), (e) => e.code === 'NO_ACCESS');
     await assert.rejects(ra.redeemLaunch(bob, { ticket: t2 }, '203.0.113.2'), (e) => e.code === 'EXPIRED');
+});
+
+test('every link record and the key check on opening have a time limit; a key check that fails is "unavailable"', async () => {
+    auditTimeouts.length = 0; keyCheckTimeouts.length = 0;
+    const t1 = ticketOf(await ra.issueLaunch(KEY, rdp({ user: 'alice@example.test' })));
+    await assert.rejects(ra.redeemLaunch(bob, { ticket: t1 }, '203.0.113.2'), (e) => e.code === 'WRONG_USER');
+    const t2 = ticketOf(await ra.issueLaunch(KEY, rdp({ user: 'alice@example.test' })));
+    const out = await ra.redeemLaunch(alice, { ticket: t2 }, '203.0.113.1');
+    ra.endSession(alice, out.sessionId);
+    for (const action of ['remote_access.launch_issue', 'remote_access.launch_wrong_user', 'remote_access.launch_open']) {
+        const writes = auditTimeouts.filter(([a]) => a === action);
+        assert.ok(writes.length && writes.every(([, t]) => t === 5000), `${action} has a time limit`);
+    }
+    assert.ok(keyCheckTimeouts.length && keyCheckTimeouts.every(t => t === 5000), 'the key check has a time limit');
+
+    const t3 = ticketOf(await ra.issueLaunch(KEY, rdp({ user: 'alice@example.test' })));
+    failKeyCheck = true;
+    await assert.rejects(ra.redeemLaunch(alice, { ticket: t3 }, '203.0.113.1'), (e) => e.status === 503 && e.code === 'UNAVAILABLE');
+    assert.ok(!audits.some(a => a.action === 'remote_access.launch_open' && JSON.parse(a.meta).ticketRef === ticketHash(t3).slice(0, 12)), 'no session opened');
 });
 
 test('a revoked key voids its links that were not opened yet', async () => {
@@ -334,6 +361,8 @@ test('no refusal record when the link record itself failed, or when the discarde
     // The link lost the race after its record was written: the discard record says why.
     await raceForLastPlace();
     assert.ok(audits.some(a => a.action === 'remote_access.launch_discard'));
+    const discards = auditTimeouts.filter(([a]) => a === 'remote_access.launch_discard');
+    assert.ok(discards.length && discards.every(([, t]) => t === 5000), 'the discard record has a time limit');
     assert.equal(refusals().length, 0);
     // If the discard record could not be written, the refusal record says it instead.
     failActions = new Set(['remote_access.launch_discard']);
