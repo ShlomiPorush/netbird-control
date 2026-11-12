@@ -19,8 +19,16 @@ An admin creates keys in **Settings → API Keys**, in the main account.
   the same settings. The old key keeps working until you revoke it, so you can move the other
   system to the new key first.
 - The audit log records keys being created and revoked, every connection link a key makes, and
-  every time a link is opened. If that record can't be written, the action doesn't happen. Calls
-  that are refused (a bad key, bad input, no access) are not in the audit log.
+  every time a link is opened. If that record can't be written, the action doesn't happen.
+- A link request that a valid key makes and the app refuses (bad input, no access, remote access
+  turned off, too many waiting links) is recorded as `remote_access.launch_refused`, with the key,
+  the error code and the target. The target holds only values that passed the field checks;
+  anything else shows as `invalid`, and the credential fields are never recorded. Repeats are
+  collapsed per key and code: within 10 minutes, a record is written at about the 1st, 10th, 100th
+  (and so on) refusal, with the number so far. A refusal that arrives while a record is being
+  written, or within a minute after a write failed, is only counted; the next refusal after that
+  writes the record. Calls refused before the key is accepted (a missing or bad key, a
+  missing permission), and bodies that are not JSON, are not in the audit log.
 
 | Scope | Allows |
 | --- | --- |
@@ -34,9 +42,14 @@ Send the key in the `Authorization` header:
 Authorization: Bearer nbc_...
 ```
 
-The app checks the key before it reads the request body. Failed attempts count toward a per-address
-limit that the webhook receivers share: 20 failures in 10 minutes block that address for the rest
-of the window (`429 TOO_MANY_FAILURES`). A valid key may make 30 calls a minute (`429`).
+The app checks the key before it reads the request body. A missing, malformed, unknown or expired
+key is a failed attempt. Failed attempts count toward a per-address limit that the webhook receivers
+and the Telegram callback share: after 20 failures in 10 minutes, every failed attempt from that
+address gets `429 TOO_MANY_FAILURES` for the rest of the window, including a revoked key and a key
+used from an address it may not use. A revoked key, or a key used from such an address, is refused
+but does not count as a failure. The failure limit never refuses a valid key: the key is checked
+first, so a valid key works from a blocked address too. A valid key may make 30 calls a minute
+(`429`, no code).
 
 Request bodies are JSON (`Content-Type: application/json`), up to 64 KB. A form or any other
 body type gets `415 UNSUPPORTED_MEDIA_TYPE`.
@@ -65,7 +78,7 @@ Every error is JSON with a message for people and a stable code for programs:
 | 409 | `USER_AMBIGUOUS` | More than one NetBird user has this email address. |
 | 413 | `TOO_LARGE` | The body is over 64 KB. |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | The body is not sent as JSON. |
-| 429 | `TOO_MANY_FAILURES`, or no code | Too many failed attempts from this address, or too many calls with this key. |
+| 429 | `TOO_MANY_FAILURES`, or no code | Too many failed attempts from this address (only a failed attempt gets this), or too many calls with this key. |
 | 503 | `BUSY`, `SNAPSHOT_FAILED`, `AUDIT_FAILED`, `UNAVAILABLE` | Try again shortly. |
 
 ## `POST /api/v1/remote-access/launch`

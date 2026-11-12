@@ -23,6 +23,9 @@ const KEY_PREFIX_LEN = 12;
 const MAX_NAME = 80;
 const MAX_ALLOWED_IPS = 50;
 const TOUCH_EVERY_MS = 60_000;
+// The longest a database read or write that a caller without a valid key can cause may take
+// (pg's query_timeout: the query fails and the pool drops that connection).
+const QUERY_TIMEOUT_MS = 5000;
 
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
@@ -33,12 +36,12 @@ function apiError(status, code, message) {
 }
 
 // A STRICT audit record: throws when it can't be written (recordAudit in db.js logs and goes on).
-// `q` is the pool or a transaction client.
-async function writeAuditStrict(q, { actorId = '', actorEmail = '', actorName = '', action, target = '', meta = null }) {
-    await q.query(
-        `INSERT INTO app_audit (actor_id, actor_email, actor_name, action, target, meta, tenant)
-         VALUES ($1, $2, $3, $4, $5, $6, '')`,
-        [actorId, actorEmail, actorName, action, target, meta ? JSON.stringify(meta) : null]);
+// `q` is the pool or a transaction client; `timeoutMs` bounds the write (pg's query_timeout).
+async function writeAuditStrict(q, { actorId = '', actorEmail = '', actorName = '', action, target = '', meta = null, timeoutMs = 0 }) {
+    const text = `INSERT INTO app_audit (actor_id, actor_email, actor_name, action, target, meta, tenant)
+         VALUES ($1, $2, $3, $4, $5, $6, '')`;
+    const values = [actorId, actorEmail, actorName, action, target, meta ? JSON.stringify(meta) : null];
+    await (timeoutMs ? q.query({ text, values, query_timeout: timeoutMs }) : q.query(text, values));
 }
 
 // The audit actor for a change made by a signed-in admin.
@@ -111,7 +114,7 @@ async function createApiKey(body, viewer) {
     const name = String((body && body.name) || '').trim();
     if (!name || name.length > MAX_NAME) throw apiError(400, 'INVALID_NAME', `Enter a name of up to ${MAX_NAME} characters.`);
     const scopes = [...new Set(Array.isArray(body && body.scopes) ? body.scopes.map(String) : [])];
-    if (!scopes.length || scopes.some(s => !SCOPES[s])) throw apiError(400, 'INVALID_SCOPES', 'Choose at least one permission.');
+    if (!scopes.length || scopes.some(s => !Object.hasOwn(SCOPES, s))) throw apiError(400, 'INVALID_SCOPES', 'Choose at least one permission.');
     const allowedIps = parseAllowedIps(body && body.allowedIps);
     let expiresAt = null;
     if (body && body.expiresAt) {
@@ -142,9 +145,17 @@ async function createApiKey(body, viewer) {
     }
 }
 
+// A key id exactly as stored (SERIAL: 1 to 2147483647), as a number or a string of digits.
+// Anything else ("1abc", "1.5", "1e3", "01", " 1") is no id, so no key can match it.
+const MAX_KEY_ID = 2147483647;
+function parseKeyId(v) {
+    const n = typeof v === 'number' ? v : (typeof v === 'string' && /^[1-9]\d{0,9}$/.test(v) ? Number(v) : NaN);
+    return Number.isSafeInteger(n) && n >= 1 && n <= MAX_KEY_ID ? n : null;
+}
+
 async function revokeApiKey(id, viewer) {
-    const n = parseInt(id, 10);
-    if (!Number.isInteger(n) || n < 1) throw apiError(404, 'NOT_FOUND', 'This key does not exist.');
+    const n = parseKeyId(id);
+    if (n === null) throw apiError(404, 'NOT_FOUND', 'This key does not exist.');
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -177,7 +188,7 @@ const isUsable = (row, now = Date.now()) => !row.revoked_at && !(row.expires_at 
 async function authenticateKey(raw, ip) {
     const key = String(raw || '');
     if (!KEY_RE.test(key)) throw apiError(401, 'INVALID_KEY', 'The API key is not valid.');
-    const r = await pool.query('SELECT * FROM api_keys WHERE key_prefix = $1', [key.slice(0, KEY_PREFIX_LEN)]);
+    const r = await pool.query({ text: 'SELECT * FROM api_keys WHERE key_prefix = $1', values: [key.slice(0, KEY_PREFIX_LEN)], query_timeout: QUERY_TIMEOUT_MS });
     const want = Buffer.from(sha256(key), 'hex');
     const row = r.rows.find(x => {
         const have = Buffer.from(String(x.key_hash || ''), 'hex');
@@ -205,19 +216,28 @@ async function keyStillValid(id, scope) {
     return !!(row && isUsable(row) && (row.scopes || []).includes(scope));
 }
 
-// Express middleware: a valid key holding `scope` on req.apiKey, else a JSON error. Failed
-// attempts count toward the caller's per-IP failed-auth throttle (shared with the webhooks).
+// Refusals of a real key (its hash matched a stored key): the caller holds that key and is not
+// guessing, so these don't count toward the failed-auth throttle.
+const KNOWN_KEY_REFUSALS = new Set(['KEY_REVOKED', 'IP_NOT_ALLOWED']);
+
+// Express middleware: a valid key holding `scope` on req.apiKey, else a JSON error. The key is
+// checked first, so a valid key always works. Only a failed attempt consults the caller's per-IP
+// failed-auth throttle (shared with the webhooks): while that address is blocked every failed
+// attempt gets 429, else a missing, malformed, unknown or expired key counts toward it.
 function requireApiKey(scope, { tooManyAuthFails, noteAuthFail }) {
     return async (req, res, next) => {
-        try {
+        const refuse = (status, code, error) => {
             if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'Too many failed attempts. Try again later.', code: 'TOO_MANY_FAILURES' });
+            if (!KNOWN_KEY_REFUSALS.has(code)) noteAuthFail(req.ip);
+            return res.status(status).json({ error, code });
+        };
+        try {
             const m = /^Bearer\s+(\S+)\s*$/i.exec(String(req.headers.authorization || ''));
-            if (!m) { noteAuthFail(req.ip); return res.status(401).json({ error: 'Send the API key as "Authorization: Bearer <key>".', code: 'MISSING_KEY' }); }
+            if (!m) return refuse(401, 'MISSING_KEY', 'Send the API key as "Authorization: Bearer <key>".');
             let row;
             try { row = await authenticateKey(m[1], req.ip); } catch (e) {
                 if (!e.status) throw e;
-                noteAuthFail(req.ip);
-                return res.status(e.status).json({ error: e.message, code: e.code });
+                return refuse(e.status, e.code, e.message);
             }
             if (!(row.scopes || []).includes(scope)) return res.status(403).json({ error: 'This API key has no permission for this action.', code: 'SCOPE_MISSING' });
             req.apiKey = { id: row.id, name: row.name, prefix: row.key_prefix, scopes: row.scopes || [] };
@@ -231,7 +251,7 @@ function requireApiKey(scope, { tooManyAuthFails, noteAuthFail }) {
 }
 
 module.exports = {
-    SCOPES, KEY_PREFIX_LEN, apiError, writeAuditStrict, keyActor,
+    SCOPES, KEY_PREFIX_LEN, QUERY_TIMEOUT_MS, apiError, writeAuditStrict, keyActor,
     listApiKeys, createApiKey, revokeApiKey, authenticateKey, keyStillValid, requireApiKey,
     _internal: { normalizeIp, parseAllowedIps, ipAllowed, sha256, isUsable },
 };
