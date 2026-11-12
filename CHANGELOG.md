@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.3.0] - 2026-11-12
+
 ### Added
 - **Browser Remote Access (RDP and SSH).** Users open sessions from the new Remote Access page,
   with no NetBird client on their device or on the server. Sessions go through the Browser Gateway,
