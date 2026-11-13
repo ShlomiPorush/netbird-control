@@ -135,7 +135,7 @@ export function RemoteAccessSettings() {
               label={!st.gateway.enrolled ? 'Gateway Not Enrolled' : st.gateway.online ? 'Gateway Online' : 'Gateway Offline'}
               detail={st.gateway.enrolled ? st.gateway.peers.map((p) => `${p.name}${p.connected ? '' : ' (offline)'}`).join(', ') : 'Create a setup key below and start the gateway containers.'} />
             <StatusLine ok={st.guacdReachable} label={st.guacdReachable ? 'guacd Reachable' : 'guacd Not Reachable'}
-              detail={st.guacdReachable ? `${form.guacdHost}:${form.guacdPort}` : `No answer from ${form.guacdHost}:${form.guacdPort}. Are the gateway containers running (docker-compose.remote-access.yml)?`} />
+              detail={st.guacdReachable ? `${form.guacdHost}:${form.guacdPort}` : `No answer from ${form.guacdHost}:${form.guacdPort}. Are the gateway containers running (netbird-docker-compose-files/docker-compose-remote-access.yml)?`} />
             <StatusLine ok={st.targets > 0} warn label={`${st.targets} Resource${st.targets === 1 ? '' : 's'} Open To The Gateway`} />
             {st.reachError && <StatusLine ok={false} label="Unreadable Policy Blocks Every Session" detail={st.reachError} />}
             {st.domainRoutes.length > 0 && (
@@ -309,7 +309,7 @@ export function RemoteAccessSettings() {
           Each button creates a one-time NetBird setup key (valid for 1 day) for one gateway.
           Put it in <code>.env</code> as <code>REMOTE_GATEWAY_SETUP_KEY</code> or <code>REMOTE_NAMES_GATEWAY_SETUP_KEY</code> and keep it there:
           the gateway needs it at every start, and a used key can't enroll anything else. Then start the gateways
-          with <code>docker-compose.remote-access.yml</code>. docs/remote-access.md has the steps and the host firewall rules.
+          with <code>netbird-docker-compose-files/docker-compose-remote-access.yml</code>. docs/remote-access.md has the steps and the host firewall rules.
         </p>
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => createKey('ip')} disabled={!!keyBusy || form.readonly}><KeyRound size={15} /> {keyBusy === 'ip' ? 'Creating…' : 'Create IP Gateway Setup Key'}</Button>
