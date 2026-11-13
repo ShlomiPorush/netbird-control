@@ -101,8 +101,8 @@ test('a name the server looks up is refused when it resolves to such an address'
     assert.equal(MESSAGES.ADDRESS_NOT_ALLOWED.length > 0, true);
 });
 
-test('the refused gateway subnets match docker-compose.remote-access.yml', () => {
-    const compose = fs.readFileSync(path.join(__dirname, '..', '..', 'docker-compose.remote-access.yml'), 'utf8');
+test('the refused gateway subnets match netbird-docker-compose-files/docker-compose-remote-access.yml', () => {
+    const compose = fs.readFileSync(path.join(__dirname, '..', '..', 'netbird-docker-compose-files', 'docker-compose-remote-access.yml'), 'utf8');
     const subnets = [...compose.matchAll(/^\s*-\s*subnet:\s*([0-9./]+)\s*$/gm)].map(m => m[1]);
     assert.ok(subnets.length >= 2, 'the compose file still declares its networks');
     for (const sn of subnets) assert.ok(GATEWAY_INTERNAL_SUBNETS.includes(sn), `${sn} is refused as a target`);

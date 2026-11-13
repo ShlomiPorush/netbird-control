@@ -139,9 +139,14 @@ covers the database, SSO and a few locked values:
 | `TRUST_PROXY` | The reverse proxy allowed to report the client address (`X-Forwarded-For`): its address or CIDR (comma-separated for several), or a hop count. Empty (default) uses the connecting address and ignores the header. Behind a proxy, set it to that proxy, and make sure the app port is not also reachable directly |
 | `TELEGRAM_BOT_TOKEN`, `SMTP_*` | Notifications (can also be set in the app) |
 | `EVENT_PURGE_ADMINS` | Emails allowed to delete stored events |
-| `REMOTE_GATEWAY_SETUP_KEY`, `REMOTE_NAMES_GATEWAY_SETUP_KEY`, `REMOTE_GATEWAY_MANAGEMENT_URL` | Browser Remote Access only: the setup keys and management URL of the Browser Gateway containers (`docker-compose.remote-access.yml`). Keep the keys after enrollment. The feature itself is configured in **Settings → Remote Access** ([docs](docs/remote-access.md)) |
+| `REMOTE_GATEWAY_SETUP_KEY`, `REMOTE_NAMES_GATEWAY_SETUP_KEY`, `REMOTE_GATEWAY_MANAGEMENT_URL` | Browser Remote Access only: the setup keys and management URL of the Browser Gateway containers (`netbird-docker-compose-files/docker-compose-remote-access.yml`). Keep the keys after enrollment. The feature itself is configured in **Settings → Remote Access** ([docs](docs/remote-access.md)) |
 
 [`.env.example`](.env.example) documents every variable.
+
+The Browser Remote Access add-on and reference Compose files for the NetBird infrastructure
+(routing peer, exit node, reverse proxy) are in
+[`netbird-docker-compose-files`](netbird-docker-compose-files/README.md), with a description of
+each file.
 
 ## Upgrading
 
@@ -150,8 +155,7 @@ nothing changes. Two kinds of installs stop starting:
 
 - `DB_PASSWORD` is not set and the database user really has the password `netbird` (the old
   built-in default, typically a setup without this `docker-compose.yml`).
-- `.env` still holds the old example value `change-me-to-a-strong-password`. With
-  `docker compose`, the database container does not start either.
+- `.env` still holds the old example value `change-me-to-a-strong-password`.
 
 Both values were public, so replace them. Changing `.env` alone does not change the password of an
 existing database: PostgreSQL uses `DB_PASSWORD` only when it creates the database. With

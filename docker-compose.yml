@@ -24,33 +24,10 @@ services:
       start_period: 40s
       retries: 3
 
-  # Keeps the database from starting with the old .env.example password, which is public: on a new
-  # volume PostgreSQL would be created with it. Runs once when Compose starts db, then exits.
-  db-password-check:
-    image: postgres:17-alpine
-    restart: "no"
-    network_mode: none
-    # The image declares a data volume; a tmpfs keeps this check from leaving one behind.
-    tmpfs:
-      - /var/lib/postgresql/data
-    environment:
-      - DB_PASSWORD=${DB_PASSWORD}
-    command:
-      - sh
-      - -c
-      - |
-        if [ "$$DB_PASSWORD" = "change-me-to-a-strong-password" ]; then
-          echo "DB_PASSWORD is still the public example value from .env.example. Set a strong password in .env (see Upgrading in README)." >&2
-          exit 1
-        fi
-
   db:
     image: postgres:17-alpine
     container_name: netbird-control-db
     restart: unless-stopped
-    depends_on:
-      db-password-check:
-        condition: service_completed_successfully
     environment:
       - POSTGRES_DB=${DB_NAME}
       - POSTGRES_USER=${DB_USER}
