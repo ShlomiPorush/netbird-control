@@ -53,8 +53,9 @@ function parsePrefix(addr) {
 
 const prefixCovers = (p, ip) => !!p && ip >= p.start && ip <= p.end;
 
-// The internal Docker networks of the Browser Gateways (netbird-docker-compose-files/docker-compose-remote-access.yml): the
-// gateways' own addresses and the egress bridge. A test keeps this list in step with the file.
+// The internal Docker networks of the Browser Gateways
+// (netbird-docker-compose-files/docker-compose-remote-access.yml): the gateways' own addresses and
+// the egress bridge. A test keeps this list in step with the file.
 const GATEWAY_INTERNAL_SUBNETS = ['172.31.250.0/24', '172.31.251.0/24'];
 // Never browser targets, whatever a resource or policy says: "this network", loopback, link-local,
 // NetBird peers (100.64.0.0/10 - peers are not targets), multicast, reserved and broadcast, and the

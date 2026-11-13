@@ -10,10 +10,23 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The Browser Remote Access compose file moved.** It was `docker-compose.remote-access.yml` in the
+  repository root and is now `netbird-docker-compose-files/docker-compose-remote-access.yml`. If you
+  run the Browser Gateways, change the old path to the new one wherever you use it: in `-f`, in
+  `COMPOSE_FILE`, and in your own scripts. Run it from the repository root, after the main file:
+  `docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml up -d`.
+  The project name, volumes and networks stay the same, so the gateways keep their NetBird identity.
+  `netbird-docker-compose-files/README.md` describes every Compose file in that folder.
+
 ### Removed
 - **The one-shot `db-password-check` container is gone from `docker-compose.yml`.** It only stopped
   the database container from starting with the old `.env.example` password, and stayed behind as an
   exited container. The app still refuses to start with that password, a missing one, or an empty one.
+  An install that ran it keeps the exited container after the upgrade. Remove it once with
+  `docker ps -aq --filter label=com.docker.compose.service=db-password-check --filter status=exited | xargs -r docker rm`.
+  Do not use `--remove-orphans` for this unless your command includes every compose file you run:
+  it also removes the Browser Gateways when the remote access file is left out.
 
 ---
 
