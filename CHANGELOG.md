@@ -23,8 +23,14 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **The one-shot `db-password-check` container is gone from `docker-compose.yml`.** It only stopped
   the database container from starting with the old `.env.example` password, and stayed behind as an
   exited container. The app still refuses to start with that password, a missing one, or an empty one.
-  An install that ran it keeps the exited container after the upgrade. Remove it once with
-  `docker ps -aq --filter label=com.docker.compose.service=db-password-check --filter status=exited | xargs -r docker rm`.
+  An install that ran it keeps the exited container after the upgrade. Once the upgraded install is
+  up, remove it with this command, run in the folder that holds `docker-compose.yml`. It removes
+  only that install's exited check container:
+
+  ```sh
+  project=$(docker compose config | sed -n 's/^name: //p') && [ -n "$project" ] && docker ps -aq --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=db-password-check --filter status=exited | xargs -r docker rm
+  ```
+
   Do not use `--remove-orphans` for this unless your command includes every compose file you run:
   it also removes the Browser Gateways when the remote access file is left out.
 
