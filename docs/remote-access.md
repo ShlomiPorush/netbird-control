@@ -17,7 +17,7 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
 
 - **The Browser Gateway** is a NetBird client container (a peer) with
   [Apache Guacamole's](https://guacamole.apache.org) `guacd` in its network namespace. It runs
-  next to the app, from `docker-compose.remote-access.yml`, which is added on top of the main
+  next to the app, from `netbird-docker-compose-files/docker-compose-remote-access.yml`, which is added on top of the main
   compose file. Without that file an existing deployment does not change.
 - **There are two gateways.**
   - **The IP gateway** serves IPv4 addresses. NetBird DNS is off on it, so it receives only static
@@ -230,7 +230,7 @@ server's resource already chosen.
 5. **Add the host firewall rules** (next section), then start the gateways:
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.remote-access.yml --profile remote-names up -d
+   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-names up -d
    ```
 
    Leave out `--profile remote-names` to run without the names gateway; host names of domain
@@ -256,7 +256,7 @@ server's resource already chosen.
 
 ## What the gateways enforce on every start
 
-Each gateway container runs a short start script (in `docker-compose.remote-access.yml`) before
+Each gateway container runs a short start script (in `netbird-docker-compose-files/docker-compose-remote-access.yml`) before
 NetBird:
 
 - **guacd's way out is locked to NetBird.** guacd runs as uid 1000 in its own container, in the

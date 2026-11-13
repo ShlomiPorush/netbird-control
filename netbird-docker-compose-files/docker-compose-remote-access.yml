@@ -1,11 +1,11 @@
 # Browser Remote Access (optional) - the Browser Gateways, added on top of docker-compose.yml:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.remote-access.yml up -d
+#   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml up -d
 #
 # Connecting by host name to NetBird domain resources also needs the names gateway (profile
 # "remote-names"):
 #
-#   docker compose -f docker-compose.yml -f docker-compose.remote-access.yml --profile remote-names up -d
+#   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-names up -d
 #
 # Without this file nothing changes for an existing deployment. Setup, the REQUIRED host
 # firewall rules and the security model are in docs/remote-access.md.

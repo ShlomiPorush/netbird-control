@@ -10,6 +10,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Removed
+- **The one-shot `db-password-check` container is gone from `docker-compose.yml`.** It only stopped
+  the database container from starting with the old `.env.example` password, and stayed behind as an
+  exited container. The app still refuses to start with that password, a missing one, or an empty one.
+
 ---
 
 ## [1.3.0] - 2026-11-12
