@@ -22,6 +22,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   `docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml up -d`.
   The project name, volumes and networks stay the same, so the gateways keep their NetBird identity.
   `netbird-docker-compose-files/README.md` describes every Compose file in that folder.
+- **Dependency updates** since 1.3.0: `nodemailer` and `express-rate-limit` in the backend, and
+  `lucide-react` 1.x, `react-day-picker` 10, TanStack Query, React Router and the Vite React
+  plugin in the frontend.
 
 ### Removed
 - **The one-shot `db-password-check` container is gone from `docker-compose.yml`.** It only stopped
