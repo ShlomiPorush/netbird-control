@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.3.1] - 2026-11-13
+
 ### Changed
 - **The Browser Remote Access compose file moved.** It was `docker-compose.remote-access.yml` in the
   repository root and is now `netbird-docker-compose-files/docker-compose-remote-access.yml`. If you
