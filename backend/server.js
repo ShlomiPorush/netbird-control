@@ -15,7 +15,7 @@ const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, ad
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
-const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
+const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, refuseManagedGroupEdit, removeUserManagedGroups, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
 
 // AD group whose members are treated as admins (in addition to NetBird owner/admin)
 const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID || '';
@@ -132,7 +132,10 @@ const BODY_PARSER_EXEMPT = new Set(['/api/settings-import', '/api/internal-backu
 // Express 5's parser leaves req.body undefined when a request has no JSON body - no Content-Type or
 // another one, like the app's DELETE requests (Express 4 set {}). Keep {} so a handler that reads
 // req.body.x answers its usual 400 instead of throwing.
-app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) ? next() : jsonBody1mb(req, res, (err) => {
+// The public API (/api/v1, any letter case, with or without a trailing slash, as Express routes it)
+// reads its body with its own smaller parser, after the API key was checked.
+const API_V1_PATH = /^\/api\/v1(\/|$)/i;
+app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) || API_V1_PATH.test(req.path) ? next() : jsonBody1mb(req, res, (err) => {
     if (!err && req.body === undefined) req.body = {};
     next(err);
 })));
@@ -199,16 +202,18 @@ async function resolveWebhookAccount(acct) {
 }
 
 // Constant-time Bearer check against the account's expected token (empty = open - no auth required).
-// Returns true when authenticated; on failure it sends the response itself and returns false. Only
-// FAILED attempts count toward the per-IP throttle (legit webhook bursts are never throttled).
+// Returns true when authenticated; on failure it sends the response itself and returns false. The
+// token is checked first, so the correct token always works; only FAILED attempts consult and count
+// toward the per-IP throttle (legit webhook bursts are never throttled).
 function checkWebhookAuth(req, res, expected) {
     if (!expected) return true;
-    if (tooManyAuthFails(req.ip)) { res.status(429).json({ error: 'Too many failed attempts - try again later' }); return false; }
     const authHeader = req.headers['authorization'];
-    if (!authHeader) { noteAuthFail(req.ip); res.status(401).json({ error: 'Missing Authorization header' }); return false; }
-    const token = authHeader.replace(/^Bearer\s+/i, '');
-    if (!safeEqual(token, expected)) { noteAuthFail(req.ip); res.status(403).json({ error: 'Invalid token' }); return false; }
-    return true;
+    if (authHeader && safeEqual(authHeader.replace(/^Bearer\s+/i, ''), expected)) return true;
+    if (tooManyAuthFails(req.ip)) { res.status(429).json({ error: 'Too many failed attempts - try again later' }); return false; }
+    noteAuthFail(req.ip);
+    if (!authHeader) res.status(401).json({ error: 'Missing Authorization header' });
+    else res.status(403).json({ error: 'Invalid token' });
+    return false;
 }
 
 // ────────────── Traffic Noise Filter (DB-backed; managed in Settings) ──────────────
@@ -331,8 +336,9 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
         const secret = getTelegramWebhookSecret();
         // No secret is stored until the webhook is registered, so nothing can prove the update came from Telegram.
         if (!secret) return res.status(403).json({ error: 'forbidden' });
-        if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
+        // The secret is checked first, so the right one always works; only a wrong one meets the throttle.
         if (!safeEqual(req.headers['x-telegram-bot-api-secret-token'], secret)) {
+            if (tooManyAuthFails(req.ip)) return res.status(429).json({ error: 'too many attempts' });
             noteAuthFail(req.ip);
             return res.status(403).json({ error: 'forbidden' });
         }
@@ -342,6 +348,56 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
     }
     res.status(200).json({ ok: true });
 });
+
+// ─── Public API v1 (other systems, with an API key from Settings → API Keys) ───
+// Registered before the login gate: a caller is a server with a key, not a signed-in browser. The
+// key is checked from the headers first; only then is the per-key limit counted and the body read,
+// by the router's own parser (the global one skips /api/v1, see BODY_PARSER_EXEMPT). The router's
+// error handler never logs the error object: a parse error carries the raw body, which may hold
+// passwords.
+const apiKeysLib = require('./lib/api-keys');
+const remoteAccessLib = require('./lib/remote-access');
+const apiV1 = express.Router();
+const apiV1IpLimiter = rateLimit(limiterOptions('apiv1'));
+const apiKeyLimiter = rateLimit(limiterOptions('apikey'));
+const apiV1JsonParser = express.json({ limit: '64kb' });
+// Bodies are JSON only. Any other type (a form, for example) is refused by name, instead of being
+// skipped by the parser and then reported as missing fields.
+const apiV1Json = (req, res, next) => (req.is('application/json')
+    ? apiV1JsonParser(req, res, next)
+    : res.status(415).json({ error: 'Send the body as JSON (Content-Type: application/json).', code: 'UNSUPPORTED_MEDIA_TYPE' }));
+const apiKeyAuth = (scope) => apiKeysLib.requireApiKey(scope, { tooManyAuthFails, noteAuthFail });
+// Every /api/v1 request counts per client IP before its key is looked up; a valid key then counts
+// per key, and only a call within both limits records the key's last use.
+apiV1.use(apiV1IpLimiter);
+apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLimiter, apiKeysLib.recordKeyUse, apiV1Json, async (req, res) => {
+    try {
+        if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
+        const out = await remoteAccessLib.issueLaunch(req.apiKey, req.body || {});
+        const base = String(process.env.BASE_URL || '').replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`;
+        res.status(201).json({ url: `${base}/remote-access?launch=${out.ticket}`, expiresAt: out.expiresAt });
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        console.error('[api v1] launch failed:', e.message);
+        res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
+    }
+});
+apiV1.use((req, res) => res.status(404).json({ error: 'Not Found', code: 'NOT_FOUND' }));
+// eslint-disable-next-line no-unused-vars
+apiV1.use((err, req, res, next) => {
+    const key = req.apiKey ? req.apiKey.prefix : '-';
+    if (err && err.type === 'entity.parse.failed') {
+        console.error(`[api v1] ${req.method} ${req.path} key=${key}: the body is not valid JSON`);
+        return res.status(400).json({ error: 'The request body is not valid JSON.', code: 'BAD_JSON' });
+    }
+    if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'The request body is too large.', code: 'TOO_LARGE' });
+    if (err && typeof err.status === 'number' && err.status >= 400 && err.status < 500) {
+        return res.status(err.status).json({ error: 'The request could not be read.', code: 'BAD_REQUEST' });
+    }
+    console.error(`[api v1] ${req.method} ${req.path} key=${key}: ${(err && err.type) || (err && err.name) || 'error'}`);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
+});
+app.use('/api/v1', apiV1);
 
 // ══════════════ RATE LIMITS + AUTH GATE - everything below is rate limited and requires login (when configured) ══════════════
 // The routes above (webhook receivers, health probe, Telegram callback) are registered BEFORE
@@ -700,6 +756,8 @@ const TENANT_CTX_PREFIXES = [
     // targets from the tenant's own usage; automations/grants/recurring/recert are tnt()-scoped.
     '/api/temporary-access', '/api/recurring-access', '/api/recertification',
     '/api/automations', '/api/request-targets',
+    // Access Check reads the tenant's own NetBird state and grant rows (read-only).
+    '/api/access-check',
     // Per-tenant app configuration exposed in Settings while managing a tenant: the tenant's own
     // incoming-webhook tokens + endpoint URL, its own event-retention window, and its own Telegram
     // (bot/chat/topics/events + test-send + create-topics - the tenant reads/writes ITS OWN config;
@@ -1020,7 +1078,8 @@ app.use(express.static(path.join(__dirname, 'public'), {
 app.get('/api/me', async (req, res) => {
     try {
         const v = await getViewer(req);
-        const body = { authEnabled: v.authEnabled, isAdmin: v.isAdmin, canApprove: !!v.canApprove, canPurge: canPurgeEvents(v), perms: v.perms || {}, user_id: v.user_id, name: v.name, email: v.email, role: v.role, netbirdConfigured: netbirdApiConfigured() };
+        const body = { authEnabled: v.authEnabled, isAdmin: v.isAdmin, canApprove: !!v.canApprove, canPurge: canPurgeEvents(v), perms: v.perms || {}, user_id: v.user_id, name: v.name, email: v.email, role: v.role, netbirdConfigured: netbirdApiConfigured(),
+            remoteAccess: AUTH_ENABLED && remoteAccessAvailable() && !currentTenantAccount() && remoteAccessViewerOk(v) };
         // /api/me?debug=1 → "why am I (not) an admin": the viewer's own identity + the AD groups
         // resolved from Microsoft Graph, so an ADMIN_GROUP_ID mismatch or a missing/unconsented
         // Graph permission is immediately obvious. Returns only the caller's own data.
@@ -1855,6 +1914,7 @@ app.get('/api/system-health', requireAdmin, async (req, res) => {
                 netbird: stats.netbird,
                 telegram: { enabled: !!getTelegramConfig().enabled, hasToken: !!getTelegramConfig().hasToken, queue: getTelegramQueueStats() },
                 smtp: { enabled: !!getSmtpConfig().enabled },
+                remoteAccess: { enabled: !!getRemoteAccessConfig().enabled, activeSessions: getRemoteAccessStatusLite().activeSessions },
             },
             db: stats.db,
             activeGrants: stats.activeGrants,
@@ -2252,6 +2312,16 @@ app.get('/api/request-targets', async (req, res) => {
 
 // Create a request (any logged-in user).
 const { refreshAutoApprovalInventory } = require('./db');
+const { addResourceGroups, removeResourceGroups, fetchUserGroupsFresh } = require('./db');
+const { WebSocketServer } = require('ws');
+const {
+    getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps, remoteAccessAvailable, reconcileRemoteAccess,
+    createGatewaySetupKey, getRemoteAccessStatus, checkAccess: checkRemoteAccess, createSession: createRemoteSession,
+    renewLease: renewRemoteLease, endSession: endRemoteSession, takeToken: takeRemoteToken, attachTunnel: attachRemoteTunnel,
+    recheckSessions: recheckRemoteSessions, sweepSessions: sweepRemoteSessions, closeOrphanSessions: closeRemoteOrphans,
+    getRemoteAccessStatusLite, RECHECK_INTERVAL_MS: REMOTE_RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD: REMOTE_WS_MAX_PAYLOAD,
+    beginStartupSettling: beginRemoteTargetSettling,
+} = require('./lib/remote-access');
 app.post('/api/access-requests', async (req, res) => {
     try {
         const viewer = await getViewer(req);
@@ -3121,7 +3191,7 @@ app.post('/api/users/invite', requireAdmin, async (req, res) => {
         res.json(user);
     } catch (err) {
         console.error('Error inviting user:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to invite the user' });
+        res.status(err.status || 502).json({ error: err.message || 'Failed to invite the user' });
     }
 });
 
@@ -3229,6 +3299,9 @@ app.post('/api/setup-keys', requireAdmin, async (req, res) => {
     try {
         const b = req.body || {};
         const name = String(b.name || '').trim().slice(0, 100);
+        // A setup key never enrolls a device into a Browser Remote Access group: only the keys the
+        // Browser Remote Access settings create (for the gateways) do.
+        await refuseManagedGroupEdit(Array.isArray(b.autoGroups) ? b.autoGroups : []);
         const key = await createSetupKey({
             name,
             type: b.type === 'reusable' ? 'reusable' : 'one-off',
@@ -3245,7 +3318,7 @@ app.post('/api/setup-keys', requireAdmin, async (req, res) => {
         res.json(key);
     } catch (err) {
         console.error('Error creating setup key:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to create the setup key' });
+        res.status(err.status || 502).json({ error: err.message || 'Failed to create the setup key' });
     }
 });
 
@@ -3300,6 +3373,172 @@ app.get('/api/peers/:id', async (req, res) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
+
+// ─── Browser remote access (RDP / SSH through the Browser Gateway) - main account only ───
+// The portal authorizes every session (lib/remote-access-auth.js): NetBird only sees the gateway
+// peer. Needs SSO - without it there is no NetBird identity to check access against.
+function remoteAccessViewerOk(v) {
+    const cfg = getRemoteAccessConfig();
+    return !!(v && v.authEnabled && v.user_id && (cfg.allowAll || v.isAdmin || (v.perms && v.perms['remote.connect'])));
+}
+async function requireRemoteUser(req, res, next) {
+    try {
+        if (currentTenantAccount()) return res.status(404).json({ error: 'Browser remote access is not available while managing a tenant.' });
+        if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
+        if (!remoteAccessAvailable()) return res.status(403).json({ error: 'Browser remote access is turned off.', code: 'DISABLED' });
+        const v = await getViewer(req);
+        if (!remoteAccessViewerOk(v)) return res.status(403).json({ error: "You don't have permission to use browser remote access.", code: 'FORBIDDEN' });
+        req.remoteViewer = v;
+        next();
+    } catch (err) {
+        console.error('[remote-access] viewer:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+function sendRemoteError(res, e) {
+    const status = e.status || 500;
+    if (status >= 500 && !e.code) console.error('[remote-access]', e.message);
+    res.status(status).json({ error: status >= 500 && !e.code ? 'Internal server error' : e.message, code: e.code });
+}
+
+app.get('/api/remote-access/info', async (req, res) => {
+    try {
+        const v = await getViewer(req);
+        const cfg = getRemoteAccessConfig();
+        res.json({
+            available: AUTH_ENABLED && remoteAccessAvailable() && !currentTenantAccount(),
+            allowed: remoteAccessViewerOk(v),
+            ssoRequired: !AUTH_ENABLED,
+            clipboard: cfg.clipboard, idleTimeoutMin: cfg.idleTimeoutMin, maxDurationHours: cfg.maxDurationHours,
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+app.post('/api/remote-access/check', requireRemoteUser, async (req, res) => {
+    try { res.json(await checkRemoteAccess(req.remoteViewer, req.body || {})); }
+    catch (e) { sendRemoteError(res, e); }
+});
+app.post('/api/remote-access/sessions', requireRemoteUser, async (req, res) => {
+    try { res.json(await createRemoteSession(req.remoteViewer, req.body || {}, req.ip)); }
+    catch (e) { sendRemoteError(res, e); }
+});
+app.post('/api/remote-access/sessions/:id/lease', requireRemoteUser, (req, res) => {
+    if (!renewRemoteLease(req.remoteViewer, String(req.params.id))) return res.status(404).json({ error: 'This session has ended.' });
+    res.json({ ok: true });
+});
+app.delete('/api/remote-access/sessions/:id', requireRemoteUser, (req, res) => {
+    endRemoteSession(req.remoteViewer, String(req.params.id));
+    res.json({ ok: true });
+});
+// A launch link from another system (POST /api/v1/remote-access/launch), opened in the browser.
+// Only the ticket and the screen size come from the browser; the target and credentials don't.
+app.post('/api/remote-access/launch/redeem', requireRemoteUser, async (req, res) => {
+    try {
+        const b = req.body || {};
+        res.json(await remoteAccessLib.redeemLaunch(req.remoteViewer, {
+            ticket: b.ticket, width: b.width, height: b.height, dpi: b.dpi, timezone: b.timezone,
+        }, req.ip));
+    } catch (e) { sendRemoteError(res, e); }
+});
+
+// ─── API keys (Settings → API Keys): admins, main account only ───
+app.get('/api/api-keys', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try {
+        res.json({
+            keys: await apiKeysLib.listApiKeys(),
+            scopes: Object.entries(apiKeysLib.SCOPES).map(([id, label]) => ({ id, label })),
+            trustProxy: !!process.env.TRUST_PROXY,
+        });
+    } catch (e) {
+        console.error('[api-keys] list failed:', e.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+app.post('/api/api-keys', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try { res.status(201).json(await apiKeysLib.createApiKey(req.body || {}, await getViewer(req))); }
+    catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        console.error('[api-keys] create failed:', e.message);
+        res.status(500).json({ error: "The key couldn't be created. Try again." });
+    }
+});
+app.post('/api/api-keys/:id/revoke', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try { res.json(await apiKeysLib.revokeApiKey(req.params.id, await getViewer(req))); }
+    catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        console.error('[api-keys] revoke failed:', e.message);
+        res.status(500).json({ error: "The key couldn't be revoked. Try again." });
+    }
+});
+
+// Admin: settings, managed NetBird objects, gateway enrollment, status.
+app.get('/api/remote-access/config', requireAdmin, (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    res.json({ ...getRemoteAccessConfig(), ssoEnabled: AUTH_ENABLED, readonly: NETBIRD_READONLY });
+});
+app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    const before = getRemoteAccessConfig();
+    try {
+        const out = await setRemoteAccessConfig(req.body || {});
+        audit(await getViewer(req), 'settings.remote_access', '', {
+            enabled: out.config.enabled, networks: out.config.networks.length, allowAll: out.config.allowAll,
+            wasEnabled: before.enabled, sync: out.sync || undefined,
+        });
+        res.json(out);
+    } catch (e) {
+        // The settings are saved even when NetBird could not be updated; the error says what failed.
+        res.status(502).json({ error: e.message || 'Could not update NetBird', config: getRemoteAccessConfig() });
+    }
+});
+app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    try { res.json(await getRemoteAccessStatus()); }
+    catch (e) { sendRemoteError(res, e); }
+});
+app.post('/api/remote-access/setup-key', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
+    try {
+        const kind = (req.body || {}).kind === 'names' ? 'names' : 'ip';
+        const key = await createGatewaySetupKey(kind);
+        audit(await getViewer(req), 'remote_access.setup_key', kind === 'names' ? 'Browser Gateway Names' : 'Browser Gateway', { expiresInDays: 1, usageLimit: 1 });
+        res.json({ key: key && key.key, expires: key && key.expires, name: key && key.name });
+    } catch (e) {
+        res.status(502).json({ error: e.message || 'Could not create the setup key' });
+    }
+});
+
+// The tunnel itself is a WebSocket upgrade (no Express middleware runs there): it is authorized
+// only by the one-time token that POST /api/remote-access/sessions handed to the signed-in user.
+const remoteWss = new WebSocketServer({
+    noServer: true,
+    maxPayload: REMOTE_WS_MAX_PAYLOAD,
+    handleProtocols: (protocols) => (protocols.has('guacamole') ? 'guacamole' : false),
+});
+function handleRemoteUpgrade(req, socket, head) {
+    socket.on('error', () => { });
+    const reject = (code, text) => {
+        socket.write(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+        socket.destroy();
+    };
+    let url;
+    try { url = new URL(req.url, 'http://localhost'); } catch { return reject(400, 'Bad Request'); }
+    if (url.pathname !== '/api/remote-access/tunnel') return reject(404, 'Not Found');
+    // Same-origin browsers only (the Host the request came to, or the configured BASE_URL).
+    const allowedHosts = new Set([String(req.headers.host || '').toLowerCase()]);
+    try { if (process.env.BASE_URL) allowedHosts.add(new URL(process.env.BASE_URL).host.toLowerCase()); } catch { /* ignore */ }
+    let originHost = '';
+    try { originHost = new URL(String(req.headers.origin || '')).host.toLowerCase(); } catch { /* none */ }
+    if (!originHost || !allowedHosts.has(originHost)) return reject(403, 'Forbidden');
+    const sessionId = takeRemoteToken(url.searchParams.get('token'));
+    if (!sessionId) return reject(401, 'Unauthorized');
+    remoteWss.handleUpgrade(req, socket, head, (ws) => attachRemoteTunnel(sessionId, ws));
+}
 
 // ─── Connectivity diagnostics (Troubleshoot page) - all read-only ───
 // A regular user may diagnose only their OWN devices; admins - and holders of View All
@@ -3402,6 +3641,88 @@ app.get('/api/diagnostics/address', async (req, res) => {
         console.error('Error diagnosing address:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
+});
+
+// ─── Access Check (Access Management) - read-only ───
+// "Does user X have access to resource Y?" and "who has access to Y?", answered from a fresh
+// read of NetBird (lib/access-check.js). It exposes other people's access, so it is limited to
+// admins and the holders of the access-management permissions. Session only - not in /api/v1.
+const accessCheck = require('./lib/access-check');
+const { loadAccessCheckSnapshot, loadAccessCheckRouters } = require('./db');
+const ACCESS_CHECK_PERMS = ['temp.manage', 'networks.manage', 'troubleshoot.all'];
+
+async function requireAccessChecker(req, res, next) {
+    try {
+        const viewer = await getViewer(req);
+        if (viewer.isAdmin || ACCESS_CHECK_PERMS.some(p => viewer.perms && viewer.perms[p])) return next();
+        res.status(403).json({ error: 'Forbidden' });
+    } catch (err) {
+        console.error('Error checking access-check permission:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+
+const ACCESS_ID_RE = /^[^\s\u0000-\u001f]{1,200}$/;
+// Target + query from the query string, or { error } for a 400.
+function parseAccessCheckQuery(q) {
+    const type = String(q.type || 'resource');
+    const id = String(q.id || '');
+    const protocol = String(q.protocol || 'any');
+    const portRaw = q.port === undefined || q.port === '' ? '' : String(q.port);
+    if (type !== 'resource' && type !== 'network') return { error: 'type must be resource or network' };
+    if (!ACCESS_ID_RE.test(id)) return { error: 'id is required' };
+    if (!['any', 'tcp', 'udp', 'icmp'].includes(protocol)) return { error: 'protocol must be any, tcp, udp or icmp' };
+    let port = null;
+    if (portRaw) {
+        if (protocol !== 'tcp' && protocol !== 'udp') return { error: 'A port needs the TCP or UDP protocol' };
+        if (!/^\d{1,5}$/.test(portRaw) || Number(portRaw) < 1 || Number(portRaw) > 65535) return { error: 'port must be a number from 1 to 65535' };
+        port = Number(portRaw);
+    }
+    return { target: { type, id }, query: { protocol, port } };
+}
+
+// The snapshot, plus the routers of every network the target can route through. The Browser
+// Gateway policies (main account only) are labelled as infrastructure by id.
+async function accessCheckSnapshot(target) {
+    const snap = await loadAccessCheckSnapshot();
+    const managed = currentTenantAccount() ? {} : ((remoteAccessLib.getRemoteAccessConfig() || {}).managed || {});
+    snap.managedPolicyIds = [managed.policyId, managed.namesPolicyId].filter(Boolean);
+    snap.routers = target ? await loadAccessCheckRouters(accessCheck.networksForTarget(snap, target)) : new Map();
+    return snap;
+}
+
+function sendAccessCheckError(res, err, what) {
+    if (err && err.code === 'NETBIRD_READ_FAILED') return res.status(503).json({ error: `${err.message}. Try again in a moment.` });
+    console.error(`Error ${what}:`, err && err.message);
+    res.status(500).json({ error: 'Internal server error' });
+}
+
+app.get('/api/access-check/options', requireAccessChecker, async (req, res) => {
+    try {
+        res.json(accessCheck.accessCheckOptions(await accessCheckSnapshot(null)));
+    } catch (err) { sendAccessCheckError(res, err, 'loading access-check options'); }
+});
+
+app.get('/api/access-check/user', requireAccessChecker, async (req, res) => {
+    const p = parseAccessCheckQuery(req.query);
+    if (p.error) return res.status(400).json({ error: p.error });
+    const userId = String(req.query.user_id || '');
+    if (!ACCESS_ID_RE.test(userId)) return res.status(400).json({ error: 'user_id is required' });
+    try {
+        const out = accessCheck.explainUserAccess(await accessCheckSnapshot(p.target), { userId, target: p.target, query: p.query });
+        if (!out) return res.status(404).json({ error: 'The user or the resource no longer exists' });
+        res.json(out);
+    } catch (err) { sendAccessCheckError(res, err, 'checking user access'); }
+});
+
+app.get('/api/access-check/target', requireAccessChecker, async (req, res) => {
+    const p = parseAccessCheckQuery(req.query);
+    if (p.error) return res.status(400).json({ error: p.error });
+    try {
+        const out = accessCheck.whoHasAccess(await accessCheckSnapshot(p.target), { target: p.target, query: p.query });
+        if (!out) return res.status(404).json({ error: 'The resource no longer exists' });
+        res.json(out);
+    } catch (err) { sendAccessCheckError(res, err, 'checking who has access'); }
 });
 
 // The Windows diagnostics script, for the local checks a browser cannot perform
@@ -4341,7 +4662,7 @@ app.post('/api/networks/:id/routers', async (req, res) => {
         res.json({ status: 'ok', router: out });
     } catch (err) {
         console.error('Error adding routing peer:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to add routing peer' });
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to add routing peer' });
     }
 });
 
@@ -4551,6 +4872,13 @@ function loginStateReturnTo(state) {
 }
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
+    // A body the JSON parser couldn't read: answered without logging the error object, which
+    // carries the raw body (it may hold a launch ticket, a password or a token).
+    if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
+        const tooLarge = err.type === 'entity.too.large';
+        console.error(`Unreadable request body on ${req.method} ${req.path}: ${err.type}`);
+        return res.status(tooLarge ? 413 : 400).json({ error: tooLarge ? 'The request body is too large.' : 'The request body is not valid JSON.' });
+    }
     if (req.path === '/callback' && oidcCallbackRecoverable(err)) {
         const state = callbackState(req);
         const tries = Math.max(0, Number.parseInt(state.retry, 10) || 0);
@@ -4633,6 +4961,44 @@ async function start() {
         const dbProblem = dbPasswordProblem(process.env);
         if (dbProblem) throw new Error(dbProblem);
         await initializeDatabase();
+        // Browser remote access: inject the db.js helpers it needs, close sessions a crash or
+        // restart left open (with an honest "end time unknown"), then run its timers. The re-check
+        // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
+        setRemoteAccessDeps({
+            addResourceGroups, removeResourceGroups, createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit,
+            // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
+            // peers mirrors behind getViewer refresh only every 10 minutes).
+            stillPermitted: async ({ oid, email, userId, snap }) => {
+                const u = (snap.users || []).find(x => x && x.id === userId);
+                if (!u || u.is_blocked) return false;
+                if (getRemoteAccessConfig().allowAll) return true;
+                if (u.role === 'owner' || u.role === 'admin') return true;
+                const peerGroups = (snap.peers || []).filter(p => p && p.user_id === userId)
+                    .flatMap(p => (p.groups || []).map(g => (g && g.id) || g));
+                const allNb = [...(u.auto_groups || []), ...peerGroups];
+                const nbGroups = [...allNb, ...allNb.map(g => String(g).split('|').pop())];
+                const permitted = (groups) => !!resolveFeaturePerms({ isAdmin: false, userId, oid, email: u.email || email, groups: [...new Set(groups.filter(Boolean))] })['remote.connect'];
+                if (permitted(nbGroups)) return true;
+                // Only Entra (Graph) membership can still grant it: that needs a fresh, successful
+                // lookup - a failed or cached one never keeps a session open.
+                const adGroups = await fetchUserGroupsFresh(oid).catch(() => null);
+                if (adGroups === null) return false;
+                if (!!ADMIN_GROUP_ID && adGroups.includes(ADMIN_GROUP_ID)) return true;
+                return permitted([...adGroups, ...nbGroups]);
+            },
+        });
+        // A resource write sent before a restart may still land in NetBird: no session is approved
+        // until a target sync that starts 90 s from now has finished.
+        beginRemoteTargetSettling();
+        await closeRemoteOrphans().then(n => { if (n) console.log(`[remote-access] closed ${n} session(s) left open by a restart`); })
+            .catch(err => console.error('[remote-access] orphan cleanup error:', err.message));
+        setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);
+        setInterval(sweepRemoteSessions, 15000);
+        if (!NETBIRD_READONLY) {
+            const raTick = () => tracked('remoteAccessSync', reconcileRemoteAccess);
+            setTimeout(raTick, 45000);
+            setInterval(raTick, 10 * 60000);
+        }
         // One-time: fill approved_minutes on old approved requests from grants/bypass evidence.
         backfillApprovedDurations().catch(err => console.error('Approved-durations backfill error:', err.message));
         // Warm the NetBird caches at startup (user + router name resolution)
@@ -4751,7 +5117,7 @@ async function start() {
                 .catch(() => { });
         }
 
-        app.listen(PORT, '0.0.0.0', async () => {
+        const server = app.listen(PORT, '0.0.0.0', async () => {
             console.log(`NetBird Logs server running on port ${PORT}`);
             // The (tenant, timestamp DESC) log indexes are built HERE, after the port is open, and
             // CONCURRENTLY - on a multi-GB events table each build takes minutes, so it must never
@@ -4781,6 +5147,7 @@ async function start() {
                 console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
             }
         });
+        server.on('upgrade', handleRemoteUpgrade);
     } catch (err) {
         console.error('Failed to start server:', err.message);
         process.exit(1);

@@ -1,0 +1,188 @@
+# Browser Remote Access (optional) - the Browser Gateways, added on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml up -d
+#
+# Connecting by host name to NetBird domain resources also needs the names gateway (profile
+# "remote-names"):
+#
+#   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-names up -d
+#
+# Without this file nothing changes for an existing deployment. Setup, the REQUIRED host
+# firewall rules and the security model are in docs/remote-access.md.
+
+# Each gateway runs NetBird in the foreground with its settings given on every start (a value
+# changed later in the environment would not reach an already enrolled peer otherwise), after it
+# locks guacd's way out: guacd runs as uid 1000 in another container that shares this network
+# namespace, and its TCP connections may only go through NetBird (wt0), to itself (lo), or be
+# replies to the app on the internal network. When a NetBird route is missing, its connection
+# fails instead of leaving through Docker's egress. Only TCP is locked: guacd's RDP and SSH are
+# TCP, and the kernel sends WireGuard's encrypted UDP on behalf of the same socket owner. The same script is the health check ("health"), so guacd starts only
+# once the gateway is up with the expected settings.
+x-gateway-start: &gateway-start |
+  set -eu
+  CHAIN=NBC_GUACD_EGRESS
+  GUACD_UID=1000
+  INTERNAL=172.31.250.0/24
+  flags_ok() {
+    found=$$(grep -rhoE "\"$$1\": *(true|false)" /var/lib/netbird/ 2>/dev/null || true)
+    [ -n "$$found" ] && ! printf '%s\n' "$$found" | grep -vqE ": *$$2$$"
+  }
+  if [ "$${1:-run}" = health ]; then
+    ip link show wt0 >/dev/null 2>&1 || exit 1
+    iptables -w -C OUTPUT -p tcp -m owner --uid-owner "$$GUACD_UID" -j "$$CHAIN" 2>/dev/null || exit 1
+    flags_ok DisableDNS "$$GATEWAY_DISABLE_DNS" || exit 1
+    flags_ok BlockInbound true || exit 1
+    exit 0
+  fi
+  if ! printf '%s' "$${NB_SETUP_KEY:-}" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$$'; then
+    echo "The setup key is missing or is not a NetBird setup key. Create one in NetBird Control (Settings > Remote Access), put it in .env and keep it there: see docs/remote-access.md." >&2
+    exit 1
+  fi
+  iptables -w -D OUTPUT -p tcp -m owner --uid-owner "$$GUACD_UID" -j "$$CHAIN" 2>/dev/null || true
+  iptables -w -N "$$CHAIN" 2>/dev/null || iptables -w -F "$$CHAIN"
+  iptables -w -A "$$CHAIN" -o lo -j ACCEPT
+  iptables -w -A "$$CHAIN" -o wt0 -j ACCEPT
+  iptables -w -A "$$CHAIN" -d "$$INTERNAL" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -w -A "$$CHAIN" -p tcp -j REJECT --reject-with tcp-reset
+  iptables -w -I OUTPUT 1 -p tcp -m owner --uid-owner "$$GUACD_UID" -j "$$CHAIN"
+  exec netbird up --foreground-mode --disable-dns="$$GATEWAY_DISABLE_DNS" --block-inbound=true
+
+x-gateway: &gateway
+  image: netbirdio/netbird:${REMOTE_GATEWAY_NETBIRD_TAG:-0.82.0}
+  restart: unless-stopped
+  entrypoint: [ "/bin/sh", "-c", *gateway-start, "gateway-start" ]
+  healthcheck:
+    test: [ "CMD", "/bin/sh", "-c", *gateway-start, "gateway-start", "health" ]
+    interval: 30s
+    timeout: 10s
+    start_period: 60s
+    retries: 3
+  cap_add:
+    - NET_ADMIN
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=1
+    - net.ipv6.conf.default.disable_ipv6=1
+  mem_limit: 256m
+  pids_limit: 256
+
+# guacd starts only once its gateway's NetBird interface exists. The gateway's start script creates
+# it only after the egress lock is in place, so this also holds when Docker starts the containers
+# on its own (a restart policy does not wait for depends_on).
+x-guacd-start: &guacd-start |
+  until grep -q 'wt0:' /proc/net/dev; do sleep 1; done
+  exec /opt/guacamole/sbin/guacd -f -b "$$GUACD_BIND" -l 4822 -L info
+
+x-guacd: &guacd
+  image: guacamole/guacd:${REMOTE_GUACD_TAG:-1.6.0}
+  restart: unless-stopped
+  mem_limit: 2g
+  cpus: 2
+  pids_limit: 512
+
+services:
+  app:
+    networks:
+      # The app reaches guacd only over this internal network.
+      remote-access: { }
+
+  # The IP gateway: a NetBird peer (this container) with guacd in its network namespace. NetBird
+  # DNS is off, so it receives only static routes to the IPv4 host and subnet resources of the
+  # networks open to browser access. Enroll it with a setup key from Settings → Remote Access.
+  remote-gateway:
+    <<: *gateway
+    container_name: netbird-control-remote-gateway
+    hostname: netbird-control-browser-gateway
+    environment:
+      - NB_SETUP_KEY=${REMOTE_GATEWAY_SETUP_KEY:-}
+      - NB_MANAGEMENT_URL=${REMOTE_GATEWAY_MANAGEMENT_URL:-https://api.netbird.io:443}
+      - GATEWAY_DISABLE_DNS=true
+    volumes:
+      # The peer's identity (its NetBird private key). A Docker volume, never in the work tree.
+      - remote-gateway-state:/var/lib/netbird
+    networks:
+      remote-egress: { }
+      remote-access:
+        ipv4_address: 172.31.250.2
+
+  # guacd shares the gateway's network namespace and listens ONLY on the gateway's address on the
+  # internal network the app also sits on - never on 0.0.0.0 (the image's default entrypoint).
+  remote-guacd:
+    <<: *guacd
+    container_name: netbird-control-remote-guacd
+    network_mode: "service:remote-gateway"
+    depends_on:
+      remote-gateway:
+        condition: service_healthy
+    environment:
+      - GUACD_BIND=172.31.250.2
+    entrypoint: [ "/bin/sh", "-c", *guacd-start ]
+    # The image's own health check probes 127.0.0.1:4822, where guacd does not listen here. Left
+    # as is, the container shows as unhealthy and a watchdog such as autoheal would restart it.
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z 172.31.250.2 4822 || exit 1" ]
+      interval: 60s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # The names gateway (optional, profile "remote-names"): NetBird DNS on, and only the domain
+  # resources of the networks open to browser access - reached by name, the way any NetBird
+  # client reaches them. Sessions to an IP address never use it.
+  remote-names-gateway:
+    <<: *gateway
+    profiles: [ "remote-names" ]
+    container_name: netbird-control-remote-names-gateway
+    hostname: netbird-control-browser-gateway-names
+    environment:
+      - NB_SETUP_KEY=${REMOTE_NAMES_GATEWAY_SETUP_KEY:-}
+      - NB_MANAGEMENT_URL=${REMOTE_GATEWAY_MANAGEMENT_URL:-https://api.netbird.io:443}
+      - GATEWAY_DISABLE_DNS=false
+    volumes:
+      - remote-names-gateway-state:/var/lib/netbird
+    networks:
+      remote-egress: { }
+      remote-access:
+        ipv4_address: 172.31.250.3
+
+  remote-names-guacd:
+    <<: *guacd
+    profiles: [ "remote-names" ]
+    container_name: netbird-control-remote-names-guacd
+    network_mode: "service:remote-names-gateway"
+    depends_on:
+      remote-names-gateway:
+        condition: service_healthy
+    environment:
+      - GUACD_BIND=172.31.250.3
+    entrypoint: [ "/bin/sh", "-c", *guacd-start ]
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z 172.31.250.3 4822 || exit 1" ]
+      interval: 60s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  remote-gateway-state:
+  remote-names-gateway-state:
+
+# Both subnets are pinned: guacd binds to the gateways' fixed addresses, and the host's
+# DOCKER-USER rules (docs/remote-access.md) are keyed to them. If either overlaps a network on
+# your host, change it here AND in those rules.
+networks:
+  # App <-> guacd only. internal: no route out of the host through this network.
+  remote-access:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          # Dynamic addresses (the app) come only from the upper half, so the gateways' fixed
+          # addresses in the lower half (.2 and .3) can never be taken.
+          ip_range: 172.31.250.128/25
+  # The gateways' way out (to the NetBird relays and peers).
+  remote-egress:
+    name: netbird-control-remote-egress
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.251.0/24

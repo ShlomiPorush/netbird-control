@@ -28,6 +28,8 @@ const SCHED_LABELS: Record<string, string> = {
   tenantTokenRotation: 'Tenant Token Rotation',
   resetStuckAutomations: 'Startup: Reset Stuck Automations',
   resetStuckGrants: 'Startup: Reset Stuck Grants',
+  remoteAccessRecheck: 'Remote Access Session Re-Check',
+  remoteAccessSync: 'Remote Access Gateway Sync',
 };
 
 // What each job actually DOES - shown under its name so nobody has to guess.
@@ -47,6 +49,8 @@ const SCHED_DESCRIPTIONS: Record<string, string> = {
   trafficPull: 'Every 5 minutes: for accounts that opted in (Settings → Webhook), reads traffic events from the NetBird API and stores them like streamed webhook events. A no-op for accounts that leave it off.',
   auditPull: 'Every 5 minutes: for accounts that opted in (Settings → Webhook), reads audit events from the NetBird API and stores them like webhook events. A no-op for accounts that leave it off.',
   mspDigest: "Hourly check: on the configured day and hour, sends the weekly snapshot of every MSP tenant to main's Telegram and/or email. Off by default.",
+  remoteAccessRecheck: "Every 60s while browser sessions are open: reads NetBird again and closes any session whose user lost access, was blocked or lost the permission. Sessions also close when access can't be verified for 2.5 minutes.",
+  remoteAccessSync: 'Every 10 minutes while Remote Access is on: keeps the Browser Gateway policy in place and adds new resources of the selected networks to the gateway target group.',
   internalBackup: 'Hourly check: at the configured hour, writes the daily envelope-encrypted full backup to the backup folder. Off until a passphrase and a folder are set.',
   retentionPurge: 'Checked every 10 minutes, acts once per day: deletes traffic + NetBird events older than the Data Retention setting. Disabled retention = nothing is ever deleted.',
   tenantTokenRotation: "Hourly: re-issues each MSP tenant's managed service-user token when it is within 30 days of its 365-day expiry, so tenant access never lapses.",
@@ -225,6 +229,10 @@ export function SystemHealthTab() {
             sub={data.authEnabled ? 'Azure AD / OIDC' : 'everyone is admin - configure OIDC!'} />
           <TelegramCard tg={data.integrations.telegram} />
           <HealthCard label="Email (SMTP)" value={data.integrations.smtp.enabled ? 'Enabled' : 'Off'} />
+          {data.integrations.remoteAccess && (
+            <HealthCard label="Remote Access" value={data.integrations.remoteAccess.enabled ? 'Enabled' : 'Off'}
+              sub={data.integrations.remoteAccess.enabled ? `${data.integrations.remoteAccess.activeSessions} active session(s)` : undefined} />
+          )}
           <HealthCard label="Scheduled Bypass Expiries" value={String(data.scheduledBypasses)} sub="devices with a timed bypass" />
         </div>
       </div>

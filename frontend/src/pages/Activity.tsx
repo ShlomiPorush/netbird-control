@@ -135,7 +135,9 @@ export default function Activity() {
         <TrafficSummary perPage={perPage} sortState={sortState}
           onDrill={(r) => {
             // Jump to Detailed pre-filtered to just this pair.
-            setSource(r.sourceHost || r.sourceName);
+            // A browser-session row is one user's sessions, from any address.
+            if (r.sourceType === 'BROWSER_GATEWAY') { setSource(r.sourceName); if (r.userId) setUser(r.userId); }
+            else setSource(r.sourceHost || r.sourceName);
             setDestination(r.destinationName || r.destinationHost);
             switchView('detailed');
           }}

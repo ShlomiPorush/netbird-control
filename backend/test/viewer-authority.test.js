@@ -26,6 +26,7 @@ let listOnlyServiceUsers = false; // the regular list fails, the service-user li
 let serviceListDown = false; // the service-user list fails, the regular list answers
 nb.netbirdGet = async (path) => {
     if (path === '/api/users/current') return { id: 'svc' };
+    if (path === '/api/groups') return [];
     if (listDown && path.startsWith('/api/users')) return null;
     if (refreshDown && path.startsWith('/api/users') && !/liveUsersById/.test(new Error().stack)) return null;
     if (serviceListDown && path === '/api/users?service_user=true') return null;

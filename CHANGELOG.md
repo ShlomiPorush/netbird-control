@@ -10,6 +10,116 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **The Browser Remote Access compose file moved.** It was `docker-compose.remote-access.yml` in the
+  repository root and is now `netbird-docker-compose-files/docker-compose-remote-access.yml`. If you
+  run the Browser Gateways, change the old path to the new one wherever you use it: in `-f`, in
+  `COMPOSE_FILE`, and in your own scripts. Run it from the repository root, after the main file:
+  `docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml up -d`.
+  The project name, volumes and networks stay the same, so the gateways keep their NetBird identity.
+  `netbird-docker-compose-files/README.md` describes every Compose file in that folder.
+
+### Removed
+- **The one-shot `db-password-check` container is gone from `docker-compose.yml`.** It only stopped
+  the database container from starting with the old `.env.example` password, and stayed behind as an
+  exited container. The app still refuses to start with that password, a missing one, or an empty one.
+  An install that ran it keeps the exited container after the upgrade. Once the upgraded install is
+  up, list the check containers with their Compose project:
+
+  ```sh
+  docker ps -a --filter label=com.docker.compose.service=db-password-check --format 'table {{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Status}}'
+  ```
+
+  Then remove the one of the install you upgraded, by the name in the first column:
+  `docker rm <name>`. `docker rm` does not remove a running container.
+
+  Do not use `--remove-orphans` for this unless your command includes every compose file you run:
+  it also removes the Browser Gateways when the remote access file is left out.
+
+---
+
+## [1.3.0] - 2026-11-12
+
+### Added
+- **Browser Remote Access (RDP and SSH).** Users open sessions from the new Remote Access page,
+  with no NetBird client on their device or on the server. Sessions go through the Browser Gateway,
+  a NetBird peer with Apache Guacamole's guacd that runs next to the app
+  (`docker-compose.remote-access.yml`, added on top of the main compose file; existing
+  deployments are unchanged without it). A user reaches only servers their own NetBird access
+  already reaches, on ports their policies open. Policies with posture checks do not count. Every
+  open session is checked again each minute and closes when access ends. Sessions appear on the
+  Activity page. Off by default; turn it on in **Settings → Remote Access**. The host firewall rules
+  in [docs/remote-access.md](docs/remote-access.md) are required.
+  - **Host names.** A user can type a host name. A name of a NetBird domain resource is checked
+    against that resource's policies and connects through the optional names gateway (profile
+    `remote-names`); any other name is looked up and each address is checked like a typed one.
+    A pasted link keeps only its host, and its port moves to the port field.
+  - **Tabs.** Several sessions stay open as tabs in one full-screen view and keep running while the
+    user moves around the portal. The session bar hides itself and comes back from its handle at
+    the top; pinned, it stays and the session moves down below it. Copy and paste work both ways
+    where the browser allows it. Sessions Per User defaults to 5.
+  - **Sign-in retry.** A wrong user name or password shows the sign-in form again in the same tab
+    instead of ending there. Password fields can show what was typed.
+  - **Request Access.** When a user has no access to a server, Request Access opens with that
+    server's resource already chosen.
+  - **Display settings.** Settings → Remote Access sets the RDP colors, keyboard layout, font
+    smoothing and desktop effects, and the SSH font size and colors. RDP sessions default to full
+    color with font smoothing on. On a scaled screen (125%, 150%) the session uses the screen's
+    real resolution, so it stays sharp.
+  - **The gateway's objects belong to the app.** Resource edits, grants, recurring rules and
+    routing peers can't add, remove or reuse the Browser Gateway groups, policies or peers, and
+    setup never takes over an existing group or policy with one of their names. Wildcard domain
+    resources and special addresses (loopback, link-local, NetBird peers, multicast, the gateways'
+    own networks) are never targets. A policy rule whose source the app can't read blocks sessions
+    until it is changed. After a restart, new sessions wait about a minute and a half.
+  - **Members added outside the app are removed.** A user, or a device a user enrolled, that
+    someone adds to a Browser Gateway group in the NetBird dashboard is taken out again when the
+    app next reads users or devices; each removal is in the audit log. The Groups page,
+    invitations and setup keys can't add anyone to these groups, rename them or delete them.
+  - **The gateway's objects carry the installation name**, from the Application Name in
+    **Settings → General**, such as *Browser Gateway (NetBird Control DEV)*, so installations that
+    share a NetBird account never collide. Existing objects are renamed on the next save.
+  - **What the browser may send.** The app passes to guacd only input, the screen size, the
+    clipboard and the sign-in values that guacd asks for. The server address and port never come
+    from the browser. A browser message is limited to 16 KiB; a larger or malformed one closes the
+    session.
+- **API keys and a public API.** Admins create API keys in **Settings → API Keys**. A key does only
+  what its permissions allow, can be limited to addresses and an expiry date, is shown once, and is
+  stored only as a hash. The audit log records keys being created and revoked, every connection
+  link a key makes or that is opened, and link requests it refuses (collapsed per key and error
+  code). The first action,
+  `POST /api/v1/remote-access/launch`, lets another system, such as a customer file, open a browser
+  RDP or SSH session with stored credentials: it returns a one-time link that expires after five
+  minutes, the credentials never reach the browser, and the user's own access is checked as for a
+  manual connection. See [docs/api.md](docs/api.md) and
+  [docs/remote-launch-integration.md](docs/remote-launch-integration.md). Each client address may
+  make 300 public API calls a minute, counted before the key is checked, so guessed keys can't
+  flood the database; each key may make 30.
+- **Access Check.** A new section in Access Management answers two questions from a fresh read
+  of NetBird: is this user authorized for a resource or a network, and who is. The answer uses
+  the same authorization model as Remote Access: the user's groups, their devices' groups and All
+  (temporary-grant groups only while the grant is valid) against the policies, with drop rules
+  winning and Browser Gateway policies never granting; a policy with posture checks makes it
+  "Authorized If Posture Checks Pass". It names the policy, group and ports behind the answer, and
+  needs no device. Collapsed Device Details show what each device can reach right now, following
+  what NetBird enforces (each device's own groups, the most specific route when resources overlap,
+  accept rules minus drop rules on the routing peer), and why a device cannot connect (compliance,
+  an expired sign-in, a blocked user). A temporary grant that has ended but is still in NetBird is
+  flagged there. Admins and holders of Manage Temporary Access, Manage All Networks
+  or Troubleshoot All Peers can use it, and Tenant Support users inside a tenant. The user page has
+  a **Check Access** button and the resource editor a **Who Has Access** button. It is not part of
+  the public API.
+
+
+### Changed
+- **A revoke now marks the temporary grant before it touches NetBird**, and the mark is never
+  cleared. Browser Remote Access does not count a grant once its revoke has started, even if the
+  revoke fails. On upgrade, active grants with a recorded error are marked once.
+- **Correct credentials always work from an address that failed too often.** The webhook receivers
+  and the Telegram callback check the token or secret first. While an address is blocked after
+  repeated failures, only its failed attempts get `429`; the correct webhook token and the correct
+  Telegram secret are accepted as usual.
+
 ---
 
 ## [1.2.2] - 2026-11-08
