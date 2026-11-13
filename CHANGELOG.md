@@ -24,13 +24,14 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   the database container from starting with the old `.env.example` password, and stayed behind as an
   exited container. The app still refuses to start with that password, a missing one, or an empty one.
   An install that ran it keeps the exited container after the upgrade. Once the upgraded install is
-  up, remove it with this command. It reads the Compose project from the running
-  `netbird-control-db` container and removes only that project's exited check container. When that
-  container does not exist, it removes nothing:
+  up, list the check containers with their Compose project:
 
   ```sh
-  project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' netbird-control-db) && [ -n "$project" ] && docker ps -aq --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=db-password-check --filter status=exited | xargs -r docker rm
+  docker ps -a --filter label=com.docker.compose.service=db-password-check --format 'table {{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Status}}'
   ```
+
+  Then remove the one of the install you upgraded, by the name in the first column:
+  `docker rm <name>`. `docker rm` does not remove a running container.
 
   Do not use `--remove-orphans` for this unless your command includes every compose file you run:
   it also removes the Browser Gateways when the remote access file is left out.
