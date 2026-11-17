@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.4.0] - 2026-11-17
+
 ### Added
 - **Updates without downtime.** `scripts/update.sh` updates the app with the docker rollout plugin:
   the new container starts beside the old one, and the old one is removed only once the new one is
