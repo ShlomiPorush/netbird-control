@@ -40,7 +40,7 @@ const _tenantTokens = new Map(); // tenant/account id → PAT
 const _mspProv = { token: '' };
 function getMspProvisioningToken() { return _mspProv.token; }
 function setMspProvisioningTokenInMemory(token) { _mspProv.token = String(token || ''); }
-async function loadTenantTokens() {
+async function loadTenantTokens({ strict = false } = {}) {
     try {
         const r = await pool.query(`SELECT key, value FROM app_settings WHERE key LIKE 'msp_tenant_token:%' OR key = 'msp_provisioning_token'`);
         _tenantTokens.clear();
@@ -51,6 +51,7 @@ async function loadTenantTokens() {
             if (id && row.value) _tenantTokens.set(id, row.value);
         }
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[MSP] tenant token load error:', e.message);
     }
 }
@@ -102,14 +103,16 @@ function tenantSlot() {
 const _nbEnv = { url: process.env['NETBIRD_API_URL'] || '', token: process.env['NETBIRD_API_TOKEN'] || '' };
 const _nbApi = { url: _nbEnv.url, token: _nbEnv.token };
 
-async function loadNbApi() {
+async function loadNbApi({ strict = false } = {}) {
     try {
         const r = await pool.query("SELECT key, value FROM app_settings WHERE key IN ('netbird_api_url', 'netbird_api_token')");
         const m = {};
         for (const row of r.rows) m[row.key] = row.value;
-        if (!_nbEnv.url && m.netbird_api_url) _nbApi.url = m.netbird_api_url;
-        if (!_nbEnv.token && m.netbird_api_token) _nbApi.token = m.netbird_api_token;
+        // A value cleared in the database clears it here too (a reload must match the stored state).
+        if (!_nbEnv.url) _nbApi.url = m.netbird_api_url || '';
+        if (!_nbEnv.token) _nbApi.token = m.netbird_api_token || '';
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[NetBird API] config load error:', e.message);
     }
 }

@@ -10,6 +10,33 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **Updates without downtime.** `scripts/update.sh` updates the app with the docker rollout plugin:
+  the new container starts beside the old one, and the old one is removed only once the new one is
+  healthy. It finds the NetBird Control services of the Compose project by their image and leaves
+  every other service alone. The deployment needs a reverse proxy, a drain label and a few other
+  settings, listed in the README under "Upgrading Without Downtime". When one is missing, the
+  script recreates the app with a short downtime and says why. The first update to this version
+  always recreates the app.
+- **System Health shows whether this instance runs the background jobs** (leader or standby).
+
+### Changed
+- **Only one instance runs the background jobs.** The instance that holds a PostgreSQL advisory
+  lock runs the schedulers, the start-up recovery and the Remote Access target sync. Another
+  instance waits and takes over once the first one exits. The lock needs a direct PostgreSQL
+  connection or a pooler in session mode, not a transaction-mode pooler such as PgBouncer in
+  transaction mode.
+- **The app shuts down cleanly on `docker stop`.** It stops starting jobs and remote sessions,
+  closes open remote sessions with a reason, sends the Telegram messages it can, lets requests in
+  flight finish and exits within 8 seconds.
+- **A start waits at most 5 seconds for a table lock** when it updates the database schema. If a
+  long query holds the table, the start fails and Docker tries again, instead of blocking every
+  query on that table.
+
+### Fixed
+- **Clearing the NetBird API URL or token, or the webhook token, in the database now also clears
+  it in memory when the settings are read again,** for example after a settings import.
+
 ---
 
 ## [1.3.1] - 2026-11-13

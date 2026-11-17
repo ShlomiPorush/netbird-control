@@ -126,14 +126,20 @@ export function SystemHealthTab() {
 
   const failing = schedEntries.filter(([, s]) => s.lastError).length;
   const nb = data.integrations.netbird;
+  const leader = data.leader;
 
   return (
     <div className="flex flex-col gap-5">
       {/* Top row: liveness at a glance */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <HealthCard label="Uptime" value={fmtUptime(data.uptimeSec)} sub={`v${data.version || '?'} · Node ${data.node}`} />
-        <HealthCard label="Schedulers" value={failing ? `${failing} Failing` : 'All Healthy'} warn={failing > 0}
-          sub={`${schedEntries.length} tracked jobs`} />
+        {leader && !leader.ready ? (
+          <HealthCard label="Schedulers" warn value={leader.role === 'leader' ? 'Starting' : 'Standby'}
+            sub={leader.role === 'leader' ? 'Recovering before the jobs start' : 'Background jobs run on another instance'} />
+        ) : (
+          <HealthCard label="Schedulers" value={failing ? `${failing} Failing` : 'All Healthy'} warn={failing > 0}
+            sub={`${schedEntries.length} tracked jobs`} />
+        )}
         <HealthCard label="NetBird API" warn={!nb.configured || !nb.lastOkAt}
           value={!nb.configured ? 'Not Configured' : nb.lastOkAt ? 'Connected' : 'No Contact Yet'}
           sub={nb.lastOkAt ? `last OK ${formatTimestamp(nb.lastOkAt)}${nb.readonly ? ' · read-only' : ''}` : nb.readonly ? 'read-only' : undefined} />

@@ -10,8 +10,11 @@ const { parseTrustProxy, limiterOptions } = require('./lib/rate-limit');
 const { safeReturnTo, isPlausibleEmail } = require('./lib/pure');
 const { missingSsoSettings } = require('./lib/sso-config');
 const { dbPasswordProblem } = require('./lib/db-config');
-const { withCancelOnClose } = require('./lib/core');
-const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
+const { withCancelOnClose, DB_CONNECTION } = require('./lib/core');
+const { Client: PgClient } = require('pg');
+const { createLeader } = require('./lib/leader');
+const { settleTelegramQueue } = require('./lib/telegram');
+const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetAllStuckRuns, reloadConfigCaches, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
@@ -310,8 +313,16 @@ async function webhookReceiver(req, res) {
 app.post('/api/webhook', webhookReceiver);
 app.post('/api/webhook/t/:acct', webhookReceiver);
 
-// Health check (kept public for uptime probes)
+// Health check (kept public for uptime probes). During a zero-downtime update docker rollout runs
+// the service's pre-stop hook in the old container (label docker-rollout.pre-stop-hook, see the
+// README): it creates DRAIN_FILE, this answers 503, and the reverse proxy's own health check stops
+// sending requests here before the container is stopped. start() removes a marker left by an
+// interrupted update and then looks for the marker 4 times a second; a request never touches the
+// file system (the probe is not rate limited).
+const DRAIN_FILE = '/tmp/drain';
+let _draining = false;
 app.get('/api/health', (req, res) => {
+    if (_draining) return res.status(503).json({ status: 'draining', timestamp: new Date().toISOString() });
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -1910,6 +1921,7 @@ app.get('/api/system-health', requireAdmin, async (req, res) => {
             uptimeSec: Math.floor((Date.now() - _bootAt) / 1000),
             authEnabled: AUTH_ENABLED,
             schedulers: _schedHealth,
+            leader: _leader.status(),
             integrations: {
                 netbird: stats.netbird,
                 telegram: { enabled: !!getTelegramConfig().enabled, hasToken: !!getTelegramConfig().hasToken, queue: getTelegramQueueStats() },
@@ -2319,6 +2331,7 @@ const {
     createGatewaySetupKey, getRemoteAccessStatus, checkAccess: checkRemoteAccess, createSession: createRemoteSession,
     renewLease: renewRemoteLease, endSession: endRemoteSession, takeToken: takeRemoteToken, attachTunnel: attachRemoteTunnel,
     recheckSessions: recheckRemoteSessions, sweepSessions: sweepRemoteSessions, closeOrphanSessions: closeRemoteOrphans,
+    shutdownSessions: shutdownRemoteSessions,
     getRemoteAccessStatusLite, RECHECK_INTERVAL_MS: REMOTE_RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD: REMOTE_WS_MAX_PAYLOAD,
     beginStartupSettling: beginRemoteTargetSettling,
 } = require('./lib/remote-access');
@@ -4951,6 +4964,84 @@ async function trackedRun(name, s, fn) {
     s.runs++;
 }
 
+// ─── Leader election and shutdown ───
+// Only the leader (lib/leader.js) runs the background jobs: the schedulers below, the start-up
+// recovery and the Remote Access target sync. During a zero-downtime update the old and the new
+// container run side by side; the old one keeps the lock until it exits.
+let _shuttingDown = false;
+const _leader = createLeader({
+    Client: PgClient,
+    connection: DB_CONNECTION,
+    onLeader: leaderStartup,
+    // Never keep running without the lock: Docker starts the container again.
+    onFatal: () => process.exit(1),
+});
+const leaderReady = () => !_shuttingDown && _leader.isReady();
+// A job tick that runs only on the ready leader.
+const leaderOnly = (fn) => () => (leaderReady() ? fn() : undefined);
+
+// Runs once this instance holds the lock; it becomes ready (and runs jobs) only if all of it
+// succeeded. The previous leader is gone by now, so its work is really over.
+async function leaderStartup() {
+    // Settings saved on the previous leader while this instance was starting.
+    await reloadConfigCaches();
+    // Sessions a crash or restart left open, closed with an honest "end time unknown". This
+    // instance's own sessions are not touched.
+    const closed = await closeRemoteOrphans({ strict: true });
+    if (closed) console.log(`[remote-access] closed ${closed} session(s) left open by a restart`);
+    // 'running' flags of automations and grants that the previous leader left.
+    await resetAllStuckRuns();
+    // Maintenance that must not hold the jobs back, as before: the one-time backfill of
+    // approved_minutes, and the (tenant, timestamp DESC) log indexes, built CONCURRENTLY (minutes on
+    // a big table), which log their own progress and heal an interrupted build on the next run.
+    backfillApprovedDurations().catch(err => console.error('Approved-durations backfill error:', err.message));
+    ensureLogIndexes().catch(err => console.error('[Index] log index maintenance error:', err.message));
+}
+
+// SIGTERM (docker stop) or SIGINT: finish within SHUTDOWN_BUDGET_MS, below Docker's 10 s stop
+// timeout. No new job or Remote Access session starts; open remote sessions are closed and their
+// end records written; the Telegram queue gets the time left unless it waits for a retry; requests
+// in flight may finish; then the lock is released and the process exits. A second signal changes
+// nothing: the first deadline stands.
+const SHUTDOWN_BUDGET_MS = 8000;
+function installShutdown(server) {
+    let started = false;
+    const onSignal = (signal) => {
+        if (started) return;
+        started = true;
+        _shuttingDown = true;
+        const deadline = Date.now() + SHUTDOWN_BUDGET_MS;
+        const left = () => Math.max(0, deadline - Date.now());
+        const within = (p, ms) => Promise.race([p, new Promise((resolve) => setTimeout(resolve, ms))]);
+        const hardStop = setTimeout(() => {
+            console.error('[shutdown] the deadline passed; exiting now');
+            process.exit(0);
+        }, SHUTDOWN_BUDGET_MS + 500);
+        console.log(`[shutdown] ${signal} received: stopping`);
+        let serverClosed = false;
+        const closing = new Promise((resolve) => server.close(() => { serverClosed = true; resolve(); }));
+        (async () => {
+            try {
+                await within(shutdownRemoteSessions('The server is restarting. Open the session again in a moment.'), left());
+                const unsent = await settleTelegramQueue(deadline - 1000);
+                if (unsent) console.warn(`[shutdown] ${unsent} Telegram message(s) were not sent`);
+                await within(closing, left());
+                if (!serverClosed) {
+                    console.warn('[shutdown] closing the connections still open');
+                    server.closeAllConnections();
+                }
+                await within(_leader.stop(), Math.max(500, left()));
+            } catch (e) {
+                console.error('[shutdown] error:', e.message);
+            }
+            clearTimeout(hardStop);
+            process.exit(0);
+        })();
+    };
+    process.on('SIGTERM', () => onSignal('SIGTERM'));
+    process.on('SIGINT', () => onSignal('SIGINT'));
+}
+
 // Start server after DB initialization
 async function start() {
     try {
@@ -4966,6 +5057,7 @@ async function start() {
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
             addResourceGroups, removeResourceGroups, createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit,
+            isLeader: leaderReady,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).
             stillPermitted: async ({ oid, email, userId, snap }) => {
@@ -4990,17 +5082,14 @@ async function start() {
         // A resource write sent before a restart may still land in NetBird: no session is approved
         // until a target sync that starts 90 s from now has finished.
         beginRemoteTargetSettling();
-        await closeRemoteOrphans().then(n => { if (n) console.log(`[remote-access] closed ${n} session(s) left open by a restart`); })
-            .catch(err => console.error('[remote-access] orphan cleanup error:', err.message));
+        // Orphaned sessions are closed by the leader (leaderStartup), not by every instance that starts.
         setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);
         setInterval(sweepRemoteSessions, 15000);
         if (!NETBIRD_READONLY) {
-            const raTick = () => tracked('remoteAccessSync', reconcileRemoteAccess);
+            const raTick = leaderOnly(() => tracked('remoteAccessSync', reconcileRemoteAccess));
             setTimeout(raTick, 45000);
             setInterval(raTick, 10 * 60000);
         }
-        // One-time: fill approved_minutes on old approved requests from grants/bypass evidence.
-        backfillApprovedDurations().catch(err => console.error('Approved-durations backfill error:', err.message));
         // Warm the NetBird caches at startup (user + router name resolution)
         ensureUsersFresh().catch(err => console.error('Initial user refresh error:', err.message));
         ensurePeersFresh().catch(err => console.error('Initial peer refresh error:', err.message));
@@ -5013,14 +5102,13 @@ async function start() {
             // single tenant iteration failing never blocks the rest - forEachTenant collects the
             // errors and throws one summary (which tracked() raises as the job alert, naming the
             // tenant). Request escalation / the weekly digest / anomaly alerts stay MAIN-only.
-            await tracked('resetStuckAutomations', () => forEachTenant(resetStuckAutomations));
-            const autoTick = () => tracked('automations', () => forEachTenant(runDueAutomations));
+            // The 'running' flags a crash left are cleared by the leader (leaderStartup).
+            const autoTick = leaderOnly(() => tracked('automations', () => forEachTenant(runDueAutomations)));
             setTimeout(autoTick, 15000);
             setInterval(autoTick, 60000);
             // Temporary-access expiry: revoke expired grants + keep active grants' groups in
             // sync with the users' current devices, on the same 60s cadence.
-            await tracked('resetStuckGrants', () => forEachTenant(resetStuckGrants));
-            const grantsTick = async () => {
+            const grantsTick = leaderOnly(async () => {
                 await tracked('grantExpiry', () => forEachTenant(revokeExpiredGrants));
                 await tracked('grantReconcile', () => forEachTenant(reconcileActiveGrants));
                 await tracked('grantCrashCleanup', () => forEachTenant(cleanupStuckCreatingGrants));
@@ -5030,27 +5118,27 @@ async function start() {
                 await tracked('trafficAnomalies', checkTrafficAnomalies);
                 await tracked('recurringAccess', () => forEachTenant(runRecurringAccess));
                 await tracked('recertification', () => forEachTenant(runRecertification));
-            };
+            });
             setTimeout(grantsTick, 20000);
             setInterval(grantsTick, 60000);
         }
 
         // IP-assignment history: keep the ip↔user intervals current from the peers cache. Runs
         // in read-only mode too - it only reads NetBird and writes the app's own DB.
-        const ipTick = () => tracked('ipHistorySync', () => forEachTenant(async () => { await ensurePeersFresh(); await syncIpAssignments(); }));
+        const ipTick = leaderOnly(() => tracked('ipHistorySync', () => forEachTenant(async () => { await ensurePeersFresh(); await syncIpAssignments(); })));
         setTimeout(ipTick, 10000);
         setInterval(ipTick, 60000);
 
         // Reverse-proxy access logs: copy NetBird Cloud's 7-day window into the app's own DB
         // (proxy_access_logs), so the app's Data Retention governs them. Read-only safe.
-        const proxyLogsTick = () => tracked('proxyLogsSync', () => forEachTenant(syncProxyAccessLogs));
+        const proxyLogsTick = leaderOnly(() => tracked('proxyLogsSync', () => forEachTenant(syncProxyAccessLogs)));
         setTimeout(proxyLogsTick, 15000);
         setInterval(proxyLogsTick, 5 * 60 * 1000);
 
         // Traffic Events API pull: the same 5-minute cadence, staggered off the proxy sync so two
         // multi-page NetBird walks never start together. Each account self-gates on its own opt-in
         // setting (disabled by default), so this is a no-op until someone turns it on. Read-only safe.
-        const trafficPullTick = () => tracked('trafficPull', () => forEachTenant(syncTrafficEvents));
+        const trafficPullTick = leaderOnly(() => tracked('trafficPull', () => forEachTenant(syncTrafficEvents)));
         setTimeout(trafficPullTick, 25000);
         setInterval(trafficPullTick, 5 * 60 * 1000);
 
@@ -5058,24 +5146,24 @@ async function start() {
         // TYPE_UNKNOWN state; this refreshes each account's peer/resource index (used by ingest)
         // and fixes stored rows, old ones included. It first retries any log index that is still
         // missing (a no-op once all are built). Only writes the app's own DB - read-only safe.
-        const eventTypesTick = () => tracked('eventTypes', async () => {
+        const eventTypesTick = leaderOnly(() => tracked('eventTypes', async () => {
             await ensureLogIndexes();
             await forEachTenant(reclassifyEventTypes);
-        });
+        }));
         setTimeout(eventTypesTick, 40000);
         setInterval(eventTypesTick, 10 * 60 * 1000);
 
         // Audit Events API pull: the same 5-minute cadence, staggered off the traffic pull (25s) so
         // two multi-page NetBird walks never start together. Each account self-gates on its own
         // opt-in setting (disabled by default), so this is a no-op until someone turns it on.
-        const auditPullTick = () => tracked('auditPull', () => forEachTenant(syncAuditEvents));
+        const auditPullTick = leaderOnly(() => tracked('auditPull', () => forEachTenant(syncAuditEvents)));
         setTimeout(auditPullTick, 35000);
         setInterval(auditPullTick, 5 * 60 * 1000);
 
         // Event retention purge - once per account (main + each tenant), each self-gating to once
         // per day and to ITS OWN configured window. Only touches the app's own DB (read-only safe);
         // per-account DELETEs are scoped to that account's rows.
-        const retentionTick = () => tracked('retentionPurge', () => forEachTenant(purgeOldEvents));
+        const retentionTick = leaderOnly(() => tracked('retentionPurge', () => forEachTenant(purgeOldEvents)));
         setTimeout(retentionTick, 30000);
         setInterval(retentionTick, 10 * 60 * 1000);
 
@@ -5091,21 +5179,21 @@ async function start() {
             const msToNextHour = 3600_000 - (Date.now() % 3600_000);
             setTimeout(() => { fn(); setInterval(fn, 3600_000); }, msToNextHour + staggerMs);
         };
-        const mspDigestTick = () => tracked('mspDigest', sendMspDigest);
+        const mspDigestTick = leaderOnly(() => tracked('mspDigest', sendMspDigest));
         scheduleHourlyAligned(mspDigestTick, 50000, 15000);
 
         // Internal encrypted backup: hourly tick that self-gates on enabled + the configured hour + a
         // once-a-day marker (internal_backup_last), writing an envelope-encrypted full backup to
         // BACKUP_DIR. Disabled by default (kill switch). Main-only, read-only safe (reads the DB +
         // writes a file); no passphrase needed at backup time (the public key encrypts).
-        const internalBackupTickJob = () => tracked('internalBackup', internalBackupTick);
+        const internalBackupTickJob = leaderOnly(() => tracked('internalBackup', internalBackupTick));
         scheduleHourlyAligned(internalBackupTickJob, 55000, 20000);
 
         // MSP tenant token rotation: re-issues each tenant's managed service-user token when
         // it is within 30 days of its 365-day expiry. Hourly check; quiet when nothing is due.
         // Writes to NetBird (token create/delete) - skipped in read-only mode.
         if (!NETBIRD_READONLY) {
-            const tenantTokenTick = () => tracked('tenantTokenRotation', rotateTenantTokens);
+            const tenantTokenTick = leaderOnly(() => tracked('tenantTokenRotation', rotateTenantTokens));
             setTimeout(tenantTokenTick, 45000);
             setInterval(tenantTokenTick, 60 * 60 * 1000);
         }
@@ -5117,13 +5205,12 @@ async function start() {
                 .catch(() => { });
         }
 
+        // A drain marker left by an interrupted update would keep this instance out of rotation.
+        fs.rmSync(DRAIN_FILE, { force: true });
+        setInterval(() => { _draining = fs.existsSync(DRAIN_FILE); }, 250).unref();
         const server = app.listen(PORT, '0.0.0.0', async () => {
             console.log(`NetBird Logs server running on port ${PORT}`);
-            // The (tenant, timestamp DESC) log indexes are built HERE, after the port is open, and
-            // CONCURRENTLY - on a multi-GB events table each build takes minutes, so it must never
-            // gate the boot or lock out webhook ingest. Fire-and-forget: it logs its own progress
-            // and self-heals an interrupted build on the next start.
-            ensureLogIndexes().catch(err => console.error('[Index] log index maintenance error:', err.message));
+            // The log indexes are built by the leader (leaderStartup), after the port is open.
             console.log(`Webhook endpoint: POST /api/webhook`);
             console.log(`Web UI: ${process.env.BASE_URL || `http://localhost:${PORT}`}`);
             if (NETBIRD_READONLY) console.log('NetBird writes: READ-ONLY (NETBIRD_READONLY=true) - all create/update/delete + automations are blocked');
@@ -5148,6 +5235,9 @@ async function start() {
             }
         });
         server.on('upgrade', handleRemoteUpgrade);
+        installShutdown(server);
+        // Try for the leader lock; the jobs above start running once this instance leads.
+        _leader.start();
     } catch (err) {
         console.error('Failed to start server:', err.message);
         process.exit(1);

@@ -175,6 +175,77 @@ existing database: PostgreSQL uses `DB_PASSWORD` only when it creates the databa
 With your own PostgreSQL server, change the user's password there as a superuser, then set the
 same value in `.env` (after `chmod 600 .env`).
 
+### Upgrading Without Downtime
+
+[`scripts/update.sh`](scripts/update.sh) updates the app with the
+[docker rollout](https://github.com/wowu/docker-rollout) plugin, version `v0.14`. The new
+container starts beside the old one. Once the new one is healthy, the reverse proxy stops sending
+requests to the old one, which then shuts down and is removed. If the new one does not become
+healthy, it is removed and the old one keeps running. Copy the script next to your Compose file and
+`.env`, and run it from there on a Linux Docker host:
+
+```bash
+./update.sh 1.4.0   # pulls 1.4.0, updates the app and sets TAG in .env
+./update.sh         # pulls and updates the TAG that is already in .env
+```
+
+The script finds what to update by itself. It reads the services of the Compose project, including
+`COMPOSE_FILE` and `COMPOSE_PROFILES` from `.env`, and updates only services whose image is a
+NetBird Control image (the image label `netbird-control.side-by-side`). It lists every other
+service, such as a database or gateways, and leaves it alone. To leave out a service, give it the
+label `netbird-control.rollout: "false"`. To update only some services, name them:
+`SERVICES="app" ./update.sh`. `ROLLOUT_TIMEOUT` (default 180 seconds) is how long a new container
+has to become healthy. The script changes only the `TAG` line of `.env`, right before the first
+update, and puts it back when the new version does not start.
+
+An update without downtime needs all of these. When one is missing, the script recreates the app
+with a short downtime and says why before it does:
+
+- No `container_name` and no `ports`: two containers run at once, so the app is reached only
+  through a reverse proxy.
+- `restart: unless-stopped` or `restart: always`.
+- The drain label `docker-rollout.pre-stop-hook` and, behind Traefik, a Traefik health check on
+  `/api/health`. Before the old container stops, the hook makes `/api/health` answer 503, and the
+  proxy stops sending it requests.
+- With SSO, `SESSION_SECRET` set, so both containers accept the same sign-in.
+- A direct connection to PostgreSQL, or a pooler in session mode. Only one container runs the
+  background jobs, decided by a PostgreSQL lock that a transaction-mode pooler cannot hold.
+- A running version that can already run beside another one. The first update to this version
+  always recreates the app.
+
+A Traefik setup, on a Traefik network named `traefik`:
+
+```yaml
+services:
+  app:
+    image: ghcr.io/shlomiporush/nbcontrol:${TAG}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=3000
+    networks:
+      - traefik
+    labels:
+      - docker-rollout.pre-stop-hook=touch /tmp/drain && sleep 5
+      - traefik.enable=true
+      - traefik.docker.network=traefik
+      - traefik.http.routers.nbcontrol.rule=Host(`nbcontrol.example.com`)
+      - traefik.http.services.nbcontrol.loadbalancer.server.port=3000
+      - traefik.http.services.nbcontrol.loadbalancer.healthcheck.path=/api/health
+      - traefik.http.services.nbcontrol.loadbalancer.healthcheck.interval=1s
+      - traefik.http.services.nbcontrol.loadbalancer.healthcheck.timeout=1s
+
+networks:
+  traefik:
+    external: true
+```
+
+Open browser remote access sessions (RDP and SSH) end when the old container stops, and users open
+them again. For a few seconds while both containers run, opening a new session can fail and needs
+another try. When a release's notes say it needs downtime, update with `docker compose pull` and
+`docker compose up -d` instead.
+
 ## Security
 
 - **SSO** - with the three `OIDC_*` variables and `BASE_URL` set, every page requires login. Admins are
@@ -192,8 +263,10 @@ same value in `.env` (after `chmod 600 .env`).
   environment locks the field in the app.
 - **Destructive actions are gated** - with SSO on, deleting stored events needs an admin listed in
   `EVENT_PURGE_ADMINS`, and blocklist enforcement always needs an explicit scan, review and confirm.
-- **Run one instance** - schedulers and caches live in the process, so a second replica would run
-  every job twice.
+- **Run one instance** - caches, sign-in activity and browser remote access sessions live in the
+  process. Only one instance runs the background jobs (the one that holds a PostgreSQL lock), but
+  a second instance is meant only for the moment of an update (see
+  [Upgrading Without Downtime](#upgrading-without-downtime)).
 
 More in [docs/permissions-and-security.md](docs/permissions-and-security.md).
 

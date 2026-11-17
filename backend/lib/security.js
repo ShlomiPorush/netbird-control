@@ -60,11 +60,12 @@ function secNum(v, def, min, max) {
 function applySecurityConfig(normalized) {
     for (const k of Object.keys(SECURITY_DEFAULTS)) _security[k] = normalized[k];
 }
-async function loadSecurityConfig() {
+async function loadSecurityConfig({ strict = false } = {}) {
     try {
         const v = await getSetting('security_config');
         if (v) applySecurityConfig(normSecurityConfig(JSON.parse(v)));
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[Security] config load error:', e.message);
     }
 }
