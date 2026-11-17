@@ -8,7 +8,7 @@
 # Copy it beside the deployment's docker-compose.yml and .env and run it from there. It finds the
 # services to update by themselves, not by name or image: every service of the Compose project
 # (COMPOSE_FILE and COMPOSE_PROFILES in .env are honoured) whose image carries the label
-# netbird-control.side-by-side. Other services (a database, gateways, a proxy) are listed and left
+# netbird-control.zero-downtime-update. Other services (a database, gateways, a proxy) are listed and left
 # alone. A service labelled netbird-control.rollout: "false" in the Compose file is left alone too.
 # SERVICES="app" limits the run to the services named. ROLLOUT_TIMEOUT (seconds, default 180) is
 # how long a new container has to become healthy.
@@ -41,7 +41,7 @@ ROLLOUT_VERSION="v0.14"
 # added the new one first (Traefik applies Docker changes after a short delay; docker rollout's
 # --wait-after-healthy defaults to 0 in v0.14).
 SETTLE=10
-SIDE_BY_SIDE_LABEL="netbird-control.side-by-side"
+ZERO_DOWNTIME_LABEL="netbird-control.zero-downtime-update"
 OPT_OUT_LABEL="netbird-control.rollout"
 DRAIN_LABEL="docker-rollout.pre-stop-hook"
 
@@ -307,7 +307,7 @@ log "Pulling: ${pullable[*]}"
 services=()
 too_old=()
 for service in "${pullable[@]}"; do
-  label="$(docker image inspect -f "{{index .Config.Labels \"$SIDE_BY_SIDE_LABEL\"}}" "${image_of[$service]}" 2>/dev/null)" || label=""
+  label="$(docker image inspect -f "{{index .Config.Labels \"$ZERO_DOWNTIME_LABEL\"}}" "${image_of[$service]}" 2>/dev/null)" || label=""
   if [[ $label != "1" ]]; then
     # A NetBird Control release from before this script (1.3.1 and older), or another image.
     img_source="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.source"}}' "${image_of[$service]}" 2>/dev/null)" || img_source=""
@@ -386,7 +386,7 @@ plan_service() {
   fi
   [[ -n $hc ]] || reasons+=("it has no health check")
   old="$(head -n 1 <<<"$running")"
-  [[ $(container_label "$old" "$SIDE_BY_SIDE_LABEL") == "1" ]] || reasons+=("the running version cannot run beside another instance yet")
+  [[ $(container_label "$old" "$ZERO_DOWNTIME_LABEL") == "1" ]] || reasons+=("the running version cannot run beside another instance yet")
   [[ -n $(container_label "$old" "$DRAIN_LABEL") ]] || reasons+=("its running container has no $DRAIN_LABEL label")
   labels="$(docker inspect -f '{{range $k, $v := .Config.Labels}}{{println $k}}{{end}}' "$old")" || stop "Could not read the labels of $service from Docker."
   if grep -q '^traefik\.' <<<"$labels" &&

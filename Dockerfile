@@ -56,5 +56,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # This version can run beside another instance of itself for a moment (one leader runs the jobs,
 # SIGTERM shuts down cleanly, /api/health drains): scripts/update.sh updates only services whose
 # image declares it, and rolls one without downtime only when its running container declares it too.
-LABEL netbird-control.side-by-side="1"
+LABEL netbird-control.zero-downtime-update="1"
 CMD ["node", "server.js"]
