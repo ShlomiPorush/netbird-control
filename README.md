@@ -185,9 +185,12 @@ healthy, it is removed and the old one keeps running. Copy the script next to yo
 `.env`, and run it from there on a Linux Docker host:
 
 ```bash
-./update.sh 1.4.0   # pulls 1.4.0, updates the app and sets TAG in .env
-./update.sh         # pulls and updates the TAG that is already in .env
+./update.sh 1.4.0   # pulls 1.4.0, updates the app and sets the tag in .env
+./update.sh         # pulls and updates the tag that is already in .env
 ```
+
+The image tag can come from `TAG` (as in this repository's `docker-compose.yml`) or from `VERSION`
+in `.env`. The script finds which one your Compose file uses.
 
 The script finds what to update by itself. It reads the services of the Compose project, including
 `COMPOSE_FILE` and `COMPOSE_PROFILES` from `.env`, and updates only services whose image is a
@@ -195,7 +198,7 @@ NetBird Control image (the image label `netbird-control.zero-downtime-update`). 
 service, such as a database or gateways, and leaves it alone. To leave out a service, give it the
 label `netbird-control.rollout: "false"`. To update only some services, name them:
 `SERVICES="app" ./update.sh`. `ROLLOUT_TIMEOUT` (default 180 seconds) is how long a new container
-has to become healthy. The script changes only the `TAG` line of `.env`, right before the first
+has to become healthy. The script changes only that tag line of `.env`, right before the first
 update, and puts it back when the new version does not start.
 
 An update without downtime needs all of these. When one is missing, the script recreates the app
