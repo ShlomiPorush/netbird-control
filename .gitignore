@@ -5,9 +5,11 @@ data/
 .DS_Store
 temp/
 # Root-only: local helper scripts (local.sh) stay untracked, except release.sh, which prepares
-# release pull requests; backend/scripts IS tracked - the app serves Diagnose-NetBird.ps1 from there.
+# release pull requests, and update.sh, which deployments copy to update without downtime;
+# backend/scripts IS tracked - the app serves Diagnose-NetBird.ps1 from there.
 /scripts/*
 !/scripts/release.sh
+!/scripts/update.sh
 docker-compose-dev.yml
 netbird html
 .claude

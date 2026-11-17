@@ -36,12 +36,14 @@ const snapshot = {
     '/api/routes': [],
     '/api/networks/n1/routers': [{ peer: 'p-r', enabled: true }],
 };
-nb.netbirdGet = async (p) => JSON.parse(JSON.stringify(snapshot[p] ?? null));
+let onNetbirdGet = null; // test hook, called before each NetBird read
+nb.netbirdGet = async (p) => { if (onNetbirdGet) await onNetbirdGet(p); return JSON.parse(JSON.stringify(snapshot[p] ?? null)); };
 
 const events = require('../lib/events');
 const recorded = [];
 let failEvents = false;
-events.addEvent = async (e) => { if (failEvents) throw new Error('db down'); recorded.push(e); order.push('event:' + e.Message); };
+let beforeEvent = null; // test hook, awaited before each event record
+events.addEvent = async (e) => { if (beforeEvent) await beforeEvent(e); if (failEvents) throw new Error('db down'); recorded.push(e); order.push('event:' + e.Message); };
 
 const ra = require('../lib/remote-access');
 const { encodeInstruction, GuacParser } = ra._internal;
@@ -441,36 +443,38 @@ test('only the parameter names guacd asks for reach guacd, never the target', as
         t = await openReady(port);
     } finally { afterReady = DEFAULT_AFTER_READY; }
     const before = guacdSeen.length;
+    // Fresh random values per run, as for SECRET above.
+    const [PW1, PW2, PP] = [0, 1, 2].map(() => crypto.randomBytes(9).toString('base64url'));
     const b64 = (v) => Buffer.from(v).toString('base64');
     const stream = (idx, name, value) => [encodeInstruction('argv', idx, 'text/plain', name), encodeInstruction('blob', idx, b64(value)), encodeInstruction('end', idx)];
     const send = (list) => { for (const m of list) t.ws.send(m); };
     send(stream('1', 'hostname', '10.9.9.9'));   // asked for, but never from the browser
     send(stream('2', 'port', '4444'));           // never asked for, never allowed
-    send(stream('3', 'password', 'pw'));         // asked for
+    send(stream('3', 'password', PW1));         // asked for
     send(stream('4', 'font-size', '14'));        // SSH terminal setting
     send(stream('5', 'username', 'root'));       // not asked for
-    send(stream('08', 'password', 'pw'));        // not a plain stream index
-    send(stream('600', 'password', 'pw'));       // outside guacd's stream range
+    send(stream('08', 'password', PW1));        // not a plain stream index
+    send(stream('600', 'password', PW1));       // outside guacd's stream range
     t.ws.send(encodeInstruction('blob', '7', b64('x')));   // a stream that was never opened
     t.ws.send(encodeInstruction('blob', '3', b64('late'))); // a stream already ended
-    send(stream('1', 'password', 'pw2'));        // the index of a dropped stream, reused for an allowed one
+    send(stream('1', 'password', PW2));        // the index of a dropped stream, reused for an allowed one
     send([encodeInstruction('clipboard', '6', 'text/plain'), encodeInstruction('blob', '6', b64('clip')), encodeInstruction('end', '6')]);
     t.ws.send(encodeInstruction('ack', '9', 'OK', '0'));   // answers a guacd stream, passes as before
     // A later request from guacd opens one more name.
     t.sock.write(encodeInstruction('required', 'passphrase'));
     await waitFor(() => t.msgs.some(m => m.includes('10.passphrase')));
-    send(stream('2', 'passphrase', 'pp'));
+    send(stream('2', 'passphrase', PP));
     t.ws.send(encodeInstruction('nop'));
     await waitFor(() => guacdSeen.slice(before).some(i => i.opcode === 'nop'));
 
     const seen = guacdSeen.slice(before).filter(i => ['argv', 'blob', 'end', 'clipboard', 'ack'].includes(i.opcode)).map(i => [i.opcode, ...i.args]);
     assert.deepEqual(seen, [
-        ['argv', '3', 'text/plain', 'password'], ['blob', '3', b64('pw')], ['end', '3'],
+        ['argv', '3', 'text/plain', 'password'], ['blob', '3', b64(PW1)], ['end', '3'],
         ['argv', '4', 'text/plain', 'font-size'], ['blob', '4', b64('14')], ['end', '4'],
-        ['argv', '1', 'text/plain', 'password'], ['blob', '1', b64('pw2')], ['end', '1'],
+        ['argv', '1', 'text/plain', 'password'], ['blob', '1', b64(PW2)], ['end', '1'],
         ['clipboard', '6', 'text/plain'], ['blob', '6', b64('clip')], ['end', '6'],
         ['ack', '9', 'OK', '0'],
-        ['argv', '2', 'text/plain', 'passphrase'], ['blob', '2', b64('pp')], ['end', '2'],
+        ['argv', '2', 'text/plain', 'passphrase'], ['blob', '2', b64(PP)], ['end', '2'],
     ]);
     assert.equal(t.closed(), null, 'dropping is silent, the session stays open');
     ra.closeAllSessions('test over');
@@ -487,4 +491,145 @@ test('clipboard streams stay within guacd\'s stream range', async () => {
     assert.equal(idx.length, 512);
     assert.ok(idx.every(n => n < 512));
     ra.closeAllSessions('test over');
+});
+
+// ─── Leader recovery and process shutdown (zero-downtime updates) ───
+
+test("the leader's orphan cleanup leaves this process's own sessions, and strict mode reports a failure", async () => {
+    ra.closeAllSessions('next test');
+    const own = await ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' }, '203.0.113.9');
+    const orphan = { id: 'orphan-1', protocol: 'ssh', target_addr: '10.0.0.5', target_port: 22, user_id: 'u9', user_email: '', user_name: '', client_ip: '', resource_id: 'r1', resource_name: 'srv1', started_at: new Date().toISOString(), rx_bytes: 0, tx_bytes: 0 };
+    const query = core.pool.query;
+    core.pool.query = async (sql, params) => (/SELECT \* FROM remote_sessions/.test(sql) ? { rows: [{ ...orphan, id: own.sessionId }, orphan] } : query(sql, params));
+    try {
+        const before = recorded.length;
+        assert.equal(await ra.closeOrphanSessions(), 1);
+        const ends = recorded.slice(before).filter(e => e.Message === 'TYPE_END').map(e => e.meta.flow_id);
+        assert.deepEqual(ends, ['orphan-1'], 'only the orphan is closed, not the live session of this process');
+
+        failEvents = true;
+        assert.equal(await ra.closeOrphanSessions(), 0, 'not strict: the row is kept for the next start-up');
+        await assert.rejects(ra.closeOrphanSessions({ strict: true }), /could not be closed/);
+    } finally {
+        failEvents = false;
+        core.pool.query = query;
+        ra.closeAllSessions('test over');
+    }
+});
+
+test('a session closed while its start is being written gets its end record after the start, and no token', async () => {
+    ra.closeAllSessions('next test');
+    let seen; const insertSeen = new Promise(r => { seen = r; });
+    let go; const insertGo = new Promise(r => { go = r; });
+    const query = core.pool.query;
+    core.pool.query = async (sql, params) => {
+        if (/^\s*INSERT INTO remote_sessions/.test(sql)) { seen(); await insertGo; }
+        return query(sql, params);
+    };
+    try {
+        const before = recorded.length;
+        const orderBefore = order.length;
+        const creating = ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' }, '203.0.113.9');
+        await insertSeen;
+        ra.closeAllSessions('Your access to this server ended.'); // as a re-check or turning the feature off does
+        await new Promise(r => setTimeout(r, 50));
+        assert.ok(!recorded.slice(before).some(e => e.Message === 'TYPE_END'), 'no end record before the start record');
+        go();
+        await assert.rejects(creating, (e) => e.code === 'SESSION_CLOSED');
+        await waitFor(() => recorded.slice(before).some(e => e.Message === 'TYPE_END'));
+        assert.deepEqual(recorded.slice(before).map(e => e.Message), ['TYPE_START', 'TYPE_END']);
+        await waitFor(() => order.slice(orderBefore).includes('DELETE:remote_sessions'));
+        const tail = order.slice(orderBefore);
+        assert.ok(tail.lastIndexOf('DELETE:remote_sessions') > tail.indexOf('INSERT:remote_sessions'), 'no live-state row is left behind');
+    } finally {
+        core.pool.query = query;
+    }
+});
+
+test("the orphan cleanup leaves a session of this process whose end record is still waiting", async () => {
+    ra.closeAllSessions('next test');
+    let seen; const startSeen = new Promise(r => { seen = r; });
+    let go; const startGo = new Promise(r => { go = r; });
+    beforeEvent = async (e) => { if (e.Message === 'TYPE_START') { seen(); await startGo; } };
+    const query = core.pool.query;
+    let ownId = null;
+    core.pool.query = async (sql, params) => {
+        if (/^\s*INSERT INTO remote_sessions/.test(sql)) ownId = params[0];
+        if (/SELECT \* FROM remote_sessions/.test(sql)) return { rows: [{ id: ownId, protocol: 'ssh', target_addr: '10.0.0.5', target_port: 22, user_id: 'u1', started_at: new Date().toISOString(), rx_bytes: 0, tx_bytes: 0 }] };
+        return query(sql, params);
+    };
+    try {
+        const before = recorded.length;
+        const creating = ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' }, '203.0.113.9');
+        await startSeen; // the row is in, the start record is being written
+        ra.closeAllSessions('Your access to this server ended.'); // out of the session map, end record waiting
+        assert.equal(await ra.closeOrphanSessions({ strict: true }), 0, 'not an orphan');
+        beforeEvent = null;
+        go();
+        await assert.rejects(creating, (e) => e.code === 'SESSION_CLOSED');
+        await waitFor(() => recorded.slice(before).some(e => e.Message === 'TYPE_END'));
+        const mine = recorded.slice(before);
+        assert.deepEqual(mine.map(e => e.Message), ['TYPE_START', 'TYPE_END']);
+    } finally {
+        beforeEvent = null;
+        core.pool.query = query;
+    }
+});
+
+// Last in this file: a shutdown is one-way for the process.
+test('a shutdown closes open sessions, waits for their end records, and refuses sessions already being created', async () => {
+    const port = app.address().port;
+    const t = await openReady(port);
+    const gate = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
+    const target = { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' };
+    // End records take a while, so the shutdown has something to wait for.
+    let slowEnd = false;
+    beforeEvent = async (e) => { if (e.Message === 'TYPE_END') { slowEnd = true; await new Promise(r => setTimeout(r, 150)); } };
+    // Request 1 stops while its start is being recorded (the live-state row insert).
+    const insertSeen = gate(); const insertGo = gate();
+    const query = core.pool.query;
+    core.pool.query = async (sql, params) => {
+        if (/^\s*INSERT INTO remote_sessions/.test(sql)) { insertSeen.open(); await insertGo.p; }
+        return query(sql, params);
+    };
+    // Request 2 stops between its first checks and the session map (the routers read).
+    const routersSeen = gate(); const routersGo = gate();
+    let holdRouters = false;
+    onNetbirdGet = async (p) => {
+        if (holdRouters && /\/routers$/.test(p)) { holdRouters = false; routersSeen.open(); await routersGo.p; }
+    };
+    try {
+        const first = ra.createSession(viewer, target, '203.0.113.9');
+        await insertSeen.p;
+        holdRouters = true;
+        const second = ra.createSession(viewer, target, '203.0.113.9');
+        await routersSeen.p;
+        const before = recorded.length;
+        const orderBefore = order.length;
+        const shutdown = ra.shutdownSessions('The server is restarting.');
+        routersGo.open();
+        await assert.rejects(second, (e) => e.code === 'SERVER_RESTARTING');
+        // A start that is still being recorded does not hold back the open session.
+        await waitFor(() => t.closed());
+        insertGo.open();
+        await assert.rejects(first, (e) => e.code === 'SERVER_RESTARTING');
+        await shutdown;
+        assert.ok(slowEnd, 'the open session was closed');
+        await waitFor(() => t.closed());
+        // The session of request 1: start recorded first, then its end, then its row removed.
+        const mine = recorded.slice(before);
+        const start = mine.find(e => e.Message === 'TYPE_START');
+        assert.ok(start, 'the start of request 1 was recorded');
+        const flow = start.meta.flow_id;
+        const msgs = mine.filter(e => e.meta.flow_id === flow).map(e => e.Message);
+        assert.deepEqual(msgs, ['TYPE_START', 'TYPE_END'], 'its end record follows its start record');
+        assert.equal(mine.filter(e => e.Message === 'TYPE_END').length, 2, 'the shutdown waited for both end records');
+        const tail = order.slice(orderBefore);
+        assert.ok(tail.lastIndexOf('DELETE:remote_sessions') > tail.indexOf('INSERT:remote_sessions'), 'no live-state row is left behind');
+        await assert.rejects(ra.createSession(viewer, target, '203.0.113.9'), (e) => e.code === 'SERVER_RESTARTING');
+    } finally {
+        core.pool.query = query;
+        beforeEvent = null;
+        onNetbirdGet = null;
+    }
 });

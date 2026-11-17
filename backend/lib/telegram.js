@@ -38,7 +38,7 @@ function _slot(acct) {
 const _cfgKey = (acct) => (acct ? `telegram_config:${acct}` : 'telegram_config');
 const _tokKey = (acct) => (acct ? `telegram_bot_token:${acct}` : 'telegram_bot_token');
 
-async function loadTelegram() {
+async function loadTelegram({ strict = false } = {}) {
     // MAIN slot - env override included, behavior preserved byte-for-byte.
     try {
         const main = _slot('');
@@ -56,6 +56,7 @@ async function loadTelegram() {
         const tok = await getSetting('telegram_bot_token');
         if (!_tgEnv.token && tok) main.token = tok;
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[Telegram] config load error:', e.message);
     }
     // TENANT slots - settings-only (never env). Scan every per-tenant key so each tenant's config
@@ -78,6 +79,7 @@ async function loadTelegram() {
             } catch { /* skip a malformed tenant config row */ }
         }
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[Telegram] tenant config load error:', e.message);
     }
 }
@@ -179,6 +181,16 @@ function getTelegramQueueStats() {
         sent: _tgStats.sent, failed: _tgStats.failed, retries: _tgStats.retries,
         lastSentAt: _tgStats.lastSentAt, lastErrorAt: _tgStats.lastErrorAt, lastError: _tgStats.lastError,
     };
+}
+
+// Process shutdown: wait while the queue still sends, until it is empty or the deadline passes.
+// Never waits through a retry pause. Resolves with the number of messages left, which are lost with
+// the process, as on any restart.
+async function settleTelegramQueue(untilMs) {
+    while (_tgQueue.length && !(_tgStats.pausedUntil > Date.now()) && Date.now() < untilMs) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return _tgQueue.length;
 }
 
 function enqueueTelegram(job) {
@@ -376,7 +388,7 @@ module.exports = {
     loadTelegram, getTelegramConfig, getTelegramToken, getTelegramWebhookSecret, setTelegramConfig,
     getTelegramState,
     tgEsc, TG_CAT_EMOJI,
-    sendTelegram, setTelegramObserver, getTelegramQueueStats, telegramApi, answerCallbackQuery, editTelegramMessage, editTelegramReplyMarkup,
+    sendTelegram, setTelegramObserver, getTelegramQueueStats, settleTelegramQueue, telegramApi, answerCallbackQuery, editTelegramMessage, editTelegramReplyMarkup,
     telegramSetWebhook, telegramDeleteWebhook, telegramTest, telegramCreateTopics,
     _setTelegramSleepForTests,
 };

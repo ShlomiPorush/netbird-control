@@ -199,11 +199,13 @@ let _mainWhToken = _whEnv.token; // main account's events token (env wins, else 
 const whTokenKey = () => tnt() ? `webhook_auth_token:${tnt()}` : 'webhook_auth_token';
 const whNotifKey = () => tnt() ? `webhook_notif_token:${tnt()}` : 'webhook_notif_token';
 
-async function loadWebhook() {
+async function loadWebhook({ strict = false } = {}) {
     try {
         const v = await getSetting('webhook_auth_token');
-        if (!_whEnv.token && v) _mainWhToken = v;
+        // A token cleared in the database clears it here too (a reload must match the stored state).
+        if (!_whEnv.token) _mainWhToken = v || '';
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[Webhook] config load error:', e.message);
     }
 }
@@ -384,12 +386,13 @@ function normPermEntry(e) {
     const groupIds = (Array.isArray(e && e.groupIds) ? e.groupIds : []).map(s => String(s).trim()).filter(Boolean);
     return { users, groupIds };
 }
-async function loadFeaturePerms() {
+async function loadFeaturePerms({ strict = false } = {}) {
     try {
         const v = await getSetting('feature_permissions');
         const c = v ? (JSON.parse(v) || {}) : {};
         for (const k of PERMISSION_KEYS) _featurePerms[k] = normPermEntry(c[k] || {});
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[Permissions] config load error:', e.message);
         for (const k of PERMISSION_KEYS) _featurePerms[k] = _featurePerms[k] || { users: [], groupIds: [] };
     }
@@ -571,7 +574,7 @@ function normApprovers(arr) {
     }).filter(Boolean);
 }
 
-async function loadApproverConfig() {
+async function loadApproverConfig({ strict = false } = {}) {
     try {
         const v = await getSetting('approver_config');
         if (v) {
@@ -593,6 +596,7 @@ async function loadApproverConfig() {
             }
         }
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[Approver] config load error:', e.message);
     }
 }
@@ -700,7 +704,7 @@ function normAutoRules(arr, legacy = false) {
         return { targets, groupIds, maxMinutes: Math.max(0, parseInt(r.maxMinutes, 10) || 0), enabled: r.enabled !== false, ...(access ? { access } : {}) };
     });
 }
-async function loadAutoApproval() {
+async function loadAutoApproval({ strict = false } = {}) {
     try {
         const v = await getSetting('auto_approval_config');
         if (!v) return;
@@ -720,6 +724,7 @@ async function loadAutoApproval() {
             if (_autoApproval.trusted.length || _autoApproval.rules.length) await persistAutoApproval();
         }
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[AutoApproval] config load error:', e.message);
     }
 }
@@ -3665,6 +3670,11 @@ async function getAdminEventTypes() {
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
+        // Schema statements wait at most 5 s for a table lock. During a zero-downtime update the old
+        // instance still serves: a long query there would otherwise hold an ALTER TABLE here, and every
+        // later query on that table would queue behind it. A timeout fails this start instead; the new
+        // container never gets healthy, docker rollout removes it and the old one keeps serving.
+        await client.query(`SET lock_timeout = '5s'`);
         await client.query(`
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY,
@@ -4220,7 +4230,7 @@ async function initializeDatabase() {
         // Reverse-proxy access logs, INGESTED locally: NetBird Cloud only keeps them 7 days,
         // so a scheduler copies them here and the app's own Data Retention governs their life.
         // service_name / user_name are resolved AT INGEST so history survives renames/deletions.
-        await pool.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS proxy_access_logs (
         id TEXT PRIMARY KEY,
         timestamp TIMESTAMPTZ NOT NULL,
@@ -4249,7 +4259,7 @@ async function initializeDatabase() {
         // Everything the app itself sent out (email / Telegram) - one row per actual send
         // attempt, written by the transport observers in lib/mail.js and lib/telegram.js.
         // Answers "who got what, when, and why" after the fact; governed by Data Retention.
-        await pool.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS outbound_log (
         id BIGSERIAL PRIMARY KEY,
         timestamp TIMESTAMPTZ DEFAULT NOW(),
@@ -4263,13 +4273,13 @@ async function initializeDatabase() {
     `);
         // The full rendered body sent out (email HTML / Telegram HTML) so an admin can preview
         // exactly what went out. Kept out of the list query - bodies are large; fetched on demand.
-        await pool.query(`ALTER TABLE outbound_log ADD COLUMN IF NOT EXISTS body TEXT DEFAULT ''`);
+        await client.query(`ALTER TABLE outbound_log ADD COLUMN IF NOT EXISTS body TEXT DEFAULT ''`);
 
         // NetBird account notifications (Settings → Notifications → Webhook in the NetBird
         // dashboard, pointed at this app): routing peer down/deleted, pending approvals,
         // IdP/EDR sync token expiry. Raw payload kept in full - the schema is not formally
         // documented, so extraction is best-effort and the original is never lost.
-        await pool.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS nb_notifications (
         id BIGSERIAL PRIMARY KEY,
         received_at TIMESTAMPTZ DEFAULT NOW(),
@@ -4282,12 +4292,12 @@ async function initializeDatabase() {
       );
     `);
         // Admin "Ignore" on a notice hides it for EVERYONE (banner + dashboard).
-        await pool.query(`ALTER TABLE nb_notifications ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ`);
+        await client.query(`ALTER TABLE nb_notifications ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ`);
 
         // Cleanup-scan ignores: findings an admin marked as "known and fine" (e.g. a resource
         // deliberately kept WITHOUT default policies, reachable only via access requests).
         // Ignored findings drop out of the Cleanup page counters AND the weekly digest.
-        await pool.query(`
+        await client.query(`
       CREATE TABLE IF NOT EXISTS cleanup_ignores (
         id SERIAL PRIMARY KEY,
         category TEXT NOT NULL,
@@ -4461,7 +4471,10 @@ async function initializeDatabase() {
             console.log('NetBird API not configured - set it in Settings → NetBird API (or NETBIRD_API_URL/NETBIRD_API_TOKEN env)');
         }
     } finally {
-        client.release();
+        // The connection goes back to the pool: without the setting, or closed when that fails.
+        let resetError;
+        await client.query('RESET lock_timeout').catch((err) => { resetError = err; });
+        client.release(resetError);
     }
 }
 
@@ -10027,6 +10040,26 @@ async function deleteTemporaryAccessGrant(id, actor) {
     return { deleted: true };
 }
 
+// Leader start-up recovery (lib/leader.js): clear the 'running' flags of automations and grants
+// that a crashed or stopped leader left, for every account at once. Not per account through
+// forEachTenant: a failed tenant lookup there falls back to main only and would hide the miss.
+// Errors propagate, so the leader is not ready until this succeeded. Only the instance that just
+// took the leader lock runs it, and the previous leader is gone by then (it held the lock until
+// it exited), so no job is really running.
+async function resetAllStuckRuns() {
+    await pool.query(`UPDATE automations SET last_status='' WHERE last_status='running'`);
+    await pool.query(`UPDATE temporary_access_grants SET last_status='' WHERE last_status='running'`);
+}
+
+// Leader start-up: read every in-memory config again. Settings saved on the previous leader while
+// this instance was starting would otherwise stay stale here. Strict: a database error throws.
+async function reloadConfigCaches() {
+    const strict = { strict: true };
+    await loadNbApi(strict); await loadTenantTokens(strict); await loadWebhook(strict); await loadTelegram(strict);
+    await loadApproverConfig(strict); await loadAutoApproval(strict); await loadSmtp(strict); await loadFeaturePerms(strict);
+    await loadSecurityConfig(strict); await loadRemoteAccessConfig(strict);
+}
+
 // Startup: clear any 'running' flags left by a crash so a revoke can be retried.
 async function resetStuckGrants() {
     await pool.query(`UPDATE temporary_access_grants SET last_status='' WHERE last_status='running' AND tenant=$1`, [tnt()]).catch(() => { });
@@ -12385,7 +12418,7 @@ module.exports = {
     getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork,
     scanBlockedResources, enforceBlockedResources,
     listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant,
-    revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies,
+    revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, resetAllStuckRuns, reloadConfigCaches, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies,
     purgeOldEvents, getRetentionStatus, getRetentionDays, setRetentionDays, getSystemStats,
     exportAppSettings, importAppSettings,
     // Internal envelope-encrypted backup (tier 2)

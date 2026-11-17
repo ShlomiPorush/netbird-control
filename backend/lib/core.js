@@ -131,4 +131,4 @@ async function setSetting(key, value) {
     _onSettingChange();
 }
 
-module.exports = { pool, getSetting, setSetting, onSettingChange, cappedCount, capTotal, withCancelOnClose, COUNT_CAP };
+module.exports = { pool, DB_CONNECTION, getSetting, setSetting, onSettingChange, cappedCount, capTotal, withCancelOnClose, COUNT_CAP };

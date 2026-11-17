@@ -158,12 +158,13 @@ function normSsh(v) {
     };
 }
 
-async function loadRemoteAccessConfig() {
-    try { _cfg = normConfig(JSON.parse(await getSetting('remote_access_config') || 'null')); } catch { _cfg = { ...DEFAULTS }; }
+async function loadRemoteAccessConfig({ strict = false } = {}) {
+    // strict (the leader's reload): a database error is thrown instead of falling back to defaults.
+    try { _cfg = normConfig(JSON.parse(await getSetting('remote_access_config') || 'null')); } catch (e) { if (strict && !(e instanceof SyntaxError)) throw e; _cfg = { ...DEFAULTS }; }
     try {
         const n = JSON.parse(await getSetting('remote_access_nb') || 'null') || {};
         _nb = Object.fromEntries(Object.keys(NB_EMPTY).map(k => [k, String(n[k] || '')]));
-    } catch { _nb = { ...NB_EMPTY }; }
+    } catch (e) { if (strict && !(e instanceof SyntaxError)) throw e; _nb = { ...NB_EMPTY }; }
 }
 
 function getRemoteAccessConfig() {
@@ -249,6 +250,9 @@ function scheduleSettleSync(delayMs = untilDeadline()) {
     _settleTimer = _targetLockCtx.exit(() => setTimeout(() => {
         _settleTimer = null;
         if (!_cfg.enabled || !netbirdApiConfigured() || NETBIRD_READONLY) return; // the next apply syncs
+        // Only the leader writes to NetBird (lib/leader.js). A standby asks again until it leads or
+        // shuts down; until a sync ends, it keeps refusing new sessions, as during any settling.
+        if (_deps.isLeader && !_deps.isLeader()) { scheduleSettleSync(5000); return; }
         syncTargetGroup().catch(e => {
             console.error('[remote-access] target sync after an unanswered write failed:', e.message);
             if (!_settleTimer) scheduleSettleSync(Math.max(60_000, untilDeadline()));
@@ -704,6 +708,7 @@ const MESSAGES = {
     WILDCARD_DOMAIN_NOT_ALLOWED: "Browser access doesn't connect through wildcard domain resources. Ask an administrator to add this exact host name as a domain resource, or enter the server's IP address.",
     GATEWAY_REACH_UNKNOWN: "A NetBird policy gives the Browser Gateway access that NetBird Control can't read, so browser access is blocked for everyone until an administrator changes that policy.",
     TARGETS_SETTLING: 'NetBird is still applying a change to the browser targets. Try again in a minute.',
+    SERVER_RESTARTING: 'The server is restarting. Try again in a moment.',
 };
 const REQUESTABLE = new Set(['NO_ACCESS', 'PORT_NOT_ALLOWED']);
 
@@ -795,6 +800,9 @@ async function checkAccess(viewer, body) {
 // ─── Sessions ───
 const _tokens = new Map();   // token -> { sessionId, expiresAt }
 const _sessions = new Map(); // sessionId -> session
+const _pendingEnds = new Set(); // end records still being written
+const _endingIds = new Set(); // their session ids: still this process's own, not orphans
+let _shuttingDown = false;
 let _lastGoodRecheck = Date.now();
 
 const countFor = (userId) => [..._sessions.values()].filter(s => s.userId === userId).length;
@@ -824,6 +832,7 @@ function sessionEvent(s, kind, extra = {}) {
 // body). They go to guacd for RDP and SSH alike.
 async function createSession(viewer, body, clientIp, opts = {}) {
     if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
+    if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
     const { protocol, address, port } = parseTarget(body);
     if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser) throw httpError(429, 'TOO_MANY', `You already have ${_cfg.maxSessionsPerUser} open sessions. Close one first.`);
     if (_sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY_TOTAL', 'The Browser Gateway is at its session limit. Try again later.');
@@ -861,6 +870,8 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     // And the settling state: an unanswered write may have started it during the reads above, or
     // the targets changed after the snapshot was read.
     if (targetsSettling() || !snapshotCurrent(snap)) throw httpError(503, 'TARGETS_SETTLING');
+    // A shutdown that started during the reads above has already closed every session it saw.
+    if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
     const s = {
         id: crypto.randomUUID(), protocol, address: rt.address, port, width, height, dpi, timezone, creds,
         gateway: rt.gateway, targetName: rt.name || '',
@@ -874,18 +885,16 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     };
     _sessions.set(s.id, s); // counts toward the quota from now on, including setup
 
-    try {
-        await pool.query(
-            `INSERT INTO remote_sessions (id, user_id, user_email, user_name, client_ip, protocol, target_addr, target_port, resource_id, resource_name, network_id, started_at, target_name, gateway)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-            [s.id, s.userId, s.userEmail, s.userName, s.clientIp, protocol, s.address, port, s.resourceId, s.resourceName, s.networkId, s.startedAt, s.targetName, s.gateway]);
-        await addEvent(sessionEvent(s, 'start'));
-    } catch (e) {
-        _sessions.delete(s.id);
-        await pool.query('DELETE FROM remote_sessions WHERE id = $1', [s.id]).catch(() => { });
-        console.error('[remote-access] could not record session start:', e.message);
-        throw httpError(503, 'RECORD_FAILED', "The session couldn't be recorded, so it was not opened. Try again.");
+    // Whatever closes the session while its start is being recorded (a shutdown, a re-check),
+    // closeSession writes the end record only after this start record, and none if it failed.
+    s.started = recordStart(s);
+    if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', "The session couldn't be recorded, so it was not opened. Try again.");
+    if (_shuttingDown) {
+        closeSession(s, 'The server is restarting.');
+        throw httpError(503, 'SERVER_RESTARTING');
     }
+    // Closed while its start was being written (a re-check, the feature turned off): no token for it.
+    if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
 
     const token = crypto.randomBytes(32).toString('base64url');
     _tokens.set(token, { sessionId: s.id, expiresAt: Date.now() + TOKEN_TTL_MS });
@@ -896,6 +905,23 @@ async function createSession(viewer, body, clientIp, opts = {}) {
         if (s.state === 'pending') closeSession(s, 'The session was not opened in time.');
     }, TOKEN_TTL_MS + 1000);
     return { sessionId: s.id, token, resource: verdict.resource, network: verdict.network, address: s.address, name: s.targetName, gateway: s.gateway };
+}
+
+// The live-state row and the start record. Resolves true, or false after undoing the row.
+async function recordStart(s) {
+    try {
+        await pool.query(
+            `INSERT INTO remote_sessions (id, user_id, user_email, user_name, client_ip, protocol, target_addr, target_port, resource_id, resource_name, network_id, started_at, target_name, gateway)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+            [s.id, s.userId, s.userEmail, s.userName, s.clientIp, s.protocol, s.address, s.port, s.resourceId, s.resourceName, s.networkId, s.startedAt, s.targetName, s.gateway]);
+        await addEvent(sessionEvent(s, 'start'));
+        return true;
+    } catch (e) {
+        _sessions.delete(s.id);
+        await pool.query('DELETE FROM remote_sessions WHERE id = $1', [s.id]).catch(() => { });
+        console.error('[remote-access] could not record session start:', e.message);
+        return false;
+    }
 }
 
 // Lease renewal through an ordinary authenticated request (the SSO middleware answers 401 for an
@@ -1265,7 +1291,14 @@ function closeSession(s, reason, code = 0) {
     try { if (s.guacd) s.guacd.destroy(); } catch { /* already gone */ }
     try { if (s.ws && s.ws.readyState <= 1) s.ws.close(1000, String(code)); } catch { /* already gone */ }
     const endedAt = new Date();
-    recordEnd(s, endedAt, reason).catch(e => console.error('[remote-access] could not record session end:', e.message));
+    // After the start record (the session may close while its start is still being written), and
+    // none when the start failed. Kept until written, so a shutdown can wait for every end record.
+    const p = Promise.resolve(s.started ?? true)
+        .then((started) => (started ? recordEnd(s, endedAt, reason) : undefined))
+        .catch(e => console.error('[remote-access] could not record session end:', e.message));
+    _pendingEnds.add(p);
+    _endingIds.add(s.id);
+    p.finally(() => { _pendingEnds.delete(p); _endingIds.delete(s.id); });
 }
 
 // The end record goes to `events` first. Only then is the live-state row deleted: if the record
@@ -1280,6 +1313,17 @@ async function recordEnd(s, endedAt, reason) {
 function closeAllSessions(reason) {
     _tokens.clear();
     for (const s of [..._sessions.values()]) failSession(s, reason, 0x0303);
+}
+
+// Process shutdown (SIGTERM): no new session from now on, also in requests already past their
+// first checks; every open one is closed with a reason; resolves once every end record that is
+// still being written, including earlier ones, is done. The caller bounds the wait.
+async function shutdownSessions(reason) {
+    _shuttingDown = true;
+    // Every session closes now. The end record of one whose start is still being written follows
+    // that start record (closeSession), so a hanging start holds back only its own end record.
+    closeAllSessions(reason);
+    while (_pendingEnds.size) await Promise.allSettled([..._pendingEnds]);
 }
 
 // Consume a one-time token. Single-threaded: get + delete cannot interleave with another upgrade.
@@ -1344,11 +1388,16 @@ function sweepSessions() {
 }
 
 // Sessions left open by a crash or restart: closed with an honest reason.
-async function closeOrphanSessions() {
+// The rows of this process's own sessions are not orphans: this instance may already serve sessions
+// when it becomes the leader (lib/leader.js). strict (the leader's recovery): throws when a row
+// could not be closed, instead of leaving it for the next start-up.
+async function closeOrphanSessions({ strict = false } = {}) {
     const r = await pool.query('SELECT * FROM remote_sessions');
     const reason = 'The server restarted. The real end time is unknown.';
     let closed = 0;
+    let failed = 0;
     for (const row of r.rows) {
+        if (_sessions.has(row.id) || _endingIds.has(row.id)) continue;
         const s = {
             id: row.id, protocol: row.protocol, address: row.target_addr, port: row.target_port,
             userId: row.user_id, userEmail: row.user_email, userName: row.user_name, clientIp: row.client_ip,
@@ -1361,9 +1410,11 @@ async function closeOrphanSessions() {
             await pool.query('DELETE FROM remote_sessions WHERE id = $1', [row.id]);
             closed++;
         } catch (e) {
+            failed++;
             console.error('[remote-access] orphan end record (kept for the next start-up):', e.message);
         }
     }
+    if (strict && failed) throw new Error(`${failed} remote session(s) left by a restart could not be closed`);
     return closed;
 }
 
@@ -1626,7 +1677,7 @@ module.exports = {
     withTargetLock, noteUncertainTargetWrite, beginStartupSettling, enforceManagedMembership,
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
-    recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
+    recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
     _internal: {
         GuacParser, CLIENT_MAX_ELEMENTS, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, syncTargetGroup, applyGatewayObjects,

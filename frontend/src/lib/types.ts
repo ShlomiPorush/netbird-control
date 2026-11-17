@@ -334,6 +334,8 @@ export interface SystemHealth {
   uptimeSec: number;
   authEnabled: boolean;
   schedulers: Record<string, SchedulerHealth>;
+  // Only the leader instance runs the background jobs (backend/lib/leader.js).
+  leader?: { role: 'leader' | 'standby'; ready: boolean; since: string | null };
   integrations: {
     netbird: { configured: boolean; lastOkAt: string | null; readonly: boolean };
     telegram: { enabled: boolean; hasToken: boolean; queue: TelegramQueueStats };

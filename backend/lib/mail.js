@@ -23,7 +23,7 @@ const _smtpEnv = {
 const _smtpEnvManaged = !!_smtpEnv.host;
 const _smtp = { enabled: false, host: '', port: 587, secure: false, user: '', pass: '', from: '' };
 
-async function loadSmtp() {
+async function loadSmtp({ strict = false } = {}) {
     try {
         const v = await getSetting('smtp_config');
         if (v) {
@@ -38,6 +38,7 @@ async function loadSmtp() {
         const p = await getSetting('smtp_pass');
         if (p) _smtp.pass = p;
     } catch (e) {
+        if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[SMTP] config load error:', e.message);
     }
 }

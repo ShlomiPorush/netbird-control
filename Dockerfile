@@ -53,4 +53,8 @@ EXPOSE 3000
 # Liveness probe: healthcheck.js hits GET /api/health (see backend/healthcheck.js).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD ["node", "healthcheck.js"]
+# This version can run beside another instance of itself for a moment (one leader runs the jobs,
+# SIGTERM shuts down cleanly, /api/health drains): scripts/update.sh updates only services whose
+# image declares it, and rolls one without downtime only when its running container declares it too.
+LABEL netbird-control.side-by-side="1"
 CMD ["node", "server.js"]
