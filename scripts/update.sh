@@ -28,9 +28,10 @@
 # and the script says why before it acts.
 #
 # .env changes right before the first service is updated, and only its tag line: TAG or VERSION,
-# whichever the image uses. When no container of that service ends up on the new image, the line
-# goes back to what it was. Needs flock (util-linux). The output never shows the resolved Compose
-# configuration, which holds secrets.
+# whichever the image uses, or the one TAG_VARIABLE names (TAG_VARIABLE=MY_TAG ./update.sh 1.4.0).
+# When no container of that service ends up on the new image, the line goes back to what it was.
+# Needs flock (util-linux). The output never shows the resolved Compose configuration, which holds
+# secrets.
 
 set -euo pipefail
 
@@ -262,22 +263,41 @@ if [[ -n $version ]]; then
     err "A release looks like 1.4.0, not '$version'."
     exit 1
   fi
-  # The .env variable that sets the image tag, TAG or VERSION: the one that changes the images
-  # Compose resolves when it is given a test value.
+  # The .env variable that sets the image tag: the one TAG_VARIABLE names, or else TAG or VERSION.
+  # It counts only when it changes the images Compose resolves when it is given a test value.
+  sets_a_tag() {
+    local images
+    images="$(env "$1=0.0.0-update-probe" docker compose config --images 2>/dev/null)" || return 1
+    grep -q ':0\.0\.0-update-probe$' <<<"$images"
+  }
   tag_var=""
-  for name in TAG VERSION; do
-    images="$(env "$name=0.0.0-update-probe" docker compose config --images 2>/dev/null)" || continue
-    if grep -q ':0\.0\.0-update-probe$' <<<"$images"; then
+  if [[ -n ${TAG_VARIABLE:-} ]]; then
+    if [[ ! $TAG_VARIABLE =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      err "TAG_VARIABLE must be the name of a variable in .env, such as VERSION, not '$TAG_VARIABLE'."
+      exit 1
+    fi
+    if [[ -n ${!TAG_VARIABLE+set} ]]; then
+      err "$TAG_VARIABLE is set in this shell's environment. Unset it (unset $TAG_VARIABLE) and run this again: .env decides it."
+      exit 1
+    fi
+    if ! sets_a_tag "$TAG_VARIABLE"; then
+      err "No image tag in this Compose project comes from $TAG_VARIABLE. Write the image as ghcr.io/shlomiporush/nbcontrol:\${$TAG_VARIABLE}, or set TAG_VARIABLE to the variable it uses."
+      exit 1
+    fi
+    tag_var="$TAG_VARIABLE"
+  else
+    for name in TAG VERSION; do
+      sets_a_tag "$name" || continue
       if [[ -n $tag_var ]]; then
         err "Both TAG and VERSION set an image tag in this Compose project. Use one of them."
         exit 1
       fi
       tag_var="$name"
+    done
+    if [[ -z $tag_var ]]; then
+      err "No image tag in this Compose project comes from TAG or VERSION in .env, so this script cannot choose the release. Name the variable your Compose file uses, for example: TAG_VARIABLE=MY_TAG ./update.sh $version. Or run ./update.sh without a release."
+      exit 1
     fi
-  done
-  if [[ -z $tag_var ]]; then
-    err "No image tag in this Compose project comes from TAG or VERSION in .env, so this script cannot choose the release. Write the image as ghcr.io/shlomiporush/nbcontrol:\${TAG} (or \${VERSION}), or run ./update.sh without a release."
-    exit 1
   fi
   if ! grep -q "^$tag_var=" .env; then
     err ".env has no $tag_var line. Add one with the release that runs now, for example $tag_var=1.3.1, and run this again."

@@ -190,7 +190,8 @@ healthy, it is removed and the old one keeps running. Copy the script next to yo
 ```
 
 The image tag can come from `TAG` (as in this repository's `docker-compose.yml`) or from `VERSION`
-in `.env`. The script finds which one your Compose file uses.
+in `.env`. The script finds which one your Compose file uses. For a variable with another name,
+name it: `TAG_VARIABLE=MY_TAG ./update.sh 1.4.0`.
 
 The script finds what to update by itself. It reads the services of the Compose project, including
 `COMPOSE_FILE` and `COMPOSE_PROFILES` from `.env`, and updates only services whose image is a
