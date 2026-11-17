@@ -191,7 +191,7 @@ healthy, it is removed and the old one keeps running. Copy the script next to yo
 
 The script finds what to update by itself. It reads the services of the Compose project, including
 `COMPOSE_FILE` and `COMPOSE_PROFILES` from `.env`, and updates only services whose image is a
-NetBird Control image (the image label `netbird-control.side-by-side`). It lists every other
+NetBird Control image (the image label `netbird-control.zero-downtime-update`). It lists every other
 service, such as a database or gateways, and leaves it alone. To leave out a service, give it the
 label `netbird-control.rollout: "false"`. To update only some services, name them:
 `SERVICES="app" ./update.sh`. `ROLLOUT_TIMEOUT` (default 180 seconds) is how long a new container
