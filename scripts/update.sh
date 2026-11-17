@@ -2,16 +2,29 @@
 #
 # update.sh - update a NetBird Control deployment, without downtime where the deployment allows it.
 #
-#   ./update.sh 1.4.0    pull 1.4.0, update the app and set TAG in .env
-#   ./update.sh          pull and update the TAG already set in .env
-#
+#   ./update.sh 1.4.0    pull 1.4.0, update the app and set its tag in .env
+#   ./update.sh          pull and update the tag already set in .env
+
+# ─── Settings ─────────────────────────────────────────────────────────────────────────────────
+# Change them here, or set one for a single run: TAG_VARIABLE=MY_TAG ./update.sh 1.4.0
+
+# The .env variable that sets the image tag. Empty: TAG or VERSION, whichever the Compose file uses.
+TAG_VARIABLE="${TAG_VARIABLE:-}"
+# The services to update, separated by spaces. Empty: every NetBird Control service of the project.
+SERVICES="${SERVICES:-}"
+# Seconds a new container has to become healthy.
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180}"
+# Seconds between "the new container is healthy" and draining the old one, so the reverse proxy
+# sends requests to the new one first (Traefik applies Docker changes after a short delay).
+SETTLE_SECONDS="${SETTLE_SECONDS:-10}"
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+
 # Copy it beside the deployment's docker-compose.yml and .env and run it from there. It finds the
 # services to update by themselves, not by name or image: every service of the Compose project
 # (COMPOSE_FILE and COMPOSE_PROFILES in .env are honoured) whose image carries the label
-# netbird-control.zero-downtime-update. Other services (a database, gateways, a proxy) are listed and left
-# alone. A service labelled netbird-control.rollout: "false" in the Compose file is left alone too.
-# SERVICES="app" limits the run to the services named. ROLLOUT_TIMEOUT (seconds, default 180) is
-# how long a new container has to become healthy.
+# netbird-control.zero-downtime-update. Other services (a database, gateways, a proxy) are listed
+# and left alone. A service labelled netbird-control.rollout: "false" in the Compose file is left
+# alone too.
 #
 # A service is updated with docker rollout (github.com/wowu/docker-rollout, exactly v0.14): the new
 # container starts beside the old one, which is drained and removed only once the new one is
@@ -27,20 +40,16 @@
 # another instance, the service is recreated instead (docker compose up -d), with a short downtime,
 # and the script says why before it acts.
 #
-# .env changes right before the first service is updated, and only its TAG line; when no
-# container of that service ends up on the new image, the line goes back to what it was. Needs
-# flock (util-linux). The output never shows the resolved Compose configuration, which holds secrets.
+# .env changes right before the first service is updated, and only its tag line (see TAG_VARIABLE
+# above). When no container of that service ends up on the new image, the line goes back to what
+# it was. Needs flock (util-linux). The output never shows the resolved Compose configuration,
+# which holds secrets.
 
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-TIMEOUT="${ROLLOUT_TIMEOUT:-180}"
 ROLLOUT_VERSION="v0.14"
-# Seconds between "the new container is healthy" and draining the old one, so the reverse proxy has
-# added the new one first (Traefik applies Docker changes after a short delay; docker rollout's
-# --wait-after-healthy defaults to 0 in v0.14).
-SETTLE=10
 ZERO_DOWNTIME_LABEL="netbird-control.zero-downtime-update"
 OPT_OUT_LABEL="netbird-control.rollout"
 DRAIN_LABEL="docker-rollout.pre-stop-hook"
@@ -49,8 +58,16 @@ log() { printf '\033[36m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*"; }
 err() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
+for name in ROLLOUT_TIMEOUT SETTLE_SECONDS; do
+  if [[ ! ${!name} =~ ^[0-9]+$ ]]; then
+    err "$name must be a number of seconds, not '${!name}'."
+    exit 1
+  fi
+done
+
 # The resolved Compose configuration as "service<TAB>key<TAB>value" lines, for the few keys this
-# script reads. Arguments go in front of docker compose (env TAG=... to resolve another release).
+# script reads. Arguments go in front of docker compose (env TAG=... or VERSION=... to resolve
+# another release).
 # The OIDC values (one is a secret) stay in this pipe and in variables; never print them.
 service_facts() {
   "$@" docker compose config | awk '
@@ -142,7 +159,7 @@ on_new_image_and_healthy() {
   done
 }
 
-# Sets the TAG line of .env, as it is now, to the given value. The new text goes to a private file
+# Sets the tag line (TAG or VERSION) of .env, as it is now, to the given value. The new text goes to a private file
 # (mktemp, owner only) and then into .env itself, which keeps its owner, mode and symlink target. A
 # write cut short leaves that file, with the full text, for the operator.
 edited=""
@@ -152,7 +169,7 @@ env_value=""
 write_tag() {
   env_value="$1"
   env_tmp="$(mktemp .env.update.XXXXXX)" || return 1
-  sed "s/^TAG=.*/TAG=$1/" .env >"$env_tmp" || return 1
+  sed "s/^$tag_var=.*/$tag_var=$1/" .env >"$env_tmp" || return 1
   edited=1
   env_partial=1
   cat "$env_tmp" >.env || return 1
@@ -163,7 +180,7 @@ write_tag() {
 cleanup() {
   [[ -n $env_tmp ]] || return 0
   if [[ -n $env_partial ]]; then
-    err "Writing .env was cut short. Its full text with TAG=$env_value is in $env_tmp: put it in place with: cat $env_tmp > .env && rm $env_tmp"
+    err "Writing .env was cut short. Its full text with $tag_var=$env_value is in $env_tmp: put it in place with: cat $env_tmp > .env && rm $env_tmp"
   else
     rm -f "$env_tmp"
   fi
@@ -189,7 +206,7 @@ if ! flock -n 9; then
   exit 1
 fi
 # Values exported in this shell would win over .env for Compose, so .env would not say what runs.
-for name in TAG COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES; do
+for name in TAG VERSION COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES; do
   if [[ -n ${!name+set} ]]; then
     err "$name is set in this shell's environment. Unset it (unset $name) and run this again: .env decides it."
     exit 1
@@ -201,7 +218,8 @@ rolling=""
 previous=""
 first=""
 expected=""
-# Puts the TAG line back when .env was changed and no container of the first service runs the
+tag_var="TAG"
+# Puts the tag line back when .env was changed and no container of the first service runs the
 # new image.
 restore() {
   # A signal lands only after cat returns, so a write may be complete though not yet marked so.
@@ -210,9 +228,9 @@ restore() {
   fi
   [[ -n $edited && ${#rolled[@]} -eq 0 && -z $env_partial ]] || return 0
   if write_tag "$previous"; then
-    warn "TAG is back to $previous in .env."
+    warn "$tag_var is back to $previous in .env."
   else
-    err "Could not set TAG back to $previous in .env. Set it there by hand."
+    err "Could not set $tag_var back to $previous in .env. Set it there by hand."
   fi
 }
 stop() {
@@ -237,7 +255,7 @@ interrupted() {
     if ! record "$rolling"; then
       # Unknown what runs: leave .env as it is rather than guess.
       rolled+=("$rolling")
-      err "Interrupted while updating $rolling, and Docker did not say what runs now. .env has TAG=$expected; check with: docker compose ps $rolling"
+      err "Interrupted while updating $rolling, and Docker did not say what runs now. .env has $tag_var=$expected; check with: docker compose ps $rolling"
     else
       err "Interrupted while updating $rolling. Check its containers with: docker compose ps -a $rolling"
     fi
@@ -259,17 +277,53 @@ if [[ -n $version ]]; then
     err "A release looks like 1.4.0, not '$version'."
     exit 1
   fi
-  if ! grep -q "^TAG=" .env; then
-    err ".env has no TAG line. Add one (TAG=latest is the default) and run this again."
+  # The .env variable that sets the image tag: the one TAG_VARIABLE names, or else TAG or VERSION.
+  # It counts only when it changes the images Compose resolves when it is given a test value.
+  sets_a_tag() {
+    local images
+    images="$(env "$1=0.0.0-update-probe" docker compose config --images 2>/dev/null)" || return 1
+    grep -q ':0\.0\.0-update-probe$' <<<"$images"
+  }
+  tag_var=""
+  if [[ -n $TAG_VARIABLE ]]; then
+    if [[ ! $TAG_VARIABLE =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      err "TAG_VARIABLE must be the name of a variable in .env, such as VERSION, not '$TAG_VARIABLE'."
+      exit 1
+    fi
+    if [[ -n ${!TAG_VARIABLE+set} ]]; then
+      err "$TAG_VARIABLE is set in this shell's environment. Unset it (unset $TAG_VARIABLE) and run this again: .env decides it."
+      exit 1
+    fi
+    if ! sets_a_tag "$TAG_VARIABLE"; then
+      err "No image tag in this Compose project comes from $TAG_VARIABLE. Write the image as ghcr.io/shlomiporush/nbcontrol:\${$TAG_VARIABLE}, or set TAG_VARIABLE at the top of update.sh to the variable it uses."
+      exit 1
+    fi
+    tag_var="$TAG_VARIABLE"
+  else
+    for name in TAG VERSION; do
+      sets_a_tag "$name" || continue
+      if [[ -n $tag_var ]]; then
+        err "Both TAG and VERSION set an image tag in this Compose project. Use one of them."
+        exit 1
+      fi
+      tag_var="$name"
+    done
+    if [[ -z $tag_var ]]; then
+      err "No image tag in this Compose project comes from TAG or VERSION in .env, so this script cannot choose the release. Set TAG_VARIABLE at the top of update.sh to the variable your Compose file uses, or run ./update.sh without a release."
+      exit 1
+    fi
+  fi
+  if ! grep -q "^$tag_var=" .env; then
+    err ".env has no $tag_var line. Add one with the release that runs now, for example $tag_var=1.3.1, and run this again."
     exit 1
   fi
   # For the checks and the pull only; .env changes right before the first update.
-  new_env=(env "TAG=$version")
+  new_env=(env "$tag_var=$version")
 fi
 
 facts="$(service_facts "${new_env[@]}")" || stop "docker compose config failed: see above."
 mapfile -t all_services < <(awk -F '\t' '!seen[$1]++ { print $1 }' <<<"$facts")
-if [[ -n ${SERVICES+set} ]]; then
+if [[ -n $SERVICES ]]; then
   read -r -a wanted <<<"$SERVICES"
   for service in "${wanted[@]}"; do
     [[ " ${all_services[*]} " == *" $service "* ]] || stop "$service is not a service of this Compose project."
@@ -335,8 +389,8 @@ expected="${image_of[$first]##*:}"
 
 # The release .env holds now, to put back if the first service fails.
 if [[ -n $version ]]; then
-  previous="$(sed -n 's/^TAG=//p' .env | tail -n 1)"
-  [[ $previous =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || stop "Could not read the current TAG from .env."
+  previous="$(sed -n "s/^$tag_var=//p" .env | tail -n 1)"
+  [[ $previous =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || stop "Could not read the current $tag_var from .env."
 fi
 
 # How each service is updated, and why when not without downtime. Read now for the checks and again
@@ -434,13 +488,13 @@ for service in "${services[@]}"; do
   plan_service "$service"
   # .env first, so that a service reading it (env_file) starts with it.
   if [[ -n $version && -z $edited ]]; then
-    write_tag "$version" || stop "Could not write TAG=$version into .env."
-    log "TAG=$version in .env."
+    write_tag "$version" || stop "Could not write $tag_var=$version into .env."
+    log "$tag_var=$version in .env."
   fi
   case "${mode_of[$service]}" in
     rollout)
       log "Rolling $service"
-      action=(docker rollout --timeout "$TIMEOUT" --wait-after-healthy "$SETTLE" "$service")
+      action=(docker rollout --timeout "$ROLLOUT_TIMEOUT" --wait-after-healthy "$SETTLE_SECONDS" "$service")
       ;;
     *)
       if [[ ${mode_of[$service]} == "start" ]]; then
@@ -449,7 +503,7 @@ for service in "${services[@]}"; do
         warn "Recreating $service (short downtime): ${why_of[$service]}"
       fi
       # --no-deps: the services it depends on stay as they are.
-      action=(docker compose up -d --no-deps --wait --wait-timeout "$TIMEOUT" "$service")
+      action=(docker compose up -d --no-deps --wait --wait-timeout "$ROLLOUT_TIMEOUT" "$service")
       ;;
   esac
   rolling="$service"
@@ -460,7 +514,7 @@ for service in "${services[@]}"; do
   if ! record "$service"; then
     # Unknown what runs: leave .env as it is rather than guess.
     rolled+=("$service")
-    stop "Docker did not say what $service runs now. .env has TAG=$expected; check with: docker compose ps $service"
+    stop "Docker did not say what $service runs now. .env has $tag_var=$expected; check with: docker compose ps $service"
   fi
   if [[ -n $ok ]] && on_new_image_and_healthy "$service"; then
     log "$service is on ${image_of[$service]} and healthy."
@@ -470,7 +524,7 @@ for service in "${services[@]}"; do
     # docker rollout v0.14 removes the old container when the new one vanished before it looked
     # (github.com/wowu/docker-rollout, NEW_CONTAINER_IDS empty). Bring the service back at once.
     err "No container of $service is running after the update. Starting it now."
-    docker compose up -d --no-deps --wait --wait-timeout "$TIMEOUT" "$service" || true
+    docker compose up -d --no-deps --wait --wait-timeout "$ROLLOUT_TIMEOUT" "$service" || true
     record "$service" || true
     stop "$service had no running container after the update and was started again. Check it with: docker compose ps $service; docker compose logs $service"
   fi
