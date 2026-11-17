@@ -17,7 +17,8 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   every other service alone. The deployment needs a reverse proxy, a drain label and a few other
   settings, listed in the README under "Upgrading Without Downtime". When one is missing, the
   script recreates the app with a short downtime and says why. The first update to this version
-  always recreates the app.
+  always recreates the app. The image tag can come from `TAG` or `VERSION` in `.env`, and the
+  script's settings are at its top.
 - **System Health shows whether this instance runs the background jobs** (leader or standby).
 
 ### Changed
