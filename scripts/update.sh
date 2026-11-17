@@ -305,16 +305,31 @@ log "Pulling: ${pullable[*]}"
 "${new_env[@]}" docker compose pull "${pullable[@]}" || stop "Pulling failed: nothing was changed."
 
 services=()
+too_old=()
 for service in "${pullable[@]}"; do
   label="$(docker image inspect -f "{{index .Config.Labels \"$SIDE_BY_SIDE_LABEL\"}}" "${image_of[$service]}" 2>/dev/null)" || label=""
   if [[ $label != "1" ]]; then
-    log "Skipped: $service (${image_of[$service]} is not a NetBird Control image that can be updated this way)"
+    # A NetBird Control release from before this script (1.3.1 and older), or another image.
+    img_source="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.source"}}' "${image_of[$service]}" 2>/dev/null)" || img_source=""
+    if [[ ${img_source,,} == */netbird-control ]]; then
+      warn "$service: not updated. ${image_of[$service]} is a NetBird Control release from before update.sh existed, so this script cannot update to it."
+      too_old+=("$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "${image_of[$service]}" 2>/dev/null || true)")
+    else
+      log "Skipped: $service (not a NetBird Control image)"
+    fi
     continue
   fi
   new_id[$service]="$(docker image inspect -f '{{.Id}}' "${image_of[$service]}")" || stop "Could not read the image ID of ${image_of[$service]}."
   services+=("$service")
 done
-((${#services[@]} > 0)) || stop "No service to update: no image in this project carries the label $SIDE_BY_SIDE_LABEL."
+if ((${#services[@]} == 0)); then
+  if ((${#too_old[@]} > 0)); then
+    warn "Nothing was updated. Run it with a newer release: ./update.sh X.Y.Z (newer than ${too_old[0]:-the one in .env})."
+  else
+    warn "Nothing was updated: no service in this project runs a NetBird Control image."
+  fi
+  exit 1
+fi
 first="${services[0]}"
 expected="${image_of[$first]##*:}"
 
