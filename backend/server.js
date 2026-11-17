@@ -317,10 +317,12 @@ app.post('/api/webhook/t/:acct', webhookReceiver);
 // the service's pre-stop hook in the old container (label docker-rollout.pre-stop-hook, see the
 // README): it creates DRAIN_FILE, this answers 503, and the reverse proxy's own health check stops
 // sending requests here before the container is stopped. start() removes a marker left by an
-// interrupted update.
+// interrupted update and then looks for the marker 4 times a second; a request never touches the
+// file system (the probe is not rate limited).
 const DRAIN_FILE = '/tmp/drain';
+let _draining = false;
 app.get('/api/health', (req, res) => {
-    if (fs.existsSync(DRAIN_FILE)) return res.status(503).json({ status: 'draining', timestamp: new Date().toISOString() });
+    if (_draining) return res.status(503).json({ status: 'draining', timestamp: new Date().toISOString() });
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -5205,6 +5207,7 @@ async function start() {
 
         // A drain marker left by an interrupted update would keep this instance out of rotation.
         fs.rmSync(DRAIN_FILE, { force: true });
+        setInterval(() => { _draining = fs.existsSync(DRAIN_FILE); }, 250).unref();
         const server = app.listen(PORT, '0.0.0.0', async () => {
             console.log(`NetBird Logs server running on port ${PORT}`);
             // The log indexes are built by the leader (leaderStartup), after the port is open.
