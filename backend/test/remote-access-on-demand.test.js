@@ -47,6 +47,7 @@ const resourceAt = (p) => {
 };
 const writes = []; // [method, path, body] of every NetBird write
 let writeAnswer = null;
+let writeGate = null; // a promise that holds back NetBird's handling of a write
 let readAnswer = null; // a test's answer to a resource read, instead of the resource
 let onResourceRead = null; // runs when a session start reads its resource, before the answer
 nb.netbirdReq = async (method, p, body) => {
@@ -57,9 +58,10 @@ nb.netbirdReq = async (method, p, body) => {
         return r ? { status: 200, body: clone(r) } : { status: 404, body: null };
     }
     writes.push([method, p, clone(body)]);
+    if (writeGate) await writeGate; // NetBird applies and answers the write only now
     if (writeAnswer) return writeAnswer;
     const r = resourceAt(p);
-    if (method === 'PUT' && r) r.groups = body.groups.map(id => ({ id }));
+    if (method === 'PUT' && r) { r.groups = body.groups.map(id => ({ id })); r.enabled = body.enabled !== false; }
     if (method === 'DELETE' && r) {
         live['/api/networks/resources'] = live['/api/networks/resources'].filter(x => x !== r);
         for (const n of live['/api/networks']) n.resources = n.resources.filter(id => id !== r.id);
@@ -124,7 +126,7 @@ const sleeps = [];
 let onSleep = null; // runs during the wait before the session is approved
 async function reset(cfg = {}) {
     world();
-    writes.length = 0; sleeps.length = 0; onSleep = null; onEvent = null; writeAnswer = null; readAnswer = null; onResourceRead = null; onGet = null; audits.length = 0;
+    writes.length = 0; sleeps.length = 0; onSleep = null; onEvent = null; writeAnswer = null; writeGate = null; readAnswer = null; onResourceRead = null; onGet = null; audits.length = 0;
     holds.clear();
     ra.closeAllSessions('reset');
     settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], ...cfg });
@@ -363,6 +365,22 @@ test('no token when a resource write or delete was sent after the last evaluatio
         assert.ok(writes.some(w => w[1] === '/api/networks/n1/resources/r2'), `${label}: the write was sent`);
         assert.equal(active(), 0, label);
     }
+});
+
+test('no token when a resource write was already waiting for its answer as the last evaluation began', async () => {
+    await reset();
+    let disabling = null;
+    // During the wait for the route, an admin on this instance disables the server. NetBird answers
+    // (and applies) that write only 30 ms later; the start record then waits for it to land.
+    onSleep = async () => {
+        writeGate = new Promise(r => setTimeout(r, 30));
+        disabling = db.setResourceEnabled('n1', 'r1', false);
+        await new Promise(r => setImmediate(r)); // the write is sent
+    };
+    onEvent = async (e) => { if (e.Message === 'TYPE_START') await disabling; };
+    await assert.rejects(rdp(), (e) => ['TARGETS_SETTLING', 'RESOURCE_DISABLED'].includes(e.code));
+    assert.equal(resource('r1').enabled, false, 'the disable did land');
+    assert.equal(active(), 0);
 });
 
 test('no token when a target sync ran after the last evaluation', async () => {

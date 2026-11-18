@@ -1169,11 +1169,15 @@ async function openTargetForSession(s, port) {
     if (until && wait > 0) await _sleep(wait);
     if (s.closed) throw closedError();
 
-    let snap;
-    s.targetsGen = _targetsGen;
-    // Always a new read (never the one the checks above used, even within the same millisecond).
-    _snapshot = null;
-    try { snap = await freshSnapshot(0); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+    // Under the target lock: a resource write of this instance holds it until NetBird answered, so
+    // this read comes after any write already sent, and a write sent after it raises the generation
+    // (no token then). The read's own clean-up of managed members runs detached and only queues.
+    const snap = await withTargetLock(async () => {
+        s.targetsGen = _targetsGen;
+        // Always a new read (never the one the checks above used, even within the same millisecond).
+        _snapshot = null;
+        try { return await freshSnapshot(0); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+    });
     if (s.closed) throw closedError();
     const cfg = authCfg(s.gateway, { real: true });
     const v = s.gateway === 'names'
