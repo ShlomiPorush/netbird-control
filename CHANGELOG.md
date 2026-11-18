@@ -46,6 +46,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **Settings → Remote Access lists the servers open to the gateways**, as in use or with the time
   they close.
 
+---
+
+## [1.4.1] - 2026-11-18
+
 ### Fixed
 - **Opening a large network to Remote Access no longer takes a NetBird request per resource.** The
   target sync read and wrote every resource separately, so a network with hundreds of resources
