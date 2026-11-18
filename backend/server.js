@@ -3505,7 +3505,15 @@ app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (e) {
         // The settings are saved even when NetBird could not be updated; the error says what failed.
-        res.status(502).json({ error: e.message || 'Could not update NetBird', config: getRemoteAccessConfig() });
+        // A change that was saved is audited all the same, with the error.
+        const after = getRemoteAccessConfig();
+        if (JSON.stringify(after) !== JSON.stringify(before)) {
+            audit(await getViewer(req), 'settings.remote_access', '', {
+                enabled: after.enabled, networks: after.networks.length, allowAll: after.allowAll,
+                wasEnabled: before.enabled, netbirdError: String(e.message || e).slice(0, 300),
+            });
+        }
+        res.status(502).json({ error: e.message || 'Could not update NetBird', config: after });
     }
 });
 app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
