@@ -286,11 +286,43 @@ test('a hold that a session raised during the sync is not deleted', async () => 
     hold('r1', 'n1', '10.0.0.1/32', Date.now() - 1000);
     // Another instance starts a session to it after this sync read the holds.
     const later = Date.now() + HOUR;
-    getHook = async (p) => { if (p === '/api/groups/g-ngwt') hold('r1', 'n1', '10.0.0.1/32', later); };
+    getHook = async (p) => { if (p === '/api/groups/g-ngwt') holds.set('r1', { networkId: 'n1', address: '10.0.0.1/32', expiresAt: later, updatedAt: Date.now() }); };
     try {
         await ra._internal.syncTargetGroup();
         assert.equal(new Date(holds.rows.get('r1').expires_at).getTime(), later);
     } finally { getHook = null; live = null; }
+});
+
+test('a member that another instance added after the sync started keeps its target', async () => {
+    syncSetup({
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.1/32' }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets', [{ id: 'r1', type: 'host' }]),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    });
+    // The other instance wrote r1's hold, then added r1, after this sync first read the holds: the
+    // group read already shows r1.
+    getHook = async (p) => { if (p === '/api/groups/g-gwt' && !holds.rows.has('r1')) holds.set('r1', { networkId: 'n1', address: '10.0.0.1/32', expiresAt: Date.now() + HOUR, updatedAt: Date.now() }); };
+    try {
+        await ra._internal.syncTargetGroup();
+        assert.deepEqual(groupWrites(), [], 'not taken out');
+        assert.ok(holds.rows.has('r1'));
+    } finally { getHook = null; live = null; }
+});
+
+test('a hold read that fails while a group is compared writes nothing for that group', async () => {
+    syncSetup({
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.1/32' }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets', [{ id: 'r1', type: 'host' }]),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    });
+    let reads = 0;
+    holds.failWith((sql) => (/^\s*SELECT/i.test(sql) && ++reads === 2 ? new Error('db down') : null)); // the read after the group read
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), /db down/);
+        assert.deepEqual(groupWrites(), []);
+    } finally { live = null; }
 });
 
 test('a new hold without membership survives the sync for 10 minutes; an expired one goes at once', async () => {

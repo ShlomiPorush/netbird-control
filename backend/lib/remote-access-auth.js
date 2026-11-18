@@ -275,23 +275,24 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
     return evaluatePolicies(view, cfg, src, viewResource(view, best.res), port, now, { resource, network });
 }
 
-// The snapshot a resource is judged on, and the gateway's reach in it:
-//   - cfg.simulate (the checks before a session, and a launch link): always a copy of the snapshot
-//     in which this resource carries its target group (only this one is changed), so the standing
-//     policy, rival routes and drop rules to the target group count as they will once it is added,
-//     also when another policy already gives the gateway a route to it;
-//   - otherwise only real membership counts: a resource out of reach is refused, on a read-only
-//     instance because it can't add it, else because the route isn't there (the evaluation right
-//     after the add, and the re-check).
+// The snapshot a resource's policies are judged on, and the gateway's reach:
+//   - the policies, always on a copy of the snapshot in which this resource carries its target
+//     group (only this one is changed), so a drop rule to the target group counts whether the
+//     resource is a member yet or not, and keeps counting if it lost its membership meanwhile;
+//   - the reach, with cfg.simulate (the checks before a session, and a launch link), on that copy
+//     too: the standing policy and rival routes count as they will once it is added;
+//   - otherwise the reach counts real membership only: a resource out of reach is refused, on a
+//     read-only instance because it can't add it, else because the route isn't there (the
+//     evaluation right before the token, and the re-check).
 function targetView(snap, cfg, res, reach, inReach) {
+    const view = cfg && cfg.targetGroupId ? withTargetMember(snap, res.id, cfg.targetGroupId) : snap;
     if (!cfg || !cfg.simulate || cfg.readonly) {
-        if (inReach(reach)) return { snap, reach };
+        if (inReach(reach)) return { snap: view, reach };
         return { code: cfg && cfg.readonly ? 'TARGET_NOT_OPEN_READONLY' : 'GATEWAY_NOT_SYNCED' };
     }
     if (!cfg.targetGroupId) return { code: 'GATEWAY_POLICY_MISSING' };
-    const view = withTargetMember(snap, res.id, cfg.targetGroupId);
+    // The peers and policies are the same as in the snapshot, whose reach had no error.
     const r = gatewayReach(view, cfg);
-    if (r.error) return { code: r.error };
     if (!inReach(r)) return { code: 'GATEWAY_POLICY_MISSING' };
     return { snap: view, reach: r };
 }

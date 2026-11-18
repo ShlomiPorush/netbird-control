@@ -19,13 +19,24 @@ let live = {};
 const reads = [];
 nb.netbirdGet = async (p) => { reads.push(p); return JSON.parse(JSON.stringify(live[p] ?? null)); };
 const writes = [];
-nb.netbirdReq = async (method, p, body) => { if (method !== 'GET') writes.push([method, p, body]); return { status: 503, raw: 'read-only' }; };
+let onResourceRead = null; // runs when a session start reads its resource
+nb.netbirdReq = async (method, p, body) => {
+    if (method === 'GET') {
+        const m = /^\/api\/networks\/[^/]+\/resources\/([^/]+)$/.exec(p);
+        if (onResourceRead) onResourceRead();
+        const r = m && live['/api/networks/resources'].find(x => x.id === m[1]);
+        return r ? { status: 200, body: JSON.parse(JSON.stringify(r)) } : { status: 404, body: null };
+    }
+    writes.push([method, p, body]);
+    return { status: 503, raw: 'read-only' };
+};
 const events = require('../lib/events');
 events.addEvent = async () => { };
 
 const ra = require('../lib/remote-access');
 
 const HOUR = 3_600_000;
+const sleeps = [];
 const viewer = { user_id: 'u1', email: 'alice@example.test' };
 function world() {
     live = {
@@ -47,8 +58,9 @@ function world() {
 }
 async function reset() {
     world();
-    writes.length = 0;
+    writes.length = 0; sleeps.length = 0; onResourceRead = null;
     holds.clear();
+    ra._internal.setSleepForTest(async (ms) => { sleeps.push(ms); });
     ra.closeAllSessions('reset');
     settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], holdHours: 3 });
     settings.remote_access_nb = JSON.stringify({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw' });
@@ -57,7 +69,7 @@ async function reset() {
     ra._internal.invalidateSnapshot();
 }
 const open = (address) => ra.createSession(viewer, { protocol: 'rdp', address, port: 3389 }, '203.0.113.9');
-test.after(() => ra.closeAllSessions('test over'));
+test.after(() => { ra.closeAllSessions('test over'); ra._internal.setSleepForTest(null); });
 
 test('a read-only instance serves an open server and refuses a cold one, writing nothing', async () => {
     await reset();
@@ -66,7 +78,31 @@ test('a read-only instance serves an open server and refuses a cold one, writing
     await assert.rejects(open('10.0.0.6'), (e) => e.code === 'TARGET_NOT_OPEN_READONLY');
     assert.ok((await open('10.0.0.5')).token);
     assert.deepEqual(writes, []);
-    assert.equal(holds.rows.size, 0, 'no hold either');
+    assert.deepEqual([...holds.rows.keys()], ['r-open'], 'the open server is held like on any instance (Postgres only)');
+});
+
+test('a read-only session start reads the resource again and approves it again before the token', async () => {
+    await reset();
+    // Taken out of its target group after the checks: this instance can't put it back.
+    onResourceRead = () => { live['/api/networks/resources'][0].groups = [{ id: 'g-srv' }]; };
+    await assert.rejects(open('10.0.0.5'), (e) => e.code === 'TARGET_NOT_OPEN_READONLY');
+    await reset();
+    onResourceRead = () => { live['/api/networks/resources'][0].address = '10.0.0.0/24'; };
+    await assert.rejects(open('10.0.0.5'), (e) => e.code === 'TARGET_CHANGED');
+    // The standing policy changes after the checks: the approval before the token reads NetBird again.
+    await reset();
+    onResourceRead = () => { live['/api/policies'][0].rules[0].ports = ['22']; };
+    await assert.rejects(open('10.0.0.5'), (e) => e.code === 'GATEWAY_POLICY_PORT');
+    assert.equal(ra.getRemoteAccessStatusLite().activeSessions, 0);
+    assert.deepEqual(writes, []);
+});
+
+test('a read-only session start waits for a route that another instance just added', async () => {
+    await reset();
+    holds.set('r-open', { networkId: 'n1', address: '10.0.0.5/32', addedAt: Date.now() - 500, expiresAt: Date.now() + HOUR });
+    assert.ok((await open('10.0.0.5')).token);
+    assert.equal(sleeps.length, 1);
+    assert.ok(sleeps[0] > 1900 && sleeps[0] <= 2000, String(sleeps[0]));
 });
 
 test('a read-only instance checks the standing policy before a session', async () => {

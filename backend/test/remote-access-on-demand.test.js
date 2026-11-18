@@ -31,7 +31,9 @@ const groupView = (gid) => ({
     id: gid, name: TARGET_GROUPS[gid], peers: [],
     resources: live['/api/networks/resources'].filter(r => (r.groups || []).some(g => g.id === gid)).map(r => ({ id: r.id, type: r.type })),
 });
+let onGet = null; // runs before each NetBird read
 nb.netbirdGet = async (p) => {
+    if (onGet) onGet(p);
     const m = /^\/api\/groups\/([^/]+)$/.exec(p);
     if (m && TARGET_GROUPS[m[1]] && live.groupsReadable !== false) return clone(groupView(m[1]));
     return clone(live[p]);
@@ -45,8 +47,10 @@ const resourceAt = (p) => {
 const writes = []; // [method, path, body] of every NetBird write
 let writeAnswer = null;
 let readAnswer = null; // a test's answer to a resource read, instead of the resource
+let onResourceRead = null; // runs when a session start reads its resource, before the answer
 nb.netbirdReq = async (method, p, body) => {
     if (method === 'GET') {
+        if (onResourceRead) onResourceRead();
         if (readAnswer) return readAnswer;
         const r = resourceAt(p);
         return r ? { status: 200, body: clone(r) } : { status: 404, body: null };
@@ -71,6 +75,8 @@ events.addEvent = async (e) => { if (onEvent) await onEvent(e); };
 
 const auth = require('../lib/remote-access-auth');
 const ra = require('../lib/remote-access');
+const audits = [];
+ra.setRemoteAccessDeps({ recordAudit: (e) => { audits.push(e); } });
 
 const HOUR = 3_600_000;
 const viewer = { user_id: 'u1', email: 'alice@example.test', name: 'Alice' };
@@ -112,7 +118,7 @@ const sleeps = [];
 let onSleep = null; // runs during the wait before the session is approved
 async function reset(cfg = {}) {
     world();
-    writes.length = 0; sleeps.length = 0; onSleep = null; onEvent = null; writeAnswer = null; readAnswer = null;
+    writes.length = 0; sleeps.length = 0; onSleep = null; onEvent = null; writeAnswer = null; readAnswer = null; onResourceRead = null; onGet = null; audits.length = 0;
     holds.clear();
     ra.closeAllSessions('reset');
     settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], ...cfg });
@@ -216,40 +222,60 @@ test('a resource that changed after the checks is not opened, and nothing is wri
     };
     for (const [label, change] of Object.entries(changes)) {
         await reset();
-        // Right after the checks, while the hold is written.
-        holds.failWith((sql) => { if (/^\s*INSERT/i.test(sql)) change(); return null; });
+        // Right after the checks: NetBird already has the change when the session start reads it.
+        onResourceRead = change;
         await assert.rejects(rdp(), (e) => e.code === 'TARGET_CHANGED', label);
         assert.deepEqual(writes, [], label);
         assert.equal(active(), 0, label);
     }
     // The same address written without /32 is the same resource.
     await reset();
-    holds.failWith((sql) => { if (/^\s*INSERT/i.test(sql)) resource('r1').address = '10.0.0.5'; return null; });
+    onResourceRead = () => { resource('r1').address = '10.0.0.5'; };
     assert.ok((await rdp()).token);
 });
 
-test('a second start within the settle time waits only the rest of it, without another write', async () => {
+test('an approval that is out of date never replaces the hold of the resource\'s new identity', async () => {
+    await reset();
+    // During the checks (their router read), r1 gets a new address, and another instance opens it
+    // under that address.
+    const other = { networkId: 'n1', address: '10.0.0.0/24', addedAt: Date.now() - 60_000, expiresAt: Date.now() + 5 * HOUR };
+    onGet = (p) => {
+        if (!p.endsWith('/routers')) return;
+        onGet = null;
+        resource('r1').address = '10.0.0.0/24';
+        resource('r1').type = 'subnet';
+        holds.set('r1', other);
+    };
+    await assert.rejects(rdp(), (e) => e.code === 'TARGET_CHANGED');
+    const row = holds.rows.get('r1');
+    assert.deepEqual([row.address, new Date(row.added_at).getTime(), new Date(row.expires_at).getTime()], [other.address, other.addedAt, other.expiresAt]);
+});
+
+test('a start within 30 s of a recorded add waits ROUTE_SETTLE_MS from when it saw the membership', async () => {
     await reset();
     await rdp();
-    await new Promise(r => setTimeout(r, 50));
+    holds.rows.get('r1').added_at = new Date(Date.now() - 1500);
     await rdp();
     assert.equal(writes.length, 1, 'already a member: no second write');
     assert.equal(sleeps.length, 2);
-    assert.ok(sleeps[1] < sleeps[0] && sleeps[1] > 0, `the rest from the stored added_at (${sleeps[0]} then ${sleeps[1]})`);
-    // Added long enough ago: no wait at all.
-    holds.rows.get('r1').added_at = new Date(Date.now() - 10_000);
+    // The add may have been a write still on its way when this request saw it.
+    assert.ok(sleeps[1] > ra.ROUTE_SETTLE_MS - 100 && sleeps[1] <= ra.ROUTE_SETTLE_MS, `the full wait again (${sleeps[0]} then ${sleeps[1]})`);
+    // Added more than 30 s ago, or never recorded: no wait at all.
+    holds.rows.get('r1').added_at = new Date(Date.now() - 31_000);
+    await rdp();
+    holds.rows.get('r1').added_at = null;
     await rdp();
     assert.equal(sleeps.length, 2);
 });
 
-test("the hold keeps an added_at that another instance wrote, and waits from it", async () => {
+test('the hold keeps an added_at that another instance wrote, and waits from it', async () => {
     await reset();
     resource('r1').groups.push({ id: 'g-gwt' }); // another instance added it a moment ago
     holds.set('r1', { networkId: 'n1', address: '10.0.0.5/32', addedAt: Date.now() - 400, expiresAt: Date.now() + HOUR });
     await rdp();
     assert.equal(writes.length, 0);
-    assert.equal(sleeps.length, 1, 'waits the rest after the other instance\'s add');
-    assert.ok(sleeps[0] > 1000 && sleeps[0] <= ra.ROUTE_SETTLE_MS - 400, String(sleeps[0]));
+    assert.equal(sleeps.length, 1, 'waits after the other instance\'s add');
+    assert.ok(sleeps[0] > ra.ROUTE_SETTLE_MS - 100 && sleeps[0] <= ra.ROUTE_SETTLE_MS, String(sleeps[0]));
     // Written by the other instance between this instance's read and its write of the hold.
     await reset();
     resource('r1').groups.push({ id: 'g-gwt' });
@@ -292,6 +318,20 @@ test('the approval after the add is the real evaluation: a member taken out mean
     await reset();
     onSleep = async () => { resource('r1').groups = [{ id: 'g-srv' }]; };
     await assert.rejects(rdp(), (e) => e.code === 'GATEWAY_NOT_SYNCED');
+    assert.equal(active(), 0);
+});
+
+test("a user's drop rule to the target group still counts at the approval when the membership is gone", async () => {
+    await reset();
+    live['/api/policies'].push({ id: 'pol-drop', name: 'No RDP to browser targets on Fridays', enabled: false, rules: [{ enabled: true, action: 'drop', protocol: 'tcp', ports: ['3389'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-gwt' }] }] });
+    // During the wait: the drop rule is turned on, the resource leaves its target group, and another
+    // policy still gives the gateway a route to it.
+    onSleep = async () => {
+        policy('pol-drop').enabled = true;
+        resource('r1').groups = [{ id: 'g-srv' }];
+        live['/api/policies'].push({ id: 'pol-extra', name: 'Gateway to srv1', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [], destinationResource: { id: 'r1', type: 'host' } }] });
+    };
+    await assert.rejects(rdp(), (e) => e.code === 'BLOCKED_BY_POLICY');
     assert.equal(active(), 0);
 });
 
@@ -385,15 +425,6 @@ test('the re-check of an open session extends its hold; a hold for another ident
     assert.equal(holds.rows.has('r1'), false);
 });
 
-test('the re-check counts only real membership', async () => {
-    await reset();
-    const out = await rdp();
-    // Taken out of the target group (the sync, or by hand): the session closes.
-    resource('r1').groups = [{ id: 'g-srv' }];
-    await ra.recheckSessions();
-    assert.equal(ra.renewLease(viewer, out.sessionId), false);
-});
-
 test('the re-check ends a session whose approved resource now has another address', async () => {
     await reset();
     const out = await rdp();
@@ -402,6 +433,40 @@ test('the re-check ends a session whose approved resource now has another addres
     resource('r1').type = 'subnet';
     await ra.recheckSessions();
     assert.equal(ra.renewLease(viewer, out.sessionId), false);
+});
+
+test('the re-check puts back the target of an open session that lost it, once, and keeps the session', async () => {
+    await reset();
+    const out = await rdp();
+    writes.length = 0; audits.length = 0;
+    // Taken out of the target group (a sync that raced another instance's add, or by hand).
+    resource('r1').groups = [{ id: 'g-srv' }];
+    await ra.recheckSessions();
+    assert.equal(ra.renewLease(viewer, out.sessionId), true, 'the session stays');
+    assert.deepEqual(writes.map(w => [w[1], w[2].groups]), [['/api/networks/n1/resources/r1', ['g-srv', 'g-gwt']]], 'one resource write');
+    await new Promise(r => setImmediate(r));
+    const audit = audits.find(a => a.action === 'remote_access.target_open');
+    assert.equal(audit.meta.reason, 'restored');
+    assert.equal(sleeps.length, 1, 'no wait for a session that is already open');
+});
+
+test('the re-check closes the session when its target can\'t be put back', async () => {
+    const cases = {
+        'the hold expired': () => { holds.rows.get('r1').expires_at = new Date(Date.now() - 1000); },
+        'the write fails': () => { writeAnswer = { status: 500, raw: 'boom' }; },
+        'the user lost access': () => { policy('pol-staff').rules[0].ports = ['22']; },
+    };
+    for (const [label, change] of Object.entries(cases)) {
+        await reset();
+        const out = await rdp();
+        resource('r1').groups = [{ id: 'g-srv' }];
+        change();
+        await ra._internal.loadTargetHolds();
+        writes.length = 0;
+        await ra.recheckSessions();
+        assert.equal(ra.renewLease(viewer, out.sessionId), false, label);
+        if (label !== 'the write fails') assert.deepEqual(writes, [], label);
+    }
 });
 
 test('the settings page lists the held servers that are open, in use or with their expiry', async () => {
@@ -413,12 +478,20 @@ test('the settings page lists the held servers that are open, in use or with the
     holds.set('r-old', { networkId: 'n1', address: '10.0.0.9/32', expiresAt: Date.now() - 1000 });
     await ra._internal.loadTargetHolds();
     ra._internal.invalidateSnapshot();
-    const snap = await ra._internal.freshSnapshot(0);
-    const held = ra._internal.heldTargets(snap);
+    let snap = await ra._internal.freshSnapshot(0);
+    let held = ra._internal.heldTargets(snap);
     assert.deepEqual(held.map(h => [h.name, h.address, h.network, h.inUse]), [['srv1', '10.0.0.5/32', 'Office', true], ['Safe', 'safe.example.com', 'Office', false]],
         'in use first; a hold without membership and an expired hold are not listed');
     assert.ok(Date.parse(held[1].expiresAt) > Date.now());
     assert.equal(ra._internal.heldTargets(null).length, 3, 'without a snapshot, every valid hold');
+    // A member whose address is no longer the one its hold is for, or that sits in the other
+    // target group, is not listed either.
+    resource('r-dom').address = 'other.example.com';
+    resource('r2').groups.push({ id: 'g-ngwt' });
+    ra._internal.invalidateSnapshot();
+    snap = await ra._internal.freshSnapshot(0);
+    held = ra._internal.heldTargets(snap);
+    assert.deepEqual(held.map(h => h.name), ['srv1']);
 });
 
 // ─── Settings ───
@@ -471,6 +544,7 @@ test('a drop rule to a target group still blocks, also through the simulated mem
     // In the gateway's reach through another policy, but not a member: still judged as a member.
     s.policies.push({ id: 'pol-extra', name: 'Gateway to the servers', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [], destinationResource: { id: 'r1', type: 'host' } }] });
     assert.equal(ask(s, cfg()).code, 'BLOCKED_BY_POLICY', 'reached another way');
+    assert.equal(ask(s, cfg({ simulate: false })).code, 'BLOCKED_BY_POLICY', 'the real evaluation, reached another way: still judged as a member');
     s.resources[0].groups.push({ id: 'g-gwt' });
     assert.equal(ask(s, cfg({ simulate: false })).code, 'BLOCKED_BY_POLICY', 'a real member');
 });

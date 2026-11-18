@@ -23,7 +23,7 @@ let holdRows = []; // the remote_access_targets rows (target holds)
 const hold = (id, networkId, address, hours = 1) => ({ resource_id: id, network_id: networkId, address, added_at: null, expires_at: new Date(Date.now() + hours * 3_600_000) });
 core.pool.query = async (sql, params) => {
     sqls.push({ sql, params });
-    if (/FROM remote_access_targets/.test(sql)) return { rows: holdRows };
+    if (/FROM remote_access_targets/.test(sql)) { if (holdRows instanceof Error) throw holdRows; return { rows: holdRows }; }
     const r = rowsFor(sql, params);
     if (r) return { rows: r };
     if (/nextval/.test(sql)) return { rows: [{ id: 701 }] };
@@ -188,6 +188,25 @@ test("an editor's write to their own resource leaves another user's browser acce
     };
     const v = evaluateUserAccess(snap, { networks: ['n1'], gatewayGroupId: 'g-gw', managedPolicyIds: ['pol-gw'] }, { userId: 'victim', address: '10.0.0.5', port: 3389 });
     assert.equal(v.code, 'OK');
+});
+
+test("while the holds can't be read, a writer keeps a target group that still qualifies, and never adds one", async () => {
+    reset();
+    holdRows = [];
+    await db.setResourceEnabled('n2', 'r2', true); // a read that worked: no holds at all
+    holdRows = new Error('db down');
+    await db.setResourceEnabled('n1', 'r1', false);
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'kept: open network, qualifying address');
+    state.resources[1].groups.push({ id: 'g-gwt' });
+    await db.setResourceEnabled('n2', 'r2', true);
+    assert.deepEqual(lastBody('PUT', /r2$/).groups, [], 'a closed network still drops it');
+    state.resources.push({ id: 'r3', net: 'n1', name: 'new', type: 'host', address: '10.0.0.7/32', enabled: true, groups: [] });
+    state.networks[0].resources.push('r3');
+    assert.equal(await db.addResourceGroups('n1', 'r3', ['g-own']), true);
+    assert.deepEqual(lastBody('PUT', /r3$/).groups, ['g-own'], 'never added');
+    holdRows = [];
+    await db.setResourceEnabled('n1', 'r1', true);
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own'], 'once the holds can be read again, the rule applies');
 });
 
 test('a writer keeps a held target, drops it once the hold expired, and a move never carries it', async () => {
