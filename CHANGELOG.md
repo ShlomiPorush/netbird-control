@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.5.0] - 2026-11-18
+
 ### Changed
 - **Remote Access opens a server to the Browser Gateway only when someone connects to it.** The
   selected networks now only say which resources may become targets. A resource joins its gateway's
