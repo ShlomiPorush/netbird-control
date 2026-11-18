@@ -10,6 +10,29 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Remote Access opens a server to the Browser Gateway only when someone connects to it.** The
+  selected networks now only say which resources may become targets. A resource joins its gateway's
+  target group when a user who may reach it starts a session, and stays for **Keep Opened Servers
+  Available For** (Settings → Remote Access, 10 hours by default, 1 to 72); an open session keeps
+  it. The session waits until the route has reached the gateway (2 seconds after the resource was
+  added, shown as **Opening The Route To The Server**), then is approved again from a fresh read of
+  NetBird before it opens, with the gateway's policy opening the port. The checks before a session
+  write nothing to NetBird. The target sync never adds a resource: it takes out every member
+  without a valid hold for its current network and address, also while Remote Access is turned off,
+  and deletes holds that expired. Resource edits keep a target group only under the same rule, and
+  new or moved resources never get one. The first sync after the upgrade takes the whole networks
+  that 1.4.x put into the target groups out, in one write per group. To roll back, use 1.4.1, not
+  1.4.0.
+- **A policy that points at a Browser Gateway target group no longer gives a user access** through
+  it. A drop rule through such a group still blocks.
+- **A read-only instance** (`NETBIRD_READONLY=true`) connects only to servers that are already open
+  to the gateway, and says so for any other.
+
+### Added
+- **Settings → Remote Access lists the servers open to the gateways**, as in use or with the time
+  they close.
+
 ### Fixed
 - **Opening a large network to Remote Access no longer takes a NetBird request per resource.** The
   target sync read and wrote every resource separately, so a network with hundreds of resources

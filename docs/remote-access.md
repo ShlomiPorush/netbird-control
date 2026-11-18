@@ -21,24 +21,23 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
   added on top of the main compose file. Without that file an existing deployment does not change.
 - **There are two gateways.**
   - **The IP gateway** serves IPv4 addresses. NetBird DNS is off on it, so it receives only static
-    routes to the IPv4 host and subnet resources of the selected networks.
+    routes to the IPv4 host and subnet resources that sessions opened (see
+    [Opening servers to the gateways](#opening-servers-to-the-gateways)).
   - **The names gateway** is optional (compose profile `remote-names`). It serves host names of
     NetBird **domain resources**, such as `server.example.com`. NetBird DNS is on, and it receives
-    only the domain resources of the selected networks, so it reaches them the same way any
+    only the domain resources that sessions opened, so it reaches them the same way any
     NetBird client does: the name resolves through the resource's routing peer, which also routes
     the traffic.
 - **NetBird sees every browser session as traffic from a gateway peer**, not from the user.
   So NetBird Control decides who may connect where, for every session.
 - **One standing policy per gateway** that the app manages (*Browser Gateway* and
-  *Browser Gateway Names*) lets each gateway reach its targets in the networks that an
-  administrator selects. The app puts the *Browser Gateway Targets* group on the IPv4 host and
-  subnet resources of those networks, and *Browser Gateway Name Targets* on their exact domain
-  resources (never on a wildcard such as `*.example.com`). It writes each target group to NetBird as
-  a whole, from a fresh read of that group, however many resources the networks have; a group that
-  is already right is not written. When a resource changes in NetBird during the update, the app
-  reads again and writes once more; if NetBird still differs afterwards, or a write's answer is not
-  a success, new sessions wait for a follow-up sync about 90 seconds later. No temporary policies
-  are created per session.
+  *Browser Gateway Names*) lets each gateway reach the members of its target group:
+  *Browser Gateway Targets* holds IPv4 host and subnet resources, and *Browser Gateway Name Targets*
+  holds exact domain resources (never a wildcard such as `*.example.com`). The networks an
+  administrator selects only say which resources **may** become targets. A resource joins its
+  target group only when a user who may reach it opens a session to it, and leaves it some hours
+  later (see [Opening servers to the gateways](#opening-servers-to-the-gateways)). No temporary
+  policies are created per session.
 - **Every object name ends with the installation name** in parentheses, taken from the
   **Application Name** in **Settings → General**, for example
   *Browser Gateway (NetBird Control DEV)*. Two installations that share one NetBird account, such
@@ -49,8 +48,11 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
   object name stays within NetBird's limit.
 - **The gateway groups, their policies and the gateway peers belong to the app.** Only the app
   decides which resources carry the target groups, whoever edits, creates, moves or merges a
-  resource: groups sent for a resource are ignored for those, and the app sets them by the rule
-  above. No temporary grant, approved request or recurring rule can put a user into a gateway
+  resource: groups sent for a resource are ignored for those. A resource write never adds a target
+  group; it keeps one only under the rule in
+  [Opening servers to the gateways](#opening-servers-to-the-gateways), so a new address, a closed
+  network or an expired hold takes it off in the same write. A new resource, and the copy that a
+  move creates, never gets one. No temporary grant, approved request or recurring rule can put a user into a gateway
   group. A gateway peer can't be a routing peer, and neither can a group it is in, nor *All*
   (a gateway that enrolls later joins it). Deleting a resource never deletes these groups or
   policies, and merging, moving or editing a resource never changes these policies. The Groups
@@ -81,6 +83,57 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
 - **Sessions open as tabs** in one full-screen view. They keep running while the user moves around
   the portal, and a button brings them back. Closing the browser tab ends them.
 
+## Opening servers to the gateways
+
+A big network can have hundreds of resources, and a target group that holds all of them is
+fragile. So a server joins its gateway's target group only when it is needed:
+
+1. **The checks before a session** (the Remote Access page, and a launch link for a named user)
+   write nothing to NetBird. A server that is not in its target group yet is judged as if it were:
+   the standing policy, the other routes the gateway receives and the drop rules count as they will
+   once it is added. A missing or disabled standing policy still refuses it.
+2. **A session start opens the server.** The session counts toward the session limits from now on.
+   The app records a **hold** for the resource (its network and its address as NetBird has it,
+   for example `10.0.0.0/24` or `srv.example.com`), valid for **Keep Opened Servers Available For**
+   (10 hours by default) from the start. If the resource is not in its target group yet, the app
+   adds it, in one write of that group.
+3. **The route reaches the gateway.** NetBird needs a moment to send the new route to the gateway
+   (on a real account it arrived 0.5 to 1.1 seconds after the write). The session waits until
+   2 seconds after the resource was added, also when another session added it a moment ago. The
+   user sees this as **Opening The Route To The Server**, for RDP and SSH alike.
+4. **The session is approved again** from a fresh read of NetBird, without any simulation: the
+   same resource, network and address, and the gateway's standing policy exists, is enabled, and
+   has an enabled accept rule from the gateway group to the target group that opens the TCP port.
+   Only then does the browser get its one-time token. Any failure ends the attempt and frees its
+   place in the session limits.
+5. **While a session is open**, the check every 60 seconds extends its server's hold to now plus
+   the hold time. A server in use always stays open.
+6. **The target sync never adds anything.** NetBird is the source of truth: the sync keeps a
+   member only while its network is selected, its address still qualifies for that group, and it
+   has a valid hold for its current network and address. Every other member is taken out, in one
+   write per group, recorded in the audit log. When a resource changes in NetBird during the sync,
+   the app reads again and writes once more; if NetBird still differs afterwards, or a write's
+   answer is not a success, new sessions wait for a follow-up sync about 90 seconds later.
+   Afterwards the sync deletes the holds that expired or whose resource is no longer in its group;
+   such a resource is not added back. The sync runs when the Remote Access settings are saved and
+   every 10 minutes on the instance that runs the background jobs, **also while Remote Access is
+   turned off**, so the groups drain (the policies stay disabled).
+
+The first sync after upgrading from 1.4.x takes out, in one write per group, every resource that
+1.4.x added for the selected networks: there are no holds yet. Sessions don't survive the restart,
+so nothing in use is lost; the next session to a server opens it again.
+
+Settings → Remote Access lists the servers that are open right now: **In Use** when a session of
+the instance that answered uses it, otherwise until when it stays open.
+
+A read-only instance (`NETBIRD_READONLY=true`) can't add a server to a target group. It accepts
+only servers that are already members, and refuses any other with a message saying so.
+
+**Rolling back.** Roll back to 1.4.1, which puts the resources of the selected networks back into
+the target groups in one write per group. The setting **Networks Open To The Gateway** keeps its
+name and meaning, so 1.4.1 sees the same networks. Don't roll back to 1.4.0: it writes each
+resource separately, which runs into NetBird's rate limit on large networks.
+
 ## Who may connect where
 
 A session opens only when **all** of these are true. Anything the check does not positively
@@ -108,7 +161,10 @@ understand is refused.
    networks `172.31.250.0/24` and `172.31.251.0/24`.
 4. An enabled *accept* policy rule connects one of the user's groups to that resource and opens the
    TCP port. The user's groups are their own groups, the groups of their peers, and *All*. A
-   matching *drop* rule refuses the session.
+   matching *drop* rule refuses the session. An accept rule that reaches the resource **only**
+   through a Browser Gateway target group (of this or another installation) never counts: a
+   resource is in such a group only because some session opened it. A drop rule through one still
+   refuses.
 5. **Policies with posture checks do not count.** A browser session cannot prove anything about
    the user's device, and the portal is reachable from the internet. Those users connect with the
    NetBird client instead.
@@ -129,7 +185,8 @@ understand is refused.
 Rules 1 to 7 decide who may connect; rule 8 (the path is up) is checked only when a session
 opens. Every 60 seconds the app reads NetBird again and checks every open session against rules
 1 to 7 (by name for a domain resource, by the address used otherwise; a name is not looked up
-again). A session closes when the user loses access, is blocked, loses the permission (an Entra
+again), counting only real membership of the target group, and extends the hold of each session
+that passes. A session closes when the user loses access, is blocked, loses the permission (an Entra
 group that grants it must be confirmed by a fresh Microsoft Graph lookup), when the network is
 removed from the gateway, or when Remote Access is turned off. A router that goes down does not
 close a session by itself: the connection simply stops working until it comes back. Sessions also
@@ -150,6 +207,12 @@ refuses a user because no policy opens the server or its port, **Request Access*
 server's resource already chosen.
 
 ## Known limits and accepted risks
+
+- **Overlapping resources right after a server is opened.** The session waits 2 seconds after its
+  server joins the target group. If the gateway already receives a less specific route that covers
+  the same address (another open server's subnet, say), that route may carry the connection until
+  the more specific one arrives, usually within the first second. The more specific route wins once
+  it is there. The app doesn't handle such overlaps specially.
 
 - **RDP server certificates are not verified.** Most internal Windows servers use self-signed
   certificates. Someone who can take over the server's address inside the network could receive
@@ -351,7 +414,8 @@ that the real end time is unknown.
 |---|---|---|
 | Enable Browser Remote Access | Off | Turning it off closes every session and disables the gateway policies. |
 | Who Can Use It | Permission only | Or every signed-in user. Either way, each user reaches only what their access allows. |
-| Networks Open To The Gateway | None | IPv4 host and subnet resources of these networks become IP gateway targets, and their domain resources names gateway targets. |
+| Networks Open To The Gateway | None | Which resources may become targets: IPv4 host and subnet resources of these networks through the IP gateway, their exact domain resources through the names gateway. A resource joins its target group only when a session opens to it. |
+| Keep Opened Servers Available For | 10 hours | 1 to 72. How long a server stays in its target group after a session to it starts. Each check of an open session extends it. |
 | Sessions Per User / In Total | 5 / 20 | Sessions that are still opening count too. |
 | Idle Timeout | 30 minutes | No keyboard or mouse input. A session in a background tab gets none. |
 | Maximum Session Length | 8 hours | |
