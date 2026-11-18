@@ -28,7 +28,7 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 // gateway and target groups are app-owned: exposure-mirroring code skips the policies, and resource
 // writes, grants and routers never add, remove or reuse the groups (helpers below).
 const {
-    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite,
+    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, withResourceTargetLock, noteUncertainTargetWrite,
     loadRemoteAccessConfig, enforceManagedMembership,
 } = require('./lib/remote-access');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
@@ -170,9 +170,11 @@ async function refuseManagedPolicySources(policies) {
         e.status = 400; throw e;
     }
 }
-// Resource writes run under the target lock, and set the managed target groups by the one rule.
-const withTargets = (fn) => (raMain() ? withTargetLock(fn) : fn());
-const targetsFor = (networkId, address, ids) => (raMain() ? withManagedTargets(networkId, address, ids) : ids);
+// Resource writes run under the target lock, and keep a managed target group only by the one rule
+// (a member with a valid hold for its network and address); they never add one. `resourceId` is
+// '' for a resource that doesn't exist yet (create, and the copy a move makes).
+const withTargets = (fn) => (raMain() ? withResourceTargetLock(fn) : fn());
+const targetsFor = (resourceId, networkId, address, ids) => (raMain() ? withManagedTargets(resourceId, networkId, address, ids) : ids);
 // No answer is not "not written": a resource write that timed out may still land.
 function noteResourceWrite(resp) {
     if (raMain() && resp && resp.status === 0) noteUncertainTargetWrite();
@@ -4108,6 +4110,19 @@ async function initializeDatabase() {
         // Older rows keep the defaults and are IP sessions.
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS target_name TEXT DEFAULT ''`);
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS gateway TEXT DEFAULT 'ip'`);
+        // Browser Gateway targets that sessions opened: one hold per resource, for the network and
+        // the address the resource had when the session started. The resource stays in its target
+        // group until expires_at; added_at is when this app last added it to the group. The target
+        // sync deletes expired holds and those whose resource is no longer in the group.
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS remote_access_targets (
+            resource_id TEXT PRIMARY KEY,
+            network_id TEXT NOT NULL,
+            address TEXT NOT NULL,
+            added_at TIMESTAMPTZ,
+            expires_at TIMESTAMPTZ NOT NULL
+          );
+        `);
 
         // API keys for the versioned public API (/api/v1), created by admins in Settings. Only the
         // SHA-256 of a key is stored; the key itself is shown once. See lib/api-keys.js.
@@ -6804,7 +6819,7 @@ async function createClientResource(networkId, { name, address, description, gro
     // Network resource - groups are optional (a management convenience). NetBird
     // derives host/subnet/domain from the address.
     const resp = await withTargets(async () => noteResourceWrite(await netbirdPost(`/api/networks/${encodeURIComponent(networkId)}/resources`, {
-        name, address, description: description || '', enabled: true, groups: targetsFor(networkId, String(address || '').trim(), groupIds),
+        name, address, description: description || '', enabled: true, groups: targetsFor('', networkId, String(address || '').trim(), groupIds),
     })));
     if (!nbWriteOk(resp)) {
         throw new Error('Failed to create resource: ' + (resp && (resp.raw || resp.error || resp.status)));
@@ -7051,8 +7066,9 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
         if (!r) { failed.push({ id: rid, name: rid, error: 'no longer exists in the source network' }); continue; }
         const label = r.name || r.address || rid;
         try {
-            // The managed target groups follow the rule for the TARGET network.
-            const groups = targetsFor(target, String(r.address || '').trim(), groupIdsOf(r.groups));
+            // The copy is a new resource: it never takes a managed target group (a session opens it
+            // again when one is needed).
+            const groups = targetsFor('', target, String(r.address || '').trim(), groupIdsOf(r.groups));
             // A resource attached to an ACTIVE temporary grant must not move - the grant's
             // cleanup bookkeeping points at the old network/resource id and would leak.
             const inTempGroup = (Array.isArray(r.groups) ? r.groups : []).some(g => /^Temp (access|resources) #\d+/.test((g && g.name) || ''));
@@ -8198,14 +8214,14 @@ async function editResource(networkId, resourceId, { name, address, description,
         return putEditedResource(networkId, resourceId, body);
     }
     // Main account: the caller can neither add nor drop a managed Browser Gateway group. Groups it
-    // omits stay as they are; the managed ones the resource has stay too, and the target groups
-    // follow the rule for the NEW address (an address that changes type swaps them).
+    // omits stay as they are; the managed ones the resource has stay too, except a target group,
+    // which stays only under the rule for the NEW address (an address change drops it).
     return withTargets(async () => {
         const cur = await getResourceInNetwork(networkId, resourceId);
         const curIds = groupIdsOf(cur.groups);
         const isManaged = await managedGroupCheck();
         const requested = Array.isArray(groups) ? groups.filter(Boolean) : curIds;
-        body.groups = targetsFor(networkId, String(address || '').trim(), [...requested.filter(g => !isManaged(g)), ...curIds.filter(isManaged)]);
+        body.groups = targetsFor(resourceId, networkId, String(address || '').trim(), [...requested.filter(g => !isManaged(g)), ...curIds.filter(isManaged)]);
         return putEditedResource(networkId, resourceId, body);
     });
 }
@@ -8221,7 +8237,7 @@ async function setResourceEnabled(networkId, resourceId, enabled) {
     return withTargets(async () => {
         const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
         if (!r || !r.id) throw new Error('Resource not found');
-        const groups = targetsFor(networkId, r.address, groupIdsOf(r.groups));
+        const groups = targetsFor(resourceId, networkId, r.address, groupIdsOf(r.groups));
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: !!enabled, groups };
         const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to set resource enabled: ' + (resp && (resp.raw || resp.error || resp.status)));
@@ -8238,7 +8254,7 @@ async function renameResource(networkId, resourceId, name, description) {
         if (!r || !r.id) throw new Error('Resource not found');
         const body = {
             name, address: r.address, description: description || r.description || '',
-            enabled: r.enabled !== false, groups: targetsFor(networkId, r.address, groupIdsOf(r.groups)),
+            enabled: r.enabled !== false, groups: targetsFor(resourceId, networkId, r.address, groupIdsOf(r.groups)),
         };
         const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to rename resource: ' + (resp && (resp.raw || resp.error || resp.status)));
@@ -8274,7 +8290,7 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
             const isManaged = await managedGroupCheck();
             missing = missing.filter(g => !isManaged(g));
         }
-        const next = targetsFor(networkId, r.address, [...current, ...missing]);
+        const next = targetsFor(resourceId, networkId, r.address, [...current, ...missing]);
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
         const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
@@ -8297,8 +8313,9 @@ async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
         const r = got && got.body;
         if (!nbWriteOk(got) || !r || !r.id) throw new Error('Failed to read the resource: ' + ((got && (got.raw || got.error || got.status)) || 'no response'));
         const current = groupIdsOf(r.groups);
-        // A target group the rule still wants stays: only the rule (the target sync) changes them.
-        const next = targetsFor(networkId, r.address, current.filter(g => !drop.has(g)));
+        // A managed group is never the caller's to drop; a target group stays only under the rule
+        // (only a session start adds one, and only the rule takes it off).
+        const next = targetsFor(resourceId, networkId, r.address, current.filter(g => !drop.has(g) || (raMain() && isRemoteAccessManagedGroup(g, ''))));
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
         const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));

@@ -117,7 +117,8 @@ test('addresses outside the selected networks or unknown are denied', () => {
 
 test('a host inside a subnet resource matches that resource', () => {
     const s = base();
-    s.policies[1].rules[0].destinations = [{ id: 'g-gwt' }];
+    s.resources[1].groups.push({ id: 'g-lan' });
+    s.policies[1].rules[0].destinations = [{ id: 'g-lan' }];
     s.policies[1].rules[0].sources = [{ id: 'g-staff' }];
     const r = ask(s, { address: '10.0.1.20' });
     assert.equal(r.ok, true);

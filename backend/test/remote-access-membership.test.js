@@ -15,7 +15,8 @@ const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] ?? null;
 core.setSetting = async (k, v) => { settings[k] = v; };
-core.pool.query = async () => ({ rows: [] });
+let holdRows = []; // the remote_access_targets rows (target holds)
+core.pool.query = async (sql) => ({ rows: /FROM remote_access_targets/.test(sql) ? holdRows : [] });
 core.pool.connect = async () => ({ query: async () => ({ rows: [] }), release() { } });
 
 const nb = require('../lib/netbird');
@@ -77,7 +78,7 @@ ra.setRemoteAccessDeps({
 
 const MANAGED = { gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw', namesGroupId: 'g-ngw', namesTargetGroupId: 'g-ngwt', namesPolicyId: 'pol-ngw' };
 function reset(over = {}) {
-    calls.length = 0; audits.length = 0; setupKeys.length = 0;
+    calls.length = 0; audits.length = 0; setupKeys.length = 0; holdRows = [];
     for (const k of Object.keys(settings)) delete settings[k];
     ra._internal.setConfigForTest({ enabled: true, networks: [] });
     ra._internal.setManagedForTest(MANAGED);
@@ -358,7 +359,9 @@ test('the objects are named after the app name, and renamed by stored id with me
         networks: [{ id: 'n1', resources: ['r1'] }],
         resources: [{ id: 'r1', type: 'host', address: '10.0.0.5/32', enabled: true }],
     });
-    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] }); // r1 stays a target by the rule
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    // r1 stays a target by the rule: a session opened it and its hold is valid.
+    holdRows = [{ resource_id: 'r1', network_id: 'n1', address: '10.0.0.5/32', added_at: null, expires_at: new Date(Date.now() + 3_600_000) }];
     state.groups[0].name = 'Browser Gateway';
     state.groups[1].name = 'Browser Gateway Targets';
     settings.app_name = '  NetBird  Control\nDEV (שלוחה) ';

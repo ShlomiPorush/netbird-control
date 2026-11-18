@@ -51,15 +51,17 @@ const snapshot = {
         { id: 'u6', email: 'TWIN@example.test', auto_groups: ['g-staff'], is_blocked: true },
     ],
     '/api/peers': [{ id: 'p-gw', name: 'gw', groups: [{ id: 'g-gw' }], connected: true }, { id: 'p-r', name: 'r', groups: [], connected: true }],
-    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-staff', name: 'Staff' }],
+    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-staff', name: 'Staff' }, { id: 'g-srv', name: 'Servers' }],
     '/api/policies': [
         { id: 'pol-gw', name: 'Browser Gateway', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-gwt' }] }] },
-        { id: 'pol-rdp', name: 'Staff RDP', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['3389', '22'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-gwt' }] }] },
+        { id: 'pol-rdp', name: 'Staff RDP', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['3389', '22'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-srv' }] }] },
     ],
-    '/api/networks/resources': [{ id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }] }],
+    '/api/networks/resources': [{ id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }, { id: 'g-srv' }] }],
     '/api/networks': [{ id: 'n1', name: 'Office', resources: ['r1'] }],
     '/api/routes': [],
     '/api/networks/n1/routers': [{ peer: 'p-r', enabled: true }],
+    // r1 is already in its target group (an earlier session opened it): no add, no wait.
+    '/api/groups/g-gwt': { id: 'g-gwt', name: 'Browser Gateway Targets', peers: [], resources: [{ id: 'r1', type: 'host' }] },
 };
 nb.netbirdGet = async (p) => JSON.parse(JSON.stringify(snapshot[p] ?? null));
 const events = require('../lib/events');

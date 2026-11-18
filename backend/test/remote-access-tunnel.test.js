@@ -21,20 +21,23 @@ nb.netbirdApiConfigured = () => true;
 const snapshot = {
     '/api/users': [{ id: 'u1', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u2', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u3', auto_groups: [], is_blocked: false }],
     '/api/peers': [{ id: 'p-gw', name: 'gw', groups: [{ id: 'g-gw' }], connected: true }, { id: 'p-ngw', name: 'ngw', groups: [{ id: 'g-ngw' }], connected: true }, { id: 'p-r', name: 'r', groups: [], connected: true }],
-    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-ngw', name: 'Browser Gateway Names' }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets' }, { id: 'g-staff', name: 'Staff' }],
+    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-ngw', name: 'Browser Gateway Names' }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets' }, { id: 'g-staff', name: 'Staff' }, { id: 'g-srv', name: 'Servers' }],
     '/api/policies': [
         { id: 'pol-gw', name: 'Browser Gateway', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-gwt' }] }] },
-        { id: 'pol-ssh', name: 'Staff SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-gwt' }] }] },
+        { id: 'pol-ssh', name: 'Staff SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-srv' }] }] },
         { id: 'pol-ngw', name: 'Browser Gateway (Names)', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-ngw' }], destinations: [{ id: 'g-ngwt' }] }] },
         { id: 'pol-web', name: 'Staff Web SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [], destinationResource: { id: 'r-dom', type: 'domain' } }] },
     ],
     '/api/networks/resources': [
-        { id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }] },
+        { id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }, { id: 'g-srv' }] },
         { id: 'r-dom', name: 'Safe', type: 'domain', address: 'mosessafe.com', enabled: true, groups: [{ id: 'g-ngwt' }] },
     ],
     '/api/networks': [{ id: 'n1', name: 'Office', resources: ['r1', 'r-dom'] }],
     '/api/routes': [],
     '/api/networks/n1/routers': [{ peer: 'p-r', enabled: true }],
+    // Both servers are already in their target groups (earlier sessions opened them): no add, no wait.
+    '/api/groups/g-gwt': { id: 'g-gwt', name: 'Browser Gateway Targets', peers: [], resources: [{ id: 'r1', type: 'host' }] },
+    '/api/groups/g-ngwt': { id: 'g-ngwt', name: 'Browser Gateway Name Targets', peers: [], resources: [{ id: 'r-dom', type: 'domain' }] },
 };
 let onNetbirdGet = null; // test hook, called before each NetBird read
 nb.netbirdGet = async (p) => { if (onNetbirdGet) await onNetbirdGet(p); return JSON.parse(JSON.stringify(snapshot[p] ?? null)); };
