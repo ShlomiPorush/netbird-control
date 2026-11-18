@@ -114,13 +114,14 @@ fragile. So a server joins its gateway's target group only when it is needed:
    and the gateway's standing policy exists, is enabled, and has an enabled accept rule from the
    gateway group to the target group that opens the TCP port. A drop rule to the target group still counts even if the resource left its group
    meanwhile. Only then does the browser get its one-time token. Any failure ends the attempt and
-   frees its place in the session limits. When a target sync, a settings save or a write that can
-   take a server out of its group happens on this instance after that read, no token is given
-   either; the user tries again.
+   frees its place in the session limits. When this instance runs a target sync, saves the Remote
+   Access settings, or sends a write of a gateway group, a resource or a network after that read,
+   no token is given either; the user tries again.
 5. **While a session is open**, the check every 60 seconds extends its server's hold to now plus
-   the hold time (read-only instances too), so a server in use stays open. A session whose server
-   is no longer reachable that way, or whose resource now has another network or address, is
-   closed.
+   the hold time (read-only instances too), so a server in use stays open. A session closes when
+   the gateway has no real route to its resource any more, or the resource now has another network
+   or address. Losing the target group alone doesn't close it while another policy still gives the
+   gateway a route there (on a read-only instance it does: such an instance serves only members).
 6. **The target sync never adds anything.** NetBird is the source of truth: the sync keeps a
    member only while its network is selected, its address still qualifies for that group, and it
    has a valid hold for its current network and address. Every other member is taken out, in one
@@ -203,8 +204,8 @@ understand is refused.
 Rules 1 to 7 decide who may connect; rule 8 (the path is up) is checked only when a session
 opens. Every 60 seconds the app reads NetBird again and checks every open session against rules
 1 to 7 (by name for a domain resource, by the address used otherwise; a name is not looked up
-again), counting only real membership of the target group, and extends the hold of each session
-that passes. A session closes when the user loses access, is blocked, loses the permission (an Entra
+again), counting only the gateway's real routes (no simulated target group), and extends the hold
+of each session that passes. A session closes when the user loses access, is blocked, loses the permission (an Entra
 group that grants it must be confirmed by a fresh Microsoft Graph lookup), when the network is
 removed from the gateway, or when Remote Access is turned off. A router that goes down does not
 close a session by itself: the connection simply stops working until it comes back. Sessions also
