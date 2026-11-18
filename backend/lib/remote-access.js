@@ -213,7 +213,6 @@ const targetGroupIds = () => [_nb.targetGroupId, _nb.namesTargetGroupId].filter(
 const ROUTE_SETTLE_MS = 2000; // measured on a real account: the route was on the gateway 0.52-1.05 s after the write was sent
 const HOLD_COLUMNS = 'resource_id, network_id, address, added_at, expires_at';
 let _holds = new Map(); // resource id -> { networkId, address, addedAt (ms, 0 = unknown), expiresAt (ms) }
-let _holdsUnknown = false; // the last read of the holds failed: writers can't judge a hold
 let _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const msOf = (v) => { const t = v ? new Date(v).getTime() : NaN; return Number.isFinite(t) ? t : 0; };
 async function loadTargetHolds({ strict = false } = {}) {
@@ -225,18 +224,19 @@ async function loadTargetHolds({ strict = false } = {}) {
             next.set(row.resource_id, { networkId: String(row.network_id || ''), address: String(row.address || ''), addedAt: msOf(row.added_at), expiresAt: msOf(row.expires_at) });
         }
         _holds = next;
-        _holdsUnknown = false;
     } catch (e) {
-        _holdsUnknown = true;
         if (strict) throw e;
         console.error('[remote-access] could not read the target holds:', e.message);
     }
 }
-// An address compared as NetBird means it: "10.0.0.5" is "10.0.0.5/32", and a name ignores case.
+// An address as NetBird means it, in one form: "10.0.0.5" is "10.0.0.5/32", a subnet is written
+// from its network address, and a name is lower case without a trailing dot. Holds store this form,
+// and every comparison of addresses uses it.
+const ipOf = (n) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
 function addressKey(address) {
     const a = String(address || '').trim();
     const p = parsePrefix(a);
-    return p ? `${p.start}/${p.bits}` : a.toLowerCase().replace(/\.$/, '');
+    return p ? `${ipOf(p.start)}/${p.bits}` : a.toLowerCase().replace(/\.$/, '');
 }
 const sameIdentity = (h, networkId, address) => !!h && h.networkId === networkId && addressKey(h.address) === addressKey(address);
 function holdValid(resourceId, networkId, address, now = Date.now()) {
@@ -253,26 +253,26 @@ function targetGroupFor(networkId, address) {
     if (isIpResourceAddress(address)) return _nb.targetGroupId || '';
     return isExactDomainResource({ address: String(address || '').trim() }) ? (_nb.namesTargetGroupId || '') : '';
 }
-// The one rule for which resources keep a managed target group (the target sync and every resource
-// writer use it): a resource keeps it only while it is a member, its network is open to browser
-// access, its address qualifies for that group, and it has a valid hold for its current network
-// and address. Nothing but a session start ever adds one. Returns the target groups the resource
-// may keep (members or not: the callers keep only those it has).
+// The target sync's rule: a resource keeps a managed target group only while it is a member, its
+// network is open to browser access, its address qualifies for that group, and it has a valid hold
+// for its current network and address. Nothing but a session start ever adds one. Returns the
+// target groups the resource may keep (members or not: the sync keeps only those it has).
 function remoteAccessTargetGroupsFor(resourceId, networkId, address) {
     const tg = targetGroupFor(networkId, address);
     return tg && holdValid(resourceId, networkId, address) ? [tg] : [];
 }
-// A resource's group list with the managed target groups set by that rule: one it has stays only
-// under the rule, and none is ever added. `resourceId` is '' for a resource that doesn't exist yet
-// (created, or the copy a move makes), which therefore never gets one.
-function withManagedTargets(resourceId, networkId, address, groupIds) {
+// A resource writer's group list (every resource write in db.js): writers never add a managed
+// target group and don't look at holds (expiry is the sync's job). One the resource has now
+// (`groupIds` are its current groups, plus what the caller adds) stays only while its network is
+// open to browser access, the address written still qualifies for that same group, and the write
+// doesn't change the address (`currentAddress`, from the writer's own fresh read, is the same
+// address as `address`). `currentAddress` is null for a resource that doesn't exist yet (created,
+// or the copy a move makes), which therefore never gets one.
+function withManagedTargets(currentAddress, networkId, address, groupIds) {
     const targets = new Set(targetGroupIds());
     const ids = (groupIds || []).filter(Boolean);
-    // Holds that couldn't be read: a target group the resource has and still qualifies for by its
-    // network and address stays (taken off later by the sync, which reads them strictly).
-    const allowed = _holdsUnknown ? (resourceId ? [targetGroupFor(networkId, address)].filter(Boolean) : []) : remoteAccessTargetGroupsFor(resourceId, networkId, address);
-    const keep = allowed.filter(tg => ids.includes(tg));
-    return [...new Set([...ids.filter(g => !targets.has(g)), ...keep])];
+    const tg = currentAddress == null || addressKey(currentAddress) !== addressKey(address) ? '' : targetGroupFor(networkId, address);
+    return [...new Set([...ids.filter(g => !targets.has(g)), ...(tg && ids.includes(tg) ? [tg] : [])])];
 }
 
 // Resource writes and the target sync run one at a time, so a write computed under an older
@@ -293,13 +293,6 @@ function withTargetLock(fn) {
         .finally(() => { if (_targetLockHolder === token) _targetLockHolder = null; });
     _targetLockTail = run.catch(() => { });
     return run;
-}
-// A resource write: under the target lock, with the holds read again first (another instance may
-// have opened a target). A failed read keeps the holds this process knows.
-function withResourceTargetLock(fn) {
-    const store = _targetLockCtx.getStore();
-    if (store && store === _targetLockHolder) return fn();
-    return withTargetLock(async () => { await loadTargetHolds(); return fn(); });
 }
 
 // A resource write that got no answer (a timeout) may still land later, after a sync that has
@@ -394,6 +387,7 @@ async function putManagedGroup(id, change) {
     if (!nbOk(r)) { noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
     bustNbCaches('gref', 'groups', 'usage');
     invalidateSnapshot();
+    noteTargetsChanged();
     return { before: g, after };
 }
 const droppedDevices = (out) => (out ? out.before.peers.filter(id => !out.after.peers.includes(id)) : []);
@@ -468,10 +462,23 @@ async function ensurePolicy(kind, enabled) {
 // limit on networks with hundreds of them). Then it deletes the holds that expired or whose
 // resource is no longer a member. It runs while browser access is off too, so the groups drain.
 // Holds the target lock for the whole run.
+// The targets generation: raised by every target sync that finishes, every settings save, and every
+// write by this process that can take a resource out of a target group (a group write, or a resource
+// write that drops one). A session start notes it before its last evaluation and gets no token when
+// it changed meanwhile. A session start's own add doesn't raise it: an add never takes a route away.
+let _targetsGen = 0;
+function noteTargetsChanged() { _targetsGen++; }
+// A resource write (db.js) that took a target group off the resource.
+function noteTargetGroupsWritten(before, after) {
+    const targets = targetGroupIds();
+    if ((before || []).some(g => targets.includes(g) && !(after || []).includes(g))) noteTargetsChanged();
+}
+
 function syncTargetGroup() {
     return withTargetLock(async () => {
         const started = Date.now();
         const out = await syncTargetGroupLocked();
+        noteTargetsChanged();
         _lastSyncStartOk = Math.max(_lastSyncStartOk, started);
         invalidateSnapshot();
         // Finished, but started before the current deadline: one more sync after it is still due.
@@ -520,30 +527,29 @@ async function syncTargetGroupLocked() {
     let removed = 0;
     const written = new Set();
     const members = new Map(); // target group id -> the resource ids it holds after the sync
-    try {
-        // Holds another instance wrote (its sessions) count too.
+    // Each group is judged from the resources and the holds read AFTER that group: a session start
+    // writes its hold before it adds the resource, so every member the group read shows (also one
+    // another instance just added) has its resource and its hold in these reads. A failed read
+    // writes nothing for that group.
+    const judge = async (tg, g) => {
+        const index = await readResourceIndex();
         await loadTargetHolds({ strict: true });
+        return keptTargets(tg, g, index);
+    };
+    try {
         for (let pass = 0; pass < 3; pass++) {
-            let index = await readResourceIndex();
             let differs = false;
             for (const tg of targetGroupIds()) {
-                // After a write, the next group is compared with a fresh read of the resources too.
-                if (differs && pass < 2) index = await readResourceIndex();
                 if (pass === 2) {
                     const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(tg)), tg);
-                    if (g) await loadTargetHolds({ strict: true });
-                    if (!g || !targetsMatch(g, keptTargets(tg, g, index))) differs = true;
+                    if (!g || !targetsMatch(g, await judge(tg, g))) differs = true;
                     if (g) members.set(tg, new Set(g.resources.map(r => r.id)));
                     continue;
                 }
                 let seen = null;
                 const out = await putManagedGroup(tg, async g => {
                     seen = g;
-                    // Read after the group: a session start writes its hold before it adds the
-                    // resource, so every member this read shows has its hold visible now (also one
-                    // another instance just added). A failed read writes nothing for this group.
-                    await loadTargetHolds({ strict: true });
-                    const want = keptTargets(tg, g, index);
+                    const want = await judge(tg, g);
                     return targetsMatch(g, want) ? null : { name: g.name, peers: [], resources: [...want].map(([id, type]) => ({ id, type })) };
                 });
                 members.set(tg, new Set((out ? out.after.resources : seen.resources).map(r => r.id)));
@@ -576,6 +582,8 @@ async function syncTargetGroupLocked() {
         }
         throw e;
     }
+    // No target group was read (none exists yet): the holds still need a current read.
+    if (!members.size) await loadTargetHolds({ strict: true });
     await dropStaleHolds(members);
     return { removed };
 }
@@ -642,6 +650,7 @@ async function setRemoteAccessConfig(input) {
     const next = normConfig({ ..._cfg, ...(input || {}) });
     const wasEnabled = _cfg.enabled;
     _cfg = next;
+    noteTargetsChanged();
     await setSetting('remote_access_config', JSON.stringify(_cfg));
     if (!_cfg.enabled) closeAllSessions('Browser remote access was turned off by an administrator.');
     let sync = null;
@@ -1120,8 +1129,9 @@ async function createSession(viewer, body, clientIp, opts = {}) {
         s.started = recordStart(s);
         if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', "The session couldn't be recorded, so it was not opened. Try again.");
         if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
-        // An unanswered write may have started settling while the start was being recorded.
-        if (targetsSettling()) throw httpError(503, 'TARGETS_SETTLING');
+        // An unanswered write may have started settling while the start was being recorded, or the
+        // targets changed after the last evaluation.
+        if (targetsSettling() || _targetsGen !== s.targetsGen) throw httpError(503, 'TARGETS_SETTLING');
         // Closed while its start was being written (a re-check, the feature turned off): no token for it.
         if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
 
@@ -1164,6 +1174,7 @@ async function openTargetForSession(s, port) {
     if (s.closed) throw closedError();
 
     let snap;
+    s.targetsGen = _targetsGen;
     // Always a new read (never the one the checks above used, even within the same millisecond).
     _snapshot = null;
     try { snap = await freshSnapshot(0); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
@@ -1202,9 +1213,7 @@ const RECENT_ADD_MS = 30_000;
 //   - already a member, with an add recorded in the last RECENT_ADD_MS: ROUTE_SETTLE_MS after the
 //     later of that add and the moment this request saw the membership;
 //   - already a member otherwise: at once.
-// opts.restored: an open session whose resource was taken out of its target group gets it back
-// (the re-check); nothing to wait for then.
-async function openTargetLocked(s, opts = {}) {
+async function openTargetLocked(s) {
     if (s.closed) throw closedError();
     const tg = targetGroupFor(s.networkId, s.resourceAddress);
     if (!tg) throw httpError(409, 'GATEWAY_POLICY_MISSING');
@@ -1222,7 +1231,7 @@ async function openTargetLocked(s, opts = {}) {
 
     let row;
     try {
-        const r = await pool.query(UPSERT_HOLD_SQL, [s.resourceId, s.networkId, s.resourceAddress, new Date(Date.now() + _cfg.holdHours * 3_600_000)]);
+        const r = await pool.query(UPSERT_HOLD_SQL, [s.resourceId, s.networkId, addressKey(s.resourceAddress), new Date(Date.now() + _cfg.holdHours * 3_600_000)]);
         row = r && r.rows && r.rows[0];
         if (!row || !msOf(row.expires_at)) throw new Error('the database returned no hold');
     } catch (e) {
@@ -1234,14 +1243,14 @@ async function openTargetLocked(s, opts = {}) {
     if (s.closed) throw closedError();
 
     if (groups.includes(tg)) {
-        if (opts.restored || !hold.addedAt || seenAt - hold.addedAt > RECENT_ADD_MS) return 0;
+        if (!hold.addedAt || seenAt - hold.addedAt > RECENT_ADD_MS) return 0;
         return Math.max(hold.addedAt, seenAt) + ROUTE_SETTLE_MS;
     }
     // A read-only instance writes nothing to NetBird, so it can't open the server.
     if (NETBIRD_READONLY) throw httpError(409, 'TARGET_NOT_OPEN_READONLY');
 
     // Recorded before the write: a write that lands is never without its added_at.
-    const ids = [s.resourceId, s.networkId, s.resourceAddress];
+    const ids = [s.resourceId, s.networkId, addressKey(s.resourceAddress)];
     try {
         const at = Date.now();
         const u = await pool.query(SET_ADDED_AT_SQL, [...ids, new Date(at)]);
@@ -1269,13 +1278,10 @@ async function openTargetLocked(s, opts = {}) {
     if (_deps.recordAudit) {
         Promise.resolve(_deps.recordAudit({
             actorId: s.userId, actorEmail: s.userEmail, actorName: s.userName, action: 'remote_access.target_open', target: s.resourceName,
-            meta: {
-                group: managedGroupName(tg), resourceId: s.resourceId, networkId: s.networkId, address: s.resourceAddress, holdHours: _cfg.holdHours,
-                ...(opts.restored ? { reason: 'restored' } : {}),
-            },
+            meta: { group: managedGroupName(tg), resourceId: s.resourceId, networkId: s.networkId, address: s.resourceAddress, holdHours: _cfg.holdHours },
         })).catch(() => { });
     }
-    return opts.restored ? 0 : at + ROUTE_SETTLE_MS;
+    return at + ROUTE_SETTLE_MS;
 }
 
 // The live-state row and the start record. Resolves true, or false after undoing the row.
@@ -1743,26 +1749,10 @@ async function recheckSessions() {
     // opening its target is checked by its own start.
     const kept = [];
     await Promise.all([..._sessions.values()].filter(s => s.state !== 'preparing').map(async (s) => {
-        const evaluate = (cfg) => (s.gateway === 'names'
+        const cfg = authCfg(s.gateway, { real: true });
+        const v = s.gateway === 'names'
             ? evaluateNameAccess(snap, cfg, { userId: s.userId, name: s.address, port: s.port })
-            : evaluateUserAccess(snap, cfg, { userId: s.userId, address: s.address, port: s.port }));
-        let v = evaluate(authCfg(s.gateway, { real: true }));
-        // Only the route is missing (the sync took the resource out while another instance added
-        // it, or someone did by hand), while the session's hold is valid: the session's server goes
-        // back into its target group, once, the same way a session start adds it, when everything
-        // else still allows the session. Anything that fails closes it as before.
-        if (!v.ok && v.code === 'GATEWAY_NOT_SYNCED' && !s.closed && holdValid(s.resourceId, s.networkId, s.resourceAddress) && targetGroupFor(s.networkId, s.resourceAddress)) {
-            const asMember = evaluate(authCfg(s.gateway));
-            if (asMember.ok && asMember.resource.id === s.resourceId && asMember.network.id === s.networkId && addressKey(asMember.resource.address) === addressKey(s.resourceAddress)) {
-                try {
-                    await withTargetLock(() => openTargetLocked(s, { restored: true }));
-                    v = asMember;
-                } catch (e) {
-                    console.error('[remote-access] could not put back the target of session %s: %s', s.id, e.message);
-                }
-            }
-        }
-        if (s.closed) return;
+            : evaluateUserAccess(snap, cfg, { userId: s.userId, address: s.address, port: s.port });
         if (!v.ok || v.resource.id !== s.resourceId) { failSession(s, `Your access to this server ended: ${MESSAGES[v.code] || v.code || 'the route changed.'}`, 0x0303); return; }
         // The approved resource itself changed (another network, another address): not the server
         // this session was approved and opened for.
@@ -1856,10 +1846,12 @@ function probeGuacd(host, port) {
 function getRemoteAccessStatusLite() { return { activeSessions: _sessions.size }; }
 
 // The servers sessions opened, with a hold that has not expired: in use by a session of this
-// instance, or until when the hold keeps them. With a snapshot, a hold is listed only while the
-// snapshot shows its resource in the right target group with the network and address the hold is
-// for (or a session of this instance uses it), and the names come from it.
+// instance, or until when the hold keeps them. A hold is listed only while the NetBird snapshot shows
+// its resource in the right target group with the network and address the hold is for (or a
+// session of this instance uses it); the names come from it. No snapshot: nothing is listed (the
+// page shows why).
 function heldTargets(snap) {
+    if (!snap) return [];
     const now = Date.now();
     const resById = new Map(((snap && snap.resources) || []).filter(r => r && r.id).map(r => [r.id, r]));
     const netById = new Map(((snap && snap.networks) || []).filter(n => n && n.id).map(n => [n.id, n]));
@@ -1877,7 +1869,7 @@ function heldTargets(snap) {
             const res = resById.get(id);
             const net = netById.get(h.networkId);
             const inUse = [..._sessions.values()].some(s => s.resourceId === id && s.state !== 'preparing' && sameIdentity(h, s.networkId, s.resourceAddress));
-            if (snap && !inUse && !member(id, h)) return null;
+            if (!inUse && !member(id, h)) return null;
             return { resourceId: id, name: (res && res.name) || h.address, address: h.address, network: (net && net.name) || h.networkId, inUse, expiresAt: new Date(h.expiresAt).toISOString() };
         })
         .filter(Boolean)
@@ -1896,7 +1888,6 @@ async function getRemoteAccessStatus() {
     };
     [out.guacdReachable, out.names.guacdReachable] = await Promise.all([
         probeGuacd(_cfg.guacdHost, _cfg.guacdPort), probeGuacd(_cfg.namesGuacdHost, _cfg.namesGuacdPort), loadTargetHolds()]);
-    out.held = heldTargets(null);
     if (!netbirdApiConfigured()) { out.error = 'The NetBird API is not connected.'; return out; }
     try {
         const snap = await freshSnapshot(30_000);
@@ -2130,7 +2121,7 @@ module.exports = {
     issueLaunch, redeemLaunch,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
-    withTargetLock, withResourceTargetLock, noteUncertainTargetWrite, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,
+    withTargetLock, noteUncertainTargetWrite, noteTargetGroupsWritten, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,

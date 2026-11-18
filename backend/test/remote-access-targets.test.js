@@ -310,6 +310,27 @@ test('a member that another instance added after the sync started keeps its targ
     } finally { getHook = null; live = null; }
 });
 
+test('a resource that another instance created and opened after the sync started keeps its target', async () => {
+    syncSetup({
+        '/api/networks/resources': [],
+        '/api/networks': [{ id: 'n1', resources: [] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    });
+    // Before the group read: the resource now exists, its hold is written, and it is a member.
+    getHook = async (p) => {
+        if (p !== '/api/groups/g-gwt' || holds.rows.has('r-new')) return;
+        live['/api/networks/resources'] = [{ id: 'r-new', type: 'host', address: '10.0.0.9/32' }];
+        live['/api/networks'] = [{ id: 'n1', resources: ['r-new'] }];
+        live['/api/groups/g-gwt'] = targetGroup('g-gwt', 'Browser Gateway Targets', [{ id: 'r-new', type: 'host' }]);
+        holds.set('r-new', { networkId: 'n1', address: '10.0.0.9/32', expiresAt: Date.now() + HOUR, updatedAt: Date.now() });
+    };
+    try {
+        await ra._internal.syncTargetGroup();
+        assert.deepEqual(groupWrites(), [], 'judged from the resources read after the group');
+    } finally { getHook = null; live = null; }
+});
+
 test('a hold read that fails while a group is compared writes nothing for that group', async () => {
     syncSetup({
         '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.1/32' }],
@@ -318,7 +339,7 @@ test('a hold read that fails while a group is compared writes nothing for that g
         '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
     });
     let reads = 0;
-    holds.failWith((sql) => (/^\s*SELECT/i.test(sql) && ++reads === 2 ? new Error('db down') : null)); // the read after the group read
+    holds.failWith((sql) => (/^\s*SELECT/i.test(sql) && ++reads === 1 ? new Error('db down') : null)); // the read after the group read
     try {
         await assert.rejects(ra._internal.syncTargetGroup(), /db down/);
         assert.deepEqual(groupWrites(), []);

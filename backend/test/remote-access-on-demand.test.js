@@ -189,6 +189,8 @@ test('a session start adds the target group to the resource in one write, waits 
     const before = Date.now();
     const out = await rdp();
     assert.ok(out.token && out.sessionId);
+    await new Promise(r => setImmediate(r));
+    assert.ok(audits.some(a => a.action === 'remote_access.target_open' && a.meta.resourceId === 'r1'), 'the add is audited');
     assert.deepEqual(writes, [['PUT', '/api/networks/n1/resources/r1', { name: 'srv1', address: '10.0.0.5/32', description: 'first', enabled: true, groups: ['g-srv', 'g-gwt'] }]],
         'one write, of the resource with its own fields; the group list is never rewritten');
     assert.deepEqual(reads, [[{ id: 'r1', type: 'host' }]], 'the wait comes after the write');
@@ -342,6 +344,32 @@ test('no token when settling started while the start was being recorded', async 
     assert.equal(active(), 0);
 });
 
+test('no token when a target sync ran after the last evaluation', async () => {
+    await reset();
+    // While the start is recorded, the hold disappears and a sync takes the server out again.
+    onEvent = async (e) => {
+        if (e.Message !== 'TYPE_START') return;
+        holds.rows.delete('r1');
+        await ra._internal.syncTargetGroup();
+    };
+    await assert.rejects(rdp(), (e) => e.code === 'TARGETS_SETTLING');
+    assert.equal(groupView('g-gwt').resources.length, 0, 'the sync did take it out');
+    assert.equal(active(), 0);
+});
+
+test('a hold stores the address in one form, so the same server keeps its hold however NetBird writes it', async () => {
+    await reset();
+    resource('r1').address = '10.0.0.5';
+    await rdp();
+    const row = holds.rows.get('r1');
+    assert.equal(row.address, '10.0.0.5/32');
+    const addedAt = new Date(row.added_at).getTime();
+    resource('r1').address = '10.0.0.5/32';
+    await rdp();
+    assert.equal(new Date(holds.rows.get('r1').added_at).getTime(), addedAt, 'the same identity: added_at kept');
+    assert.equal(writes.length, 1);
+});
+
 test('every failed start frees its quota slot and issues no token', async () => {
     // The resource can't be read: nothing is written.
     await reset({ maxSessionsPerUser: 1 });
@@ -435,38 +463,15 @@ test('the re-check ends a session whose approved resource now has another addres
     assert.equal(ra.renewLease(viewer, out.sessionId), false);
 });
 
-test('the re-check puts back the target of an open session that lost it, once, and keeps the session', async () => {
+test('the re-check counts only real membership: a session whose server left its target group closes, hold or not', async () => {
     await reset();
     const out = await rdp();
-    writes.length = 0; audits.length = 0;
-    // Taken out of the target group (a sync that raced another instance's add, or by hand).
+    writes.length = 0;
+    // Taken out of the target group (the sync, or by hand), while the hold is still valid.
     resource('r1').groups = [{ id: 'g-srv' }];
     await ra.recheckSessions();
-    assert.equal(ra.renewLease(viewer, out.sessionId), true, 'the session stays');
-    assert.deepEqual(writes.map(w => [w[1], w[2].groups]), [['/api/networks/n1/resources/r1', ['g-srv', 'g-gwt']]], 'one resource write');
-    await new Promise(r => setImmediate(r));
-    const audit = audits.find(a => a.action === 'remote_access.target_open');
-    assert.equal(audit.meta.reason, 'restored');
-    assert.equal(sleeps.length, 1, 'no wait for a session that is already open');
-});
-
-test('the re-check closes the session when its target can\'t be put back', async () => {
-    const cases = {
-        'the hold expired': () => { holds.rows.get('r1').expires_at = new Date(Date.now() - 1000); },
-        'the write fails': () => { writeAnswer = { status: 500, raw: 'boom' }; },
-        'the user lost access': () => { policy('pol-staff').rules[0].ports = ['22']; },
-    };
-    for (const [label, change] of Object.entries(cases)) {
-        await reset();
-        const out = await rdp();
-        resource('r1').groups = [{ id: 'g-srv' }];
-        change();
-        await ra._internal.loadTargetHolds();
-        writes.length = 0;
-        await ra.recheckSessions();
-        assert.equal(ra.renewLease(viewer, out.sessionId), false, label);
-        if (label !== 'the write fails') assert.deepEqual(writes, [], label);
-    }
+    assert.equal(ra.renewLease(viewer, out.sessionId), false);
+    assert.deepEqual(writes, [], 'nothing is put back');
 });
 
 test('the settings page lists the held servers that are open, in use or with their expiry', async () => {
@@ -483,7 +488,7 @@ test('the settings page lists the held servers that are open, in use or with the
     assert.deepEqual(held.map(h => [h.name, h.address, h.network, h.inUse]), [['srv1', '10.0.0.5/32', 'Office', true], ['Safe', 'safe.example.com', 'Office', false]],
         'in use first; a hold without membership and an expired hold are not listed');
     assert.ok(Date.parse(held[1].expiresAt) > Date.now());
-    assert.equal(ra._internal.heldTargets(null).length, 3, 'without a snapshot, every valid hold');
+    assert.deepEqual(ra._internal.heldTargets(null), [], 'without a NetBird snapshot, nothing is listed');
     // A member whose address is no longer the one its hold is for, or that sits in the other
     // target group, is not listed either.
     resource('r-dom').address = 'other.example.com';

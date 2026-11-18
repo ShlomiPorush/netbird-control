@@ -23,7 +23,7 @@ let holdRows = []; // the remote_access_targets rows (target holds)
 const hold = (id, networkId, address, hours = 1) => ({ resource_id: id, network_id: networkId, address, added_at: null, expires_at: new Date(Date.now() + hours * 3_600_000) });
 core.pool.query = async (sql, params) => {
     sqls.push({ sql, params });
-    if (/FROM remote_access_targets/.test(sql)) { if (holdRows instanceof Error) throw holdRows; return { rows: holdRows }; }
+    if (/FROM remote_access_targets/.test(sql)) return { rows: holdRows };
     const r = rowsFor(sql, params);
     if (r) return { rows: r };
     if (/nextval/.test(sql)) return { rows: [{ id: 701 }] };
@@ -190,47 +190,35 @@ test("an editor's write to their own resource leaves another user's browser acce
     assert.equal(v.code, 'OK');
 });
 
-test("while the holds can't be read, a writer keeps a target group that still qualifies, and never adds one", async () => {
+test('a writer keeps a target group the resource has while its network is open and the write keeps its address, without looking at holds', async () => {
     reset();
-    holdRows = [];
-    await db.setResourceEnabled('n2', 'r2', true); // a read that worked: no holds at all
-    holdRows = new Error('db down');
+    holdRows = []; // no hold at all: writers don't judge holds, the sync does
     await db.setResourceEnabled('n1', 'r1', false);
-    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'kept: open network, qualifying address');
-    state.resources[1].groups.push({ id: 'g-gwt' });
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'kept: open network, same address');
+    await db.editResource('n1', 'r1', { name: 'srv', address: '10.0.0.5', description: '' });
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'the same address written without /32');
+    // A new address drops it, even one that qualifies for the same group and has a hold.
+    holdRows = [hold('r1', 'n1', '10.0.0.6/32')];
+    await db.editResource('n1', 'r1', { name: 'srv', address: '10.0.0.6/32', description: '' });
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own']);
+    // A closed network drops it.
+    reset();
+    state.resources[1].groups = [{ id: 'g-gwt' }];
     await db.setResourceEnabled('n2', 'r2', true);
-    assert.deepEqual(lastBody('PUT', /r2$/).groups, [], 'a closed network still drops it');
-    state.resources.push({ id: 'r3', net: 'n1', name: 'new', type: 'host', address: '10.0.0.7/32', enabled: true, groups: [] });
-    state.networks[0].resources.push('r3');
-    assert.equal(await db.addResourceGroups('n1', 'r3', ['g-own']), true);
-    assert.deepEqual(lastBody('PUT', /r3$/).groups, ['g-own'], 'never added');
-    holdRows = [];
-    await db.setResourceEnabled('n1', 'r1', true);
-    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own'], 'once the holds can be read again, the rule applies');
-});
-
-test('a writer keeps a held target, drops it once the hold expired, and a move never carries it', async () => {
+    assert.deepEqual(lastBody('PUT', /r2$/).groups, []);
+    // Never added, held or not.
     reset();
-    await db.setResourceEnabled('n1', 'r1', false);
-    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'a member with a valid hold keeps it');
-    reset();
-    holdRows = [hold('r1', 'n1', '10.0.0.5/32', -1)];
-    await db.setResourceEnabled('n1', 'r1', true);
-    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own'], 'an expired hold: the same write drops it');
-    reset();
-    holdRows = [hold('r1', 'n2', '10.0.0.5/32')];
-    await db.setResourceEnabled('n1', 'r1', true);
-    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own'], 'a hold for another network is not this resource\'s');
+    state.resources[0].groups = [{ id: 'g-own' }];
+    holdRows = [hold('r1', 'n1', '10.0.0.5/32')];
+    assert.equal(await db.addResourceGroups('n1', 'r1', ['g-new']), true);
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-new']);
+    // A move's copy is a new resource: no target group, even with both networks open.
     reset();
     ra._internal.setConfigForTest({ enabled: true, networks: ['n1', 'n2'] });
-    state.resources[1].groups = [];
-    holdRows = [hold('r1', 'n1', '10.0.0.5/32'), hold('r2', 'n2', '192.0.2.10/32')];
-    assert.equal(await db.addResourceGroups('n2', 'r2', ['g-own']), true);
-    assert.deepEqual(lastBody('PUT', /r2$/).groups, ['g-own'], 'a hold never adds the target group to a resource that is not a member');
     await db.moveResources('n1', ['r1'], 'n2');
     const copy = lastBody('POST', /\/api\/networks\/n2\/resources$/);
     assert.ok(copy, 'the copy was created');
-    assert.deepEqual(copy.groups, ['g-own'], 'the copy is a new resource: no target group, even with both networks open');
+    assert.deepEqual(copy.groups, ['g-own']);
 });
 
 test('read-modify-write helpers set the target groups by the rule, not from their read', async () => {
