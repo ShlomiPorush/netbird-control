@@ -36,8 +36,8 @@ nb.netbirdGet = async (p) => {
     if (p === '/api/users') return clone(state.users.filter(u => !u.is_service_user));
     if (p === '/api/users?service_user=true') return clone(state.users.filter(u => u.is_service_user));
     if (p === '/api/policies') return clone(state.policies);
-    if (p === '/api/networks') return [];
-    if (p === '/api/networks/resources') return [];
+    if (p === '/api/networks') return clone(state.networks || []);
+    if (p === '/api/networks/resources') return clone(state.resources || []);
     if (p === '/api/peers') return clone(state.peers || []);
     return [];
 };
@@ -337,7 +337,12 @@ test("another installation's groups are refused too, by their live name", async 
 
 // ─── Installation name ───
 test('the objects are named after the app name, and renamed by stored id with members and resources kept', async () => {
-    reset({ policies: [{ id: 'pol-gw', name: 'Browser Gateway', rules: [] }, { id: 'pol-ngw', name: 'Browser Gateway (Names)', rules: [] }] });
+    reset({
+        policies: [{ id: 'pol-gw', name: 'Browser Gateway', rules: [] }, { id: 'pol-ngw', name: 'Browser Gateway (Names)', rules: [] }],
+        networks: [{ id: 'n1', resources: ['r1'] }],
+        resources: [{ id: 'r1', type: 'host', address: '10.0.0.5/32', enabled: true }],
+    });
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] }); // r1 stays a target by the rule
     state.groups[0].name = 'Browser Gateway';
     state.groups[1].name = 'Browser Gateway Targets';
     settings.app_name = '  NetBird  Control\nDEV (שלוחה) ';

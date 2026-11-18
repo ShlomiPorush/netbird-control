@@ -33,8 +33,9 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
   *Browser Gateway Names*) lets each gateway reach its targets in the networks that an
   administrator selects. The app puts the *Browser Gateway Targets* group on the IPv4 host and
   subnet resources of those networks, and *Browser Gateway Name Targets* on their exact domain
-  resources (never on a wildcard such as `*.example.com`). No temporary policies are created per
-  session.
+  resources (never on a wildcard such as `*.example.com`). It writes each target group to NetBird in
+  one request, from a fresh read of that group, however many resources the networks have; a group
+  that is already right is not written. No temporary policies are created per session.
 - **Every object name ends with the installation name** in parentheses, taken from the
   **Application Name** in **Settings → General**, for example
   *Browser Gateway (NetBird Control DEV)*. Two installations that share one NetBird account, such

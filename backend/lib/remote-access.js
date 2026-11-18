@@ -308,13 +308,14 @@ function fullGroup(g, id) {
     return { name: g.name, peers: peers.map(refId), resources: resources.map(r => ({ id: r.id, type: r.type })) };
 }
 // Change a managed group from a fresh read of it. The caller holds the target lock. `change` gets
-// { name, peers } and returns the new { name, peers }, or null for no write. Resources are kept.
+// { name, peers, resources } and returns the new { name, peers } (resources are kept) or
+// { name, peers, resources } (resources are replaced), or null for no write.
 async function putManagedGroup(id, change) {
     const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(id)), id);
     if (!g) throw new Error(`Couldn't read the group "${managedGroupName(id)}" from NetBird in full - nothing was changed.`);
-    const next = change({ name: g.name, peers: [...g.peers] });
+    const next = change({ name: g.name, peers: [...g.peers], resources: g.resources.map(r => ({ ...r })) });
     if (!next) return null;
-    const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), { name: next.name, peers: next.peers, resources: g.resources });
+    const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), { name: next.name, peers: next.peers, resources: next.resources || g.resources });
     if (r && r.status === 0) { noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
     if (!nbOk(r)) throw nbErr(`Updating the "${g.name}" group`, r);
     bustNbCaches('gref', 'groups', 'usage');
@@ -380,9 +381,21 @@ async function ensurePolicy(kind, enabled) {
     return r.body.id;
 }
 
+// A resource's type as a group's resource list names it: NetBird's own, or the one NetBird derives
+// from the address when a read has none (one IPv4 address is a host, any other prefix a subnet,
+// anything else a domain).
+function groupResourceType(res) {
+    if (typeof res.type === 'string' && res.type) return res.type;
+    const a = String(res.address || '').trim();
+    if (!isIpResourceAddress(a)) return 'domain';
+    return !a.includes('/') || a.endsWith('/32') ? 'host' : 'subnet';
+}
+
 // Put the IP target group on every IPv4 host/subnet resource of the selected networks and the
 // names target group on every exact domain resource of them; take each group off every other
-// resource (wildcard domain resources included). Holds the target lock for the whole run.
+// resource (wildcard domain resources included). One write per target group that differs, from a
+// fresh read of that group, whatever the number of resources (a write per resource ran into
+// NetBird's rate limit on networks with hundreds of them). Holds the target lock for the whole run.
 function syncTargetGroup() {
     return withTargetLock(async () => {
         const started = Date.now();
@@ -399,18 +412,26 @@ async function syncTargetGroupLocked() {
     if (!Array.isArray(resources) || !Array.isArray(networks)) throw new Error("Couldn't read the networks from NetBird");
     const netOf = new Map();
     for (const n of networks) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOf.set((rid && rid.id) || rid, n.id);
-    let added = 0, removed = 0;
+    const wanted = new Map(targetGroupIds().map(tg => [tg, new Map()])); // group -> resource id -> type
     for (const res of resources) {
         if (!res || !res.id) continue;
         const netId = netOf.get(res.id);
         if (!netId) continue;
-        const wanted = remoteAccessTargetGroupsFor(netId, res.address);
-        for (const tg of targetGroupIds()) {
-            const has = (Array.isArray(res.groups) ? res.groups : []).some(g => ((g && g.id) || g) === tg);
-            const want = wanted.includes(tg);
-            if (want && !has) { await _deps.addResourceGroups(netId, res.id, [tg]); added++; }
-            else if (!want && has) { await _deps.removeResourceGroups(netId, res.id, [tg]); removed++; }
+        for (const tg of remoteAccessTargetGroupsFor(netId, res.address)) {
+            if (wanted.has(tg)) wanted.get(tg).set(res.id, groupResourceType(res));
         }
+    }
+    let added = 0, removed = 0;
+    for (const [tg, want] of wanted) {
+        const out = await putManagedGroup(tg, g => {
+            const have = new Set(g.resources.map(r => r.id));
+            if (have.size === want.size && [...want.keys()].every(id => have.has(id))) return null;
+            return { name: g.name, peers: g.peers, resources: [...want].map(([id, type]) => ({ id, type })) };
+        });
+        if (!out) continue;
+        const before = new Set(out.before.resources.map(r => r.id));
+        added += [...want.keys()].filter(id => !before.has(id)).length;
+        removed += [...before].filter(id => !want.has(id)).length;
     }
     return { added, removed };
 }

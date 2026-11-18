@@ -2324,7 +2324,7 @@ app.get('/api/request-targets', async (req, res) => {
 
 // Create a request (any logged-in user).
 const { refreshAutoApprovalInventory } = require('./db');
-const { addResourceGroups, removeResourceGroups, fetchUserGroupsFresh } = require('./db');
+const { fetchUserGroupsFresh } = require('./db');
 const { WebSocketServer } = require('ws');
 const {
     getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps, remoteAccessAvailable, reconcileRemoteAccess,
@@ -5056,7 +5056,7 @@ async function start() {
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
-            addResourceGroups, removeResourceGroups, createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit,
+            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit,
             isLeader: leaderReady,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).

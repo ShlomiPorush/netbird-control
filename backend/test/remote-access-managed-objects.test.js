@@ -44,7 +44,8 @@ nb.netbirdGet = async (p) => {
     if (p.startsWith('/api/groups/')) {
         if (state.groupReadable === false) return null;
         const g = state.groups.find(x => x.id === decodeURIComponent(p.slice('/api/groups/'.length)));
-        return g ? clone(g) : null;
+        // As in NetBird, a group's resources and a resource's groups are one relation.
+        return g ? clone({ ...g, peers: g.peers || [], resources: groupResources(g.id) }) : null;
     }
     if (p === '/api/policies') return clone(state.policies);
     if (p === '/api/users' || p.startsWith('/api/users?')) return [{ id: 'user-1', role: 'user', auto_groups: [] }];
@@ -61,6 +62,25 @@ nb.netbirdPost = async (p, body) => {
     calls.push(['POST', p, clone(body)]);
     return { status: 200, body: { id: `nb-${calls.length}`, type: 'host' } };
 };
+const groupResources = (gid) => state.resources.filter(r => (r.groups || []).some(g => (g.id || g) === gid)).map(r => ({ id: r.id, type: r.type || 'host' }));
+// What NetBird does with a write (also callable from a test's putHook).
+function applyWrite(method, p, body) {
+    const res = resourceOf(p);
+    if (res && method === 'DELETE') state.resources = state.resources.filter(r => r !== res);
+    if (res && method === 'PUT' && body && Array.isArray(body.groups)) res.groups = body.groups.map(id => ({ id }));
+    const gm = /^\/api\/groups\/([^/]+)$/.exec(p);
+    if (gm && method === 'PUT' && body) {
+        const gid = decodeURIComponent(gm[1]);
+        const g = state.groups.find(x => x.id === gid);
+        if (g) { g.name = body.name; g.peers = (body.peers || []).map(id => ({ id })); }
+        const members = new Set((body.resources || []).map(r => r.id));
+        for (const r of state.resources) {
+            const others = (r.groups || []).filter(x => (x.id || x) !== gid);
+            r.groups = members.has(r.id) ? [...others, { id: gid }] : others;
+        }
+    }
+    return { status: 200, body: { id: 'ok' } };
+}
 nb.netbirdReq = async (method, p, body) => {
     if (method === 'GET') {
         const res = resourceOf(p);
@@ -68,9 +88,7 @@ nb.netbirdReq = async (method, p, body) => {
     }
     calls.push([method, p, clone(body)]);
     if (state.putHook && method === 'PUT') return state.putHook(p, body);
-    const res = resourceOf(p);
-    if (res && method === 'PUT' && body && Array.isArray(body.groups)) res.groups = body.groups.map(id => ({ id }));
-    return { status: 200, body: { id: 'ok' } };
+    return applyWrite(method, p, body);
 };
 
 const db = require('../db');
@@ -185,10 +203,9 @@ test('a write computed before a configuration change finishes before the sync th
     const held = new Promise(r => { release = r; });
     const order = [];
     state.putHook = async (p, body) => {
-        order.push('put:' + body.groups.join(','));
+        order.push(body.groups ? 'put:' + body.groups.join(',') : 'group:' + body.resources.map(r => r.id).join(','));
         if (order.length === 1) await held;
-        const res = resourceOf(p); res.groups = body.groups.map(id => ({ id }));
-        return { status: 200, body: {} };
+        return applyWrite('PUT', p, body);
     };
     state.readHook = async (p) => { if (p === '/api/networks/resources') order.push('sync-read'); };
     const editing = db.editResource('n1', 'r1', { name: 'srv', address: '10.0.0.5/32', groups: ['g-own'] });
