@@ -393,8 +393,8 @@ async function ensurePolicy(kind, enabled) {
 
 // Put the IP target group on every IPv4 host/subnet resource of the selected networks and the
 // names target group on every exact domain resource of them; take each group off every other
-// resource (wildcard domain resources included). One write per target group that differs, from a
-// fresh read of that group, whatever the number of resources (a write per resource ran into
+// resource (wildcard domain resources included). Each target group that differs is written as a
+// whole, from a fresh read of it, whatever the number of resources (a write per resource ran into
 // NetBird's rate limit on networks with hundreds of them). Holds the target lock for the whole run.
 function syncTargetGroup() {
     return withTargetLock(async () => {
@@ -442,9 +442,12 @@ async function syncTargetGroupLocked() {
     const written = new Set();
     try {
         for (let pass = 0; pass < 3; pass++) {
-            const wanted = await wantedTargets();
+            let wanted = await wantedTargets();
             let differs = false;
-            for (const [tg, want] of wanted) {
+            for (const tg of targetGroupIds()) {
+                // After a write, the next group is compared with a fresh read of the resources too.
+                if (differs && pass < 2) wanted = await wantedTargets();
+                const want = wanted.get(tg);
                 if (pass === 2) {
                     const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(tg)), tg);
                     if (!g || !targetsMatch(g, want)) differs = true;
@@ -471,7 +474,10 @@ async function syncTargetGroupLocked() {
                 if (gone.length) noteMemberRemovals(gone.map(id => ({ kind: 'device', id, name: id, group: out.before.name })));
             }
             if (!differs) break;
-            if (pass === 2) noteUncertainTargetWrite();
+            if (pass === 2) {
+                noteUncertainTargetWrite();
+                throw new Error('NetBird changed again while it was being updated. New sessions wait for a follow-up sync in about 90 seconds.');
+            }
         }
     } catch (e) {
         if (written.size) {

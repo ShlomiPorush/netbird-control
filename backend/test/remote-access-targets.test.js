@@ -314,10 +314,35 @@ test('a difference still there after the second write holds new sessions back', 
     ra._internal.setManagedForTest(MANAGED_IDS);
     ra._internal.resetSettlingForTest();
     try {
-        await ra._internal.syncTargetGroup();
+        await assert.rejects(ra._internal.syncTargetGroup(), /NetBird changed again while it was being updated/, 'never reported as a success');
         assert.equal(groupWrites().length, 2, 'two writes at most');
         assert.equal(ra._internal.settlingForTest(), true, 'the check after them found a difference');
     } finally { live = null; afterWrite = null; ra._internal.resetSettlingForTest(); }
+});
+
+test('after one group is written, the next is compared with a fresh read of the resources', async () => {
+    const dom = { id: 'r-dom', type: 'domain', address: 'safe.example.com', groups: [] };
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }, dom],
+        '/api/networks': [{ id: 'n1', resources: ['r1', 'r-dom'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'), // needs r1: written first
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets', [{ id: 'r-dom', type: 'domain' }]),
+    };
+    // While the IP group is written, someone makes the name a wildcard and takes it out by hand.
+    afterWrite = (p) => {
+        if (p !== '/api/groups/g-gwt') return;
+        live['/api/networks/resources'] = [live['/api/networks/resources'][0], { ...dom, address: '*.example.com' }];
+        live['/api/groups/g-ngwt'] = targetGroup('g-ngwt', 'Browser Gateway Name Targets');
+        afterWrite = null;
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        await ra._internal.syncTargetGroup();
+        assert.deepEqual(groupWrites().map(w => w[1]), ['/api/groups/g-gwt'], 'the names group is not written from the older read');
+        assert.deepEqual(live['/api/groups/g-ngwt'].resources, [], 'the wildcard is not put back');
+    } finally { live = null; afterWrite = null; }
 });
 
 test('a group write answered with an error of any kind counts as uncertain', async () => {
