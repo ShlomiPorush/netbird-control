@@ -169,6 +169,8 @@ test('the target sync writes each target group once, however many resources a ne
         '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
     };
     ra._internal.setManagedForTest(MANAGED_IDS);
+    const audits = [];
+    ra.setRemoteAccessDeps({ recordAudit: (e) => { audits.push(e); } });
     try {
         // Opening the network: one write for all of it, no write per resource.
         writes.length = 0;
@@ -179,8 +181,12 @@ test('the target sync writes each target group once, however many resources a ne
         assert.equal(p, '/api/groups/g-gwt');
         assert.equal(body.resources.length, 827);
         assert.deepEqual(body.resources.slice(-2), [{ id: 'r-sub', type: 'subnet' }, { id: 'r-bare', type: 'host' }], 'a missing type is the one NetBird derives from the address');
-        assert.deepEqual(body.peers, ['p-stray'], 'the peers are left to the member clean-up, never dropped here');
+        assert.deepEqual(body.peers, [], 'a target group holds resources only: a stray device is taken out, never written back');
         assert.deepEqual(opened, { added: 827, removed: 0 });
+        await new Promise(r => setImmediate(r));
+        const update = audits.find(a => a.action === 'remote_access.targets_update');
+        assert.deepEqual([update.target, update.meta.added, update.meta.removed, update.meta.addedIds.length], ['Browser Gateway Targets', 827, 0, 50], 'which resources changed is audited');
+        assert.ok(audits.some(a => a.action === 'remote_access.member_remove' && a.target === 'p-stray'), 'the device taken out is audited like the clean-up does');
 
         // Already in place: nothing is written.
         live['/api/groups/g-gwt'] = targetGroup('g-gwt', 'Browser Gateway Targets', body.resources);
@@ -194,6 +200,39 @@ test('the target sync writes each target group once, however many resources a ne
         const closed = await ra._internal.syncTargetGroup();
         assert.deepEqual(writes, [['PUT', '/api/groups/g-gwt', { name: 'Browser Gateway Targets', peers: [], resources: [] }]]);
         assert.deepEqual(closed, { added: 0, removed: 827 });
+    } finally { live = null; }
+});
+
+test('a resource whose type changed is written again, with the same members', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'subnet', address: '10.0.0.0/24', groups: [] }], // was a /32 host
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets', [{ id: 'r1', type: 'host' }]),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        assert.deepEqual(await ra._internal.syncTargetGroup(), { added: 0, removed: 0 });
+        assert.deepEqual(groupWrites().map(w => w[2].resources), [[{ id: 'r1', type: 'subnet' }]]);
+    } finally { live = null; }
+});
+
+test('a sync that fails after writing one group says that group was updated', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': null, // unreadable
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(),
+            (e) => /^The "Browser Gateway Targets" group was updated, then: Couldn't read the group/.test(e.message) && !/nothing was changed/.test(e.message));
+        assert.equal(groupWrites().length, 1);
     } finally { live = null; }
 });
 

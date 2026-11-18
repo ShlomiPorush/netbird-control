@@ -88,6 +88,7 @@ nb.netbirdReq = async (method, p, body) => {
     }
     calls.push([method, p, clone(body)]);
     if (state.putHook && method === 'PUT') return state.putHook(p, body);
+    if (state.deleteHook && method === 'DELETE') await state.deleteHook(p);
     return applyWrite(method, p, body);
 };
 
@@ -220,6 +221,28 @@ test('a write computed before a configuration change finishes before the sync th
     await syncing;
     assert.deepEqual(order.slice(0, 2), ['put:g-own,g-gwt', 'sync-read']);
     assert.deepEqual(state.resources[0].groups.map(g => g.id), ['g-own'], 'the sync then took the target group off');
+});
+
+test('a resource delete in flight finishes before a target sync reads the resources', async () => {
+    reset();
+    let release;
+    const held = new Promise(r => { release = r; });
+    const order = [];
+    state.deleteHook = async (p) => { if (resourceOf(p)) { order.push('delete'); await held; } };
+    state.readHook = async (p) => { if (p === '/api/networks/resources') order.push('sync-read'); };
+    const deleting = db.deleteResource('n1', 'r1');
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    state.resources.push({ id: 'r9', net: 'n1', name: 'new', address: '10.0.0.9/32', enabled: true, groups: [] });
+    state.networks[0].resources.push('r9'); // a change that makes the sync write the group
+    const syncing = ra._internal.syncTargetGroup();
+    await new Promise(r => setTimeout(r, 20));
+    assert.deepEqual(order, ['delete'], 'the sync waits for the delete in flight');
+    release();
+    await deleting;
+    await syncing;
+    assert.deepEqual(order.slice(0, 2), ['delete', 'sync-read']);
+    const put = lastBody('PUT', /^\/api\/groups\/g-gwt$/);
+    assert.deepEqual(put.resources.map(r => r.id), ['r9'], 'the deleted resource is not written back');
 });
 
 test('a resource write that got no answer holds new sessions back until a later sync has finished', async () => {
