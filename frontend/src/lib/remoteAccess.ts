@@ -76,6 +76,8 @@ export interface RemoteAccessConfig {
   maxSessionsTotal: number;
   idleTimeoutMin: number;
   maxDurationHours: number;
+  /** How long a server a session opened stays open to its gateway (1-72 hours). */
+  holdHours: number;
   clipboard: boolean;
   sshHostKeys: Record<string, string>;
   rdp: RdpDisplay;
@@ -109,6 +111,18 @@ export interface RemoteAccessStatus {
   lastApply: { at: string | null; error: string };
   // Members added to the managed groups outside the app, and taken out again (newest first).
   membership?: { at: string | null; error: string; removed: { at: string; kind: 'user' | 'device'; name: string; group: string }[] };
+  // Servers that sessions opened to the gateways and that are still held (in use first).
+  held?: HeldTarget[];
+}
+
+export interface HeldTarget {
+  resourceId: string;
+  name: string;
+  address: string;
+  network: string;
+  /** A session of the instance that answered uses it right now. */
+  inUse: boolean;
+  expiresAt: string;
 }
 
 // What the user typed or pasted into the address field, cleaned to what the field is for: a
@@ -134,7 +148,7 @@ export const remoteApi = {
   lease: (id: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, {}),
   end: (id: string) => api.del<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
   config: () => api.get<RemoteAccessConfig>('/api/remote-access/config'),
-  saveConfig: (cfg: Partial<RemoteAccessConfig>) => api.put<{ config: RemoteAccessConfig; sync: { added: number; removed: number } | null }>('/api/remote-access/config', cfg),
+  saveConfig: (cfg: Partial<RemoteAccessConfig>) => api.put<{ config: RemoteAccessConfig; sync: { removed: number } | null }>('/api/remote-access/config', cfg),
   status: () => api.get<RemoteAccessStatus>('/api/remote-access/status'),
   setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
   /** Open a launch link from another system. Only the ticket and the screen size are sent. */
