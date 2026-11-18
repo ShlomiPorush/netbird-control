@@ -95,25 +95,31 @@ fragile. So a server joins its gateway's target group only when it is needed:
    enabled and open the TCP port to the target group (on a read-only instance too), so a missing,
    disabled or re-pointed one refuses the session before anything is written.
 2. **A session start opens the server.** The session counts toward the session limits from now on.
-   The app records a **hold** for the resource (its network and its address as NetBird has it,
-   for example `10.0.0.0/24` or `srv.example.com`), valid for **Keep Opened Servers Available For**
-   (10 hours by default) from the start; a hold for the same network and address keeps the later
-   expiry. It then reads the resource again: if its network, address or type changed since the
-   checks, or it is gone, nothing is written and the session is refused. If the resource doesn't
-   carry its target group yet, the app adds the group to the resource, in one write of that
-   resource, so two sessions opening different servers at once (also on two instances) never undo
-   each other.
+   The app reads the resource again first: if its network, address or type changed since the
+   checks, or it is gone, nothing is written and the session is refused. Then it records a
+   **hold** for the resource (its network and its address as NetBird has it, for example
+   `10.0.0.0/24` or `srv.example.com`), valid for **Keep Opened Servers Available For** (10 hours
+   by default) from the start; a hold for the same network and address keeps the later expiry. If
+   the resource doesn't carry its target group yet, the app adds the group to the resource, in one
+   write of that resource, so two sessions opening different servers at once (also on two
+   instances) never undo each other.
 3. **The route reaches the gateway.** NetBird needs a moment to send the new route to the gateway
    (on a real account it arrived 0.5 to 1.1 seconds after the write). The session waits until
-   2 seconds after the resource was added, also when another session added it a moment ago. The
-   user sees this as **Opening The Route To The Server**, for RDP and SSH alike.
-4. **The session is approved again** from a fresh read of NetBird, without any simulation: the
-   same resource, network and address, and the gateway's standing policy exists, is enabled, and
-   has an enabled accept rule from the gateway group to the target group that opens the TCP port.
-   Only then does the browser get its one-time token. Any failure ends the attempt and frees its
-   place in the session limits.
+   2 seconds after the resource was added. When the resource was already in its group but its add
+   was recorded less than 30 seconds earlier (that write may still have been on its way), the
+   session waits 2 seconds from when it saw the membership. The user sees this as **Opening The
+   Route To The Server**, for RDP and SSH alike.
+4. **The session is approved again** from a fresh read of NetBird: the same resource, network and
+   address, a real route through its target group, and the gateway's standing policy exists, is
+   enabled, and has an enabled accept rule from the gateway group to the target group that opens
+   the TCP port. A drop rule to the target group still counts even if the resource left its group
+   meanwhile. Only then does the browser get its one-time token. Any failure ends the attempt and
+   frees its place in the session limits.
 5. **While a session is open**, the check every 60 seconds extends its server's hold to now plus
-   the hold time (read-only instances too). A server in use always stays open. A session whose
+   the hold time (read-only instances too). A server in use always stays open: if its resource was
+   taken out of its target group while the session's hold is valid (for example by a sync that
+   crossed another instance's add) and the user still has access, the check adds it back once,
+   recorded in the audit log as restored; if that fails, the session closes. A session whose
    resource now has another network or address is closed.
 6. **The target sync never adds anything.** NetBird is the source of truth: the sync keeps a
    member only while its network is selected, its address still qualifies for that group, and it
@@ -121,9 +127,13 @@ fragile. So a server joins its gateway's target group only when it is needed:
    write per group, recorded in the audit log. When a resource changes in NetBird during the sync,
    the app reads again and writes once more; if NetBird still differs afterwards, or a write's
    answer is not a success, new sessions wait for a follow-up sync about 90 seconds later.
-   Afterwards the sync deletes the holds that expired, and those whose resource is not in its
-   group once they are 10 minutes old (a hold that another instance has just written, while its
-   add is still on the way, stays); such a resource is not added back. The sync runs when the Remote Access settings are saved and
+   The holds are read again after each group read, so a member another instance has just added
+   keeps its place. Afterwards the sync deletes the holds that expired, and those whose resource is
+   not in its group once they are 10 minutes old (a hold that another instance has just written,
+   while its add is still on the way, stays); such a resource is not added back. A resource write
+   (an edit, a rename) that can't read the holds keeps the target group if the resource still
+   qualifies by network and address, and leaves the rest to the sync. The sync runs when the
+   Remote Access settings are saved and
    every 10 minutes on the instance that runs the background jobs, **also while Remote Access is
    turned off**, so the groups drain (the policies stay disabled).
 
@@ -135,7 +145,9 @@ Settings → Remote Access lists the servers that are open right now: **In Use**
 the instance that answered uses it, otherwise until when it stays open.
 
 A read-only instance (`NETBIRD_READONLY=true`) can't add a server to a target group. It accepts
-only servers that are already members, and refuses any other with a message saying so.
+only servers that are already members, and refuses any other with a message saying so. Otherwise
+a session start runs the same steps as on any instance (the fresh read of the resource, the hold
+in the database, the wait and the approval), without the NetBird write.
 
 **Rolling back.** Roll back to 1.4.1, which puts the resources of the selected networks back into
 the target groups in one write per group. The setting **Networks Open To The Gateway** keeps its
