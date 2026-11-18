@@ -181,6 +181,22 @@ test('any device in a target group is taken out; the resources of the group stay
     assert.deepEqual(peerIds('g-gw'), ['p-gw']);
 });
 
+test('a target group is written without any device, also one the data did not show', async () => {
+    reset();
+    state.groups[1].peers = [{ id: 'p-x' }, { id: 'p-new' }]; // p-new joined after the peers were read
+    await enforce({ peers: [{ id: 'p-x', name: 'x', user_id: 'u1', groups: [{ id: 'g-gwt' }] }] });
+    assert.deepEqual(writes('PUT', /^\/api\/groups\/g-gwt$/)[0][2].peers, [], 'so a late answer can never put a device back');
+    assert.deepEqual(audits.map(a => a.target).sort(), ['p-new', 'x'], 'both are recorded');
+    // A rename writes a target group without devices too, and records them.
+    reset();
+    state.groups[1].peers = [{ id: 'p-y' }];
+    settings.app_name = 'Prod';
+    await ra._internal.applyGatewayObjects();
+    assert.deepEqual(peerIds('g-gwt'), []);
+    assert.ok(audits.some(a => a.action === 'remote_access.member_remove' && a.target === 'p-y'));
+    assert.deepEqual(peerIds('g-gw'), ['p-gw'], 'the gateway group keeps its gateway');
+});
+
 test('a group read that is not complete is never written back', async () => {
     for (const shape of [(g) => ({ ...g, resources: undefined }), (g) => ({ ...g, peers: [{}] }), (g) => ({ ...g, id: 'other' }), (g) => ({ ...g, resources: [{ id: 'r1' }] })]) {
         reset({ groupShape: shape });

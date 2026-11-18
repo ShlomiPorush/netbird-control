@@ -5842,7 +5842,9 @@ async function deleteNetwork(id) {
             }
         }
     }
-    const resp = await netbirdReq('DELETE', '/api/networks/' + encodeURIComponent(id));
+    // Under the target lock, like a resource delete: NetBird deletes the resources still in the
+    // network with it, and a target sync must not write references to them back.
+    const resp = await withTargets(() => netbirdReq('DELETE', '/api/networks/' + encodeURIComponent(id)));
     if (!resp || (resp.status >= 300 && resp.status !== 404)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'network may still be in use';
         throw new Error(typeof msg === 'string' ? msg : String(msg));

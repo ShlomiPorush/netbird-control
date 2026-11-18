@@ -113,8 +113,8 @@ function reset(over = {}) {
         ],
         networks: [{ id: 'n1', name: 'Office', resources: ['r1'] }, { id: 'n2', name: 'Lab', resources: ['r2'] }],
         resources: [
-            { id: 'r1', net: 'n1', name: 'srv', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-own', name: 'Team' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }] },
-            { id: 'r2', net: 'n2', name: 'lab', address: '192.0.2.10/32', enabled: true, groups: [{ id: 'g-gwt', name: 'Browser Gateway Targets' }] },
+            { id: 'r1', net: 'n1', name: 'srv', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-own', name: 'Team' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }] },
+            { id: 'r2', net: 'n2', name: 'lab', type: 'host', address: '192.0.2.10/32', enabled: true, groups: [{ id: 'g-gwt', name: 'Browser Gateway Targets' }] },
         ],
         policies: [
             { id: 'pol-gw', name: 'Browser Gateway', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-gwt' }] }] },
@@ -232,7 +232,7 @@ test('a resource delete in flight finishes before a target sync reads the resour
     state.readHook = async (p) => { if (p === '/api/networks/resources') order.push('sync-read'); };
     const deleting = db.deleteResource('n1', 'r1');
     for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
-    state.resources.push({ id: 'r9', net: 'n1', name: 'new', address: '10.0.0.9/32', enabled: true, groups: [] });
+    state.resources.push({ id: 'r9', net: 'n1', name: 'new', type: 'host', address: '10.0.0.9/32', enabled: true, groups: [] });
     state.networks[0].resources.push('r9'); // a change that makes the sync write the group
     const syncing = ra._internal.syncTargetGroup();
     await new Promise(r => setTimeout(r, 20));

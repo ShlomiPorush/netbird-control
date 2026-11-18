@@ -310,18 +310,25 @@ function fullGroup(g, id) {
 // Change a managed group from a fresh read of it. The caller holds the target lock. `change` gets
 // { name, peers, resources } and returns the new { name, peers } (resources are kept) or
 // { name, peers, resources } (resources are replaced), or null for no write.
+// A target group holds resources only: every write to one leaves it without devices, so a late
+// answer to an older write can never put back a device that was taken out meanwhile. The caller
+// records the devices it took out (`before.peers` that are not in `after.peers`).
 async function putManagedGroup(id, change) {
     const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(id)), id);
     if (!g) throw new Error(`Couldn't read the group "${managedGroupName(id)}" from NetBird in full, so it was not changed.`);
-    const next = change({ name: g.name, peers: [...g.peers], resources: g.resources.map(r => ({ ...r })) });
+    const next = change({ name: g.name, peers: [...g.peers], resources: g.resources });
     if (!next) return null;
-    const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), { name: next.name, peers: next.peers, resources: next.resources || g.resources });
-    if (r && r.status === 0) { noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
+    const after = { name: next.name, peers: targetGroupIds().includes(id) ? [] : next.peers, resources: next.resources || g.resources };
+    const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), after);
+    // No answer, or a server error: NetBird may have saved the group before it failed (it builds
+    // the answer after the save), so the write is uncertain either way.
+    if (r && (r.status === 0 || r.status >= 500)) { noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
     if (!nbOk(r)) throw nbErr(`Updating the "${g.name}" group`, r);
     bustNbCaches('gref', 'groups', 'usage');
     invalidateSnapshot();
-    return { before: g, after: next };
+    return { before: g, after };
 }
+const droppedDevices = (out) => (out ? out.before.peers.filter(id => !out.after.peers.includes(id)) : []);
 
 // A managed group is found only by the id this app stored when it created it. A group that merely
 // has the name is never taken over: an empty peer list does not prove it is unused (resources,
@@ -337,7 +344,11 @@ async function ensureGroup(name, knownId) {
         throw new Error(`NetBird already has a group named "${name}" that NetBird Control did not create or no longer has on record. Delete or rename that group in NetBird, then save again. If it was the gateway's group, enroll the gateway again afterwards with a new setup key.`);
     }
     if (found) {
-        if (found.name !== name) await putManagedGroup(found.id, g => (g.name === name ? null : { name, peers: g.peers }));
+        if (found.name !== name) {
+            const out = await putManagedGroup(found.id, g => (g.name === name ? null : { name, peers: g.peers }));
+            const gone = droppedDevices(out);
+            if (gone.length) noteMemberRemovals(gone.map(id => ({ kind: 'device', id, name: id, group: out.before.name })));
+        }
         return found.id;
     }
     const r = await netbirdPost('/api/groups', { name });
@@ -381,16 +392,6 @@ async function ensurePolicy(kind, enabled) {
     return r.body.id;
 }
 
-// A resource's type as a group's resource list names it: NetBird's own, or the one NetBird derives
-// from the address when a read has none (one IPv4 address is a host, any other prefix a subnet,
-// anything else a domain).
-function groupResourceType(res) {
-    if (typeof res.type === 'string' && res.type) return res.type;
-    const a = String(res.address || '').trim();
-    if (!isIpResourceAddress(a)) return 'domain';
-    return !a.includes('/') || a.endsWith('/32') ? 'host' : 'subnet';
-}
-
 // Put the IP target group on every IPv4 host/subnet resource of the selected networks and the
 // names target group on every exact domain resource of them; take each group off every other
 // resource (wildcard domain resources included). One write per target group that differs, from a
@@ -407,54 +408,67 @@ function syncTargetGroup() {
         return out;
     });
 }
-async function syncTargetGroupLocked() {
+// The resources each target group should hold, by the rule: group id -> resource id -> its type
+// as NetBird reports it (a group's resource list names each one's type).
+async function wantedTargets() {
     const [resources, networks] = await Promise.all([netbirdGet('/api/networks/resources'), netbirdGet('/api/networks')]);
     if (!Array.isArray(resources) || !Array.isArray(networks)) throw new Error("Couldn't read the networks from NetBird");
     const netOf = new Map();
     for (const n of networks) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOf.set((rid && rid.id) || rid, n.id);
-    const wanted = new Map(targetGroupIds().map(tg => [tg, new Map()])); // group -> resource id -> type
+    const wanted = new Map(targetGroupIds().map(tg => [tg, new Map()]));
     for (const res of resources) {
         if (!res || !res.id) continue;
         const netId = netOf.get(res.id);
         if (!netId) continue;
         for (const tg of remoteAccessTargetGroupsFor(netId, res.address)) {
-            if (wanted.has(tg)) wanted.get(tg).set(res.id, groupResourceType(res));
+            if (!wanted.has(tg)) continue;
+            if (typeof res.type !== 'string' || !res.type) throw new Error("Couldn't read the networks from NetBird in full, so the target groups were not changed.");
+            wanted.get(tg).set(res.id, res.type);
         }
     }
+    return wanted;
+}
+
+async function syncTargetGroupLocked() {
     let added = 0, removed = 0;
-    const written = [];
-    for (const [tg, want] of wanted) {
-        let out;
-        try {
-            out = await putManagedGroup(tg, g => {
-                const have = new Map(g.resources.map(r => [r.id, r.type]));
-                const same = !g.peers.length && have.size === want.size && [...want].every(([id, type]) => have.get(id) === type);
-                if (same) return null;
-                // A target group holds resources only. A device in it is taken out here too (the
-                // member clean-up would remove it anyway), so a late answer to this write can never
-                // put back a device that the clean-up removed meanwhile.
-                return { name: g.name, peers: [], resources: [...want].map(([id, type]) => ({ id, type })) };
-            });
-        } catch (e) {
-            if (written.length) e.message = `The "${written.join('" and "')}" group was updated, then: ${e.message}`;
-            throw e;
+    const written = new Set();
+    // At most two passes. A resource changed in NetBird between the read and a write (an exact name
+    // made a wildcard, say) is corrected right away instead of at the next sync: the second pass
+    // reads everything again and writes only what still differs.
+    for (let pass = 0; pass < 2; pass++) {
+        const wanted = await wantedTargets();
+        let wrote = false;
+        for (const [tg, want] of wanted) {
+            let out;
+            try {
+                out = await putManagedGroup(tg, g => {
+                    const have = new Map(g.resources.map(r => [r.id, r.type]));
+                    const same = !g.peers.length && have.size === want.size && [...want].every(([id, type]) => have.get(id) === type);
+                    return same ? null : { name: g.name, peers: [], resources: [...want].map(([id, type]) => ({ id, type })) };
+                });
+            } catch (e) {
+                if (written.size) e.message = `The "${[...written].join('" and "')}" group was updated, then: ${e.message}`;
+                throw e;
+            }
+            if (!out) continue;
+            wrote = true;
+            written.add(out.after.name);
+            const before = new Set(out.before.resources.map(r => r.id));
+            const ins = [...want.keys()].filter(id => !before.has(id));
+            const outs = [...before].filter(id => !want.has(id));
+            added += ins.length;
+            removed += outs.length;
+            // One write changes many resources at once: the audit log keeps which ones.
+            if (_deps.recordAudit) {
+                Promise.resolve(_deps.recordAudit({
+                    actorId: '', actorEmail: '', actorName: 'System', action: 'remote_access.targets_update', target: out.after.name,
+                    meta: { added: ins.length, removed: outs.length, addedIds: ins.slice(0, 50), removedIds: outs.slice(0, 50) },
+                })).catch(() => { });
+            }
+            const gone = droppedDevices(out);
+            if (gone.length) noteMemberRemovals(gone.map(id => ({ kind: 'device', id, name: id, group: out.before.name })));
         }
-        if (!out) continue;
-        written.push(out.after.name);
-        const before = new Set(out.before.resources.map(r => r.id));
-        const ins = [...want.keys()].filter(id => !before.has(id));
-        const outs = [...before].filter(id => !want.has(id));
-        added += ins.length;
-        removed += outs.length;
-        // NetBird records one group update for this write, not an event per resource: keep which
-        // resources changed in the app's audit log.
-        if ((ins.length || outs.length) && _deps.recordAudit) {
-            Promise.resolve(_deps.recordAudit({
-                actorId: '', actorEmail: '', actorName: 'System', action: 'remote_access.targets_update', target: out.after.name,
-                meta: { added: ins.length, removed: outs.length, addedIds: ins.slice(0, 50), removedIds: outs.slice(0, 50) },
-            })).catch(() => { });
-        }
-        if (out.before.peers.length) noteMemberRemovals(out.before.peers.map(id => ({ kind: 'device', id, name: id, group: out.before.name })));
+        if (!wrote) break;
     }
     return { added, removed };
 }
@@ -610,7 +624,8 @@ async function runMembership({ users, peers }) {
                 return keep.length === g.peers.length ? null : { name: g.name, peers: keep };
             }));
             _membershipFailed.delete(key);
-            if (out) for (const id of out.before.peers.filter(id => ids.has(id))) removed.push({ kind: 'device', id, name: peerName.get(id) || id, group: out.before.name });
+            // A target group is written without any device, also one this run's data did not show.
+            for (const id of droppedDevices(out)) removed.push({ kind: 'device', id, name: peerName.get(id) || id, group: out.before.name });
         } catch (e) { failed(key, e); }
     }
     // After the group writes, outside the target lock: a user write takes the user's lock first
