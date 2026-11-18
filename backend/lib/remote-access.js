@@ -208,9 +208,9 @@ const targetGroupIds = () => [_nb.targetGroupId, _nb.namesTargetGroupId].filter(
 // the network and the address it had (its identity) and an expiry. A session start sets the expiry
 // to at least now + holdHours; the re-check of a session still open raises it again. Kept in memory
 // too, because the rule below is synchronous: loaded with the settings, read again before every
-// sync, session start and resource write (another instance may have written one), and updated on
-// every write.
-const ROUTE_SETTLE_MS = 2000; // measured on a real account: the route was on the gateway 0.52-1.05 s after the group write was sent
+// sync and resource write (another instance may have written one), and updated from the database's
+// answer on every write.
+const ROUTE_SETTLE_MS = 2000; // measured on a real account: the route was on the gateway 0.52-1.05 s after the write was sent
 const HOLD_COLUMNS = 'resource_id, network_id, address, added_at, expires_at';
 let _holds = new Map(); // resource id -> { networkId, address, addedAt (ms, 0 = unknown), expiresAt (ms) }
 let _sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -376,10 +376,7 @@ function fullGroup(g, id) {
 // A target group holds resources only: every write to one leaves it without devices, so a late
 // answer to an older write can never put back a device that was taken out meanwhile. The caller
 // records the devices it took out (`before.peers` that are not in `after.peers`).
-// `opts.added`: the write only adds a resource (a session start). Reads from before it stay usable
-// then: a resource not in its group yet is judged as if it were, and the session that added it
-// reads NetBird again before it is approved.
-async function putManagedGroup(id, change, opts = {}) {
+async function putManagedGroup(id, change) {
     const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(id)), id);
     if (!g) throw new Error(`Couldn't read the group "${managedGroupName(id)}" from NetBird in full, so it was not changed.`);
     const next = await change({ name: g.name, peers: [...g.peers], resources: g.resources });
@@ -390,7 +387,7 @@ async function putManagedGroup(id, change, opts = {}) {
     // so even an error answer (or none) may follow a saved group.
     if (!nbOk(r)) { noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
     bustNbCaches('gref', 'groups', 'usage');
-    if (!opts.added) invalidateSnapshot();
+    invalidateSnapshot();
     return { before: g, after };
 }
 const droppedDevices = (out) => (out ? out.before.peers.filter(id => !out.after.peers.includes(id)) : []);
@@ -572,17 +569,24 @@ async function syncTargetGroupLocked() {
     return { removed };
 }
 
-// A hold that expired, or whose resource is not in a target group (a hold without membership is
-// stale: it is not added back), is deleted. Guarded by the expiry this process saw, so a hold that
-// a session start or a re-check raised meanwhile (here or on another instance) stays.
+// A hold that expired is deleted; so is one whose resource is not in a target group (a hold without
+// membership is stale: it is not added back), once it is older than STALE_HOLD_GRACE_MS: a hold
+// that a session start on another instance just wrote, while its add is still on the way, stays.
+// Both are guarded by the expiry this process saw, so a hold that a session start or a re-check
+// raised meanwhile (here or on another instance) stays.
+const STALE_HOLD_GRACE_MS = 10 * 60_000;
 async function dropStaleHolds(members) {
     const now = Date.now();
     const inGroup = new Set([...members.values()].flatMap(s => [...s]));
     for (const [id, h] of [..._holds]) {
-        if (h.expiresAt > now && inGroup.has(id)) continue;
+        const expired = h.expiresAt <= now;
+        if (!expired && inGroup.has(id)) continue;
         try {
-            await pool.query('DELETE FROM remote_access_targets WHERE resource_id = $1 AND expires_at <= $2', [id, new Date(h.expiresAt)]);
-            if (_holds.get(id) === h) _holds.delete(id);
+            const r = await pool.query(expired
+                ? 'DELETE FROM remote_access_targets WHERE resource_id = $1 AND expires_at <= $2'
+                : `DELETE FROM remote_access_targets WHERE resource_id = $1 AND expires_at <= $2 AND updated_at < NOW() - interval '${STALE_HOLD_GRACE_MS / 60_000} minutes'`,
+            [id, new Date(h.expiresAt)]);
+            if (r && r.rowCount && _holds.get(id) === h) _holds.delete(id);
         } catch (e) {
             console.error('[remote-access] could not delete a stale target hold:', e.message);
         }
@@ -860,8 +864,16 @@ async function freshSnapshot(maxAgeMs) {
 // group yet is judged as if it were (simulate); `real: true` counts only real membership (right
 // before a session is approved, and the re-check). A read-only instance can't add a resource, so it
 // never simulates.
-const authCfg = (kind = 'ip', { real = false } = {}) => ({
+// `standing: true` (the checks before a session, on every instance): the gateway's standing policy
+// must also open the port to the target group, so a disabled or re-pointed one is refused before
+// any hold or write.
+const standingIds = (kind) => {
+    const k = KINDS[kind] || KINDS.ip;
+    return { policyId: _nb[k.policyKey], gatewayGroupId: _nb[k.groupKey], targetGroupId: _nb[k.targetKey] };
+};
+const authCfg = (kind = 'ip', { real = false, standing = false } = {}) => ({
     networks: _cfg.networks,
+    standingPolicy: standing ? standingIds(kind) : null,
     gatewayGroupId: kind === 'names' ? _nb.namesGroupId : _nb.gatewayGroupId,
     gatewayGroupIds: [_nb.gatewayGroupId, _nb.namesGroupId].filter(Boolean), // never routing peers
     managedPolicyIds: [_nb.policyId, _nb.namesPolicyId].filter(Boolean),
@@ -936,8 +948,8 @@ function defaultResolve4(name) {
 // A name that matches a NetBird domain resource goes to the names gateway; any other name is
 // looked up and each IPv4 answer is checked like a typed IP (the first allowed one is used).
 async function resolveTarget(snap, userId, address, port, opts = {}) {
-    const ipCfg = opts.ipCfg || authCfg('ip');
-    const namesCfg = opts.namesCfg || authCfg('names');
+    const ipCfg = opts.ipCfg || authCfg('ip', { standing: true });
+    const namesCfg = opts.namesCfg || authCfg('names', { standing: true });
     const resolve4 = opts.resolve4 || _deps.resolve4 || defaultResolve4;
     const t = normalizeTarget(address);
     if (t.error) return { ok: false, verdict: { ok: false, code: t.error } };
@@ -1088,14 +1100,16 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     _sessions.set(s.id, s); // counts toward the quota from now on, including setup
     let issued = false;
     try {
-        if (!NETBIRD_READONLY) await openTargetForSession(s, protocol, port);
-        else if (s.closed) throw closedError(s);
+        if (!NETBIRD_READONLY) await openTargetForSession(s, port);
+        else if (s.closed) throw closedError();
 
         // Whatever closes the session while its start is being recorded (a shutdown, a re-check),
         // closeSession writes the end record only after this start record, and none if it failed.
         s.started = recordStart(s);
         if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', "The session couldn't be recorded, so it was not opened. Try again.");
         if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
+        // An unanswered write may have started settling while the start was being recorded.
+        if (targetsSettling()) throw httpError(503, 'TARGETS_SETTLING');
         // Closed while its start was being written (a re-check, the feature turned off): no token for it.
         if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
 
@@ -1116,94 +1130,117 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     }
 }
 
-function closedError(s) {
+function closedError() {
     return _shuttingDown ? httpError(503, 'SERVER_RESTARTING') : httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
 }
 
 // Open the session's server to its gateway, then approve it again from NetBird as it is now:
-//   1. under the target lock: set the hold (session start: the full holdHours at once); if the
-//      resource is not in its target group (fresh read), record added_at first (no group write
-//      when that fails), add it to the group, and record added_at again after the answer;
+//   1. under the target lock: set the hold (session start: the full holdHours at once); read the
+//      resource fresh, and if it no longer is the approved one, write nothing; if it doesn't carry
+//      its target group yet, record added_at first (no write when that fails), add the group to
+//      the RESOURCE (never by rewriting the group's list, so two opens never undo each other, also
+//      on two instances), and record added_at again after the answer;
 //   2. wait until ROUTE_SETTLE_MS after added_at (also when another request added it a moment
 //      ago), so the route is on the gateway before guacd connects;
 //   3. read NetBird again and evaluate for real (no simulation): the same resource, network and
 //      address, and the gateway's standing policy opens the port to the target group.
-async function openTargetForSession(s, protocol, port) {
+async function openTargetForSession(s, port) {
     const addedAt = await withTargetLock(() => openTargetLocked(s));
-    if (s.closed) throw closedError(s);
+    if (s.closed) throw closedError();
     const wait = addedAt + ROUTE_SETTLE_MS - Date.now();
     if (addedAt && wait > 0) await _sleep(wait);
-    if (s.closed) throw closedError(s);
+    if (s.closed) throw closedError();
 
     let snap;
     // Always a new read (never the one the checks above used, even within the same millisecond).
     _snapshot = null;
     try { snap = await freshSnapshot(0); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
-    if (s.closed) throw closedError(s);
+    if (s.closed) throw closedError();
     const cfg = authCfg(s.gateway, { real: true });
     const v = s.gateway === 'names'
         ? evaluateNameAccess(snap, cfg, { userId: s.userId, name: s.address, port })
         : evaluateUserAccess(snap, cfg, { userId: s.userId, address: s.address, port });
     if (!v.ok) throw httpError(v.code === 'GATEWAY_NOT_SYNCED' ? 503 : 403, v.code);
     if (v.resource.id !== s.resourceId || v.network.id !== s.networkId || addressKey(v.resource.address) !== addressKey(s.resourceAddress)) throw httpError(409, 'TARGET_CHANGED');
-    const k = KINDS[s.gateway] || KINDS.ip;
-    const problem = standingPolicyProblem(snap, { policyId: _nb[k.policyKey], gatewayGroupId: _nb[k.groupKey], targetGroupId: _nb[k.targetKey] }, port);
+    const problem = standingPolicyProblem(snap, standingIds(s.gateway), port);
     if (problem) throw httpError(409, problem);
     if (targetsSettling() || !snapshotCurrent(snap)) throw httpError(503, 'TARGETS_SETTLING');
 }
 
+// The hold for a session start, in one statement: the same identity (network and address) keeps its
+// added_at (another instance may have just added the resource) and gets the later expiry; another
+// identity replaces the row. Returns the row as the database has it.
+const UPSERT_HOLD_SQL = `INSERT INTO remote_access_targets (resource_id, network_id, address, added_at, expires_at, updated_at)
+    VALUES ($1, $2, $3, NULL, $4, NOW())
+    ON CONFLICT (resource_id) DO UPDATE SET
+        added_at = CASE WHEN remote_access_targets.network_id = EXCLUDED.network_id AND remote_access_targets.address = EXCLUDED.address
+            THEN remote_access_targets.added_at ELSE NULL END,
+        expires_at = CASE WHEN remote_access_targets.network_id = EXCLUDED.network_id AND remote_access_targets.address = EXCLUDED.address
+            THEN GREATEST(remote_access_targets.expires_at, EXCLUDED.expires_at) ELSE EXCLUDED.expires_at END,
+        network_id = EXCLUDED.network_id, address = EXCLUDED.address, updated_at = NOW()
+    RETURNING ${HOLD_COLUMNS}`;
+const SET_ADDED_AT_SQL = 'UPDATE remote_access_targets SET added_at = $4, updated_at = NOW() WHERE resource_id = $1 AND network_id = $2 AND address = $3';
+
 // Returns the hold's added_at (ms; 0 when the resource was already in its group before any
 // recorded add, so there is nothing to wait for).
 async function openTargetLocked(s) {
-    if (s.closed) throw closedError(s);
-    try { await loadTargetHolds({ strict: true }); } catch { throw httpError(503, 'TARGET_OPEN_FAILED'); }
+    if (s.closed) throw closedError();
     const tg = targetGroupFor(s.networkId, s.resourceAddress);
     if (!tg) throw httpError(409, 'GATEWAY_POLICY_MISSING');
-    const now = Date.now();
-    const until = now + _cfg.holdHours * 3_600_000;
-    const cur = _holds.get(s.resourceId);
-    // One hold per resource identity: another network or address replaces it.
-    const same = sameIdentity(cur, s.networkId, s.resourceAddress);
-    const hold = { networkId: s.networkId, address: s.resourceAddress, addedAt: same ? cur.addedAt : 0, expiresAt: same ? Math.max(cur.expiresAt, until) : until };
+    let row;
     try {
-        await pool.query(
-            `INSERT INTO remote_access_targets (${HOLD_COLUMNS}) VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (resource_id) DO UPDATE SET network_id = $2, address = $3, added_at = $4, expires_at = $5`,
-            [s.resourceId, hold.networkId, hold.address, hold.addedAt ? new Date(hold.addedAt) : null, new Date(hold.expiresAt)]);
+        const r = await pool.query(UPSERT_HOLD_SQL, [s.resourceId, s.networkId, s.resourceAddress, new Date(Date.now() + _cfg.holdHours * 3_600_000)]);
+        row = r && r.rows && r.rows[0];
+        if (!row || !msOf(row.expires_at)) throw new Error('the database returned no hold');
     } catch (e) {
         console.error('[remote-access] could not record a target hold:', e.message);
         throw httpError(503, 'TARGET_OPEN_FAILED');
     }
+    const hold = { networkId: String(row.network_id), address: String(row.address), addedAt: msOf(row.added_at), expiresAt: msOf(row.expires_at) };
     _holds.set(s.resourceId, hold);
-    if (s.closed) throw closedError(s);
-    let out;
+    if (s.closed) throw closedError();
+
+    // The resource as NetBird has it now: still the approved one?
+    const path = `/api/networks/${encodeURIComponent(s.networkId)}/resources/${encodeURIComponent(s.resourceId)}`;
+    const got = await netbirdReq('GET', path);
+    if (got && got.status === 404) throw httpError(409, 'TARGET_CHANGED');
+    const res = got && got.body;
+    if (!nbOk(got) || !res || typeof res !== 'object') throw httpError(503, 'TARGET_OPEN_FAILED');
+    if (res.id !== s.resourceId || addressKey(res.address) !== addressKey(s.resourceAddress) || !s.nbType || res.type !== s.nbType) throw httpError(409, 'TARGET_CHANGED');
+    const groups = (Array.isArray(res.groups) ? res.groups : []).map(refId).filter(Boolean);
+    if (groups.includes(tg)) return hold.addedAt;
+
+    // Recorded before the write: a write that lands is never without its added_at.
+    const ids = [s.resourceId, s.networkId, s.resourceAddress];
     try {
-        out = await putManagedGroup(tg, async g => {
-            if (g.resources.some(r => r.id === s.resourceId)) return null;
-            if (!s.nbType) throw new Error("NetBird didn't say which type the resource is");
-            // Recorded before the write: a write that lands is never without its added_at.
-            const at = Date.now();
-            await pool.query('UPDATE remote_access_targets SET added_at = $2 WHERE resource_id = $1', [s.resourceId, new Date(at)]);
-            hold.addedAt = at;
-            return { name: g.name, peers: [], resources: [...g.resources, { id: s.resourceId, type: s.nbType }] };
-        }, { added: true });
+        const at = Date.now();
+        const u = await pool.query(SET_ADDED_AT_SQL, [...ids, new Date(at)]);
+        if (!u || u.rowCount !== 1) throw new Error(`the hold was not found (${u ? u.rowCount : 'no answer'})`);
+        hold.addedAt = at;
     } catch (e) {
-        console.error('[remote-access] could not add %s to the target group: %s', s.resourceId, e.message);
+        console.error('[remote-access] could not record when a target is added:', e.message);
         throw httpError(503, 'TARGET_OPEN_FAILED');
     }
-    if (out) {
-        const at = Date.now();
-        hold.addedAt = at;
-        await pool.query('UPDATE remote_access_targets SET added_at = $2 WHERE resource_id = $1', [s.resourceId, new Date(at)])
-            .catch(e => console.error('[remote-access] could not record when a target was added:', e.message));
-        if (_deps.recordAudit) {
-            Promise.resolve(_deps.recordAudit({
-                actorId: s.userId, actorEmail: s.userEmail, actorName: s.userName, action: 'remote_access.target_open', target: s.resourceName,
-                meta: { group: out.after.name, resourceId: s.resourceId, networkId: s.networkId, address: s.resourceAddress, holdHours: _cfg.holdHours },
-            })).catch(() => { });
-        }
-        const gone = droppedDevices(out);
-        if (gone.length) noteMemberRemovals(gone.map(id => ({ kind: 'device', id, name: id, group: out.before.name })));
+    if (s.closed) throw closedError();
+    const w = await netbirdReq('PUT', path, {
+        name: res.name, address: res.address, description: res.description || '', enabled: res.enabled !== false, groups: [...groups, tg],
+    });
+    // Any answer but success leaves the write uncertain: it may still land.
+    if (!nbOk(w)) {
+        noteUncertainTargetWrite();
+        console.error('[remote-access] could not add %s to the target group: %s', s.resourceId, (w && (w.raw || w.error || w.status)) || 'no response');
+        throw httpError(503, 'TARGET_OPEN_FAILED');
+    }
+    bustNbCaches('policies', 'gref', 'groups', 'usage');
+    const at = Date.now();
+    hold.addedAt = at;
+    await pool.query(SET_ADDED_AT_SQL, [...ids, new Date(at)])
+        .catch(e => console.error('[remote-access] could not record when a target was added:', e.message));
+    if (_deps.recordAudit) {
+        Promise.resolve(_deps.recordAudit({
+            actorId: s.userId, actorEmail: s.userEmail, actorName: s.userName, action: 'remote_access.target_open', target: s.resourceName,
+            meta: { group: managedGroupName(tg), resourceId: s.resourceId, networkId: s.networkId, address: s.resourceAddress, holdHours: _cfg.holdHours },
+        })).catch(() => { });
     }
     return hold.addedAt;
 }
@@ -1677,6 +1714,9 @@ async function recheckSessions() {
             ? evaluateNameAccess(snap, authCfg('names', { real: true }), { userId: s.userId, name: s.address, port: s.port })
             : evaluateUserAccess(snap, authCfg('ip', { real: true }), { userId: s.userId, address: s.address, port: s.port });
         if (!v.ok || v.resource.id !== s.resourceId) { failSession(s, `Your access to this server ended: ${MESSAGES[v.code] || v.code || 'the route changed.'}`, 0x0303); return; }
+        // The approved resource itself changed (another network, another address): not the server
+        // this session was approved and opened for.
+        if (v.network.id !== s.networkId || addressKey(v.resource.address) !== addressKey(s.resourceAddress)) { failSession(s, `Your access to this server ended: ${MESSAGES.TARGET_CHANGED}`, 0x0303); return; }
         if (!(await permitted(s)) && !s.closed) { failSession(s, 'You no longer have permission to use browser remote access.', 0x0303); return; }
         if (!s.closed) kept.push(s);
     }));
@@ -1684,21 +1724,26 @@ async function recheckSessions() {
 }
 
 // An open session keeps its server: each re-check raises the hold's expiry to now + holdHours.
-// Only a hold whose identity is still the one the session was approved for is extended; a missing
-// hold is not created again.
+// Only a hold whose identity is still the one the session was approved for is extended (the address
+// compared as NetBird means it); a missing hold is not created again. Read-only instances do this
+// too: it writes only Postgres.
 async function extendHolds(sessions) {
-    if (NETBIRD_READONLY || !sessions.length) return;
+    if (!sessions.length) return;
     const ids = new Map();
-    for (const s of sessions) ids.set(`${s.resourceId}\n${s.networkId}\n${s.resourceAddress}`, s);
+    for (const s of sessions) ids.set(`${s.resourceId}\n${s.networkId}\n${addressKey(s.resourceAddress)}`, s);
     const until = Date.now() + _cfg.holdHours * 3_600_000;
     await withTargetLock(async () => {
         for (const s of ids.values()) {
             try {
-                await pool.query(
-                    'UPDATE remote_access_targets SET expires_at = GREATEST(expires_at, $4) WHERE resource_id = $1 AND network_id = $2 AND address = $3',
-                    [s.resourceId, s.networkId, s.resourceAddress, new Date(until)]);
+                const r = await pool.query('SELECT address FROM remote_access_targets WHERE resource_id = $1 AND network_id = $2', [s.resourceId, s.networkId]);
+                const row = r && r.rows && r.rows[0];
+                if (!row || addressKey(row.address) !== addressKey(s.resourceAddress)) continue;
+                // The stored address exactly: a row replaced meanwhile is not touched.
+                const u = await pool.query(
+                    'UPDATE remote_access_targets SET expires_at = GREATEST(expires_at, $4), updated_at = NOW() WHERE resource_id = $1 AND network_id = $2 AND address = $3',
+                    [s.resourceId, s.networkId, row.address, new Date(until)]);
                 const h = _holds.get(s.resourceId);
-                if (h && h.networkId === s.networkId && h.address === s.resourceAddress) h.expiresAt = Math.max(h.expiresAt, until);
+                if (u && u.rowCount && h && sameIdentity(h, s.networkId, s.resourceAddress)) h.expiresAt = Math.max(h.expiresAt, until);
             } catch (e) {
                 console.error('[remote-access] could not extend a target hold:', e.message);
             }
@@ -1761,18 +1806,24 @@ function probeGuacd(host, port) {
 function getRemoteAccessStatusLite() { return { activeSessions: _sessions.size }; }
 
 // The servers sessions opened, with a hold that has not expired: in use by a session of this
-// instance, or until when the hold keeps them. Names come from a snapshot when there is one.
+// instance, or until when the hold keeps them. With a snapshot, a hold is listed only while the
+// snapshot shows its resource in its target group (or a session of this instance uses it), and the
+// names come from it.
 function heldTargets(snap) {
     const now = Date.now();
     const resById = new Map(((snap && snap.resources) || []).filter(r => r && r.id).map(r => [r.id, r]));
     const netById = new Map(((snap && snap.networks) || []).filter(n => n && n.id).map(n => [n.id, n]));
+    const targets = new Set(targetGroupIds());
+    const member = (res) => !!res && (Array.isArray(res.groups) ? res.groups : []).some(g => targets.has(String((g && g.id) || g)));
     return [..._holds].filter(([, h]) => h.expiresAt > now)
         .map(([id, h]) => {
             const res = resById.get(id);
             const net = netById.get(h.networkId);
             const inUse = [..._sessions.values()].some(s => s.resourceId === id && s.state !== 'preparing' && sameIdentity(h, s.networkId, s.resourceAddress));
+            if (snap && !inUse && !member(res)) return null;
             return { resourceId: id, name: (res && res.name) || h.address, address: h.address, network: (net && net.name) || h.networkId, inUse, expiresAt: new Date(h.expiresAt).toISOString() };
         })
+        .filter(Boolean)
         .sort((a, b) => (a.inUse === b.inUse ? a.name.localeCompare(b.name) : a.inUse ? -1 : 1));
 }
 
@@ -2044,8 +2095,7 @@ module.exports = {
         resetMembershipForTest: () => { _membershipFailed.clear(); _lastMembership = { at: null, removed: [], error: '' }; _membershipPending = null; },
         passMembershipRetryForTest: () => { for (const f of _membershipFailed.values()) f.at -= MEMBERSHIP_RETRY_MS; },
         installNameForTest: () => _installName,
-        // Target holds: set or read the in-memory copy, and replace the wait before approval.
-        setHoldsForTest: (entries) => { _holds = new Map(Object.entries(entries || {}).map(([id, h]) => [id, { addedAt: 0, ...h }])); },
+        // Target holds: read the in-memory copy, and replace the wait before approval.
         holdsForTest: () => Object.fromEntries([..._holds].map(([id, h]) => [id, { ...h }])),
         setSleepForTest: (fn) => { _sleep = fn || ((ms) => new Promise(r => setTimeout(r, ms))); },
         loadTargetHolds, heldTargets,

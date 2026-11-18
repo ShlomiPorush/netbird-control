@@ -31,12 +31,31 @@ nb.netbirdGet = async (p) => {
 const writes = []; // [method, path, body] of every NetBird write
 let writeAnswer = null; // a test's answer to a write, instead of 200
 let afterWrite = null;  // runs after a write is applied
+const resourceAt = (p) => {
+    const m = /^\/api\/networks\/[^/]+\/resources\/([^/]+)$/.exec(p);
+    return m && live && (live['/api/networks/resources'] || []).find(r => r && r.id === m[1]);
+};
 nb.netbirdReq = async (method, p, body) => {
+    if (method === 'GET') {
+        const r = resourceAt(p);
+        return r ? { status: 200, body: JSON.parse(JSON.stringify(r)) } : { status: 404, body: null };
+    }
     writes.push([method, p, JSON.parse(JSON.stringify(body ?? null))]);
     if (writeAnswer) return writeAnswer;
     // As in NetBird, a group write changes what the next read of that group returns.
     if (live && method === 'PUT' && p.startsWith('/api/groups/') && live[p]) {
         live[p] = { ...live[p], name: body.name, peers: body.peers.map(id => ({ id })), resources: body.resources };
+    }
+    // A resource write: its groups, and the target group's list (one relation in NetBird).
+    const res = method === 'PUT' && resourceAt(p);
+    if (res) {
+        res.groups = body.groups.map(id => ({ id }));
+        for (const gp of ['/api/groups/g-gwt', '/api/groups/g-ngwt']) {
+            if (!live[gp]) continue;
+            const gid = gp.slice('/api/groups/'.length);
+            const others = live[gp].resources.filter(x => x.id !== res.id);
+            live[gp] = { ...live[gp], resources: body.groups.includes(gid) ? [...others, { id: res.id, type: res.type }] : others };
+        }
     }
     if (afterWrite) afterWrite(p);
     return { status: 200, body: { id: 'ok' } };
@@ -272,6 +291,25 @@ test('a hold that a session raised during the sync is not deleted', async () => 
         await ra._internal.syncTargetGroup();
         assert.equal(new Date(holds.rows.get('r1').expires_at).getTime(), later);
     } finally { getHook = null; live = null; }
+});
+
+test('a new hold without membership survives the sync for 10 minutes; an expired one goes at once', async () => {
+    syncSetup({
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.1/32' }, { id: 'r2', type: 'host', address: '10.0.0.2/32' }, { id: 'r3', type: 'host', address: '10.0.0.3/32' }],
+        '/api/networks': [{ id: 'n1', resources: ['r1', 'r2', 'r3'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    });
+    // Another instance just wrote r1's hold, and its add is still on the way.
+    holds.set('r1', { networkId: 'n1', address: '10.0.0.1/32', expiresAt: Date.now() + HOUR, updatedAt: Date.now() - 60_000 });
+    holds.set('r2', { networkId: 'n1', address: '10.0.0.2/32', expiresAt: Date.now() + HOUR, updatedAt: Date.now() - 11 * 60_000 });
+    holds.set('r3', { networkId: 'n1', address: '10.0.0.3/32', expiresAt: Date.now() - 1000, updatedAt: Date.now() - 1000 });
+    try {
+        await ra._internal.syncTargetGroup();
+        assert.deepEqual([...holds.rows.keys()], ['r1']);
+        assert.deepEqual(Object.keys(ra._internal.holdsForTest()), ['r1'], 'kept in memory too');
+        assert.equal(writes.length, 0, 'and never added');
+    } finally { live = null; }
 });
 
 test('the background reconcile runs while browser access is off and drains the target groups', async () => {

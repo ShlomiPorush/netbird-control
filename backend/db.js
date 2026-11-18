@@ -4112,17 +4112,21 @@ async function initializeDatabase() {
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS gateway TEXT DEFAULT 'ip'`);
         // Browser Gateway targets that sessions opened: one hold per resource, for the network and
         // the address the resource had when the session started. The resource stays in its target
-        // group until expires_at; added_at is when this app last added it to the group. The target
-        // sync deletes expired holds and those whose resource is no longer in the group.
+        // group until expires_at; added_at is when this app last added it to the group; updated_at is
+        // the last session start or re-check that wrote it. The target sync deletes expired holds,
+        // and those whose resource is no longer in the group once they are 10 minutes old.
         await client.query(`
           CREATE TABLE IF NOT EXISTS remote_access_targets (
             resource_id TEXT PRIMARY KEY,
             network_id TEXT NOT NULL,
             address TEXT NOT NULL,
             added_at TIMESTAMPTZ,
-            expires_at TIMESTAMPTZ NOT NULL
+            expires_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           );
         `);
+        // A database that ran a pre-release build of this table has no updated_at yet.
+        await client.query(`ALTER TABLE remote_access_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
 
         // API keys for the versioned public API (/api/v1), created by admins in Settings. Only the
         // SHA-256 of a key is stored; the key itself is shown once. See lib/api-keys.js.

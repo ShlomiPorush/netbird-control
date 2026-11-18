@@ -261,36 +261,43 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
     if (reach.error) return deny(reach.error, { resource, network });
     if (reach.domain.length) return deny('GATEWAY_DOMAIN_ROUTES', { resource, network });
     const inReach = (r) => r.entries.some(e => e.kind === 'resource' && e.id === best.res.id);
-    // A resource joins its target group only when a session opens to it: until then it is judged
-    // as if it were a member (see coldTarget).
-    let view = snap;
-    if (!inReach(reach)) {
-        const cold = coldTarget(snap, cfg, best.res);
-        if (cold.code) return deny(cold.code, { resource, network });
-        view = cold.snap;
-        reach = gatewayReach(view, cfg);
-        if (reach.error) return deny(reach.error, { resource, network });
-        if (!inReach(reach)) return deny('GATEWAY_POLICY_MISSING', { resource, network });
-    }
+    // A resource joins its target group only when a session opens to it (see targetView).
+    const tv = targetView(snap, cfg, best.res, reach, inReach);
+    if (tv.code) return deny(tv.code, { resource, network });
+    const view = tv.snap;
+    reach = tv.reach;
     const rival = reach.entries.some(e => !(e.kind === 'resource' && e.id === best.res.id)
         && prefixCovers(e.prefix, ip) && e.prefix.bits >= best.prefix.bits);
     if (rival) return deny('AMBIGUOUS_ROUTE', { resource, network });
+    const standing = standingCheck(snap, cfg, port);
+    if (standing) return deny(standing, { resource, network });
 
     return evaluatePolicies(view, cfg, src, viewResource(view, best.res), port, now, { resource, network });
 }
 
-// A resource that is not in the gateway's reach yet (not a member of its target group):
-//   - cfg.readonly: this instance can't add it, so it is refused;
-//   - cfg.simulate (the checks before a session, and a launch link): judged on a copy of the
-//     snapshot in which only this resource also carries its target group, so the standing policy,
-//     rival routes and drop rules count as they will once it is added;
-//   - otherwise (the evaluation right after the add, and the re-check): the route isn't there.
-function coldTarget(snap, cfg, res) {
-    if (cfg && cfg.readonly) return { code: 'TARGET_NOT_OPEN_READONLY' };
-    if (!cfg || !cfg.simulate) return { code: 'GATEWAY_NOT_SYNCED' };
+// The snapshot a resource is judged on, and the gateway's reach in it:
+//   - cfg.simulate (the checks before a session, and a launch link): always a copy of the snapshot
+//     in which this resource carries its target group (only this one is changed), so the standing
+//     policy, rival routes and drop rules to the target group count as they will once it is added,
+//     also when another policy already gives the gateway a route to it;
+//   - otherwise only real membership counts: a resource out of reach is refused, on a read-only
+//     instance because it can't add it, else because the route isn't there (the evaluation right
+//     after the add, and the re-check).
+function targetView(snap, cfg, res, reach, inReach) {
+    if (!cfg || !cfg.simulate || cfg.readonly) {
+        if (inReach(reach)) return { snap, reach };
+        return { code: cfg && cfg.readonly ? 'TARGET_NOT_OPEN_READONLY' : 'GATEWAY_NOT_SYNCED' };
+    }
     if (!cfg.targetGroupId) return { code: 'GATEWAY_POLICY_MISSING' };
-    return { snap: withTargetMember(snap, res.id, cfg.targetGroupId) };
+    const view = withTargetMember(snap, res.id, cfg.targetGroupId);
+    const r = gatewayReach(view, cfg);
+    if (r.error) return { code: r.error };
+    if (!inReach(r)) return { code: 'GATEWAY_POLICY_MISSING' };
+    return { snap: view, reach: r };
 }
+// cfg.standingPolicy ({ policyId, gatewayGroupId, targetGroupId }): the gateway's standing policy
+// must open the port to the target group (see standingPolicyProblem).
+const standingCheck = (snap, cfg, port) => (cfg && cfg.standingPolicy ? standingPolicyProblem(snap, cfg.standingPolicy, port) : null);
 function withTargetMember(snap, resourceId, targetGroupId) {
     return {
         ...snap,
@@ -480,18 +487,15 @@ function evaluateNameAccess(snap, cfg, { userId, name, port, now = Date.now() })
     if (reach.error) return deny(reach.error === 'GATEWAY_NOT_ENROLLED' ? 'NAMES_GATEWAY_NOT_ENROLLED' : reach.error, { resource, network });
     if (reach.entries.length) return deny('NAMES_GATEWAY_EXTRA_REACH', { resource, network });
     const inReach = (r) => r.domain.some(d => d.kind === 'resource' && d.id === best.res.id);
-    let view = snap;
-    if (!inReach(reach)) {
-        const cold = coldTarget(snap, cfg, best.res);
-        if (cold.code) return deny(cold.code, { resource, network });
-        view = cold.snap;
-        reach = gatewayReach(view, cfg);
-        if (reach.error) return deny(reach.error, { resource, network });
-        if (!inReach(reach)) return deny('GATEWAY_POLICY_MISSING', { resource, network });
-    }
+    const tv = targetView(snap, cfg, best.res, reach, inReach);
+    if (tv.code) return deny(tv.code, { resource, network });
+    const view = tv.snap;
+    reach = tv.reach;
     const rival = reach.domain.some(d => !(d.kind === 'resource' && d.id === best.res.id)
         && arr(d.domains).some(a => { const p = domainPattern(a); return patternMatches(p, name) && p.rank >= best.rank; }));
     if (rival) return deny('AMBIGUOUS_ROUTE', { resource, network });
+    const standing = standingCheck(snap, cfg, port);
+    if (standing) return deny(standing, { resource, network });
 
     return evaluatePolicies(view, cfg, src, viewResource(view, best.res), port, now, { resource, network });
 }

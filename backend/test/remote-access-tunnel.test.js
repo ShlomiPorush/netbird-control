@@ -14,7 +14,9 @@ core.getSetting = async (k) => settings[k] || null;
 core.setSetting = async (k, v) => { settings[k] = v; };
 const queries = [];
 const order = []; // DB writes and event records, in the order they happened
-core.pool.query = async (sql, params) => { queries.push({ sql, params }); order.push(sql.trim().split(/\s+/)[0] + ':' + (/remote_sessions/.test(sql) ? 'remote_sessions' : '')); return { rows: [] }; };
+// The target holds a session start writes live in their own stand-in table.
+const holdTable = require('./helpers/hold-table').holdTable();
+core.pool.query = async (sql, params) => { if (/remote_access_targets/.test(sql)) return holdTable.query(sql, params); queries.push({ sql, params }); order.push(sql.trim().split(/\s+/)[0] + ':' + (/remote_sessions/.test(sql) ? 'remote_sessions' : '')); return { rows: [] }; };
 
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
@@ -35,9 +37,13 @@ const snapshot = {
     '/api/networks': [{ id: 'n1', name: 'Office', resources: ['r1', 'r-dom'] }],
     '/api/routes': [],
     '/api/networks/n1/routers': [{ peer: 'p-r', enabled: true }],
-    // Both servers are already in their target groups (earlier sessions opened them): no add, no wait.
-    '/api/groups/g-gwt': { id: 'g-gwt', name: 'Browser Gateway Targets', peers: [], resources: [{ id: 'r1', type: 'host' }] },
-    '/api/groups/g-ngwt': { id: 'g-ngwt', name: 'Browser Gateway Name Targets', peers: [], resources: [{ id: 'r-dom', type: 'domain' }] },
+};
+// A session start reads its resource fresh: here it already carries its target group (an earlier
+// session opened it), so nothing is written and there is nothing to wait for.
+nb.netbirdReq = async (method, p) => {
+    const m = /^\/api\/networks\/([^/]+)\/resources\/([^/]+)$/.exec(p);
+    const r = method === 'GET' && m && (snapshot['/api/networks/resources'] || []).find(x => x.id === m[2]);
+    return r ? { status: 200, body: JSON.parse(JSON.stringify(r)) } : { status: 404, body: null };
 };
 let onNetbirdGet = null; // test hook, called before each NetBird read
 nb.netbirdGet = async (p) => { if (onNetbirdGet) await onNetbirdGet(p); return JSON.parse(JSON.stringify(snapshot[p] ?? null)); };

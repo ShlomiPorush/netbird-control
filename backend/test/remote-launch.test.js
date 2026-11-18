@@ -19,7 +19,10 @@ const keyRows = new Map();
 const auditTimeouts = []; // query_timeout of each app_audit insert sent as a config object
 const keyCheckTimeouts = []; // query_timeout of each key check when a link is opened
 let failKeyCheck = false;
+// The target holds a session start writes live in their own stand-in table.
+const holdTable = require('./helpers/hold-table').holdTable();
 core.pool.query = async (sql, params = []) => {
+    if (typeof sql === 'string' && /remote_access_targets/.test(sql)) return holdTable.query(sql, params);
     if (typeof sql !== 'string') {
         params = sql.values;
         if (/app_audit/.test(sql.text)) auditTimeouts.push([sql.values[3], sql.query_timeout]);
@@ -60,9 +63,15 @@ const snapshot = {
     '/api/networks': [{ id: 'n1', name: 'Office', resources: ['r1'] }],
     '/api/routes': [],
     '/api/networks/n1/routers': [{ peer: 'p-r', enabled: true }],
-    // r1 is already in its target group (an earlier session opened it): no add, no wait.
-    '/api/groups/g-gwt': { id: 'g-gwt', name: 'Browser Gateway Targets', peers: [], resources: [{ id: 'r1', type: 'host' }] },
 };
+// A session start reads its resource fresh: here it already carries its target group (an earlier
+// session opened it), so nothing is written and there is nothing to wait for.
+nb.netbirdReq = async (method, p) => {
+    const m = /^\/api\/networks\/([^/]+)\/resources\/([^/]+)$/.exec(p);
+    const r = method === 'GET' && m && (snapshot['/api/networks/resources'] || []).find(x => x.id === m[2]);
+    return r ? { status: 200, body: JSON.parse(JSON.stringify(r)) } : { status: 404, body: null };
+};
+
 nb.netbirdGet = async (p) => JSON.parse(JSON.stringify(snapshot[p] ?? null));
 const events = require('../lib/events');
 events.addEvent = async () => { };
