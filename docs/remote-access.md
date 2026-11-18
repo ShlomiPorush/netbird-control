@@ -49,10 +49,10 @@ Browser ──WSS──> NetBird Control ──(internal Docker network)──> 
 - **The gateway groups, their policies and the gateway peers belong to the app.** Only the app
   decides which resources carry the target groups, whoever edits, creates, moves or merges a
   resource: groups sent for a resource are ignored for those. A resource write never adds a target
-  group; it keeps one only under the rule in
-  [Opening servers to the gateways](#opening-servers-to-the-gateways), so a new address, a closed
-  network or an expired hold takes it off in the same write. A new resource, and the copy that a
-  move creates, never gets one. No temporary grant, approved request or recurring rule can put a user into a gateway
+  group. It keeps one the resource has only while the resource's network is selected and the write
+  doesn't change its address, so a new address or a closed network takes it off in the same write
+  (an expired hold is left to the target sync). A new resource, and the copy that a move creates,
+  never gets one. No temporary grant, approved request or recurring rule can put a user into a gateway
   group. A gateway peer can't be a routing peer, and neither can a group it is in, nor *All*
   (a gateway that enrolls later joins it). Deleting a resource never deletes these groups or
   policies, and merging, moving or editing a resource never changes these policies. The Groups
@@ -110,17 +110,17 @@ fragile. So a server joins its gateway's target group only when it is needed:
    session waits 2 seconds from when it saw the membership. The user sees this as **Opening The
    Route To The Server**, for RDP and SSH alike.
 4. **The session is approved again** from a fresh read of NetBird: the same resource, network and
-   address, a real route through its target group, and the gateway's standing policy exists, is
-   enabled, and has an enabled accept rule from the gateway group to the target group that opens
-   the TCP port. A drop rule to the target group still counts even if the resource left its group
+   address; the gateway has a real route to that resource, and no other route as specific or more;
+   and the gateway's standing policy exists, is enabled, and has an enabled accept rule from the
+   gateway group to the target group that opens the TCP port. A drop rule to the target group still counts even if the resource left its group
    meanwhile. Only then does the browser get its one-time token. Any failure ends the attempt and
-   frees its place in the session limits.
+   frees its place in the session limits. When a target sync, a settings save or a write that can
+   take a server out of its group happens on this instance after that read, no token is given
+   either; the user tries again.
 5. **While a session is open**, the check every 60 seconds extends its server's hold to now plus
-   the hold time (read-only instances too). A server in use always stays open: if its resource was
-   taken out of its target group while the session's hold is valid (for example by a sync that
-   crossed another instance's add) and the user still has access, the check adds it back once,
-   recorded in the audit log as restored; if that fails, the session closes. A session whose
-   resource now has another network or address is closed.
+   the hold time (read-only instances too), so a server in use stays open. A session whose server
+   is no longer reachable that way, or whose resource now has another network or address, is
+   closed.
 6. **The target sync never adds anything.** NetBird is the source of truth: the sync keeps a
    member only while its network is selected, its address still qualifies for that group, and it
    has a valid hold for its current network and address. Every other member is taken out, in one
@@ -130,11 +130,8 @@ fragile. So a server joins its gateway's target group only when it is needed:
    The holds are read again after each group read, so a member another instance has just added
    keeps its place. Afterwards the sync deletes the holds that expired, and those whose resource is
    not in its group once they are 10 minutes old (a hold that another instance has just written,
-   while its add is still on the way, stays); such a resource is not added back. A resource write
-   (an edit, a rename) that can't read the holds keeps the target group if the resource still
-   qualifies by network and address, and leaves the rest to the sync. The sync runs when the
-   Remote Access settings are saved and
-   every 10 minutes on the instance that runs the background jobs, **also while Remote Access is
+   while its add is still on the way, stays); such a resource is not added back. The sync runs
+   when the Remote Access settings are saved and every 10 minutes on the instance that runs the background jobs, **also while Remote Access is
    turned off**, so the groups drain (the policies stay disabled).
 
 The first sync after upgrading from 1.4.x takes out, in one write per group, every resource that
@@ -142,7 +139,8 @@ The first sync after upgrading from 1.4.x takes out, in one write per group, eve
 so nothing in use is lost; the next session to a server opens it again.
 
 Settings → Remote Access lists the servers that are open right now: **In Use** when a session of
-the instance that answered uses it, otherwise until when it stays open.
+the instance that answered uses it, otherwise until when it stays open. When NetBird can't be read,
+the list is empty and the page shows the error.
 
 A read-only instance (`NETBIRD_READONLY=true`) can't add a server to a target group. It accepts
 only servers that are already members, and refuses any other with a message saying so. Otherwise
@@ -233,6 +231,15 @@ server's resource already chosen.
   the same address (another open server's subnet, say), that route may carry the connection until
   the more specific one arrives, usually within the first second. The more specific route wins once
   it is there. The app doesn't handle such overlaps specially.
+- **A session start writes the resource.** To open a server it reads the resource and writes it
+  back with the target group added, like every resource write in the app. NetBird has no
+  conditional write, so an edit made in NetBird in the same instant can be overwritten.
+- **Two instances during an update.** While an update without downtime runs two instances side by
+  side, a sync on one can take out a server the other has just opened. Its session closes at the
+  next check, and the user connects again.
+- **A move and a session at the same moment.** A move creates the copy, deletes the original and
+  then renames the copy. A session opened to the copy in the milliseconds before that rename loses
+  its target and has to connect again.
 
 - **RDP server certificates are not verified.** Most internal Windows servers use self-signed
   certificates. Someone who can take over the server's address inside the network could receive

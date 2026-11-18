@@ -24,11 +24,11 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   doesn't open the port. The target sync never adds a resource: it takes out every member without
   a valid hold for its current network and address, also while Remote Access is turned off, and
   deletes holds that expired (and, after 10 minutes, holds whose resource is not a member). A
-  session whose resource gets another network or address is closed at the next check; an open
-  session whose resource lost its target group is given it back once while its hold is valid.
-  Resource edits keep a target group only under the same rule, and new or moved resources never
-  get one. The first sync after the upgrade takes the whole networks
-  that 1.4.x put into the target groups out, in one write per group. To roll back, use 1.4.1, not
+  session whose resource left its target group, or got another network or address, is closed at
+  the next check. Resource edits never add a target group, and keep one only while the network is
+  selected and the address doesn't change; new or moved resources never get one. The first sync
+  after the upgrade takes the whole networks that 1.4.x put into the target groups out, in one
+  write per group. To roll back, use 1.4.1, not
   1.4.0.
 - **A policy that points at a Browser Gateway target group no longer gives a user access** through
   it. A drop rule through such a group still blocks.
