@@ -43,7 +43,9 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   is checked live and recorded on the Activity page. The gateway's NetBird groups, policies and
   peers belong to the app and carry the installation's name: resource edits, grants, routing
   peers and the Groups page can't use them, and members added in the NetBird dashboard are
-  removed again. Wildcard
+  removed again. A server joins the gateway's targets only when someone opens a session to it, and
+  stays for a set number of hours (10 by default), so the gateway never holds a whole network's
+  resources. Wildcard
   domain resources, loopback, link-local, NetBird peer and the gateways' own addresses are never
   targets ([setup and security model](docs/remote-access.md)).
   Another system, such as a customer file, can open a session with stored credentials through the

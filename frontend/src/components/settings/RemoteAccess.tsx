@@ -78,11 +78,12 @@ export function RemoteAccessSettings() {
         enabled: form.enabled, allowAll: form.allowAll, guacdHost: form.guacdHost, guacdPort: Number(form.guacdPort),
         namesGuacdHost: form.namesGuacdHost, namesGuacdPort: Number(form.namesGuacdPort),
         networks: form.networks, maxSessionsPerUser: Number(form.maxSessionsPerUser), maxSessionsTotal: Number(form.maxSessionsTotal),
-        idleTimeoutMin: Number(form.idleTimeoutMin), maxDurationHours: Number(form.maxDurationHours), clipboard: form.clipboard, sshHostKeys,
+        idleTimeoutMin: Number(form.idleTimeoutMin), maxDurationHours: Number(form.maxDurationHours), holdHours: Number(form.holdHours),
+        clipboard: form.clipboard, sshHostKeys,
         rdp: form.rdp, ssh: { ...form.ssh, fontSize: Number(form.ssh.fontSize) },
       });
       setForm(r.config);
-      setSaved(r.sync ? `Saved. NetBird updated: ${r.sync.added} resource(s) added to the gateway, ${r.sync.removed} removed.` : 'Saved.');
+      setSaved(r.sync?.removed ? `Saved. NetBird updated: ${r.sync.removed} server(s) taken off the gateways.` : 'Saved.');
       qc.invalidateQueries({ queryKey: ['remote-access-status'] });
       qc.invalidateQueries({ queryKey: ['me'] });
     } catch (e) {
@@ -110,7 +111,8 @@ export function RemoteAccessSettings() {
     <div className="max-w-2xl flex flex-col gap-5">
       <p className="text-nb-gray-500 text-sm">
         Let users open RDP and SSH sessions from the browser through the Browser Gateway - NetBird peers next to this app.
-        Each session is checked against the user's own NetBird access; the gateways can only reach the networks you pick here.
+        Each session is checked against the user's own NetBird access. The gateways reach only servers in the networks you pick here, and
+        only once someone has opened a session to them.
         The IP gateway serves IPv4 addresses. The names gateway, which is optional, serves host names of NetBird domain resources.
       </p>
 
@@ -136,7 +138,6 @@ export function RemoteAccessSettings() {
               detail={st.gateway.enrolled ? st.gateway.peers.map((p) => `${p.name}${p.connected ? '' : ' (offline)'}`).join(', ') : 'Create a setup key below and start the gateway containers.'} />
             <StatusLine ok={st.guacdReachable} label={st.guacdReachable ? 'guacd Reachable' : 'guacd Not Reachable'}
               detail={st.guacdReachable ? `${form.guacdHost}:${form.guacdPort}` : `No answer from ${form.guacdHost}:${form.guacdPort}. Are the gateway containers running (netbird-docker-compose-files/docker-compose-remote-access.yml)?`} />
-            <StatusLine ok={st.targets > 0} warn label={`${st.targets} Resource${st.targets === 1 ? '' : 's'} Open To The Gateway`} />
             {st.reachError && <StatusLine ok={false} label="Unreadable Policy Blocks Every Session" detail={st.reachError} />}
             {st.domainRoutes.length > 0 && (
               <StatusLine ok={false} label="Domain Routes Block Every Session"
@@ -154,7 +155,6 @@ export function RemoteAccessSettings() {
               <StatusLine ok={st.names.guacdReachable} label={st.names.guacdReachable ? 'guacd Reachable' : 'guacd Not Reachable'}
                 detail={st.names.guacdReachable ? `${form.namesGuacdHost}:${form.namesGuacdPort}` : `No answer from ${form.namesGuacdHost}:${form.namesGuacdPort}. Is the names gateway running (profile remote-names)?`} />
             )}
-            {st.names.gateway.enrolled && <StatusLine ok={st.names.targets > 0} warn label={`${st.names.targets} Domain Resource${st.names.targets === 1 ? '' : 's'} Open To The Names Gateway`} />}
             {st.names.reachError && <StatusLine ok={false} label="Unreadable Policy Blocks Connecting By Name" detail={st.names.reachError} />}
             {st.names.extraReach.length > 0 && (
               <StatusLine ok={false} label="Address Routes Block Connecting By Name"
@@ -173,6 +173,24 @@ export function RemoteAccessSettings() {
             )}
             {st.membership?.error && <StatusLine ok={false} label="Couldn't Remove A Member Added Outside NetBird Control" detail={`${st.membership.error} It is tried again on the next read from NetBird.`} />}
             {(st.error || st.lastApply.error) && <StatusLine ok={false} label="Problem" detail={st.error || st.lastApply.error} />}
+            <div className="text-[0.75rem] font-semibold uppercase tracking-wide text-nb-gray-500 mt-3">Opened Servers</div>
+            {(st.held || []).length === 0
+              ? <div className="text-[0.8rem] text-nb-gray-500 py-1.5">None right now. A server opens to its gateway when someone starts a session to it.</div>
+              : (
+                <ul className="flex flex-col py-1">
+                  {(st.held || []).map((h) => (
+                    <li key={h.resourceId} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1 text-sm">
+                      <span className="min-w-0 break-words text-nb-gray-800 dark:text-nb-gray-100">
+                        {h.name}{h.name !== h.address && <span className="text-nb-gray-500"> ({h.address})</span>}
+                        <span className="text-[0.78rem] text-nb-gray-500"> - {h.network}</span>
+                      </span>
+                      <span className={h.inUse ? 'text-[0.78rem] font-medium text-green-600 dark:text-green-500' : 'text-[0.78rem] text-nb-gray-500'}>
+                        {h.inUse ? 'In Use' : `Until ${formatTimestamp(h.expiresAt)}`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             <div className="text-[0.78rem] text-nb-gray-500 mt-1">{st.activeSessions} active session(s)</div>
           </>
         ) : <div className="text-sm text-red-500">The status could not be loaded.</div>}
@@ -200,7 +218,7 @@ export function RemoteAccessSettings() {
         </div>
       </Field>
 
-      <Field label="Networks Open To The Gateway" hint="IPv4 host and subnet resources of these networks join the IP gateway's target group, and their domain resources join the names gateway's. Keep this list as small as possible, and don't open two networks whose host names can resolve to the same private address.">
+      <Field label="Networks Open To The Gateway" hint="Servers in these networks can be opened from the browser: IPv4 host and subnet resources through the IP gateway, exact domain resources through the names gateway. A server joins its gateway's targets only when someone opens a session to it. Keep this list as small as possible, and don't open two networks whose host names can resolve to the same private address.">
         <div className={`${box} max-h-64 overflow-auto flex flex-col gap-1.5`}>
           {networksQ.isLoading ? <span className="text-sm text-nb-gray-500">Loading networks…</span>
             : (networksQ.data || []).length === 0 ? <span className="text-sm text-nb-gray-500">No networks found.</span>
@@ -219,6 +237,9 @@ export function RemoteAccessSettings() {
         <Field label="Sessions In Total"><Input inputMode="numeric" value={String(form.maxSessionsTotal)} onChange={(e) => set('maxSessionsTotal', Number(e.target.value.replace(/\D/g, '')) || 0)} /></Field>
         <Field label="Idle Timeout (Minutes)"><Input inputMode="numeric" value={String(form.idleTimeoutMin)} onChange={(e) => set('idleTimeoutMin', Number(e.target.value.replace(/\D/g, '')) || 0)} /></Field>
         <Field label="Maximum Session Length (Hours)"><Input inputMode="numeric" value={String(form.maxDurationHours)} onChange={(e) => set('maxDurationHours', Number(e.target.value.replace(/\D/g, '')) || 0)} /></Field>
+        <Field label="Keep Opened Servers Available For (Hours)" hint="After a session starts, its server stays open to the gateway this long (1 to 72), so the next session to it opens at once. An open session keeps it open.">
+          <Input inputMode="numeric" value={String(form.holdHours ?? 10)} onChange={(e) => set('holdHours', Number(e.target.value.replace(/\D/g, '')) || 0)} />
+        </Field>
       </div>
 
       <label className={toggleCard}>

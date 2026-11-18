@@ -14,27 +14,36 @@ core.getSetting = async (k) => settings[k] || null;
 core.setSetting = async (k, v) => { settings[k] = v; };
 const queries = [];
 const order = []; // DB writes and event records, in the order they happened
-core.pool.query = async (sql, params) => { queries.push({ sql, params }); order.push(sql.trim().split(/\s+/)[0] + ':' + (/remote_sessions/.test(sql) ? 'remote_sessions' : '')); return { rows: [] }; };
+// The target holds a session start writes live in their own stand-in table.
+const holdTable = require('./helpers/hold-table').holdTable();
+core.pool.query = async (sql, params) => { if (/remote_access_targets/.test(sql)) return holdTable.query(sql, params); queries.push({ sql, params }); order.push(sql.trim().split(/\s+/)[0] + ':' + (/remote_sessions/.test(sql) ? 'remote_sessions' : '')); return { rows: [] }; };
 
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
 const snapshot = {
     '/api/users': [{ id: 'u1', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u2', auto_groups: ['g-staff'], is_blocked: false }, { id: 'u3', auto_groups: [], is_blocked: false }],
     '/api/peers': [{ id: 'p-gw', name: 'gw', groups: [{ id: 'g-gw' }], connected: true }, { id: 'p-ngw', name: 'ngw', groups: [{ id: 'g-ngw' }], connected: true }, { id: 'p-r', name: 'r', groups: [], connected: true }],
-    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-ngw', name: 'Browser Gateway Names' }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets' }, { id: 'g-staff', name: 'Staff' }],
+    '/api/groups': [{ id: 'g-all', name: 'All' }, { id: 'g-gw', name: 'Browser Gateway' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }, { id: 'g-ngw', name: 'Browser Gateway Names' }, { id: 'g-ngwt', name: 'Browser Gateway Name Targets' }, { id: 'g-staff', name: 'Staff' }, { id: 'g-srv', name: 'Servers' }],
     '/api/policies': [
         { id: 'pol-gw', name: 'Browser Gateway', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-gwt' }] }] },
-        { id: 'pol-ssh', name: 'Staff SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-gwt' }] }] },
+        { id: 'pol-ssh', name: 'Staff SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-srv' }] }] },
         { id: 'pol-ngw', name: 'Browser Gateway (Names)', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-ngw' }], destinations: [{ id: 'g-ngwt' }] }] },
         { id: 'pol-web', name: 'Staff Web SSH', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-staff' }], destinations: [], destinationResource: { id: 'r-dom', type: 'domain' } }] },
     ],
     '/api/networks/resources': [
-        { id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }] },
+        { id: 'r1', name: 'srv1', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }, { id: 'g-srv' }] },
         { id: 'r-dom', name: 'Safe', type: 'domain', address: 'mosessafe.com', enabled: true, groups: [{ id: 'g-ngwt' }] },
     ],
     '/api/networks': [{ id: 'n1', name: 'Office', resources: ['r1', 'r-dom'] }],
     '/api/routes': [],
     '/api/networks/n1/routers': [{ peer: 'p-r', enabled: true }],
+};
+// A session start reads its resource fresh: here it already carries its target group (an earlier
+// session opened it), so nothing is written and there is nothing to wait for.
+nb.netbirdReq = async (method, p) => {
+    const m = /^\/api\/networks\/([^/]+)\/resources\/([^/]+)$/.exec(p);
+    const r = method === 'GET' && m && (snapshot['/api/networks/resources'] || []).find(x => x.id === m[2]);
+    return r ? { status: 200, body: JSON.parse(JSON.stringify(r)) } : { status: 404, body: null };
 };
 let onNetbirdGet = null; // test hook, called before each NetBird read
 nb.netbirdGet = async (p) => { if (onNetbirdGet) await onNetbirdGet(p); return JSON.parse(JSON.stringify(snapshot[p] ?? null)); };

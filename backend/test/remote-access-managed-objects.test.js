@@ -19,8 +19,11 @@ core.getSetting = async (k) => settings[k] ?? null;
 core.setSetting = async (k, v) => { settings[k] = v; };
 const sqls = [];
 let rowsFor = () => null; // per-test SQL answers
+let holdRows = []; // the remote_access_targets rows (target holds)
+const hold = (id, networkId, address, hours = 1) => ({ resource_id: id, network_id: networkId, address, added_at: null, expires_at: new Date(Date.now() + hours * 3_600_000) });
 core.pool.query = async (sql, params) => {
     sqls.push({ sql, params });
+    if (/FROM remote_access_targets/.test(sql)) return { rows: holdRows };
     const r = rowsFor(sql, params);
     if (r) return { rows: r };
     if (/nextval/.test(sql)) return { rows: [{ id: 701 }] };
@@ -100,6 +103,8 @@ ra.setRemoteAccessDeps({ addResourceGroups: db.addResourceGroups, removeResource
 const MANAGED = { gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw', namesGroupId: 'g-ngw', namesTargetGroupId: 'g-ngwt', namesPolicyId: 'pol-ngw' };
 function reset(over = {}) {
     calls.length = 0; sqls.length = 0; rowsFor = () => null;
+    // A session opened r1 (in the open network n1): its hold keeps it in the target group.
+    holdRows = [hold('r1', 'n1', '10.0.0.5/32')];
     ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
     ra._internal.setManagedForTest(MANAGED);
     ra._internal.resetSettlingForTest();
@@ -126,10 +131,10 @@ const writes = (method, re) => calls.filter(c => c[0] === method && re.test(c[1]
 const lastBody = (method, re) => { const w = writes(method, re); return w.length ? w[w.length - 1][2] : null; };
 
 // ─── Resource writes ───
-test('a new resource never takes a managed group from the caller; the target group follows the rule', async () => {
+test('a new resource never takes a managed group, not even a target group in an open network', async () => {
     reset();
     await db.createClientResource('n1', { name: 'a', address: '10.0.0.9', groups: ['g-gwt', 'g-ngwt', 'g-gw', 'g-ngw', 'g-own'], policies: [] });
-    assert.deepEqual(lastBody('POST', /\/api\/networks\/n1\/resources$/).groups, ['g-own', 'g-gwt'], 'open network, IPv4: the IP target group by the rule');
+    assert.deepEqual(lastBody('POST', /\/api\/networks\/n1\/resources$/).groups, ['g-own'], 'open network, IPv4: only a session start adds it');
     await db.createClientResource('n2', { name: 'b', address: 'files.example.com', groups: ['g-gwt', 'g-own'], policies: [] });
     assert.deepEqual(lastBody('POST', /\/api\/networks\/n2\/resources$/).groups, ['g-own'], 'closed network: none');
 });
@@ -145,7 +150,7 @@ test('without stored ids, the old managed groups are still recognized by their l
     assert.equal(writes('POST', /resources$/).length, 0, 'nothing created when the groups cannot be checked');
 });
 
-test('an edit can neither add nor drop a managed group; an address that changes type swaps the target group', async () => {
+test('an edit can neither add nor drop a managed group; an address change drops the target group', async () => {
     reset();
     const edit = (o) => db.editResource('n1', 'r1', { name: 'srv', address: '10.0.0.5/32', description: '', ...o });
     await edit({ groups: ['g-new', 'g-ngwt', 'g-gw'] });
@@ -154,8 +159,10 @@ test('an edit can neither add nor drop a managed group; an address that changes 
     assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-gwt'], 'dropping the target group is not possible');
     await edit({ groups: undefined });
     assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-gwt'], 'omitted groups keep the current ones');
+    await edit({ address: '10.0.0.5', groups: ['g-own'] });
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'the same address written without /32 keeps it');
     await edit({ address: 'srv.example.com', groups: ['g-own', 'g-gwt'] });
-    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-ngwt'], 'a domain gets the names target group, never the IP one');
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own'], 'a new address is not what the hold is for: no target group, and never the names one');
     await edit({ address: '*.example.com', groups: ['g-own'] });
     assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own'], 'a wildcard gets no target group');
 });
@@ -171,16 +178,47 @@ test("an editor's write to their own resource leaves another user's browser acce
         groups: [], routes: [], grants: [],
         networks: [{ id: 'n1', resources: ['r1'] }, { id: 'n2', resources: ['r3'] }],
         resources: [
-            { id: 'r1', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }] },
+            { id: 'r1', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-gwt' }, { id: 'g-own' }] },
             { id: 'r3', address: 'files.editor.example', enabled: true, groups: written.map(id => ({ id })) },
         ],
         policies: [
             state.policies[0],
-            { id: 'pol-staff', name: 'Staff', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['3389'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-gwt' }] }] },
+            { id: 'pol-staff', name: 'Staff', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['3389'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-own' }] }] },
         ],
     };
     const v = evaluateUserAccess(snap, { networks: ['n1'], gatewayGroupId: 'g-gw', managedPolicyIds: ['pol-gw'] }, { userId: 'victim', address: '10.0.0.5', port: 3389 });
     assert.equal(v.code, 'OK');
+});
+
+test('a writer keeps a target group the resource has while its network is open and the write keeps its address, without looking at holds', async () => {
+    reset();
+    holdRows = []; // no hold at all: writers don't judge holds, the sync does
+    await db.setResourceEnabled('n1', 'r1', false);
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'kept: open network, same address');
+    await db.editResource('n1', 'r1', { name: 'srv', address: '10.0.0.5', description: '' });
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-gwt'], 'the same address written without /32');
+    // A new address drops it, even one that qualifies for the same group and has a hold.
+    holdRows = [hold('r1', 'n1', '10.0.0.6/32')];
+    await db.editResource('n1', 'r1', { name: 'srv', address: '10.0.0.6/32', description: '' });
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own']);
+    // A closed network drops it.
+    reset();
+    state.resources[1].groups = [{ id: 'g-gwt' }];
+    await db.setResourceEnabled('n2', 'r2', true);
+    assert.deepEqual(lastBody('PUT', /r2$/).groups, []);
+    // Never added, held or not.
+    reset();
+    state.resources[0].groups = [{ id: 'g-own' }];
+    holdRows = [hold('r1', 'n1', '10.0.0.5/32')];
+    assert.equal(await db.addResourceGroups('n1', 'r1', ['g-new']), true);
+    assert.deepEqual(lastBody('PUT', /r1$/).groups, ['g-own', 'g-new']);
+    // A move's copy is a new resource: no target group, even with both networks open.
+    reset();
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1', 'n2'] });
+    await db.moveResources('n1', ['r1'], 'n2');
+    const copy = lastBody('POST', /\/api\/networks\/n2\/resources$/);
+    assert.ok(copy, 'the copy was created');
+    assert.deepEqual(copy.groups, ['g-own']);
 });
 
 test('read-modify-write helpers set the target groups by the rule, not from their read', async () => {
@@ -232,8 +270,7 @@ test('a resource delete in flight finishes before a target sync reads the resour
     state.readHook = async (p) => { if (p === '/api/networks/resources') order.push('sync-read'); };
     const deleting = db.deleteResource('n1', 'r1');
     for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
-    state.resources.push({ id: 'r9', net: 'n1', name: 'new', type: 'host', address: '10.0.0.9/32', enabled: true, groups: [] });
-    state.networks[0].resources.push('r9'); // a change that makes the sync write the group
+    // r2 (in the closed network) still carries the target group: the sync writes the group.
     const syncing = ra._internal.syncTargetGroup();
     await new Promise(r => setTimeout(r, 20));
     assert.deepEqual(order, ['delete'], 'the sync waits for the delete in flight');
@@ -242,7 +279,7 @@ test('a resource delete in flight finishes before a target sync reads the resour
     await syncing;
     assert.deepEqual(order.slice(0, 2), ['delete', 'sync-read']);
     const put = lastBody('PUT', /^\/api\/groups\/g-gwt$/);
-    assert.deepEqual(put.resources.map(r => r.id), ['r9'], 'the deleted resource is not written back');
+    assert.deepEqual(put.resources.map(r => r.id), [], 'the deleted resource is not written back');
 });
 
 test('a resource write that got no answer holds new sessions back until a later sync has finished', async () => {

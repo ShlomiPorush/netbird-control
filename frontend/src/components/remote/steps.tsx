@@ -5,10 +5,12 @@ import { cn } from '@/lib/cn';
 import { GUAC, PORTAL_MESSAGE_CODES, type GuacStatus } from '@/lib/remoteAccess';
 import { Button } from '@/components/ui';
 
-// The connection steps a user sees, shared by the Remote Access page (the checks before a session)
-// and the session tabs (opening the channel, reaching the server, signing in).
+// The connection steps a user sees, shared by the Remote Access page (the checks before a session,
+// and opening the route: the server joins its gateway's targets and the route reaches the gateway)
+// and the session tabs (opening the channel, reaching the server, signing in). RDP and SSH show the
+// same steps.
 
-export type StepKey = 'access' | 'path' | 'channel' | 'server' | 'signin';
+export type StepKey = 'access' | 'path' | 'route' | 'channel' | 'server' | 'signin';
 export type StepState = 'pending' | 'running' | 'pass' | 'fail';
 export interface Step { key: StepKey; label: string; state: StepState; detail?: string }
 /** requestLink: where "Request Access" leads (with the denied resource chosen); no button without it. */
@@ -17,6 +19,7 @@ export interface Failure { message: string; requestLink?: string; troubleshoot?:
 export const STEP_LABELS: Record<StepKey, string> = {
   access: 'Checking Permissions',
   path: 'Checking The Path',
+  route: 'Opening The Route To The Server',
   channel: 'Opening A Secure Channel',
   server: 'Connecting To The Server',
   signin: 'Signing In',
@@ -27,12 +30,13 @@ export const ARG_LABELS: Record<string, string> = { username: 'User Name', passw
 const STEP_SHORT: Record<StepKey, string> = {
   access: 'Permissions',
   path: 'Path',
+  route: 'Route',
   channel: 'Secure Channel',
   server: 'Server',
   signin: 'Sign In',
 };
 
-export const freshSteps = (): Step[] => (['access', 'path', 'channel', 'server'] as StepKey[]).map((key) => ({ key, label: STEP_LABELS[key], state: 'pending' }));
+export const freshSteps = (): Step[] => (['access', 'path', 'route', 'channel', 'server'] as StepKey[]).map((key) => ({ key, label: STEP_LABELS[key], state: 'pending' }));
 
 // Each running step stays on screen for at least this long, so the user can follow the checks.
 // The first connection in a browser tab moves slower; later ones move quicker.

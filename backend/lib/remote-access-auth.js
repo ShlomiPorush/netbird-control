@@ -132,9 +132,11 @@ function ruleOpensTcpPort(rule, port) {
     return false;
 }
 
-function ruleTargetsResource(rule, res) {
+// `skipGroups`: groups through which a match does not count (the app-managed target groups, for
+// an accept rule that would grant a user).
+function ruleTargetsResource(rule, res, skipGroups) {
     if (idOf(rule.destinationResource) && idOf(rule.destinationResource) === res.id) return true;
-    const resGroups = new Set(arr(res.groups).map(idOf).filter(Boolean));
+    const resGroups = new Set(arr(res.groups).map(idOf).filter(g => g && !(skipGroups && skipGroups.has(g))));
     return arr(rule.destinations).some(d => resGroups.has(idOf(d)));
 }
 
@@ -255,17 +257,59 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
 
     // The gateway must route this ip through the approved resource and nothing else: no
     // domain routes (unbounded), and no other route at least as specific as the resource.
-    const reach = gatewayReach(snap, cfg);
+    let reach = gatewayReach(snap, cfg);
     if (reach.error) return deny(reach.error, { resource, network });
     if (reach.domain.length) return deny('GATEWAY_DOMAIN_ROUTES', { resource, network });
-    const inReach = reach.entries.some(e => e.kind === 'resource' && e.id === best.res.id);
-    if (!inReach) return deny('GATEWAY_NOT_SYNCED', { resource, network });
+    const inReach = (r) => r.entries.some(e => e.kind === 'resource' && e.id === best.res.id);
+    // A resource joins its target group only when a session opens to it (see targetView).
+    const tv = targetView(snap, cfg, best.res, reach, inReach);
+    if (tv.code) return deny(tv.code, { resource, network });
+    const view = tv.snap;
+    reach = tv.reach;
     const rival = reach.entries.some(e => !(e.kind === 'resource' && e.id === best.res.id)
         && prefixCovers(e.prefix, ip) && e.prefix.bits >= best.prefix.bits);
     if (rival) return deny('AMBIGUOUS_ROUTE', { resource, network });
+    const standing = standingCheck(snap, cfg, port);
+    if (standing) return deny(standing, { resource, network });
 
-    return evaluatePolicies(snap, cfg, src, best.res, port, now, { resource, network });
+    return evaluatePolicies(view, cfg, src, viewResource(view, best.res), port, now, { resource, network });
 }
+
+// The snapshot a resource's policies are judged on, and the gateway's reach:
+//   - the policies, always on a copy of the snapshot in which this resource carries its target
+//     group (only this one is changed), so a drop rule to the target group counts whether the
+//     resource is a member yet or not, and keeps counting if it lost its membership meanwhile;
+//   - the reach, with cfg.simulate (the checks before a session, and a launch link), on that copy
+//     too: the standing policy and rival routes count as they will once it is added;
+//   - otherwise the reach counts real membership only: a resource out of reach is refused, on a
+//     read-only instance because it can't add it, else because the route isn't there (the
+//     evaluation right before the token, and the re-check).
+function targetView(snap, cfg, res, reach, inReach) {
+    // A read-only instance serves only a resource that is in its target group: it can't add one, and
+    // a route through another policy doesn't make it a member.
+    if (cfg && cfg.readonly && !(cfg.targetGroupId && arr(res.groups).some(g => idOf(g) === cfg.targetGroupId))) return { code: 'TARGET_NOT_OPEN_READONLY' };
+    const view = cfg && cfg.targetGroupId ? withTargetMember(snap, res.id, cfg.targetGroupId) : snap;
+    if (!cfg || !cfg.simulate || cfg.readonly) {
+        if (inReach(reach)) return { snap: view, reach };
+        return { code: cfg && cfg.readonly ? 'TARGET_NOT_OPEN_READONLY' : 'GATEWAY_NOT_SYNCED' };
+    }
+    if (!cfg.targetGroupId) return { code: 'GATEWAY_POLICY_MISSING' };
+    // The peers and policies are the same as in the snapshot, whose reach had no error.
+    const r = gatewayReach(view, cfg);
+    if (!inReach(r)) return { code: 'GATEWAY_POLICY_MISSING' };
+    return { snap: view, reach: r };
+}
+// cfg.standingPolicy ({ policyId, gatewayGroupId, targetGroupId }): the gateway's standing policy
+// must open the port to the target group (see standingPolicyProblem).
+const standingCheck = (snap, cfg, port) => (cfg && cfg.standingPolicy ? standingPolicyProblem(snap, cfg.standingPolicy, port) : null);
+function withTargetMember(snap, resourceId, targetGroupId) {
+    return {
+        ...snap,
+        resources: arr(snap.resources).map(r => (r && r.id === resourceId && !arr(r.groups).some(g => idOf(g) === targetGroupId)
+            ? { ...r, groups: [...arr(r.groups), { id: targetGroupId }] } : r)),
+    };
+}
+const viewResource = (view, res) => arr(view.resources).find(r => r && r.id === res.id) || res;
 
 // The managed gateway objects' names: a fixed base, alone (the names before the installation name
 // was added) or followed by " (<installation name>)". Every installation recognizes every other
@@ -286,13 +330,43 @@ function isManagedGatewayName(name, kind) {
 function managedPolicyIds(cfg) {
     return new Set([cfg && cfg.managedPolicyId, ...arr(cfg && cfg.managedPolicyIds)].filter(Boolean));
 }
+const TARGET_GROUP_BASES = ['Browser Gateway Targets', 'Browser Gateway Name Targets'];
+const isTargetGroupName = (name) => typeof name === 'string' && TARGET_GROUP_BASES.some(base => name === base
+    || (name.length > base.length + 3 && name.startsWith(base + ' (') && name.endsWith(')')));
+function managedTargetGroupIds(snap, cfg) {
+    const ids = new Set([cfg && cfg.targetGroupId, ...arr(cfg && cfg.targetGroupIds)].filter(Boolean));
+    for (const g of arr(snap.groups)) if (g && g.id && isTargetGroupName(g.name)) ids.add(g.id);
+    return ids;
+}
+
+// The standing policy of a gateway, checked right before a session is approved: it exists, is
+// enabled, and has an enabled accept rule from the gateway group to the target group that opens
+// TCP `port`. Returns null, or the code of what is missing.
+function standingPolicyProblem(snap, { policyId, gatewayGroupId, targetGroupId }, port) {
+    const p = policyId ? arr(snap.policies).find(x => x && x.id === policyId) : null;
+    if (!p || p.enabled === false || !gatewayGroupId || !targetGroupId) return 'GATEWAY_POLICY_MISSING';
+    let found = false;
+    for (const rule of arr(p.rules)) {
+        if (!rule || rule.enabled === false || (rule.action || 'accept') !== 'accept') continue;
+        if (!arr(rule.sources).some(s => idOf(s) === gatewayGroupId)) continue;
+        if (!arr(rule.destinations).some(d => idOf(d) === targetGroupId)) continue;
+        found = true;
+        if (ruleOpensTcpPort(rule, port)) return null;
+    }
+    return found ? 'GATEWAY_POLICY_PORT' : 'GATEWAY_POLICY_MISSING';
+}
 
 // Policies: an enabled accept rule from one of the user's groups to this resource that opens
 // the TCP port. Posture-checked policies cannot be evaluated for a browser session and do not
 // count. A matching drop rule wins.
+// An accept rule that reaches the resource only through an app-managed target group (this
+// installation's by id, any installation's by name) grants nothing: those groups exist for the
+// gateways, and a resource is in one only because some session opened to it. A drop rule still
+// matches through them.
 function evaluatePolicies(snap, cfg, src, res, port, now, where) {
     const deny = (code, extra = {}) => ({ ok: false, code, ...where, ...extra });
     const managed = managedPolicyIds(cfg);
+    const targetGroups = managedTargetGroupIds(snap, cfg);
     const grantById = new Map(arr(snap.grants).map(g => [String(g.id), g]));
     const granting = [];
     let postureOnly = false;
@@ -309,6 +383,7 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
             if (!ruleTargetsResource(rule, res)) continue;
             const opens = ruleOpensTcpPort(rule, port);
             const action = rule.action || 'accept';
+            if (action === 'accept' && !ruleTargetsResource(rule, res, targetGroups)) continue;
             if (action === 'drop') {
                 if (opens) return deny('BLOCKED_BY_POLICY', { policy: p.name || p.id });
                 continue;
@@ -412,16 +487,21 @@ function evaluateNameAccess(snap, cfg, { userId, name, port, now = Date.now() })
     // and no other domain resource or domain route, in any network, that matches the name at
     // least as specifically (NetBird resolves a name through its most specific match, so a
     // broader wildcard elsewhere never takes it).
-    const reach = gatewayReach(snap, cfg);
+    let reach = gatewayReach(snap, cfg);
     if (reach.error) return deny(reach.error === 'GATEWAY_NOT_ENROLLED' ? 'NAMES_GATEWAY_NOT_ENROLLED' : reach.error, { resource, network });
     if (reach.entries.length) return deny('NAMES_GATEWAY_EXTRA_REACH', { resource, network });
-    const inReach = reach.domain.some(d => d.kind === 'resource' && d.id === best.res.id);
-    if (!inReach) return deny('GATEWAY_NOT_SYNCED', { resource, network });
+    const inReach = (r) => r.domain.some(d => d.kind === 'resource' && d.id === best.res.id);
+    const tv = targetView(snap, cfg, best.res, reach, inReach);
+    if (tv.code) return deny(tv.code, { resource, network });
+    const view = tv.snap;
+    reach = tv.reach;
     const rival = reach.domain.some(d => !(d.kind === 'resource' && d.id === best.res.id)
         && arr(d.domains).some(a => { const p = domainPattern(a); return patternMatches(p, name) && p.rank >= best.rank; }));
     if (rival) return deny('AMBIGUOUS_ROUTE', { resource, network });
+    const standing = standingCheck(snap, cfg, port);
+    if (standing) return deny(standing, { resource, network });
 
-    return evaluatePolicies(snap, cfg, src, best.res, port, now, { resource, network });
+    return evaluatePolicies(view, cfg, src, viewResource(view, best.res), port, now, { resource, network });
 }
 
 // Is the path up: a connected gateway peer, and an enabled, connected routing peer for the
@@ -453,5 +533,6 @@ module.exports = {
     evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
     gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt, evaluatePolicies,
+    standingPolicyProblem,
     TEMP_POLICY_RE, TEMP_GROUP_RE,
 };

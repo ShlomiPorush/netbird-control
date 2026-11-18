@@ -88,6 +88,10 @@ services:
   # The IP gateway: a NetBird peer (this container) with guacd in its network namespace. NetBird
   # DNS is off, so it receives only static routes to the IPv4 host and subnet resources of the
   # networks open to browser access. Enroll it with a setup key from Settings → Remote Access.
+  # NB_LAZY_CONN=false: the gateway opens its tunnels to a server's routing peers as soon as the
+  # route arrives, not on the session's first packet. With lazy connections the first connection
+  # to a server that was just opened woke the routing peers, and NetBird switched between them in
+  # the middle of the TLS handshake, so that connection failed.
   remote-gateway:
     <<: *gateway
     container_name: netbird-control-remote-gateway
@@ -96,6 +100,7 @@ services:
       - NB_SETUP_KEY=${REMOTE_GATEWAY_SETUP_KEY:-}
       - NB_MANAGEMENT_URL=${REMOTE_GATEWAY_MANAGEMENT_URL:-https://api.netbird.io:443}
       - GATEWAY_DISABLE_DNS=true
+      - NB_LAZY_CONN=false
     volumes:
       # The peer's identity (its NetBird private key). A Docker volume, never in the work tree.
       - remote-gateway-state:/var/lib/netbird
@@ -137,6 +142,7 @@ services:
       - NB_SETUP_KEY=${REMOTE_NAMES_GATEWAY_SETUP_KEY:-}
       - NB_MANAGEMENT_URL=${REMOTE_GATEWAY_MANAGEMENT_URL:-https://api.netbird.io:443}
       - GATEWAY_DISABLE_DNS=false
+      - NB_LAZY_CONN=false # see remote-gateway
     volumes:
       - remote-names-gateway-state:/var/lib/netbird
     networks:

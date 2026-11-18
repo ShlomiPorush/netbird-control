@@ -10,6 +10,42 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Remote Access opens a server to the Browser Gateway only when someone connects to it.** The
+  selected networks now only say which resources may become targets. A resource joins its gateway's
+  target group when a user who may reach it starts a session, and stays for **Keep Opened Servers
+  Available For** (Settings → Remote Access, 10 hours by default, 1 to 72); an open session keeps
+  it. The session start adds the target group to that one resource (never by rewriting the group's
+  list), and only while the resource still has the network, address and type it was checked with.
+  The session waits until the route has reached the gateway (2 seconds after the resource was
+  added, shown as **Opening The Route To The Server**), then is approved again from a fresh read of
+  NetBird before it opens, with the gateway's policy opening the port. The checks before a session
+  write nothing to NetBird, and refuse a session when the gateway's policy is missing, disabled or
+  doesn't open the port. The target sync never adds a resource: it takes out every member without
+  a valid hold for its current network and address, also while Remote Access is turned off, and
+  deletes holds that expired (and, after 10 minutes, holds whose resource is not a member). A
+  session closes at the next check when the gateway has no real route to its resource any more,
+  or the resource got another network or address. Resource edits never add a target group, and keep one only while the network is
+  selected and the address doesn't change; new or moved resources never get one. The first sync
+  after the upgrade takes the whole networks that 1.4.x put into the target groups out, in one
+  write per group. To roll back, use 1.4.1, not
+  1.4.0.
+- **The gateways keep their NetBird connections open** (`NB_LAZY_CONN=false` in
+  `netbird-docker-compose-files/docker-compose-remote-access.yml`). With lazy connections, the first
+  session to a server that was just opened woke the server's routing peers, and NetBird switched
+  between them in the middle of the connection, so that first session failed. Now the gateway opens
+  its tunnels to a server's routing peers as soon as the route arrives. **Upgrade:** take the new
+  compose file and re-create the gateway containers and their guacd containers.
+- **A policy that points at a Browser Gateway target group no longer gives a user access** through
+  it. A drop rule through such a group still blocks.
+- **A read-only instance** (`NETBIRD_READONLY=true`) connects only to servers that are already open
+  to the gateway, and says so for any other. It checks and approves a session start the same way as
+  any instance, without writing to NetBird.
+
+### Added
+- **Settings → Remote Access lists the servers open to the gateways**, as in use or with the time
+  they close.
+
 ---
 
 ## [1.4.1] - 2026-11-18

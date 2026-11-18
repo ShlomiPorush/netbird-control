@@ -71,7 +71,7 @@ export default function RemoteAccess() {
         sessionId: s.sessionId, token: s.token, protocol: s.protocol,
         title: sessionTitle(s, s.port) || `${s.address}:${s.port}`,
         clipboard: !!info.data?.clipboard,
-        steps: withStep(withStep(withStep(freshSteps(), 'access', 'pass'), 'path', 'pass'), 'channel', 'running'),
+        steps: withStep(withStep(withStep(withStep(freshSteps(), 'access', 'pass'), 'path', 'pass'), 'route', 'pass'), 'channel', 'running'),
         dwell: pickDwell(), target: { address: s.address || '', port: s.port }, serverCredentials: true,
       });
     }).catch((err) => {
@@ -153,11 +153,13 @@ export default function RemoteAccess() {
     }
   };
 
+  // The session request opens the route too: the server joins its gateway's targets if it isn't
+  // there yet, and the server waits until the route has reached the gateway (about 2 seconds).
   const openSession = async (creds?: Record<string, string>) => {
     setPhase('opening');
-    setStep('channel', 'running');
+    setStep('route', 'running');
     const c = checked.current;
-    const handoff = withStep(withStep(withStep(freshSteps(), 'access', 'pass', c.access), 'path', 'pass', c.path), 'channel', 'running');
+    const handoff = withStep(withStep(withStep(withStep(freshSteps(), 'access', 'pass', c.access), 'path', 'pass', c.path), 'route', 'pass'), 'channel', 'running');
     try {
       const s = await remoteApi.createSession({
         protocol, address: targetRef.current.address, port: targetRef.current.port,
@@ -173,7 +175,7 @@ export default function RemoteAccess() {
       });
       reset();
     } catch (err) {
-      fail('channel', { message: err instanceof ApiError ? err.message : 'The session could not be opened. Try again.' });
+      fail('route', { message: err instanceof ApiError ? err.message : 'The session could not be opened. Try again.' });
       setPhase('checking');
     }
   };

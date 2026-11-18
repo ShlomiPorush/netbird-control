@@ -8,7 +8,9 @@
 // NetBird sees every browser session as traffic from the gateway peer, so the PORTAL decides who
 // may connect where (lib/remote-access-auth.js, fail closed). This module owns:
 //   - the settings and the NetBird objects it manages (per gateway: a gateway group, a target
-//     group and one standing policy -> resources of the admin-selected networks);
+//     group and one standing policy). The admin-selected networks only say which resources MAY
+//     become targets: a resource joins its target group when a session opens to it, and stays
+//     while its hold lasts (see "Target holds");
 //   - session issue (one-time token), the WebSocket <-> guacd tunnel, quotas and backpressure;
 //   - the per-minute re-check that disconnects sessions whose access is gone;
 //   - session records in `events` (same format as NetBird traffic, source_type BROWSER_GATEWAY)
@@ -28,7 +30,7 @@ const { pool, getSetting, setSetting } = require('./core');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount } = require('./netbird');
 const { addEvent } = require('./events');
 const apiKeys = require('./api-keys');
-const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName } = require('./remote-access-auth');
+const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem } = require('./remote-access-auth');
 
 // The managed NetBird objects of each gateway. In NetBird each is named "<base> (<installation
 // name>)", so installations that share one NetBird account (production and DEV) never collide.
@@ -72,6 +74,9 @@ const DEFAULTS = {
     maxSessionsTotal: 20,
     idleTimeoutMin: 30,
     maxDurationHours: 8,
+    // How long a server a session opened stays in its target group after that session's start (and
+    // after each re-check of a session still open to it).
+    holdHours: 10,
     clipboard: true,
     sshHostKeys: {},
     // How RDP sessions look. Font smoothing and full color cost little bandwidth; the desktop
@@ -131,6 +136,7 @@ function normConfig(c) {
         maxSessionsTotal: clampInt(x.maxSessionsTotal, 1, 200, DEFAULTS.maxSessionsTotal),
         idleTimeoutMin: clampInt(x.idleTimeoutMin, 1, 480, DEFAULTS.idleTimeoutMin),
         maxDurationHours: clampInt(x.maxDurationHours, 1, 24, DEFAULTS.maxDurationHours),
+        holdHours: clampInt(x.holdHours, 1, 72, DEFAULTS.holdHours),
         clipboard: x.clipboard === undefined ? DEFAULTS.clipboard : !!x.clipboard,
         sshHostKeys: keys,
         rdp: normRdp(x.rdp),
@@ -165,6 +171,7 @@ async function loadRemoteAccessConfig({ strict = false } = {}) {
         const n = JSON.parse(await getSetting('remote_access_nb') || 'null') || {};
         _nb = Object.fromEntries(Object.keys(NB_EMPTY).map(k => [k, String(n[k] || '')]));
     } catch (e) { if (strict && !(e instanceof SyntaxError)) throw e; _nb = { ...NB_EMPTY }; }
+    await loadTargetHolds({ strict });
 }
 
 function getRemoteAccessConfig() {
@@ -195,23 +202,77 @@ function isRemoteAccessManagedGroup(id, liveName) {
 }
 const targetGroupIds = () => [_nb.targetGroupId, _nb.namesTargetGroupId].filter(Boolean);
 
-// The one rule for which resources carry the managed target groups (syncTargetGroup and every
-// resource writer use it): the IP target group on IPv4 host/subnet resources and the names target
-// group on exact domain resources of the networks open to browser access; nothing anywhere else.
-const isIpResourceAddress = (address) => /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(String(address || '').trim());
-function remoteAccessTargetGroupsFor(networkId, address) {
-    if (!_cfg.enabled || !_cfg.networks.includes(networkId)) return [];
-    const ip = isIpResourceAddress(address);
-    const out = [];
-    if (ip && _nb.targetGroupId) out.push(_nb.targetGroupId);
-    if (!ip && _nb.namesTargetGroupId && isExactDomainResource({ address: String(address || '').trim() })) out.push(_nb.namesTargetGroupId);
-    return out;
+// ─── Target holds ───
+// A resource joins its target group only when an authorized user opens a session to it
+// (createSession). It then has a hold: one row per resource id in `remote_access_targets`, with
+// the network and the address it had (its identity) and an expiry. A session start sets the expiry
+// to at least now + holdHours; the re-check of a session still open raises it again. Kept in memory
+// too, because the sync's rule is synchronous: loaded with the settings, read again by the sync after
+// each group read (another instance may have written one), and updated from the database's answer
+// on every write.
+const ROUTE_SETTLE_MS = 2000; // measured on a real account: the route was on the gateway 0.52-1.05 s after the write was sent
+const HOLD_COLUMNS = 'resource_id, network_id, address, added_at, expires_at';
+let _holds = new Map(); // resource id -> { networkId, address, addedAt (ms, 0 = unknown), expiresAt (ms) }
+let _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const msOf = (v) => { const t = v ? new Date(v).getTime() : NaN; return Number.isFinite(t) ? t : 0; };
+async function loadTargetHolds({ strict = false } = {}) {
+    try {
+        const r = await pool.query(`SELECT ${HOLD_COLUMNS} FROM remote_access_targets`);
+        const next = new Map();
+        for (const row of (r && Array.isArray(r.rows) ? r.rows : [])) {
+            if (!row || typeof row.resource_id !== 'string' || !row.resource_id || !msOf(row.expires_at)) continue;
+            next.set(row.resource_id, { networkId: String(row.network_id || ''), address: String(row.address || ''), addedAt: msOf(row.added_at), expiresAt: msOf(row.expires_at) });
+        }
+        _holds = next;
+    } catch (e) {
+        if (strict) throw e;
+        console.error('[remote-access] could not read the target holds:', e.message);
+    }
 }
-// A resource's group list with the managed target groups set by that rule (anything the caller or
-// an earlier read had for them is replaced).
-function withManagedTargets(networkId, address, groupIds) {
+// An address as NetBird means it, in one form: "10.0.0.5" is "10.0.0.5/32", a subnet is written
+// from its network address, and a name is lower case without a trailing dot. Holds store this form,
+// and every comparison of addresses uses it.
+const ipOf = (n) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+function addressKey(address) {
+    const a = String(address || '').trim();
+    const p = parsePrefix(a);
+    return p ? `${ipOf(p.start)}/${p.bits}` : a.toLowerCase().replace(/\.$/, '');
+}
+const sameIdentity = (h, networkId, address) => !!h && h.networkId === networkId && addressKey(h.address) === addressKey(address);
+function holdValid(resourceId, networkId, address, now = Date.now()) {
+    const h = resourceId ? _holds.get(resourceId) : null;
+    return !!h && h.expiresAt > now && sameIdentity(h, networkId, address);
+}
+
+// The target group a resource's address qualifies for, while browser access is on and its network
+// is open to it: the IP target group for an IPv4 host/subnet resource, the names target group for
+// an exact domain resource; '' for anything else (wildcard domain resources included).
+const isIpResourceAddress = (address) => /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(String(address || '').trim());
+function targetGroupFor(networkId, address) {
+    if (!_cfg.enabled || !_cfg.networks.includes(networkId)) return '';
+    if (isIpResourceAddress(address)) return _nb.targetGroupId || '';
+    return isExactDomainResource({ address: String(address || '').trim() }) ? (_nb.namesTargetGroupId || '') : '';
+}
+// The target sync's rule: a resource keeps a managed target group only while it is a member, its
+// network is open to browser access, its address qualifies for that group, and it has a valid hold
+// for its current network and address. Nothing but a session start ever adds one. Returns the
+// target groups the resource may keep (members or not: the sync keeps only those it has).
+function remoteAccessTargetGroupsFor(resourceId, networkId, address) {
+    const tg = targetGroupFor(networkId, address);
+    return tg && holdValid(resourceId, networkId, address) ? [tg] : [];
+}
+// A resource writer's group list (every resource write in db.js): writers never add a managed
+// target group and don't look at holds (expiry is the sync's job). One the resource has now
+// (`groupIds` are its current groups, plus what the caller adds) stays only while its network is
+// open to browser access, the address written still qualifies for that same group, and the write
+// doesn't change the address (`currentAddress`, from the writer's own fresh read, is the same
+// address as `address`). `currentAddress` is null for a resource that doesn't exist yet (created,
+// or the copy a move makes), which therefore never gets one.
+function withManagedTargets(currentAddress, networkId, address, groupIds) {
     const targets = new Set(targetGroupIds());
-    return [...new Set([...(groupIds || []).filter(g => g && !targets.has(g)), ...remoteAccessTargetGroupsFor(networkId, address)])];
+    const ids = (groupIds || []).filter(Boolean);
+    const tg = currentAddress == null || addressKey(currentAddress) !== addressKey(address) ? '' : targetGroupFor(networkId, address);
+    return [...new Set([...ids.filter(g => !targets.has(g)), ...(tg && ids.includes(tg) ? [tg] : [])])];
 }
 
 // Resource writes and the target sync run one at a time, so a write computed under an older
@@ -249,7 +310,7 @@ function scheduleSettleSync(delayMs = untilDeadline()) {
     // Created outside any lock context: the timer must queue for the lock like everyone else.
     _settleTimer = _targetLockCtx.exit(() => setTimeout(() => {
         _settleTimer = null;
-        if (!_cfg.enabled || !netbirdApiConfigured() || NETBIRD_READONLY) return; // the next apply syncs
+        if (!targetGroupIds().length || !netbirdApiConfigured() || NETBIRD_READONLY) return; // the next apply syncs
         // Only the leader writes to NetBird (lib/leader.js). A standby asks again until it leads or
         // shuts down; until a sync ends, it keeps refusing new sessions, as during any settling.
         if (_deps.isLeader && !_deps.isLeader()) { scheduleSettleSync(5000); return; }
@@ -309,16 +370,18 @@ function fullGroup(g, id) {
 }
 // Change a managed group from a fresh read of it. The caller holds the target lock. `change` gets
 // { name, peers, resources } and returns the new { name, peers } (resources are kept) or
-// { name, peers, resources } (resources are replaced), or null for no write.
+// { name, peers, resources } (resources are replaced), or null for no write; it may be async (a
+// throw writes nothing).
 // A target group holds resources only: every write to one leaves it without devices, so a late
 // answer to an older write can never put back a device that was taken out meanwhile. The caller
 // records the devices it took out (`before.peers` that are not in `after.peers`).
 async function putManagedGroup(id, change) {
     const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(id)), id);
     if (!g) throw new Error(`Couldn't read the group "${managedGroupName(id)}" from NetBird in full, so it was not changed.`);
-    const next = change({ name: g.name, peers: [...g.peers], resources: g.resources });
+    const next = await change({ name: g.name, peers: [...g.peers], resources: g.resources });
     if (!next) return null;
     const after = { name: next.name, peers: targetGroupIds().includes(id) ? [] : next.peers, resources: next.resources || g.resources };
+    noteTargetsChanged();
     const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), after);
     // Any answer but success leaves the write uncertain: NetBird builds its answer after the save,
     // so even an error answer (or none) may follow a saved group.
@@ -391,15 +454,27 @@ async function ensurePolicy(kind, enabled) {
     return r.body.id;
 }
 
-// Put the IP target group on every IPv4 host/subnet resource of the selected networks and the
-// names target group on every exact domain resource of them; take each group off every other
-// resource (wildcard domain resources included). Each target group that differs is written as a
-// whole, from a fresh read of it, whatever the number of resources (a write per resource ran into
-// NetBird's rate limit on networks with hundreds of them). Holds the target lock for the whole run.
+// NetBird is the source of truth for which resources are in a target group: the sync never adds
+// one. It keeps the members that pass the rule (open network, qualifying address, a valid hold for
+// the resource's current network and address) and takes every other member out (wildcard domain
+// resources and devices included). Each target group that differs is written as a whole, from a
+// fresh read of it, whatever the number of resources (a write per resource ran into NetBird's rate
+// limit on networks with hundreds of them). Then it deletes the holds that expired or whose
+// resource is no longer a member. It runs while browser access is off too, so the groups drain.
+// Holds the target lock for the whole run.
+// The targets generation: raised by every target sync that finishes, every settings save, and right
+// before every managed group write and every resource or network write and delete of this process
+// (db.js). A session start notes it before its last evaluation and gets no token when it changed
+// meanwhile (the user tries again). A session start's own add doesn't raise it: an add never takes
+// a route away.
+let _targetsGen = 0;
+function noteTargetsChanged() { _targetsGen++; }
+
 function syncTargetGroup() {
     return withTargetLock(async () => {
         const started = Date.now();
         const out = await syncTargetGroupLocked();
+        noteTargetsChanged();
         _lastSyncStartOk = Math.max(_lastSyncStartOk, started);
         invalidateSnapshot();
         // Finished, but started before the current deadline: one more sync after it is still due.
@@ -407,24 +482,31 @@ function syncTargetGroup() {
         return out;
     });
 }
-// The resources each target group should hold, by the rule: group id -> resource id -> its type
-// as NetBird reports it (a group's resource list names each one's type).
-async function wantedTargets() {
+// Every resource as NetBird has it now: resource id -> { networkId, address, type }.
+async function readResourceIndex() {
     const [resources, networks] = await Promise.all([netbirdGet('/api/networks/resources'), netbirdGet('/api/networks')]);
     if (!Array.isArray(resources) || !Array.isArray(networks)) throw new Error("Couldn't read the networks from NetBird");
     const netOf = new Map();
     for (const n of networks) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOf.set((rid && rid.id) || rid, n.id);
-    const wanted = new Map(targetGroupIds().map(tg => [tg, new Map()]));
+    const index = new Map();
     for (const res of resources) {
         if (!res || !res.id) continue;
-        const netId = netOf.get(res.id);
-        if (!netId) continue;
-        for (const tg of remoteAccessTargetGroupsFor(netId, res.address)) {
-            if (typeof res.type !== 'string' || !res.type) throw new Error("Couldn't read the networks from NetBird in full.");
-            wanted.get(tg).set(res.id, res.type);
-        }
+        const networkId = netOf.get(res.id);
+        if (networkId) index.set(res.id, { networkId, address: res.address, type: res.type });
     }
-    return wanted;
+    return index;
+}
+// The members a target group keeps, from a fresh read of it: resource id -> its type as NetBird
+// reports it now. Only members that pass the rule; nobody is added.
+function keptTargets(tg, g, index) {
+    const want = new Map();
+    for (const r of g.resources) {
+        const x = index.get(r.id);
+        if (!x || !remoteAccessTargetGroupsFor(r.id, x.networkId, x.address).includes(tg)) continue;
+        if (typeof x.type !== 'string' || !x.type) throw new Error("Couldn't read the networks from NetBird in full.");
+        want.set(r.id, x.type);
+    }
+    return want;
 }
 
 const targetsMatch = (g, want) => {
@@ -438,36 +520,46 @@ const targetsMatch = (g, want) => {
 // checks. When that check still finds a difference, or a read fails after a write, the writes
 // count as uncertain: no session is approved until a follow-up sync (about 90 s later) finishes.
 async function syncTargetGroupLocked() {
-    let added = 0, removed = 0;
+    let removed = 0;
     const written = new Set();
+    const members = new Map(); // target group id -> the resource ids it holds after the sync
+    // Each group is judged from the resources and the holds read AFTER that group: a session start
+    // writes its hold before it adds the resource, so every member the group read shows (also one
+    // another instance just added) has its resource and its hold in these reads. A failed read
+    // writes nothing for that group.
+    const judge = async (tg, g) => {
+        const index = await readResourceIndex();
+        await loadTargetHolds({ strict: true });
+        return keptTargets(tg, g, index);
+    };
     try {
         for (let pass = 0; pass < 3; pass++) {
-            let wanted = await wantedTargets();
             let differs = false;
             for (const tg of targetGroupIds()) {
-                // After a write, the next group is compared with a fresh read of the resources too.
-                if (differs && pass < 2) wanted = await wantedTargets();
-                const want = wanted.get(tg);
                 if (pass === 2) {
                     const g = fullGroup(await netbirdGet('/api/groups/' + encodeURIComponent(tg)), tg);
-                    if (!g || !targetsMatch(g, want)) differs = true;
+                    if (!g || !targetsMatch(g, await judge(tg, g))) differs = true;
+                    if (g) members.set(tg, new Set(g.resources.map(r => r.id)));
                     continue;
                 }
-                const out = await putManagedGroup(tg, g => (targetsMatch(g, want) ? null
-                    : { name: g.name, peers: [], resources: [...want].map(([id, type]) => ({ id, type })) }));
+                let seen = null;
+                const out = await putManagedGroup(tg, async g => {
+                    seen = g;
+                    const want = await judge(tg, g);
+                    return targetsMatch(g, want) ? null : { name: g.name, peers: [], resources: [...want].map(([id, type]) => ({ id, type })) };
+                });
+                members.set(tg, new Set((out ? out.after.resources : seen.resources).map(r => r.id)));
                 if (!out) continue;
                 differs = true;
                 written.add(out.after.name);
-                const before = new Set(out.before.resources.map(r => r.id));
-                const ins = [...want.keys()].filter(id => !before.has(id));
-                const outs = [...before].filter(id => !want.has(id));
-                added += ins.length;
+                const after = new Set(out.after.resources.map(r => r.id));
+                const outs = out.before.resources.map(r => r.id).filter(id => !after.has(id));
                 removed += outs.length;
-                // One write changes many resources at once: the audit log keeps which ones.
+                // One write can take many resources out at once: the audit log keeps which ones.
                 if (_deps.recordAudit) {
                     Promise.resolve(_deps.recordAudit({
                         actorId: '', actorEmail: '', actorName: 'System', action: 'remote_access.targets_update', target: out.after.name,
-                        meta: { added: ins.length, removed: outs.length, addedIds: ins.slice(0, 50), removedIds: outs.slice(0, 50) },
+                        meta: { removed: outs.length, removedIds: outs.slice(0, 50) },
                     })).catch(() => { });
                 }
                 const gone = droppedDevices(out);
@@ -486,7 +578,34 @@ async function syncTargetGroupLocked() {
         }
         throw e;
     }
-    return { added, removed };
+    // No target group was read (none exists yet): the holds still need a current read.
+    if (!members.size) await loadTargetHolds({ strict: true });
+    await dropStaleHolds(members);
+    return { removed };
+}
+
+// A hold that expired is deleted; so is one whose resource is not in a target group (a hold without
+// membership is stale: it is not added back), once it is older than STALE_HOLD_GRACE_MS: a hold
+// that a session start on another instance just wrote, while its add is still on the way, stays.
+// Both are guarded by the expiry this process saw, so a hold that a session start or a re-check
+// raised meanwhile (here or on another instance) stays.
+const STALE_HOLD_GRACE_MS = 10 * 60_000;
+async function dropStaleHolds(members) {
+    const now = Date.now();
+    const inGroup = new Set([...members.values()].flatMap(s => [...s]));
+    for (const [id, h] of [..._holds]) {
+        const expired = h.expiresAt <= now;
+        if (!expired && inGroup.has(id)) continue;
+        try {
+            const r = await pool.query(expired
+                ? 'DELETE FROM remote_access_targets WHERE resource_id = $1 AND expires_at <= $2'
+                : `DELETE FROM remote_access_targets WHERE resource_id = $1 AND expires_at <= $2 AND updated_at < NOW() - interval '${STALE_HOLD_GRACE_MS / 60_000} minutes'`,
+            [id, new Date(h.expiresAt)]);
+            if (r && r.rowCount && _holds.get(id) === h) _holds.delete(id);
+        } catch (e) {
+            console.error('[remote-access] could not delete a stale target hold:', e.message);
+        }
+    }
 }
 
 // Create or update everything NetBird needs. Disabling turns the standing policy off (and
@@ -527,6 +646,7 @@ async function setRemoteAccessConfig(input) {
     const next = normConfig({ ..._cfg, ...(input || {}) });
     const wasEnabled = _cfg.enabled;
     _cfg = next;
+    noteTargetsChanged();
     await setSetting('remote_access_config', JSON.stringify(_cfg));
     if (!_cfg.enabled) closeAllSessions('Browser remote access was turned off by an administrator.');
     let sync = null;
@@ -534,9 +654,12 @@ async function setRemoteAccessConfig(input) {
     return { config: getRemoteAccessConfig(), sync };
 }
 
-// Background reconcile: new resources in a selected network join the target group.
+// Background reconcile (the leader, every 10 minutes): the target groups keep only what the rule
+// allows, and expired holds go. It runs while browser access is off too (the policies stay
+// disabled), so the groups drain; with no managed objects at all there is nothing to do.
 async function reconcileRemoteAccess() {
-    if (!_cfg.enabled || !netbirdApiConfigured() || NETBIRD_READONLY) return;
+    if (!netbirdApiConfigured() || NETBIRD_READONLY) return;
+    if (!_cfg.enabled && !targetGroupIds().length && !_nb.policyId && !_nb.namesPolicyId) return;
     await applyGatewayObjects();
 }
 
@@ -753,11 +876,27 @@ async function freshSnapshot(maxAgeMs) {
     throw new Error('NetBird changed while it was being read');
 }
 
-const authCfg = (kind = 'ip') => ({
+// What the evaluation needs about one gateway. By default a resource that is not in the target
+// group yet is judged as if it were (simulate); `real: true` counts only real membership (right
+// before a session is approved, and the re-check). A read-only instance can't add a resource, so it
+// never simulates.
+// `standing: true` (the checks before a session, on every instance): the gateway's standing policy
+// must also open the port to the target group, so a disabled or re-pointed one is refused before
+// any hold or write.
+const standingIds = (kind) => {
+    const k = KINDS[kind] || KINDS.ip;
+    return { policyId: _nb[k.policyKey], gatewayGroupId: _nb[k.groupKey], targetGroupId: _nb[k.targetKey] };
+};
+const authCfg = (kind = 'ip', { real = false, standing = false } = {}) => ({
     networks: _cfg.networks,
+    standingPolicy: standing ? standingIds(kind) : null,
     gatewayGroupId: kind === 'names' ? _nb.namesGroupId : _nb.gatewayGroupId,
     gatewayGroupIds: [_nb.gatewayGroupId, _nb.namesGroupId].filter(Boolean), // never routing peers
     managedPolicyIds: [_nb.policyId, _nb.namesPolicyId].filter(Boolean),
+    targetGroupId: kind === 'names' ? _nb.namesTargetGroupId : _nb.targetGroupId,
+    targetGroupIds: targetGroupIds(), // a match only through one of these never grants
+    simulate: !real && !NETBIRD_READONLY,
+    readonly: !!NETBIRD_READONLY,
 });
 
 // ─── Checks (steps 1 and 2) ───
@@ -777,7 +916,12 @@ const MESSAGES = {
     AMBIGUOUS_ROUTE: 'More than one NetBird route leads to this address, so the connection could reach the wrong server. An administrator needs to remove the overlap.',
     GATEWAY_NOT_ENROLLED: "The Browser Gateway isn't set up yet. Ask an administrator to enroll it.",
     GATEWAY_DOMAIN_ROUTES: 'The Browser Gateway receives domain-based routes, so browser access is blocked for everyone until an administrator fixes it.',
-    GATEWAY_NOT_SYNCED: "This resource isn't available to the Browser Gateway yet. Try again in a few minutes.",
+    GATEWAY_NOT_SYNCED: "The route to this server isn't on the Browser Gateway yet. Try again in a minute.",
+    GATEWAY_POLICY_MISSING: "The Browser Gateway's NetBird policy is missing or turned off, so the gateway can't reach this server. Ask an administrator to save Settings > Remote Access again.",
+    GATEWAY_POLICY_PORT: "The Browser Gateway's NetBird policy doesn't open this port, so the gateway can't reach it. Ask an administrator to save Settings > Remote Access again.",
+    TARGET_NOT_OPEN_READONLY: "This server isn't open to the Browser Gateway right now, and this instance is read-only, so it can't open it. Connect through an instance that isn't read-only.",
+    TARGET_OPEN_FAILED: "The route to this server couldn't be opened in NetBird. Try again in a minute.",
+    TARGET_CHANGED: 'This server changed in NetBird while the session was opening. Connect again.',
     BLOCKED_BY_POLICY: 'A NetBird policy blocks this connection.',
     POSTURE_REQUIRED: 'Your access to this resource requires a managed device. Connect with the NetBird client instead.',
     PORT_NOT_ALLOWED: "You have access to this resource, but not on this port. Request access if you need it.",
@@ -820,8 +964,8 @@ function defaultResolve4(name) {
 // A name that matches a NetBird domain resource goes to the names gateway; any other name is
 // looked up and each IPv4 answer is checked like a typed IP (the first allowed one is used).
 async function resolveTarget(snap, userId, address, port, opts = {}) {
-    const ipCfg = opts.ipCfg || authCfg('ip');
-    const namesCfg = opts.namesCfg || authCfg('names');
+    const ipCfg = opts.ipCfg || authCfg('ip', { standing: true });
+    const namesCfg = opts.namesCfg || authCfg('names', { standing: true });
     const resolve4 = opts.resolve4 || _deps.resolve4 || defaultResolve4;
     const t = normalizeTarget(address);
     if (t.error) return { ok: false, verdict: { ok: false, code: t.error } };
@@ -960,32 +1104,184 @@ async function createSession(viewer, body, clientIp, opts = {}) {
         clientIp: String(clientIp || ''),
         resourceId: verdict.resource.id, resourceName: verdict.resource.name || rt.address,
         resourceType: verdict.resource.type === 'subnet' ? 'SUBNET_RESOURCE' : verdict.resource.type === 'domain' ? 'DOMAIN_RESOURCE' : 'HOST_RESOURCE',
+        // The approved resource's identity: what its hold is kept for.
+        resourceAddress: String(verdict.resource.address || ''), nbType: verdict.resource.type || '',
         networkId: verdict.network.id,
         startedAt: new Date(), leaseAt: Date.now(), lastInputAt: Date.now(),
-        state: 'pending', ws: null, guacd: null, rx: 0, tx: 0, closed: false,
+        // 'preparing' while its target is opened: it counts toward the quotas, has no token yet and
+        // is not re-checked. Every way out of here that is not a token closes it.
+        state: 'preparing', ws: null, guacd: null, rx: 0, tx: 0, closed: false,
+        started: Promise.resolve(false), // no start record yet, so no end record either
     };
     _sessions.set(s.id, s); // counts toward the quota from now on, including setup
+    let issued = false;
+    try {
+        // A read-only instance too: it writes nothing to NetBird, but checks, holds, waits and
+        // approves the same way.
+        await openTargetForSession(s, port);
 
-    // Whatever closes the session while its start is being recorded (a shutdown, a re-check),
-    // closeSession writes the end record only after this start record, and none if it failed.
-    s.started = recordStart(s);
-    if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', "The session couldn't be recorded, so it was not opened. Try again.");
-    if (_shuttingDown) {
-        closeSession(s, 'The server is restarting.');
-        throw httpError(503, 'SERVER_RESTARTING');
+        // Whatever closes the session while its start is being recorded (a shutdown, a re-check),
+        // closeSession writes the end record only after this start record, and none if it failed.
+        s.started = recordStart(s);
+        if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', "The session couldn't be recorded, so it was not opened. Try again.");
+        if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
+        // An unanswered write may have started settling while the start was being recorded, or the
+        // targets changed after the last evaluation.
+        if (targetsSettling() || _targetsGen !== s.targetsGen) throw httpError(503, 'TARGETS_SETTLING');
+        // Closed while its start was being written (a re-check, the feature turned off): no token for it.
+        if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
+
+        const token = crypto.randomBytes(32).toString('base64url');
+        _tokens.set(token, { sessionId: s.id, expiresAt: Date.now() + TOKEN_TTL_MS });
+        s.state = 'pending';
+        // Still pending after the token's lifetime (never used, or used by an upgrade that then
+        // failed): close it, so it never holds a quota slot.
+        s.tokenTimer = setTimeout(() => {
+            _tokens.delete(token);
+            if (s.state === 'pending') closeSession(s, 'The session was not opened in time.');
+        }, TOKEN_TTL_MS + 1000);
+        issued = true;
+        return { sessionId: s.id, token, resource: verdict.resource, network: verdict.network, address: s.address, name: s.targetName, gateway: s.gateway };
+    } finally {
+        // Frees the quota slot (and, after a start record, writes the end record).
+        if (!issued) closeSession(s, _shuttingDown ? 'The server is restarting.' : 'The session did not open.');
     }
-    // Closed while its start was being written (a re-check, the feature turned off): no token for it.
-    if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
+}
 
-    const token = crypto.randomBytes(32).toString('base64url');
-    _tokens.set(token, { sessionId: s.id, expiresAt: Date.now() + TOKEN_TTL_MS });
-    // Still pending after the token's lifetime (never used, or used by an upgrade that then
-    // failed): close it, so it never holds a quota slot.
-    s.tokenTimer = setTimeout(() => {
-        _tokens.delete(token);
-        if (s.state === 'pending') closeSession(s, 'The session was not opened in time.');
-    }, TOKEN_TTL_MS + 1000);
-    return { sessionId: s.id, token, resource: verdict.resource, network: verdict.network, address: s.address, name: s.targetName, gateway: s.gateway };
+function closedError() {
+    return _shuttingDown ? httpError(503, 'SERVER_RESTARTING') : httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
+}
+
+// Open the session's server to its gateway, then approve it again from NetBird as it is now:
+//   1. under the target lock (openTargetLocked): read the resource fresh, and if it no longer is
+//      the approved one, stop before anything is written; set the hold (the full holdHours at
+//      once); if the resource doesn't carry its target group yet, add the group to the RESOURCE
+//      (never by rewriting the group's list, so two opens never undo each other, also on two
+//      instances). A read-only instance does all of it but the NetBird write: it refuses a
+//      resource that is not a member yet;
+//   2. wait until the route is on the gateway (see openTargetLocked);
+//   3. read NetBird again and evaluate for real (no simulation of the route): the same resource,
+//      network and address, and the gateway's standing policy opens the port to the target group.
+async function openTargetForSession(s, port) {
+    const until = await withTargetLock(() => openTargetLocked(s));
+    if (s.closed) throw closedError();
+    const wait = until - Date.now();
+    if (until && wait > 0) await _sleep(wait);
+    if (s.closed) throw closedError();
+
+    // Under the target lock: a resource write of this instance holds it until NetBird answered, so
+    // this read comes after any write already sent, and a write sent after it raises the generation
+    // (no token then). The read's own clean-up of managed members runs detached and only queues.
+    const snap = await withTargetLock(async () => {
+        s.targetsGen = _targetsGen;
+        // Always a new read (never the one the checks above used, even within the same millisecond).
+        _snapshot = null;
+        try { return await freshSnapshot(0); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+    });
+    if (s.closed) throw closedError();
+    const cfg = authCfg(s.gateway, { real: true });
+    const v = s.gateway === 'names'
+        ? evaluateNameAccess(snap, cfg, { userId: s.userId, name: s.address, port })
+        : evaluateUserAccess(snap, cfg, { userId: s.userId, address: s.address, port });
+    if (!v.ok) throw httpError(v.code === 'GATEWAY_NOT_SYNCED' ? 503 : 403, v.code);
+    if (v.resource.id !== s.resourceId || v.network.id !== s.networkId || addressKey(v.resource.address) !== addressKey(s.resourceAddress)) throw httpError(409, 'TARGET_CHANGED');
+    const problem = standingPolicyProblem(snap, standingIds(s.gateway), port);
+    if (problem) throw httpError(409, problem);
+    if (targetsSettling() || !snapshotCurrent(snap)) throw httpError(503, 'TARGETS_SETTLING');
+}
+
+// The hold for a session start, in one statement: the same identity (network and address) keeps its
+// added_at (another instance may have just added the resource) and gets the later expiry; another
+// identity replaces the row. Returns the row as the database has it.
+const UPSERT_HOLD_SQL = `INSERT INTO remote_access_targets (resource_id, network_id, address, added_at, expires_at, updated_at)
+    VALUES ($1, $2, $3, NULL, $4, NOW())
+    ON CONFLICT (resource_id) DO UPDATE SET
+        added_at = CASE WHEN remote_access_targets.network_id = EXCLUDED.network_id AND remote_access_targets.address = EXCLUDED.address
+            THEN remote_access_targets.added_at ELSE NULL END,
+        expires_at = CASE WHEN remote_access_targets.network_id = EXCLUDED.network_id AND remote_access_targets.address = EXCLUDED.address
+            THEN GREATEST(remote_access_targets.expires_at, EXCLUDED.expires_at) ELSE EXCLUDED.expires_at END,
+        network_id = EXCLUDED.network_id, address = EXCLUDED.address, updated_at = NOW()
+    RETURNING ${HOLD_COLUMNS}`;
+const SET_ADDED_AT_SQL = 'UPDATE remote_access_targets SET added_at = $4, updated_at = NOW() WHERE resource_id = $1 AND network_id = $2 AND address = $3';
+// A member whose recorded add is this recent may have been added by a write still on its way when
+// this request saw it (another request, another instance, or a restamp that failed): the route may
+// not be on the gateway yet.
+const RECENT_ADD_MS = 30_000;
+
+// Returns when the session may go on (ms since the epoch; 0: at once):
+//   - added now: ROUTE_SETTLE_MS after the write's answer;
+//   - already a member, with an add recorded in the last RECENT_ADD_MS: ROUTE_SETTLE_MS after the
+//     later of that add and the moment this request saw the membership;
+//   - already a member otherwise: at once.
+async function openTargetLocked(s) {
+    if (s.closed) throw closedError();
+    const tg = targetGroupFor(s.networkId, s.resourceAddress);
+    if (!tg) throw httpError(409, 'GATEWAY_POLICY_MISSING');
+
+    // The resource as NetBird has it now: still the approved one? Checked before the hold, so an
+    // approval that is out of date never replaces the hold of the resource's new identity.
+    const path = `/api/networks/${encodeURIComponent(s.networkId)}/resources/${encodeURIComponent(s.resourceId)}`;
+    const got = await netbirdReq('GET', path);
+    if (got && got.status === 404) throw httpError(409, 'TARGET_CHANGED');
+    const res = got && got.body;
+    if (!nbOk(got) || !res || typeof res !== 'object') throw httpError(503, 'TARGET_OPEN_FAILED');
+    if (res.id !== s.resourceId || addressKey(res.address) !== addressKey(s.resourceAddress) || !s.nbType || res.type !== s.nbType) throw httpError(409, 'TARGET_CHANGED');
+    const groups = (Array.isArray(res.groups) ? res.groups : []).map(refId).filter(Boolean);
+    const seenAt = Date.now();
+
+    let row;
+    try {
+        const r = await pool.query(UPSERT_HOLD_SQL, [s.resourceId, s.networkId, addressKey(s.resourceAddress), new Date(Date.now() + _cfg.holdHours * 3_600_000)]);
+        row = r && r.rows && r.rows[0];
+        if (!row || !msOf(row.expires_at)) throw new Error('the database returned no hold');
+    } catch (e) {
+        console.error('[remote-access] could not record a target hold:', e.message);
+        throw httpError(503, 'TARGET_OPEN_FAILED');
+    }
+    const hold = { networkId: String(row.network_id), address: String(row.address), addedAt: msOf(row.added_at), expiresAt: msOf(row.expires_at) };
+    _holds.set(s.resourceId, hold);
+    if (s.closed) throw closedError();
+
+    if (groups.includes(tg)) {
+        if (!hold.addedAt || seenAt - hold.addedAt > RECENT_ADD_MS) return 0;
+        return Math.max(hold.addedAt, seenAt) + ROUTE_SETTLE_MS;
+    }
+    // A read-only instance writes nothing to NetBird, so it can't open the server.
+    if (NETBIRD_READONLY) throw httpError(409, 'TARGET_NOT_OPEN_READONLY');
+
+    // Recorded before the write: a write that lands is never without its added_at.
+    const ids = [s.resourceId, s.networkId, addressKey(s.resourceAddress)];
+    try {
+        const at = Date.now();
+        const u = await pool.query(SET_ADDED_AT_SQL, [...ids, new Date(at)]);
+        if (!u || u.rowCount !== 1) throw new Error(`the hold was not found (${u ? u.rowCount : 'no answer'})`);
+        hold.addedAt = at;
+    } catch (e) {
+        console.error('[remote-access] could not record when a target is added:', e.message);
+        throw httpError(503, 'TARGET_OPEN_FAILED');
+    }
+    if (s.closed) throw closedError();
+    const w = await netbirdReq('PUT', path, {
+        name: res.name, address: res.address, description: res.description || '', enabled: res.enabled !== false, groups: [...groups, tg],
+    });
+    // Any answer but success leaves the write uncertain: it may still land.
+    if (!nbOk(w)) {
+        noteUncertainTargetWrite();
+        console.error('[remote-access] could not add %s to the target group: %s', s.resourceId, (w && (w.raw || w.error || w.status)) || 'no response');
+        throw httpError(503, 'TARGET_OPEN_FAILED');
+    }
+    bustNbCaches('policies', 'gref', 'groups', 'usage');
+    const at = Date.now();
+    hold.addedAt = at;
+    await pool.query(SET_ADDED_AT_SQL, [...ids, new Date(at)])
+        .catch(e => console.error('[remote-access] could not record when a target was added:', e.message));
+    if (_deps.recordAudit) {
+        Promise.resolve(_deps.recordAudit({
+            actorId: s.userId, actorEmail: s.userEmail, actorName: s.userName, action: 'remote_access.target_open', target: s.resourceName,
+            meta: { group: managedGroupName(tg), resourceId: s.resourceId, networkId: s.networkId, address: s.resourceAddress, holdHours: _cfg.holdHours },
+        })).catch(() => { });
+    }
+    return at + ROUTE_SETTLE_MS;
 }
 
 // The live-state row and the start record. Resolves true, or false after undoing the row.
@@ -1420,7 +1716,7 @@ function takeToken(token) {
 async function recheckSessions() {
     const now = Date.now();
     for (const s of [..._sessions.values()]) {
-        if (s.state !== 'pending' && now - s.leaseAt > LEASE_TIMEOUT_MS) { failSession(s, 'Your sign-in ended or the page stopped responding, so the session was closed.', 0x0303); continue; }
+        if (s.state !== 'pending' && s.state !== 'preparing' && now - s.leaseAt > LEASE_TIMEOUT_MS) { failSession(s, 'Your sign-in ended or the page stopped responding, so the session was closed.', 0x0303); continue; }
         if (now - s.lastInputAt > _cfg.idleTimeoutMin * 60_000) { failSession(s, `The session was idle for ${_cfg.idleTimeoutMin} minutes and was closed.`, 0x020A); continue; }
         if (now - s.startedAt.getTime() > _cfg.maxDurationHours * 3_600_000) { failSession(s, `Sessions are limited to ${_cfg.maxDurationHours} hours. Connect again to continue.`, 0x020A); continue; }
     }
@@ -1449,13 +1745,50 @@ async function recheckSessions() {
         }
         return permission.get(s.userId);
     };
-    await Promise.all([..._sessions.values()].map(async (s) => {
+    // Real membership only: an open session's server is in its target group. A session still
+    // opening its target is checked by its own start.
+    const kept = [];
+    await Promise.all([..._sessions.values()].filter(s => s.state !== 'preparing').map(async (s) => {
+        const cfg = authCfg(s.gateway, { real: true });
         const v = s.gateway === 'names'
-            ? evaluateNameAccess(snap, authCfg('names'), { userId: s.userId, name: s.address, port: s.port })
-            : evaluateUserAccess(snap, authCfg('ip'), { userId: s.userId, address: s.address, port: s.port });
+            ? evaluateNameAccess(snap, cfg, { userId: s.userId, name: s.address, port: s.port })
+            : evaluateUserAccess(snap, cfg, { userId: s.userId, address: s.address, port: s.port });
         if (!v.ok || v.resource.id !== s.resourceId) { failSession(s, `Your access to this server ended: ${MESSAGES[v.code] || v.code || 'the route changed.'}`, 0x0303); return; }
-        if (!(await permitted(s)) && !s.closed) failSession(s, 'You no longer have permission to use browser remote access.', 0x0303);
+        // The approved resource itself changed (another network, another address): not the server
+        // this session was approved and opened for.
+        if (v.network.id !== s.networkId || addressKey(v.resource.address) !== addressKey(s.resourceAddress)) { failSession(s, `Your access to this server ended: ${MESSAGES.TARGET_CHANGED}`, 0x0303); return; }
+        if (!(await permitted(s)) && !s.closed) { failSession(s, 'You no longer have permission to use browser remote access.', 0x0303); return; }
+        if (!s.closed) kept.push(s);
     }));
+    await extendHolds(kept);
+}
+
+// An open session keeps its server: each re-check raises the hold's expiry to now + holdHours.
+// Only a hold whose identity is still the one the session was approved for is extended (the address
+// compared as NetBird means it); a missing hold is not created again. Read-only instances do this
+// too: it writes only Postgres.
+async function extendHolds(sessions) {
+    if (!sessions.length) return;
+    const ids = new Map();
+    for (const s of sessions) ids.set(`${s.resourceId}\n${s.networkId}\n${addressKey(s.resourceAddress)}`, s);
+    const until = Date.now() + _cfg.holdHours * 3_600_000;
+    await withTargetLock(async () => {
+        for (const s of ids.values()) {
+            try {
+                const r = await pool.query('SELECT address FROM remote_access_targets WHERE resource_id = $1 AND network_id = $2', [s.resourceId, s.networkId]);
+                const row = r && r.rows && r.rows[0];
+                if (!row || addressKey(row.address) !== addressKey(s.resourceAddress)) continue;
+                // The stored address exactly: a row replaced meanwhile is not touched.
+                const u = await pool.query(
+                    'UPDATE remote_access_targets SET expires_at = GREATEST(expires_at, $4), updated_at = NOW() WHERE resource_id = $1 AND network_id = $2 AND address = $3',
+                    [s.resourceId, s.networkId, row.address, new Date(until)]);
+                const h = _holds.get(s.resourceId);
+                if (u && u.rowCount && h && sameIdentity(h, s.networkId, s.resourceAddress)) h.expiresAt = Math.max(h.expiresAt, until);
+            } catch (e) {
+                console.error('[remote-access] could not extend a target hold:', e.message);
+            }
+        }
+    }).catch(() => { });
 }
 
 // Sweeps that need no NetBird read: lease, idle, duration. Runs more often than the full re-check
@@ -1464,7 +1797,7 @@ function sweepSessions() {
     const now = Date.now();
     if (_sessions.size && now - _lastGoodRecheck > SNAPSHOT_MAX_AGE_MS) closeAllSessions("Your access couldn't be verified with NetBird, so the session was closed.");
     for (const s of [..._sessions.values()]) {
-        if (s.state !== 'pending' && now - s.leaseAt > LEASE_TIMEOUT_MS) failSession(s, 'Your sign-in ended or the page stopped responding, so the session was closed.', 0x0303);
+        if (s.state !== 'pending' && s.state !== 'preparing' && now - s.leaseAt > LEASE_TIMEOUT_MS) failSession(s, 'Your sign-in ended or the page stopped responding, so the session was closed.', 0x0303);
     }
 }
 
@@ -1512,6 +1845,37 @@ function probeGuacd(host, port) {
 
 function getRemoteAccessStatusLite() { return { activeSessions: _sessions.size }; }
 
+// The servers sessions opened, with a hold that has not expired: in use by a session of this
+// instance, or until when the hold keeps them. A hold is listed only while the NetBird snapshot shows
+// its resource in the right target group with the network and address the hold is for (or a
+// session of this instance uses it); the names come from it. No snapshot: nothing is listed (the
+// page shows why).
+function heldTargets(snap) {
+    if (!snap) return [];
+    const now = Date.now();
+    const resById = new Map(((snap && snap.resources) || []).filter(r => r && r.id).map(r => [r.id, r]));
+    const netById = new Map(((snap && snap.networks) || []).filter(n => n && n.id).map(n => [n.id, n]));
+    const netOfRes = new Map();
+    for (const n of netById.values()) for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfRes.set(String((rid && rid.id) || rid), n.id);
+    // In the target group its address belongs to, with the network and address the hold is for.
+    const member = (id, h) => {
+        const res = resById.get(id);
+        const tg = isIpResourceAddress(h.address) ? _nb.targetGroupId : _nb.namesTargetGroupId;
+        return !!res && !!tg && netOfRes.get(id) === h.networkId && addressKey(res.address) === addressKey(h.address)
+            && (Array.isArray(res.groups) ? res.groups : []).some(g => refId(g) === tg);
+    };
+    return [..._holds].filter(([, h]) => h.expiresAt > now)
+        .map(([id, h]) => {
+            const res = resById.get(id);
+            const net = netById.get(h.networkId);
+            const inUse = [..._sessions.values()].some(s => s.resourceId === id && s.state !== 'preparing' && sameIdentity(h, s.networkId, s.resourceAddress));
+            if (!inUse && !member(id, h)) return null;
+            return { resourceId: id, name: (res && res.name) || h.address, address: h.address, network: (net && net.name) || h.networkId, inUse, expiresAt: new Date(h.expiresAt).toISOString() };
+        })
+        .filter(Boolean)
+        .sort((a, b) => (a.inUse === b.inUse ? a.name.localeCompare(b.name) : a.inUse ? -1 : 1));
+}
+
 async function getRemoteAccessStatus() {
     const out = {
         enabled: _cfg.enabled, activeSessions: _sessions.size, guacdReachable: null,
@@ -1520,12 +1884,14 @@ async function getRemoteAccessStatus() {
         conflicts: [],
         lastApply: { ..._lastApply },
         membership: { ..._lastMembership, removed: [..._lastMembership.removed] },
+        held: [],
     };
     [out.guacdReachable, out.names.guacdReachable] = await Promise.all([
-        probeGuacd(_cfg.guacdHost, _cfg.guacdPort), probeGuacd(_cfg.namesGuacdHost, _cfg.namesGuacdPort)]);
+        probeGuacd(_cfg.guacdHost, _cfg.guacdPort), probeGuacd(_cfg.namesGuacdHost, _cfg.namesGuacdPort), loadTargetHolds()]);
     if (!netbirdApiConfigured()) { out.error = 'The NetBird API is not connected.'; return out; }
     try {
         const snap = await freshSnapshot(30_000);
+        out.held = heldTargets(snap);
         const peersOf = (r) => (r.peers || []).map(p => ({ id: p.id, name: p.name || p.id, connected: !!p.connected, ip: p.ip || '' }));
         const nreach = gatewayReach(snap, authCfg('names'));
         out.names.gateway.enrolled = nreach.error !== 'GATEWAY_NOT_ENROLLED';
@@ -1754,8 +2120,8 @@ async function redeemLaunch(viewer, body, clientIp) {
 module.exports = {
     issueLaunch, redeemLaunch,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
-    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, remoteAccessTargetGroupsFor, withManagedTargets,
-    withTargetLock, noteUncertainTargetWrite, beginStartupSettling, enforceManagedMembership,
+    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
+    withTargetLock, noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
@@ -1777,6 +2143,10 @@ module.exports = {
         resetMembershipForTest: () => { _membershipFailed.clear(); _lastMembership = { at: null, removed: [], error: '' }; _membershipPending = null; },
         passMembershipRetryForTest: () => { for (const f of _membershipFailed.values()) f.at -= MEMBERSHIP_RETRY_MS; },
         installNameForTest: () => _installName,
+        // Target holds: read the in-memory copy, and replace the wait before approval.
+        holdsForTest: () => Object.fromEntries([..._holds].map(([id, h]) => [id, { ...h }])),
+        setSleepForTest: (fn) => { _sleep = fn || ((ms) => new Promise(r => setTimeout(r, ms))); },
+        loadTargetHolds, heldTargets,
         lastMembershipForTest: () => ({ ..._lastMembership }),
     },
 };
