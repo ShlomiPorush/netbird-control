@@ -207,9 +207,9 @@ const targetGroupIds = () => [_nb.targetGroupId, _nb.namesTargetGroupId].filter(
 // (createSession). It then has a hold: one row per resource id in `remote_access_targets`, with
 // the network and the address it had (its identity) and an expiry. A session start sets the expiry
 // to at least now + holdHours; the re-check of a session still open raises it again. Kept in memory
-// too, because the rule below is synchronous: loaded with the settings, read again before every
-// sync and resource write (another instance may have written one), and updated from the database's
-// answer on every write.
+// too, because the sync's rule is synchronous: loaded with the settings, read again by the sync after
+// each group read (another instance may have written one), and updated from the database's answer
+// on every write.
 const ROUTE_SETTLE_MS = 2000; // measured on a real account: the route was on the gateway 0.52-1.05 s after the write was sent
 const HOLD_COLUMNS = 'resource_id, network_id, address, added_at, expires_at';
 let _holds = new Map(); // resource id -> { networkId, address, addedAt (ms, 0 = unknown), expiresAt (ms) }
@@ -381,13 +381,13 @@ async function putManagedGroup(id, change) {
     const next = await change({ name: g.name, peers: [...g.peers], resources: g.resources });
     if (!next) return null;
     const after = { name: next.name, peers: targetGroupIds().includes(id) ? [] : next.peers, resources: next.resources || g.resources };
+    noteTargetsChanged();
     const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), after);
     // Any answer but success leaves the write uncertain: NetBird builds its answer after the save,
     // so even an error answer (or none) may follow a saved group.
     if (!nbOk(r)) { noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
     bustNbCaches('gref', 'groups', 'usage');
     invalidateSnapshot();
-    noteTargetsChanged();
     return { before: g, after };
 }
 const droppedDevices = (out) => (out ? out.before.peers.filter(id => !out.after.peers.includes(id)) : []);
@@ -462,17 +462,13 @@ async function ensurePolicy(kind, enabled) {
 // limit on networks with hundreds of them). Then it deletes the holds that expired or whose
 // resource is no longer a member. It runs while browser access is off too, so the groups drain.
 // Holds the target lock for the whole run.
-// The targets generation: raised by every target sync that finishes, every settings save, and every
-// write by this process that can take a resource out of a target group (a group write, or a resource
-// write that drops one). A session start notes it before its last evaluation and gets no token when
-// it changed meanwhile. A session start's own add doesn't raise it: an add never takes a route away.
+// The targets generation: raised by every target sync that finishes, every settings save, and right
+// before every managed group write and every resource or network write and delete of this process
+// (db.js). A session start notes it before its last evaluation and gets no token when it changed
+// meanwhile (the user tries again). A session start's own add doesn't raise it: an add never takes
+// a route away.
 let _targetsGen = 0;
 function noteTargetsChanged() { _targetsGen++; }
-// A resource write (db.js) that took a target group off the resource.
-function noteTargetGroupsWritten(before, after) {
-    const targets = targetGroupIds();
-    if ((before || []).some(g => targets.includes(g) && !(after || []).includes(g))) noteTargetsChanged();
-}
 
 function syncTargetGroup() {
     return withTargetLock(async () => {
@@ -2121,7 +2117,7 @@ module.exports = {
     issueLaunch, redeemLaunch,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
-    withTargetLock, noteUncertainTargetWrite, noteTargetGroupsWritten, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,
+    withTargetLock, noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,

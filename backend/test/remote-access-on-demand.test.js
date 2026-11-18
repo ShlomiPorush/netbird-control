@@ -36,6 +36,7 @@ nb.netbirdGet = async (p) => {
     if (onGet) onGet(p);
     const m = /^\/api\/groups\/([^/]+)$/.exec(p);
     if (m && TARGET_GROUPS[m[1]] && live.groupsReadable !== false) return clone(groupView(m[1]));
+    if (RES_PATH.test(p)) return clone(resourceAt(p)); // a resource writer's read (db.js)
     return clone(live[p]);
 };
 const RES_PATH = /^\/api\/networks\/([^/]+)\/resources\/([^/]+)$/;
@@ -59,6 +60,10 @@ nb.netbirdReq = async (method, p, body) => {
     if (writeAnswer) return writeAnswer;
     const r = resourceAt(p);
     if (method === 'PUT' && r) r.groups = body.groups.map(id => ({ id }));
+    if (method === 'DELETE' && r) {
+        live['/api/networks/resources'] = live['/api/networks/resources'].filter(x => x !== r);
+        for (const n of live['/api/networks']) n.resources = n.resources.filter(id => id !== r.id);
+    }
     const m = /^\/api\/groups\/([^/]+)$/.exec(p);
     if (method === 'PUT' && m && TARGET_GROUPS[m[1]]) {
         const members = new Set(body.resources.map(x => x.id));
@@ -75,6 +80,7 @@ events.addEvent = async (e) => { if (onEvent) await onEvent(e); };
 
 const auth = require('../lib/remote-access-auth');
 const ra = require('../lib/remote-access');
+const db = require('../db'); // the resource writers
 const audits = [];
 ra.setRemoteAccessDeps({ recordAudit: (e) => { audits.push(e); } });
 
@@ -342,6 +348,21 @@ test('no token when settling started while the start was being recorded', async 
     onEvent = async (e) => { if (e.Message === 'TYPE_START') ra.noteUncertainTargetWrite(); };
     await assert.rejects(rdp(), (e) => e.code === 'TARGETS_SETTLING');
     assert.equal(active(), 0);
+});
+
+test('no token when a resource write or delete was sent after the last evaluation', async () => {
+    const cases = {
+        'a resource disabled': () => db.setResourceEnabled('n1', 'r2', false),
+        'a resource deleted': () => db.deleteResource('n1', 'r2'),
+    };
+    for (const [label, write] of Object.entries(cases)) {
+        await reset();
+        // Another admin writes a resource while the start is recorded (its answer may come later).
+        onEvent = async (e) => { if (e.Message === 'TYPE_START') await write(); };
+        await assert.rejects(rdp(), (e) => e.code === 'TARGETS_SETTLING', label);
+        assert.ok(writes.some(w => w[1] === '/api/networks/n1/resources/r2'), `${label}: the write was sent`);
+        assert.equal(active(), 0, label);
+    }
 });
 
 test('no token when a target sync ran after the last evaluation', async () => {

@@ -28,7 +28,7 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 // gateway and target groups are app-owned: exposure-mirroring code skips the policies, and resource
 // writes, grants and routers never add, remove or reuse the groups (helpers below).
 const {
-    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetGroupsWritten,
+    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership,
 } = require('./lib/remote-access');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
@@ -176,13 +176,21 @@ async function refuseManagedPolicySources(policies) {
 // yet (create, and the copy a move makes).
 const withTargets = (fn) => (raMain() ? withTargetLock(fn) : fn());
 const targetsFor = (currentAddress, networkId, address, ids) => (raMain() ? withManagedTargets(currentAddress, networkId, address, ids) : ids);
-// No answer is not "not written": a resource write that timed out may still land. A write that took
-// a target group off (`before` -> `after` group ids) is noted, so a session start that evaluated
-// before it gets no token.
-function noteResourceWrite(resp, before, after) {
+// No answer is not "not written": a resource write that timed out may still land.
+function noteResourceWrite(resp) {
     if (raMain() && resp && resp.status === 0) noteUncertainTargetWrite();
-    if (raMain() && before && nbWriteOk(resp)) noteTargetGroupsWritten(before, after);
     return resp;
+}
+// Every resource or network write and delete of the main account raises the Remote Access targets
+// generation right before it is sent: a session start that read NetBird before it gets no token and
+// tries again (lib/remote-access.js).
+function resourceReq(method, apiPath, body) {
+    if (raMain()) noteTargetsChanged();
+    return netbirdReq(method, apiPath, body);
+}
+function resourcePost(apiPath, body) {
+    if (raMain()) noteTargetsChanged();
+    return netbirdPost(apiPath, body);
 }
 const sameIdSet = (a, b) => { const A = new Set(a), B = new Set(b); return A.size === B.size && [...A].every(x => B.has(x)); };
 // resetNbCaches (delegated to lib/netbird.js) must also drop db.js's own peers/users caches to
@@ -5867,7 +5875,7 @@ async function deleteNetwork(id) {
     }
     // Under the target lock, like a resource delete: NetBird deletes the resources still in the
     // network with it, and a target sync must not write references to them back.
-    const resp = await withTargets(() => netbirdReq('DELETE', '/api/networks/' + encodeURIComponent(id)));
+    const resp = await withTargets(() => resourceReq('DELETE', '/api/networks/' + encodeURIComponent(id)));
     if (!resp || (resp.status >= 300 && resp.status !== 404)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'network may still be in use';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
@@ -6826,7 +6834,7 @@ async function createClientResource(networkId, { name, address, description, gro
 
     // Network resource - groups are optional (a management convenience). NetBird
     // derives host/subnet/domain from the address.
-    const resp = await withTargets(async () => noteResourceWrite(await netbirdPost(`/api/networks/${encodeURIComponent(networkId)}/resources`, {
+    const resp = await withTargets(async () => noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, {
         name, address, description: description || '', enabled: true, groups: targetsFor(null, networkId, String(address || '').trim(), groupIds),
     })));
     if (!nbWriteOk(resp)) {
@@ -7090,7 +7098,7 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
             // at this point - so create under a temporary name and rename back at the end,
             // after the original is gone.
             const tempName = `${r.name} [moving]`;
-            const resp = noteResourceWrite(await netbirdPost(`/api/networks/${encodeURIComponent(target)}/resources`, {
+            const resp = noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(target)}/resources`, {
                 name: tempName, address: r.address, description: r.description || '',
                 enabled: r.enabled !== false, groups,
             }));
@@ -7138,7 +7146,7 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
                 // hold the new resource, so group cleanup won't touch them).
                 await deleteResource(sourceNetworkId, rid);
                 // The original name is free now - drop the temporary [moving] suffix.
-                const rn = await netbirdReq('PUT', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`, {
+                const rn = await resourceReq('PUT', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`, {
                     name: r.name, address: r.address, description: r.description || '',
                     enabled: r.enabled !== false, groups,
                 }).then(noteResourceWrite).catch(() => null);
@@ -7152,7 +7160,7 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
                 // already re-pointed (or they'd target the resource we're about to delete),
                 // THEN drop the new resource.
                 await revertRepointedPolicies(repointed);
-                await netbirdReq('DELETE', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`).catch(() => { });
+                await resourceReq('DELETE', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`).catch(() => { });
                 throw inner;
             }
         } catch (e) {
@@ -8230,11 +8238,11 @@ async function editResource(networkId, resourceId, { name, address, description,
         const isManaged = await managedGroupCheck();
         const requested = Array.isArray(groups) ? groups.filter(Boolean) : curIds;
         body.groups = targetsFor(cur.address, networkId, String(address || '').trim(), [...requested.filter(g => !isManaged(g)), ...curIds.filter(isManaged)]);
-        return putEditedResource(networkId, resourceId, body, curIds);
+        return putEditedResource(networkId, resourceId, body);
     });
 }
-async function putEditedResource(networkId, resourceId, body, before) {
-    const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body), before, body.groups);
+async function putEditedResource(networkId, resourceId, body) {
+    const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
     if (!nbWriteOk(resp)) throw new Error('Failed to update resource: ' + (resp && (resp.raw || resp.error || resp.status)));
     bustNbCaches('policies', 'gref', 'usage');
     return resp.body;
@@ -8247,7 +8255,7 @@ async function setResourceEnabled(networkId, resourceId, enabled) {
         if (!r || !r.id) throw new Error('Resource not found');
         const groups = targetsFor(r.address, networkId, r.address, groupIdsOf(r.groups));
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: !!enabled, groups };
-        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body), groupIdsOf(r.groups), groups);
+        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to set resource enabled: ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies');
         return resp.body;
@@ -8264,7 +8272,7 @@ async function renameResource(networkId, resourceId, name, description) {
             name, address: r.address, description: description || r.description || '',
             enabled: r.enabled !== false, groups: targetsFor(r.address, networkId, r.address, groupIdsOf(r.groups)),
         };
-        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body), groupIdsOf(r.groups), body.groups);
+        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to rename resource: ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies');
         return resp.body;
@@ -8301,7 +8309,7 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
         const next = targetsFor(r.address, networkId, r.address, [...current, ...missing]);
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
-        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body), current, next);
+        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to assign access-profile group(s): ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies', 'gref', 'usage');
         return missing.some(g => next.includes(g));
@@ -8326,7 +8334,7 @@ async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
         const next = targetsFor(r.address, networkId, r.address, current.filter(g => !drop.has(g) || (raMain() && isRemoteAccessManagedGroup(g, ''))));
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
-        const resp = noteResourceWrite(await netbirdReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body), current, next);
+        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to detach resource group: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
         bustNbCaches('policies', 'gref', 'usage');
         return current.some(g => drop.has(g) && !next.includes(g));
@@ -8398,7 +8406,7 @@ async function deleteResource(networkId, resourceId) {
 
     // Under the target lock: a target sync that read the resources before this delete must not
     // write its group list after it (NetBird would keep the reference to the deleted resource).
-    const del = await withTargets(() => netbirdReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
+    const del = await withTargets(() => resourceReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
     if (!del || del.status >= 300) throw new Error('Failed to delete resource: ' + (del && (del.raw || del.error || del.status)));
 
     // Clean up groups that are now empty (and the policies that targeted them)

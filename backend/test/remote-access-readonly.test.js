@@ -105,6 +105,16 @@ test('a read-only session start waits for a route that another instance just add
     assert.ok(sleeps[0] > 1900 && sleeps[0] <= 2000, String(sleeps[0]));
 });
 
+test('a read-only instance refuses a resource outside its target group at the check, even when another policy routes to it', async () => {
+    await reset();
+    live['/api/policies'].push({ id: 'pol-extra', name: 'Gateway to cold', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [], destinationResource: { id: 'r-cold', type: 'host' } }] });
+    const r = await ra.checkAccess(viewer, { protocol: 'rdp', address: '10.0.0.6', port: 3389 });
+    assert.equal(r.steps[0].code, 'TARGET_NOT_OPEN_READONLY');
+    await assert.rejects(open('10.0.0.6'), (e) => e.code === 'TARGET_NOT_OPEN_READONLY');
+    assert.equal(holds.rows.size, 0, 'no hold for a start that is refused');
+    assert.deepEqual(writes, []);
+});
+
 test('a read-only instance checks the standing policy before a session', async () => {
     await reset();
     live['/api/policies'][0].rules[0].ports = ['22'];

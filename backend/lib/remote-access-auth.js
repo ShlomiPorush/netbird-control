@@ -285,6 +285,9 @@ function evaluateUserAccess(snap, cfg, { userId, address, port, now = Date.now()
 //     read-only instance because it can't add it, else because the route isn't there (the
 //     evaluation right before the token, and the re-check).
 function targetView(snap, cfg, res, reach, inReach) {
+    // A read-only instance serves only a resource that is in its target group: it can't add one, and
+    // a route through another policy doesn't make it a member.
+    if (cfg && cfg.readonly && !(cfg.targetGroupId && arr(res.groups).some(g => idOf(g) === cfg.targetGroupId))) return { code: 'TARGET_NOT_OPEN_READONLY' };
     const view = cfg && cfg.targetGroupId ? withTargetMember(snap, res.id, cfg.targetGroupId) : snap;
     if (!cfg || !cfg.simulate || cfg.readonly) {
         if (inReach(reach)) return { snap: view, reach };
@@ -530,6 +533,6 @@ module.exports = {
     evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
     gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt, evaluatePolicies,
-    standingPolicyProblem, withTargetMember, managedTargetGroupIds,
+    standingPolicyProblem,
     TEMP_POLICY_RE, TEMP_GROUP_RE,
 };
