@@ -363,6 +363,11 @@ Each gateway container runs a short start script (in
   `--disable-dns=true` (IP gateway) or `--disable-dns=false` (names gateway) and
   `--block-inbound=true`. A setting changed later in the environment would not reach an already
   enrolled peer otherwise.
+- **Connections to routing peers stay open** (`NB_LAZY_CONN=false`): the gateway opens its tunnels
+  to a server's routing peers as soon as the server's route arrives, within the wait before the
+  session connects. With NetBird's lazy connections, the first packet of a session would wake the
+  routing peers, and NetBird could switch between a server's routing peers in the middle of that
+  session's TLS handshake, so the first session to a server that was just opened failed.
 - **The health check** fails when `wt0` is missing, the lock is missing, or the stored NetBird
   settings differ. guacd starts only after its gateway is healthy.
 - **The peer's identity** (its NetBird private key) is kept in a Docker volume

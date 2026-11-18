@@ -30,6 +30,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   after the upgrade takes the whole networks that 1.4.x put into the target groups out, in one
   write per group. To roll back, use 1.4.1, not
   1.4.0.
+- **The gateways keep their NetBird connections open** (`NB_LAZY_CONN=false` in
+  `netbird-docker-compose-files/docker-compose-remote-access.yml`). With lazy connections, the first
+  session to a server that was just opened woke the server's routing peers, and NetBird switched
+  between them in the middle of the connection, so that first session failed. Now the gateway opens
+  its tunnels to a server's routing peers as soon as the route arrives. **Upgrade:** take the new
+  compose file and re-create the gateway containers and their guacd containers.
 - **A policy that points at a Browser Gateway target group no longer gives a user access** through
   it. A drop rule through such a group still blocks.
 - **A read-only instance** (`NETBIRD_READONLY=true`) connects only to servers that are already open
