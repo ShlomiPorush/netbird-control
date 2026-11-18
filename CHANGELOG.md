@@ -14,8 +14,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **Opening a large network to Remote Access no longer takes a NetBird request per resource.** The
   target sync read and wrote every resource separately, so a network with hundreds of resources
   failed part way with "too many requests" and left NetBird half updated. It now reads each
-  Browser Gateway target group and writes it once, whatever the number of resources, and writes
-  nothing when a group is already right. A resource in a target group that no open network
+  Browser Gateway target group and writes it as a whole, whatever the number of resources, and
+  writes nothing when a group is already right. When a resource changes in NetBird during the
+  sync, it reads again and writes once more; if NetBird still differs, or the write's answer is
+  not a success, new sessions wait for the follow-up sync about 90 seconds later. A resource in a target group that no open network
   accounts for is now taken out too, and so is a device: target groups hold resources only, and
   every write to one leaves it without devices. Each write is recorded in the audit log with the
   resources it added and removed.

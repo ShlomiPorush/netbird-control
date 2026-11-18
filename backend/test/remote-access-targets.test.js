@@ -264,23 +264,6 @@ test('a resource changed in NetBird between the read and the write is corrected 
     } finally { live = null; afterWrite = null; }
 });
 
-test('a group write answered with a server error counts as uncertain', async () => {
-    live = {
-        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }],
-        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
-        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
-        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
-    };
-    writeAnswer = { status: 500, raw: 'internal error' }; // NetBird may have saved the group already
-    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
-    ra._internal.setManagedForTest(MANAGED_IDS);
-    ra._internal.resetSettlingForTest();
-    try {
-        await assert.rejects(ra._internal.syncTargetGroup(), /internal error/);
-        assert.equal(ra._internal.settlingForTest(), true, 'new sessions wait for a later sync');
-    } finally { live = null; writeAnswer = null; ra._internal.resetSettlingForTest(); }
-});
-
 test('a resource read without its type changes nothing', async () => {
     live = {
         '/api/networks/resources': [{ id: 'r1', address: '10.0.0.5/32', groups: [] }],
@@ -292,9 +275,66 @@ test('a resource read without its type changes nothing', async () => {
     ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
     ra._internal.setManagedForTest(MANAGED_IDS);
     try {
-        await assert.rejects(ra._internal.syncTargetGroup(), /in full, so the target groups were not changed/);
+        await assert.rejects(ra._internal.syncTargetGroup(), (e) => e.message === "Couldn't read the networks from NetBird in full.");
         assert.equal(writes.length, 0);
     } finally { live = null; }
+});
+
+test('a read that fails after a write says what was written and holds new sessions back', async () => {
+    const r1 = { id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] };
+    live = {
+        '/api/networks/resources': [r1],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    afterWrite = () => { live['/api/networks/resources'] = [{ ...r1, type: '' }]; afterWrite = null; };
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    ra._internal.resetSettlingForTest();
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), (e) => /^The "Browser Gateway Targets" group was updated, then: Couldn't read the networks/.test(e.message));
+        assert.equal(ra._internal.settlingForTest(), true);
+    } finally { live = null; afterWrite = null; ra._internal.resetSettlingForTest(); }
+});
+
+test('a difference still there after the second write holds new sessions back', async () => {
+    const dom = { id: 'r-dom', type: 'domain', address: 'safe.example.com', groups: [] };
+    live = {
+        '/api/networks/resources': [dom],
+        '/api/networks': [{ id: 'n1', resources: ['r-dom'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    // NetBird keeps changing under each write: the name flips between exact and wildcard.
+    let n = 0;
+    afterWrite = () => { live['/api/networks/resources'] = [{ ...dom, address: n++ % 2 ? 'safe.example.com' : '*.example.com' }]; };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    ra._internal.resetSettlingForTest();
+    try {
+        await ra._internal.syncTargetGroup();
+        assert.equal(groupWrites().length, 2, 'two writes at most');
+        assert.equal(ra._internal.settlingForTest(), true, 'the check after them found a difference');
+    } finally { live = null; afterWrite = null; ra._internal.resetSettlingForTest(); }
+});
+
+test('a group write answered with an error of any kind counts as uncertain', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    writeAnswer = { status: 404, raw: 'user not found' }; // can follow a saved group in NetBird
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    ra._internal.resetSettlingForTest();
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), /user not found/);
+        assert.equal(ra._internal.settlingForTest(), true);
+    } finally { live = null; writeAnswer = null; ra._internal.resetSettlingForTest(); }
 });
 
 test('the target sync writes nothing when a target group cannot be read in full', async () => {
