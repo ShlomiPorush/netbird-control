@@ -25,6 +25,19 @@ nb.netbirdGet = async (p) => {
     if (routersHook && p.endsWith('/routers')) await routersHook();
     return JSON.parse(JSON.stringify((live && live[p]) ?? null));
 };
+const writes = []; // [method, path, body] of every NetBird write
+let writeAnswer = null; // a test's answer to a write, instead of 200
+let afterWrite = null;  // runs after a write is applied
+nb.netbirdReq = async (method, p, body) => {
+    writes.push([method, p, JSON.parse(JSON.stringify(body ?? null))]);
+    if (writeAnswer) return writeAnswer;
+    // As in NetBird, a group write changes what the next read of that group returns.
+    if (live && method === 'PUT' && p.startsWith('/api/groups/') && live[p]) {
+        live[p] = { ...live[p], name: body.name, peers: body.peers.map(id => ({ id })), resources: body.resources };
+    }
+    if (afterWrite) afterWrite(p);
+    return { status: 200, body: { id: 'ok' } };
+};
 const events = require('../lib/events');
 events.addEvent = async () => { };
 
@@ -127,25 +140,241 @@ test('a name only a wildcard domain resource covers is refused and never looked 
     assert.equal(v.resource.id, 'r-exact');
 });
 
+// ─── Target sync ───
+const MANAGED_IDS = { gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', namesGroupId: 'g-ngw', namesTargetGroupId: 'g-ngwt' };
+const targetGroup = (id, name, resources = [], peers = []) => ({ id, name, peers, resources });
+const groupWrites = () => writes.filter(w => w[0] === 'PUT' && w[1].startsWith('/api/groups/'));
+
 test('the target sync keeps the names target group off wildcard domain resources', async () => {
     live = {
         '/api/networks/resources': [
-            { id: 'r-dom', address: 'safe.example.com', groups: [] },
-            { id: 'r-wild', address: '*.corp.example', groups: [{ id: 'g-ngwt' }] },
-            { id: 'r-wild2', address: '*.new.example', groups: [] },
+            { id: 'r-dom', type: 'domain', address: 'safe.example.com', groups: [] },
+            { id: 'r-wild', type: 'domain', address: '*.corp.example', groups: [{ id: 'g-ngwt' }] },
+            { id: 'r-wild2', type: 'domain', address: '*.new.example', groups: [] },
         ],
         '/api/networks': [{ id: 'n1', resources: ['r-dom', 'r-wild', 'r-wild2'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets', [{ id: 'r-wild', type: 'domain' }]),
     };
-    const calls = [];
-    ra.setRemoteAccessDeps({
-        addResourceGroups: async (n, r, g) => { calls.push(['add', r, ...g]); return true; },
-        removeResourceGroups: async (n, r, g) => { calls.push(['remove', r, ...g]); return true; },
-    });
+    writes.length = 0;
     ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
-    ra._internal.setManagedForTest({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', namesGroupId: 'g-ngw', namesTargetGroupId: 'g-ngwt' });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        const out = await ra._internal.syncTargetGroup();
+        assert.deepEqual(groupWrites(), [['PUT', '/api/groups/g-ngwt', { name: 'Browser Gateway Name Targets', peers: [], resources: [{ id: 'r-dom', type: 'domain' }] }]],
+            'the exact name in, the wildcard out; the unchanged IP target group is not written');
+        assert.deepEqual(out, { added: 1, removed: 1 });
+    } finally { live = null; }
+});
+
+test('the target sync writes each target group once, however many resources a network has', async () => {
+    const hosts = Array.from({ length: 825 }, (_, i) => ({ id: `r${i}`, type: 'host', address: `10.${Math.floor(i / 250)}.${i % 250}.1/32`, groups: [] }));
+    const resources = [...hosts, { id: 'r-sub', type: 'subnet', address: '192.0.2.0/24', groups: [] }, { id: 'r-bare', type: 'host', address: '198.51.100.7', groups: [] }];
+    live = {
+        '/api/networks/resources': resources,
+        '/api/networks': [{ id: 'n-clients', resources: resources.map(r => r.id) }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets', [], [{ id: 'p-stray' }]),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    const audits = [];
+    ra.setRemoteAccessDeps({ recordAudit: (e) => { audits.push(e); } });
+    try {
+        // Opening the network: one write for all of it, no write per resource.
+        writes.length = 0;
+        ra._internal.setConfigForTest({ enabled: true, networks: ['n-clients'] });
+        const opened = await ra._internal.syncTargetGroup();
+        assert.equal(writes.length, 1, 'one NetBird write in total');
+        const [, p, body] = writes[0];
+        assert.equal(p, '/api/groups/g-gwt');
+        assert.equal(body.resources.length, 827);
+        assert.deepEqual(body.resources.slice(-2), [{ id: 'r-sub', type: 'subnet' }, { id: 'r-bare', type: 'host' }], "each resource with NetBird's type for it");
+        assert.deepEqual(body.peers, [], 'a target group holds resources only: a stray device is taken out, never written back');
+        assert.deepEqual(opened, { added: 827, removed: 0 });
+        await new Promise(r => setImmediate(r));
+        const update = audits.find(a => a.action === 'remote_access.targets_update');
+        assert.deepEqual([update.target, update.meta.added, update.meta.removed, update.meta.addedIds.length], ['Browser Gateway Targets', 827, 0, 50], 'which resources changed is audited');
+        assert.ok(audits.some(a => a.action === 'remote_access.member_remove' && a.target === 'p-stray'), 'the device taken out is audited like the clean-up does');
+
+        // Already in place: nothing is written.
+        live['/api/groups/g-gwt'] = targetGroup('g-gwt', 'Browser Gateway Targets', body.resources);
+        writes.length = 0;
+        assert.deepEqual(await ra._internal.syncTargetGroup(), { added: 0, removed: 0 });
+        assert.equal(writes.length, 0);
+
+        // Closing it: one write empties the group.
+        writes.length = 0;
+        ra._internal.setConfigForTest({ enabled: true, networks: [] });
+        const closed = await ra._internal.syncTargetGroup();
+        assert.deepEqual(writes, [['PUT', '/api/groups/g-gwt', { name: 'Browser Gateway Targets', peers: [], resources: [] }]]);
+        assert.deepEqual(closed, { added: 0, removed: 827 });
+    } finally { live = null; }
+});
+
+test('a resource whose type changed is written again, with the same members', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'subnet', address: '10.0.0.0/24', groups: [] }], // was a /32 host
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets', [{ id: 'r1', type: 'host' }]),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        assert.deepEqual(await ra._internal.syncTargetGroup(), { added: 0, removed: 0 });
+        assert.deepEqual(groupWrites().map(w => w[2].resources), [[{ id: 'r1', type: 'subnet' }]]);
+    } finally { live = null; }
+});
+
+test('a sync that fails after writing one group says that group was updated', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': null, // unreadable
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(),
+            (e) => /^The "Browser Gateway Targets" group was updated, then: Couldn't read the group/.test(e.message) && !/nothing was changed/.test(e.message));
+        assert.equal(groupWrites().length, 1);
+    } finally { live = null; }
+});
+
+test('a resource changed in NetBird between the read and the write is corrected in the same sync', async () => {
+    const dom = { id: 'r-dom', type: 'domain', address: 'safe.example.com', groups: [] };
+    live = {
+        '/api/networks/resources': [dom],
+        '/api/networks': [{ id: 'n1', resources: ['r-dom'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    // Someone makes the exact name a wildcard in the NetBird dashboard right after the read.
+    afterWrite = () => { live['/api/networks/resources'] = [{ ...dom, address: '*.example.com' }]; afterWrite = null; };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
     try {
         await ra._internal.syncTargetGroup();
-        assert.deepEqual(calls.sort(), [['add', 'r-dom', 'g-ngwt'], ['remove', 'r-wild', 'g-ngwt']]);
+        assert.deepEqual(groupWrites().map(w => w[2].resources.map(r => r.id)), [['r-dom'], []], 'the second pass takes the wildcard out');
+        assert.deepEqual(live['/api/groups/g-ngwt'].resources, []);
+    } finally { live = null; afterWrite = null; }
+});
+
+test('a resource read without its type changes nothing', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', address: '10.0.0.5/32', groups: [] }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), (e) => e.message === "Couldn't read the networks from NetBird in full.");
+        assert.equal(writes.length, 0);
+    } finally { live = null; }
+});
+
+test('a read that fails after a write says what was written and holds new sessions back', async () => {
+    const r1 = { id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] };
+    live = {
+        '/api/networks/resources': [r1],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    afterWrite = () => { live['/api/networks/resources'] = [{ ...r1, type: '' }]; afterWrite = null; };
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    ra._internal.resetSettlingForTest();
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), (e) => /^The "Browser Gateway Targets" group was updated, then: Couldn't read the networks/.test(e.message));
+        assert.equal(ra._internal.settlingForTest(), true);
+    } finally { live = null; afterWrite = null; ra._internal.resetSettlingForTest(); }
+});
+
+test('a difference still there after the second write holds new sessions back', async () => {
+    const dom = { id: 'r-dom', type: 'domain', address: 'safe.example.com', groups: [] };
+    live = {
+        '/api/networks/resources': [dom],
+        '/api/networks': [{ id: 'n1', resources: ['r-dom'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    // NetBird keeps changing under each write: the name flips between exact and wildcard.
+    let n = 0;
+    afterWrite = () => { live['/api/networks/resources'] = [{ ...dom, address: n++ % 2 ? 'safe.example.com' : '*.example.com' }]; };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    ra._internal.resetSettlingForTest();
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), /NetBird changed again while it was being updated/, 'never reported as a success');
+        assert.equal(groupWrites().length, 2, 'two writes at most');
+        assert.equal(ra._internal.settlingForTest(), true, 'the check after them found a difference');
+    } finally { live = null; afterWrite = null; ra._internal.resetSettlingForTest(); }
+});
+
+test('after one group is written, the next is compared with a fresh read of the resources', async () => {
+    const dom = { id: 'r-dom', type: 'domain', address: 'safe.example.com', groups: [] };
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }, dom],
+        '/api/networks': [{ id: 'n1', resources: ['r1', 'r-dom'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'), // needs r1: written first
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets', [{ id: 'r-dom', type: 'domain' }]),
+    };
+    // While the IP group is written, someone makes the name a wildcard and takes it out by hand.
+    afterWrite = (p) => {
+        if (p !== '/api/groups/g-gwt') return;
+        live['/api/networks/resources'] = [live['/api/networks/resources'][0], { ...dom, address: '*.example.com' }];
+        live['/api/groups/g-ngwt'] = targetGroup('g-ngwt', 'Browser Gateway Name Targets');
+        afterWrite = null;
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        await ra._internal.syncTargetGroup();
+        assert.deepEqual(groupWrites().map(w => w[1]), ['/api/groups/g-gwt'], 'the names group is not written from the older read');
+        assert.deepEqual(live['/api/groups/g-ngwt'].resources, [], 'the wildcard is not put back');
+    } finally { live = null; afterWrite = null; }
+});
+
+test('a group write answered with an error of any kind counts as uncertain', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': targetGroup('g-gwt', 'Browser Gateway Targets'),
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    writeAnswer = { status: 404, raw: 'user not found' }; // can follow a saved group in NetBird
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    ra._internal.resetSettlingForTest();
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), /user not found/);
+        assert.equal(ra._internal.settlingForTest(), true);
+    } finally { live = null; writeAnswer = null; ra._internal.resetSettlingForTest(); }
+});
+
+test('the target sync writes nothing when a target group cannot be read in full', async () => {
+    live = {
+        '/api/networks/resources': [{ id: 'r1', type: 'host', address: '10.0.0.5/32', groups: [] }],
+        '/api/networks': [{ id: 'n1', resources: ['r1'] }],
+        '/api/groups/g-gwt': { id: 'g-gwt', name: 'Browser Gateway Targets', peers: [] }, // no resources field
+        '/api/groups/g-ngwt': targetGroup('g-ngwt', 'Browser Gateway Name Targets'),
+    };
+    writes.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] });
+    ra._internal.setManagedForTest(MANAGED_IDS);
+    try {
+        await assert.rejects(ra._internal.syncTargetGroup(), /Couldn't read the group/);
+        assert.equal(writes.length, 0);
     } finally { live = null; }
 });
 

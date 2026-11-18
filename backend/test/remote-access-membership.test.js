@@ -36,8 +36,8 @@ nb.netbirdGet = async (p) => {
     if (p === '/api/users') return clone(state.users.filter(u => !u.is_service_user));
     if (p === '/api/users?service_user=true') return clone(state.users.filter(u => u.is_service_user));
     if (p === '/api/policies') return clone(state.policies);
-    if (p === '/api/networks') return [];
-    if (p === '/api/networks/resources') return [];
+    if (p === '/api/networks') return clone(state.networks || []);
+    if (p === '/api/networks/resources') return clone(state.resources || []);
     if (p === '/api/peers') return clone(state.peers || []);
     return [];
 };
@@ -179,6 +179,22 @@ test('any device in a target group is taken out; the resources of the group stay
     assert.deepEqual(peerIds('g-gwt'), []);
     assert.deepEqual(writes('PUT', /^\/api\/groups\/g-gwt$/)[0][2].resources, [{ id: 'r1', type: 'host' }]);
     assert.deepEqual(peerIds('g-gw'), ['p-gw']);
+});
+
+test('a target group is written without any device, also one the data did not show', async () => {
+    reset();
+    state.groups[1].peers = [{ id: 'p-x' }, { id: 'p-new' }]; // p-new joined after the peers were read
+    await enforce({ peers: [{ id: 'p-x', name: 'x', user_id: 'u1', groups: [{ id: 'g-gwt' }] }] });
+    assert.deepEqual(writes('PUT', /^\/api\/groups\/g-gwt$/)[0][2].peers, [], 'so a late answer can never put a device back');
+    assert.deepEqual(audits.map(a => a.target).sort(), ['p-new', 'x'], 'both are recorded');
+    // A rename writes a target group without devices too, and records them.
+    reset();
+    state.groups[1].peers = [{ id: 'p-y' }];
+    settings.app_name = 'Prod';
+    await ra._internal.applyGatewayObjects();
+    assert.deepEqual(peerIds('g-gwt'), []);
+    assert.ok(audits.some(a => a.action === 'remote_access.member_remove' && a.target === 'p-y'));
+    assert.deepEqual(peerIds('g-gw'), ['p-gw'], 'the gateway group keeps its gateway');
 });
 
 test('a group read that is not complete is never written back', async () => {
@@ -337,7 +353,12 @@ test("another installation's groups are refused too, by their live name", async 
 
 // ─── Installation name ───
 test('the objects are named after the app name, and renamed by stored id with members and resources kept', async () => {
-    reset({ policies: [{ id: 'pol-gw', name: 'Browser Gateway', rules: [] }, { id: 'pol-ngw', name: 'Browser Gateway (Names)', rules: [] }] });
+    reset({
+        policies: [{ id: 'pol-gw', name: 'Browser Gateway', rules: [] }, { id: 'pol-ngw', name: 'Browser Gateway (Names)', rules: [] }],
+        networks: [{ id: 'n1', resources: ['r1'] }],
+        resources: [{ id: 'r1', type: 'host', address: '10.0.0.5/32', enabled: true }],
+    });
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'] }); // r1 stays a target by the rule
     state.groups[0].name = 'Browser Gateway';
     state.groups[1].name = 'Browser Gateway Targets';
     settings.app_name = '  NetBird  Control\nDEV (שלוחה) ';

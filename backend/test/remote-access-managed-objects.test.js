@@ -44,7 +44,8 @@ nb.netbirdGet = async (p) => {
     if (p.startsWith('/api/groups/')) {
         if (state.groupReadable === false) return null;
         const g = state.groups.find(x => x.id === decodeURIComponent(p.slice('/api/groups/'.length)));
-        return g ? clone(g) : null;
+        // As in NetBird, a group's resources and a resource's groups are one relation.
+        return g ? clone({ ...g, peers: g.peers || [], resources: groupResources(g.id) }) : null;
     }
     if (p === '/api/policies') return clone(state.policies);
     if (p === '/api/users' || p.startsWith('/api/users?')) return [{ id: 'user-1', role: 'user', auto_groups: [] }];
@@ -61,6 +62,25 @@ nb.netbirdPost = async (p, body) => {
     calls.push(['POST', p, clone(body)]);
     return { status: 200, body: { id: `nb-${calls.length}`, type: 'host' } };
 };
+const groupResources = (gid) => state.resources.filter(r => (r.groups || []).some(g => (g.id || g) === gid)).map(r => ({ id: r.id, type: r.type || 'host' }));
+// What NetBird does with a write (also callable from a test's putHook).
+function applyWrite(method, p, body) {
+    const res = resourceOf(p);
+    if (res && method === 'DELETE') state.resources = state.resources.filter(r => r !== res);
+    if (res && method === 'PUT' && body && Array.isArray(body.groups)) res.groups = body.groups.map(id => ({ id }));
+    const gm = /^\/api\/groups\/([^/]+)$/.exec(p);
+    if (gm && method === 'PUT' && body) {
+        const gid = decodeURIComponent(gm[1]);
+        const g = state.groups.find(x => x.id === gid);
+        if (g) { g.name = body.name; g.peers = (body.peers || []).map(id => ({ id })); }
+        const members = new Set((body.resources || []).map(r => r.id));
+        for (const r of state.resources) {
+            const others = (r.groups || []).filter(x => (x.id || x) !== gid);
+            r.groups = members.has(r.id) ? [...others, { id: gid }] : others;
+        }
+    }
+    return { status: 200, body: { id: 'ok' } };
+}
 nb.netbirdReq = async (method, p, body) => {
     if (method === 'GET') {
         const res = resourceOf(p);
@@ -68,9 +88,8 @@ nb.netbirdReq = async (method, p, body) => {
     }
     calls.push([method, p, clone(body)]);
     if (state.putHook && method === 'PUT') return state.putHook(p, body);
-    const res = resourceOf(p);
-    if (res && method === 'PUT' && body && Array.isArray(body.groups)) res.groups = body.groups.map(id => ({ id }));
-    return { status: 200, body: { id: 'ok' } };
+    if (state.deleteHook && method === 'DELETE') await state.deleteHook(p);
+    return applyWrite(method, p, body);
 };
 
 const db = require('../db');
@@ -94,8 +113,8 @@ function reset(over = {}) {
         ],
         networks: [{ id: 'n1', name: 'Office', resources: ['r1'] }, { id: 'n2', name: 'Lab', resources: ['r2'] }],
         resources: [
-            { id: 'r1', net: 'n1', name: 'srv', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-own', name: 'Team' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }] },
-            { id: 'r2', net: 'n2', name: 'lab', address: '192.0.2.10/32', enabled: true, groups: [{ id: 'g-gwt', name: 'Browser Gateway Targets' }] },
+            { id: 'r1', net: 'n1', name: 'srv', type: 'host', address: '10.0.0.5/32', enabled: true, groups: [{ id: 'g-own', name: 'Team' }, { id: 'g-gwt', name: 'Browser Gateway Targets' }] },
+            { id: 'r2', net: 'n2', name: 'lab', type: 'host', address: '192.0.2.10/32', enabled: true, groups: [{ id: 'g-gwt', name: 'Browser Gateway Targets' }] },
         ],
         policies: [
             { id: 'pol-gw', name: 'Browser Gateway', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-gwt' }] }] },
@@ -185,10 +204,9 @@ test('a write computed before a configuration change finishes before the sync th
     const held = new Promise(r => { release = r; });
     const order = [];
     state.putHook = async (p, body) => {
-        order.push('put:' + body.groups.join(','));
+        order.push(body.groups ? 'put:' + body.groups.join(',') : 'group:' + body.resources.map(r => r.id).join(','));
         if (order.length === 1) await held;
-        const res = resourceOf(p); res.groups = body.groups.map(id => ({ id }));
-        return { status: 200, body: {} };
+        return applyWrite('PUT', p, body);
     };
     state.readHook = async (p) => { if (p === '/api/networks/resources') order.push('sync-read'); };
     const editing = db.editResource('n1', 'r1', { name: 'srv', address: '10.0.0.5/32', groups: ['g-own'] });
@@ -203,6 +221,28 @@ test('a write computed before a configuration change finishes before the sync th
     await syncing;
     assert.deepEqual(order.slice(0, 2), ['put:g-own,g-gwt', 'sync-read']);
     assert.deepEqual(state.resources[0].groups.map(g => g.id), ['g-own'], 'the sync then took the target group off');
+});
+
+test('a resource delete in flight finishes before a target sync reads the resources', async () => {
+    reset();
+    let release;
+    const held = new Promise(r => { release = r; });
+    const order = [];
+    state.deleteHook = async (p) => { if (resourceOf(p)) { order.push('delete'); await held; } };
+    state.readHook = async (p) => { if (p === '/api/networks/resources') order.push('sync-read'); };
+    const deleting = db.deleteResource('n1', 'r1');
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+    state.resources.push({ id: 'r9', net: 'n1', name: 'new', type: 'host', address: '10.0.0.9/32', enabled: true, groups: [] });
+    state.networks[0].resources.push('r9'); // a change that makes the sync write the group
+    const syncing = ra._internal.syncTargetGroup();
+    await new Promise(r => setTimeout(r, 20));
+    assert.deepEqual(order, ['delete'], 'the sync waits for the delete in flight');
+    release();
+    await deleting;
+    await syncing;
+    assert.deepEqual(order.slice(0, 2), ['delete', 'sync-read']);
+    const put = lastBody('PUT', /^\/api\/groups\/g-gwt$/);
+    assert.deepEqual(put.resources.map(r => r.id), ['r9'], 'the deleted resource is not written back');
 });
 
 test('a resource write that got no answer holds new sessions back until a later sync has finished', async () => {

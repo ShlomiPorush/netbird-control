@@ -5842,7 +5842,9 @@ async function deleteNetwork(id) {
             }
         }
     }
-    const resp = await netbirdReq('DELETE', '/api/networks/' + encodeURIComponent(id));
+    // Under the target lock, like a resource delete: NetBird deletes the resources still in the
+    // network with it, and a target sync must not write references to them back.
+    const resp = await withTargets(() => netbirdReq('DELETE', '/api/networks/' + encodeURIComponent(id)));
     if (!resp || (resp.status >= 300 && resp.status !== 404)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'network may still be in use';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
@@ -8253,8 +8255,8 @@ async function renameResource(networkId, resourceId, name, description) {
 // Ensure a resource belongs to every group in `wantGroupIds` (e.g. its automation's Access
 // Profile groups). GET-then-PUT unions with the resource's current groups so name/address/
 // description/enabled are preserved. Returns true only if it actually added a group.
-// The managed target groups follow the rule (the target sync adds them through here too), so a
-// read that is out of date can't put one back or take one off.
+// The managed target groups follow the rule (the target sync writes them per group), so a read
+// that is out of date can't put one back or take one off.
 async function addResourceGroups(networkId, resourceId, wantGroupIds) {
     const want = [...new Set((wantGroupIds || []).filter(Boolean))];
     if (!want.length) return false;
@@ -8369,7 +8371,9 @@ async function deleteResource(networkId, resourceId) {
         }
     }
 
-    const del = await netbirdReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    // Under the target lock: a target sync that read the resources before this delete must not
+    // write its group list after it (NetBird would keep the reference to the deleted resource).
+    const del = await withTargets(() => netbirdReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
     if (!del || del.status >= 300) throw new Error('Failed to delete resource: ' + (del && (del.raw || del.error || del.status)));
 
     // Clean up groups that are now empty (and the policies that targeted them)
