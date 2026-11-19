@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**
+  and **Connecting To Server**.
+
 ---
 
 ## [1.6.0] - 2026-11-19

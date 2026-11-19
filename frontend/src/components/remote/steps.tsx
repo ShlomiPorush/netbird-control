@@ -20,10 +20,10 @@ export interface Failure { message: string; requestLink?: string; troubleshoot?:
 export const STEP_LABELS: Record<StepKey, string> = {
   ready: 'Checking Environment',
   access: 'Checking Permissions',
-  path: 'Checking The Path',
-  route: 'Opening The Route To The Server',
+  path: 'Checking Path',
+  route: 'Opening Route To Server',
   channel: 'Opening A Secure Channel',
-  server: 'Connecting To The Server',
+  server: 'Connecting To Server',
   signin: 'Signing In',
 };
 export const ARG_LABELS: Record<string, string> = { username: 'User Name', password: 'Password', domain: 'Domain' };
