@@ -115,19 +115,18 @@ test('Retry-After in seconds is honored', async () => {
 });
 
 test('Retry-After as an HTTP date is honored', async () => {
-    replies = [limited(new Date(WALL0 + 7000).toUTCString()), ok([])];
-    await nb.netbirdGet('/api/groups');
-    assert.deepEqual(waits, [7000]);
-});
-
-test('Retry-After as an asctime date is read as UTC', async () => {
-    replies = [limited('Thu Jan  1 00:00:07 2026'), ok([])];
-    await nb.netbirdGet('/api/groups');
+    replies = [limited(new Date(WALL0 + 7000).toUTCString()), ok({})];
+    await nb.netbirdPost('/api/groups', { name: 'g' });
     assert.deepEqual(waits, [7000]);
 });
 
 test('an unreadable Retry-After falls back to the backoff, never to no wait', async () => {
-    for (const value of ['-1', '1.5', 'soon', '2026-01-01']) {
+    for (const value of [
+        '-1', '1.5', 'soon', '2026-01-01',
+        'Mon, 30 Feb 2026 00:00:07 GMT',    // an impossible date, not 2 March
+        'Thursday, 01-Jan-26 00:00:07 GMT', // obsolete RFC 850 form
+        'Thu Jan  1 00:00:07 2026',         // obsolete asctime form
+    ]) {
         waits = [];
         nb._setNetbirdTimingForTests({});
         replies = [limited(value), ok([])];
@@ -138,8 +137,8 @@ test('an unreadable Retry-After falls back to the backoff, never to no wait', as
 });
 
 test('without Retry-After the backoff grows exponentially, with jitter', async () => {
-    replies = [limited(), limited(), limited(), limited(), ok([])];
-    assert.deepEqual(await nb.netbirdGet('/api/groups'), []);
+    replies = [limited(), limited(), limited(), limited(), ok({})];
+    assert.equal((await nb.netbirdReq('PUT', '/api/groups/g1', { name: 'g' })).status, 200);
     assert.equal(waits.length, 4);
     waits.forEach((ms, i) => {
         const exp = 1000 * 2 ** i;
@@ -159,7 +158,14 @@ test('after 5 attempts the caller gets the original 429', async () => {
     assert.equal(requests.length, 5);
 });
 
-test('a call waits at most 30 seconds in total', async () => {
+test('a GET waits at most 5 seconds in total, so a page never hangs on it', async () => {
+    replies = [limited(3)];
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), TOO_MANY);
+    assert.equal(requests.length, 2); // 3 s, then 3 s more would pass 5 s
+    assert.deepEqual(waits, [3000]);
+});
+
+test('a write waits at most 30 seconds in total', async () => {
     replies = [limited(20)];
     const r = await nb.netbirdPost('/api/groups', { name: 'g' });
     assert.equal(r.status, 429);
@@ -167,13 +173,48 @@ test('a call waits at most 30 seconds in total', async () => {
     assert.deepEqual(waits, [20000]);
 });
 
-test('a Retry-After longer than the limit fails at once and is not shared', async () => {
+test('the budget counts the time that really passed when a timer fires late', async () => {
+    let late = 15_000;
+    nb._setNetbirdTimingForTests({ sleep: async (ms) => { waits.push(ms); clock += ms + late; late = 0; } });
+    replies = [limited(10)];
+    assert.equal((await nb.netbirdPost('/api/groups', { name: 'g' })).status, 429);
+    assert.equal(requests.length, 2); // 25 s passed, so 10 s more would pass the 30 s limit
+    assert.deepEqual(waits, [10000]);
+});
+
+test('during a pause longer than a call may wait, nothing is sent and the call ends at once with the 429', async () => {
     replies = [limited(120)];
     assert.equal((await nb.netbirdPost('/api/groups', { name: 'g' })).status, 429);
     assert.equal(requests.length, 1);
     replies = [ok([])];
-    assert.deepEqual(await nb.netbirdGet('/api/groups'), []);
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), TOO_MANY);
+    assert.deepEqual(await nb.netbirdReq('PUT', '/api/groups/g1', { name: 'g' }), { status: 429, body: TOO_MANY, raw: JSON.stringify(TOO_MANY) });
+    assert.equal(requests.length, 1);
     assert.deepEqual(waits, []);
+    clock += 120_000; // the pause is over
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), []);
+    assert.equal(requests.length, 2);
+});
+
+test('a pause too long for a GET is waited out by a write', async () => {
+    replies = [limited(20)];
+    assert.equal((await nb.netbirdPost('/api/groups', { name: 'g' })).status, 429); // pause: 20 s
+    requests = []; waits = [];
+    replies = [ok({})];
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), TOO_MANY);
+    assert.equal(requests.length, 0);
+    assert.equal((await nb.netbirdReq('DELETE', '/api/groups/g1')).status, 200);
+    assert.deepEqual(waits, [20000]);
+    assert.equal(requests.length, 1);
+});
+
+test('a pause longer than 10 minutes is capped at 10 minutes', async () => {
+    replies = [limited(3600)];
+    assert.equal((await nb.netbirdPost('/api/groups', { name: 'g' })).status, 429);
+    clock += 10 * 60_000;
+    replies = [ok([])];
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), []);
+    assert.equal(requests.length, 2);
 });
 
 test('after a 429, the next call waits out the shared cooldown before it sends', async () => {

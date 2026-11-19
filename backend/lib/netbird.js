@@ -184,44 +184,53 @@ function readOnlyResp() {
 // NetBird answers "too many requests" (429) when a burst of calls exceeds its API rate limit - for
 // example a bulk change that touches hundreds of resources one call at a time. A 429 means NetBird
 // rejected the request without acting on it, so every method (GET, POST, PUT, DELETE) is safe to
-// send again. Each call is retried up to NB_429_MAX_ATTEMPTS times in all, and waits at most
-// NB_429_MAX_WAIT_MS in total: NetBird's Retry-After (seconds or an HTTP date) when it sends one,
-// otherwise exponential backoff with jitter. When a limit is reached, the caller gets the last
-// 429 answer unchanged - the same result it got before this retry existed. Timeouts, network
-// errors and 5xx answers are NOT retried here.
-// After a 429, every call in this process waits out a shared cooldown before it sends, so
-// concurrent callers pause together instead of all hitting NetBird again at once.
+// send again.
+// - Each call is sent up to NB_429_MAX_ATTEMPTS times and waits at most its budget in total: a
+//   read (GET) NB_429_READ_WAIT_MS, so a page never hangs on it; a write NB_429_WRITE_WAIT_MS.
+// - The wait is NetBird's Retry-After (seconds or an HTTP date) when it sends one, otherwise
+//   exponential backoff with jitter.
+// - The wait is a pause shared by every call in this process (up to NB_429_MAX_PAUSE_MS): while
+//   NetBird asks to wait, nothing is sent. A call that cannot wait out the rest of the pause within
+//   its budget is not sent at all and ends at once with the 429.
+// - When a limit is reached, the caller gets the 429 answer unchanged - the same result it got
+//   before this retry existed, so every caller reports it as it always did. A background job fails
+//   that run and does the rest on its next scheduled run.
+// Timeouts, network errors and 5xx answers are NOT retried here.
 const NB_429_MAX_ATTEMPTS = 5;
-const NB_429_MAX_WAIT_MS = 30 * 1000;
+const NB_429_READ_WAIT_MS = 5 * 1000;
+const NB_429_WRITE_WAIT_MS = 30 * 1000;
+const NB_429_MAX_PAUSE_MS = 10 * 60 * 1000;
 const NB_429_BACKOFF_BASE_MS = 1000;
-// `now` is a monotonic clock for the cooldown, so a wall-clock change cannot stretch a wait;
+// `now` is a monotonic clock for the pause, so a wall-clock change cannot stretch a wait;
 // `wallNow` is the wall clock, needed only to read a Retry-After date.
 const _nbTiming = {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => performance.now(),
     wallNow: () => Date.now(),
 };
-let _nbCooldownUntil = 0;
+let _nbPausedUntil = 0;
+let _nbPauseAnswer = null; // { body, raw } of the 429 that set the pause
 // Tests replace the clocks and the sleep, so no test waits for real time.
 function _setNetbirdTimingForTests({ sleep, now, wallNow } = {}) {
     if (sleep) _nbTiming.sleep = sleep;
     if (now) _nbTiming.now = now;
     if (wallNow) _nbTiming.wallNow = wallNow;
-    _nbCooldownUntil = 0;
+    _nbPausedUntil = 0;
+    _nbPauseAnswer = null;
 }
 
 // Retry-After as milliseconds to wait from `wallNow`, or null when it is absent or unreadable
-// (the caller then backs off as if there were none). RFC 9110 section 10.2.3: delay-seconds, or an
-// HTTP-date - IMF-fixdate and the obsolete RFC 850 form end in "GMT"; the obsolete asctime form
-// has no zone and is UTC.
+// (the caller then backs off as if there were none). Read: delay-seconds, or an HTTP-date in the
+// IMF-fixdate form ("Sun, 06 Nov 1994 08:49:37 GMT", RFC 9110 section 5.6.7). The date must read
+// back exactly, so an impossible date (Feb 30) is unreadable instead of rolling over. The obsolete
+// RFC 850 and asctime forms are not read; they fall back to the backoff, which is always safe.
 function parseRetryAfter(value, wallNow) {
     if (value === undefined || value === null) return null;
     const s = String(value).trim();
     if (/^\d+$/.test(s)) return Number(s) * 1000;
-    let at = NaN;
-    if (/^[A-Za-z]{3,9}, \d{2}[ -][A-Za-z]{3}[ -]\d{2,4} \d{2}:\d{2}:\d{2} GMT$/.test(s)) at = Date.parse(s);
-    else if (/^[A-Za-z]{3} [A-Za-z]{3} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/.test(s)) at = Date.parse(`${s} GMT`);
-    return Number.isFinite(at) ? Math.max(0, at - wallNow) : null;
+    const at = Date.parse(s);
+    if (!Number.isFinite(at) || new Date(at).toUTCString() !== s) return null;
+    return Math.max(0, at - wallNow);
 }
 // Backoff before retry n (1-based): 1s, 2s, 4s, ... with "equal jitter" (half fixed, half random).
 function nbBackoffMs(n) {
@@ -229,38 +238,40 @@ function nbBackoffMs(n) {
     return Math.round(exp / 2 + Math.random() * (exp / 2));
 }
 
-// Run `attempt` (one HTTP call that resolves { status, retryAfter, value }) and send it again
-// while NetBird answers 429, within the limits above. Resolves the final attempt's `value`.
-async function withNbRateLimitRetry(label, attempt) {
+// Run `attempt` (one HTTP call that resolves { status, retryAfter, answer: { body, raw }, value })
+// and send it again while NetBird answers 429, within the limits above. Resolves the final
+// attempt's `value`; a call never sent because of the pause resolves `from429(answer)` instead,
+// built from the 429 that set the pause.
+async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429) {
     let waited = 0;
-    let last = null;
-    attempts: for (let n = 1; n <= NB_429_MAX_ATTEMPTS; n++) {
-        // Wait out the shared cooldown, and check it again after every sleep: another call may have
-        // extended it meanwhile. The waiting never goes past this call's budget. A retry that would
-        // need more gives up; a first attempt sends once its budget is spent.
-        for (let cool; (cool = _nbCooldownUntil - _nbTiming.now()) > 0;) {
-            const room = NB_429_MAX_WAIT_MS - waited;
-            if (last && cool > room) break attempts;
-            if (room <= 0) break;
-            const ms = Math.min(cool, room);
-            await _nbTiming.sleep(ms);
-            waited += ms;
+    let last = null; // this call's own last 429
+    const giveUp = () => {
+        console.error('[NetBird %s] rate limited (429), giving up after %d ms of waiting', label, Math.round(waited));
+        return last ? last.value : from429(_nbPauseAnswer || { body: null, raw: '' });
+    };
+    for (let n = 1; ; n++) {
+        // Wait out the shared pause, and check it again after every sleep: another call may have
+        // extended it meanwhile.
+        for (let cool; (cool = _nbPausedUntil - _nbTiming.now()) > 0;) {
+            if (cool > maxWaitMs - waited) return giveUp();
+            const t0 = _nbTiming.now();
+            await _nbTiming.sleep(cool);
+            waited += _nbTiming.now() - t0; // the time that really passed (a timer can fire late)
         }
         const r = await attempt();
         if (r.status !== 429) return r.value;
         last = r;
-        const now = _nbTiming.now();
         const retryAfter = parseRetryAfter(r.retryAfter, _nbTiming.wallNow());
         const wait = retryAfter !== null ? retryAfter : nbBackoffMs(n);
-        // A wait longer than any call may wait is not shared: other calls get their own 429 and
-        // give up at once, instead of waiting for nothing.
-        if (wait <= NB_429_MAX_WAIT_MS) _nbCooldownUntil = Math.max(_nbCooldownUntil, now + wait);
-        if (n === NB_429_MAX_ATTEMPTS || waited + wait > NB_429_MAX_WAIT_MS) break;
+        const until = _nbTiming.now() + Math.min(wait, NB_429_MAX_PAUSE_MS);
+        if (until > _nbPausedUntil) { _nbPausedUntil = until; _nbPauseAnswer = r.answer; }
+        if (n === NB_429_MAX_ATTEMPTS || wait > maxWaitMs - waited) return giveUp();
         console.warn('[NetBird %s] rate limited (429), retry %d of %d in %d ms', label, n, NB_429_MAX_ATTEMPTS - 1, wait);
     }
-    console.error('[NetBird %s] rate limited (429), giving up after %d ms of waiting', label, waited);
-    return last.value;
 }
+const nbWaitFor = (method) => (String(method).toUpperCase() === 'GET' ? NB_429_READ_WAIT_MS : NB_429_WRITE_WAIT_MS);
+const writeFrom429 = (a) => ({ status: 429, body: a.body, raw: a.raw });
+
 
 // Generic authenticated GET to the NetBird API → parsed JSON (array/object) or null
 function netbirdGet(apiPath) {
@@ -268,7 +279,7 @@ function netbirdGet(apiPath) {
     const url = new URL(apiPath, _nbApi.url);
     const auth = tenantAuth(url);
     const transport = url.protocol === 'https:' ? https : http;
-    return withNbRateLimitRetry(`GET ${apiPath}`, () => new Promise((resolve) => {
+    return withNbRateLimitRetry(`GET ${apiPath}`, NB_429_READ_WAIT_MS, () => new Promise((resolve) => {
         const req = transport.get(url.toString(), {
             headers: { 'Authorization': `Token ${auth}`, 'Accept': 'application/json' },
             timeout: 10000,
@@ -278,7 +289,7 @@ function netbirdGet(apiPath) {
             // The connection closed in the middle of the body: a network error, not an answer.
             res.on('error', (err) => { console.error('[NetBird GET %s] error:', apiPath, err.message); resolve({ status: 0, value: null }); });
             res.on('end', () => {
-                const done = (value) => resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], value });
+                const done = (value) => resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], answer: { body: value, raw: data }, value });
                 try {
                     const j = JSON.parse(data);
                     if (res.statusCode >= 200 && res.statusCode < 300) noteNetbirdOk();
@@ -295,10 +306,11 @@ function netbirdGet(apiPath) {
         });
         req.on('error', (err) => { console.error('[NetBird GET %s] error:', apiPath, err.message); resolve({ status: 0, value: null }); });
         req.on('timeout', () => { console.error(`[NetBird GET ${apiPath}] timeout`); req.destroy(); resolve({ status: 0, value: null }); });
-    }));
+    }), (a) => a.body);
 }
 
-// One write call (POST/PUT/DELETE) → { status, retryAfter, value: { status, body, raw } or { status: 0, error } }
+// One write call (POST/PUT/DELETE, or a GET through netbirdReq) → { status, retryAfter, answer,
+// value: { status, body, raw } or { status: 0, error } }
 function netbirdWriteOnce(transport, url, method, headers, body) {
     return new Promise((resolve) => {
         const req = transport.request(url, { method, headers, timeout: 15000 }, (res) => {
@@ -309,7 +321,7 @@ function netbirdWriteOnce(transport, url, method, headers, body) {
             res.on('end', () => {
                 let j = null; try { j = JSON.parse(d); } catch (e) { }
                 if (res.statusCode >= 200 && res.statusCode < 300) noteNetbirdOk();
-                resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], value: { status: res.statusCode, body: j, raw: d } });
+                resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], answer: { body: j, raw: d }, value: { status: res.statusCode, body: j, raw: d } });
             });
         });
         req.on('error', e => resolve({ status: 0, value: { status: 0, error: e.message } }));
@@ -332,7 +344,7 @@ function netbirdPost(apiPath, bodyObj) {
         'Accept': 'application/json',
         'Content-Length': Buffer.byteLength(body),
     };
-    return withNbRateLimitRetry(`POST ${apiPath}`, () => netbirdWriteOnce(transport, url, 'POST', headers, body));
+    return withNbRateLimitRetry(`POST ${apiPath}`, NB_429_WRITE_WAIT_MS, () => netbirdWriteOnce(transport, url, 'POST', headers, body), writeFrom429);
 }
 
 // Authenticated PUT (thin wrapper over netbirdReq) - a named companion to netbirdPost for the
@@ -349,7 +361,7 @@ function netbirdReq(method, apiPath, bodyObj) {
     const transport = url.protocol === 'https:' ? https : http;
     const headers = { 'Authorization': `Token ${auth}`, 'Accept': 'application/json' };
     if (body !== null) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(body); }
-    return withNbRateLimitRetry(`${method} ${apiPath}`, () => netbirdWriteOnce(transport, url, method, headers, body));
+    return withNbRateLimitRetry(`${method} ${apiPath}`, nbWaitFor(method), () => netbirdWriteOnce(transport, url, method, headers, body), writeFrom429);
 }
 
 // In-memory caches for groups (id→name) and policies (id→{name,enabled})

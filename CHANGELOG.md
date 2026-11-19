@@ -53,11 +53,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ### Fixed
 - **A NetBird rate limit no longer fails a bulk change at the first refusal.** When NetBird answers
-  "too many requests" (HTTP 429), the app sends the call again, up to 5 attempts and 30 seconds of
-  waiting per call. It follows NetBird's `Retry-After` when present, otherwise it backs off
-  exponentially with jitter, and the app's other NetBird calls wait out the same pause. If NetBird
-  still refuses, the action fails the same way it did before. Timeouts, network errors and server
-  errors are not retried.
+  "too many requests" (HTTP 429), the app pauses all its NetBird calls and sends the call again, up
+  to 5 attempts. The pause follows NetBird's `Retry-After` when present (at most 10 minutes),
+  otherwise it backs off exponentially with jitter. A change waits at most 30 seconds and a page
+  read at most 5 seconds; a call that cannot wait out the pause is not sent and fails at once. If
+  NetBird still refuses, the action fails the same way it did before, and a background job
+  continues on its next run. Timeouts, network errors and server errors are not retried.
 - **A NetBird answer cut off in the middle no longer leaves the action waiting forever.** When the
   connection closes while NetBird sends its answer, the call ends as a network error.
 

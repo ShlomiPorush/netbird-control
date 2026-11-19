@@ -126,8 +126,8 @@ Safari 16.4 or Firefox 128 or later.
    page. The manual setup is in [docs/features.md](docs/features.md#connecting-netbird-events).
 
 When NetBird answers a call with "too many requests" (HTTP 429), for example during a bulk change to
-hundreds of resources, the app waits and sends the call again: up to 5 attempts and 30 seconds per
-call, following NetBird's `Retry-After` when it sends one. Details are in
+hundreds of resources, the app pauses its NetBird calls and sends the call again. A save waits up to
+30 seconds and a page read up to 5 seconds, so pages never hang on it. Details are in
 [docs/features.md](docs/features.md#network-management-delegated-via-the-netbird-api).
 
 ## Configuration
