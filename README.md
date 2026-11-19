@@ -39,7 +39,9 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   schedule, with a dry run before anything is written.
 - **Browser remote access** - RDP and SSH sessions from the browser through NetBird gateway
   peers, by IP address or host name, only to servers the user's own NetBird access already
-  reaches. Several sessions stay open as tabs while you use the rest of the portal. Each session
+  reaches. The Remote Access page opens on its own, without the portal's menu, and several sessions
+  stay open as tabs while you use the rest of the portal, with special keys, an on-screen keyboard,
+  touch control and screenshots. Each session
   is checked live and recorded on the Activity page. The gateway's NetBird groups, policies and
   peers belong to the app and carry the installation's name: resource edits, grants, routing
   peers and the Groups page can't use them, and members added in the NetBird dashboard are

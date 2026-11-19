@@ -1,22 +1,24 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { GUAC, PORTAL_MESSAGE_CODES, type GuacStatus } from '@/lib/remoteAccess';
 import { Button } from '@/components/ui';
+import { FLOW_BUTTON } from './flow';
 
 // The connection steps a user sees, shared by the Remote Access page (the checks before a session,
 // and opening the route: the server joins its gateway's targets and the route reaches the gateway)
 // and the session tabs (opening the channel, reaching the server, signing in). RDP and SSH show the
 // same steps.
 
-export type StepKey = 'access' | 'path' | 'route' | 'channel' | 'server' | 'signin';
+export type StepKey = 'ready' | 'access' | 'path' | 'route' | 'channel' | 'server' | 'signin';
 export type StepState = 'pending' | 'running' | 'pass' | 'fail';
 export interface Step { key: StepKey; label: string; state: StepState; detail?: string }
 /** requestLink: where "Request Access" leads (with the denied resource chosen); no button without it. */
 export interface Failure { message: string; requestLink?: string; troubleshoot?: boolean }
 
 export const STEP_LABELS: Record<StepKey, string> = {
+  ready: 'Checking Environment',
   access: 'Checking Permissions',
   path: 'Checking The Path',
   route: 'Opening The Route To The Server',
@@ -28,6 +30,7 @@ export const ARG_LABELS: Record<string, string> = { username: 'User Name', passw
 
 // Short names for the one-line summary shown once the checks are behind the user.
 const STEP_SHORT: Record<StepKey, string> = {
+  ready: 'Environment',
   access: 'Permissions',
   path: 'Path',
   route: 'Route',
@@ -36,7 +39,11 @@ const STEP_SHORT: Record<StepKey, string> = {
   signin: 'Sign In',
 };
 
-export const freshSteps = (): Step[] => (['access', 'path', 'route', 'channel', 'server'] as StepKey[]).map((key) => ({ key, label: STEP_LABELS[key], state: 'pending' }));
+export const freshSteps = (): Step[] => (['ready', 'access', 'path', 'route', 'channel', 'server'] as StepKey[]).map((key) => ({ key, label: STEP_LABELS[key], state: 'pending' }));
+
+/** The steps a new session tab starts with: the checks and the route are behind it. */
+export const handoffSteps = (c: { access?: string; path?: string } = {}): Step[] =>
+  withStep(withStep(withStep(withStep(withStep(freshSteps(), 'ready', 'pass'), 'access', 'pass', c.access), 'path', 'pass', c.path), 'route', 'pass'), 'channel', 'running');
 
 // Each running step stays on screen for at least this long, so the user can follow the checks.
 // The first connection in a browser tab moves slower; later ones move quicker.
@@ -139,23 +146,20 @@ export function StepSummary({ steps }: { steps: Step[] }) {
   );
 }
 
-export function Card({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn('w-full max-w-md rounded-xl border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-5 shadow-xl', className)}>{children}</div>;
-}
-
-// The reason is already on the failed step; this box holds what the user can do next.
+// The reason is already on the failed step; this holds what the user can do next, one full-width
+// button each. The first one is the main action.
 export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave }: {
   failure: Failure; onRetry: () => void; retryLabel?: string;
   /** Called before following a link out of the session view. */
   onLeave?: () => void;
 }) {
+  const main = failure.requestLink ? 'request' : failure.troubleshoot ? 'troubleshoot' : 'retry';
+  const variant = (k: typeof main) => (k === main ? 'primary' : 'secondary');
   return (
-    <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
-      <div className="flex flex-wrap gap-2">
-        {failure.requestLink && <Link to={failure.requestLink} onClick={onLeave}><Button size="sm" variant="primary">Request Access</Button></Link>}
-        {failure.troubleshoot && <Link to="/troubleshoot" onClick={onLeave}><Button size="sm">Open Troubleshoot</Button></Link>}
-        <Button size="sm" onClick={onRetry}>{retryLabel}</Button>
-      </div>
+    <div className="mt-5 flex flex-col gap-2">
+      {failure.requestLink && <Link to={failure.requestLink} onClick={onLeave} className="block"><Button variant={variant('request')} className={FLOW_BUTTON}>Request Access</Button></Link>}
+      {failure.troubleshoot && <Link to="/troubleshoot" onClick={onLeave} className="block"><Button variant={variant('troubleshoot')} className={FLOW_BUTTON}>Open Troubleshoot</Button></Link>}
+      <Button variant={variant('retry')} className={FLOW_BUTTON} onClick={onRetry}>{retryLabel}</Button>
     </div>
   );
 }

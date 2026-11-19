@@ -292,6 +292,8 @@ test('a resource write that got no answer holds new sessions back until a later 
     await assert.rejects(ra.createSession(viewer, { protocol: 'rdp', address: '10.0.0.5', port: 3389 }), (e) => e.code === 'TARGETS_SETTLING');
     const check = await ra.checkAccess(viewer, { protocol: 'rdp', address: '10.0.0.5', port: 3389 });
     assert.equal(check.steps[0].code, 'TARGETS_SETTLING');
+    assert.equal(check.steps[0].key, 'ready', 'reported as the environment step, not as the user access');
+    assert.equal(check.steps[0].retry, true, 'the browser waits and checks again');
     ra._internal.passSettleDeadlineForTest();
     assert.equal(ra._internal.settlingForTest(), true, 'the deadline alone does not end it');
     state.putHook = null;

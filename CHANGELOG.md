@@ -10,6 +10,47 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **Special keys in a session.** A menu in the session bar sends the key combinations the local
+  system keeps for itself or a phone has no key for: over RDP Ctrl+Alt+Del, the Windows key,
+  Alt+Tab, Task Manager, Run, Lock, Alt+F4 and Print Screen; over SSH Ctrl+C, Ctrl+D, Ctrl+Z,
+  Ctrl+L, Esc and Tab. It replaces the Ctrl+Alt+Del button.
+- **An on-screen keyboard.** The official Guacamole on-screen keyboard opens at the bottom of a
+  session, with Ctrl, Alt, the Windows key, function keys and arrows. On a phone or a tablet the
+  device's own keyboard can type into the session as well, in any language.
+- **Touch control.** On a touch screen a tap clicks and a long press right-clicks; a tap followed
+  at once by a touch that moves drags.
+- **Screenshot and SSH text size.** The session bar's More menu saves the remote screen as a PNG,
+  and over SSH it makes the terminal text smaller or larger.
+
+### Changed
+- **Remote Access opens as a page of its own.** The page no longer shows the portal's sidebar and
+  top bar: one centered card holds the connection form, with **Back To Portal**, the theme switch
+  and the account menu above it. RDP and SSH are now two buttons instead of a list, and the large
+  heading steps aside while a connection is checked. The address stays `/remote-access`, so launch
+  links keep working, and open sessions stay open while you move between this page and the portal.
+- **The rest of the connection flow has the same look.** The SSH sign-in, a failed check, and the
+  session view's cards (connecting, the server asking to sign in, a failed sign-in, a connection
+  that failed, a session that ended) are now one centered card each, with a short heading, large
+  fields and full-width buttons; while a session connects or signs in, its card also names the
+  server. On the page, Try Again runs the same connection again instead of going back to the form.
+- **The session bar floats above the session.** It is a rounded bar at the top center with the
+  tabs, the session tools and Disconnect, and it still hides itself, shows from its handle and can
+  be pinned. The NetBird mark at its start is the way back to the portal. Pinned, the bar now stays
+  on top of the session instead of moving the session down, so the remote screen keeps the whole
+  window. The Clipboard panel is larger, has no explanation text and opens right under its
+  button. The browser's right-click menu no longer opens on the Remote Access page or in the
+  session view, except in text fields.
+- **A connection checks Remote Access itself first.** The new first step, **Checking
+  Environment**, shows when Remote Access is not ready, instead of reporting it under Checking
+  Permissions. While it is getting ready after a restart or a change (about a minute), the page
+  waits and checks again by itself, for about two and a half minutes, with a way to cancel; when
+  NetBird can't be reached, the step fails at once. A launch link also waits until Remote Access is ready
+  before it is used, so it is normally not spent while Remote Access is getting ready (a change
+  that starts at the very moment it opens still uses it up, with a message to open it again); a
+  link that gave up waiting stays in the address, and reloading the page tries it again. An
+  access refusal is never reported from data that changed during the check.
+
 ---
 
 ## [1.5.0] - 2026-11-18

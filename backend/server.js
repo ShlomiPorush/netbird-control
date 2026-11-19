@@ -3415,6 +3415,8 @@ function sendRemoteError(res, e) {
 }
 
 app.get('/api/remote-access/info', async (req, res) => {
+    // A launch link is sent only after a fresh "not settling" answer: never from a cache.
+    res.set('Cache-Control', 'no-store');
     try {
         const v = await getViewer(req);
         const cfg = getRemoteAccessConfig();
@@ -3422,6 +3424,9 @@ app.get('/api/remote-access/info', async (req, res) => {
             available: AUTH_ENABLED && remoteAccessAvailable() && !currentTenantAccount(),
             allowed: remoteAccessViewerOk(v),
             ssoRequired: !AUTH_ENABLED,
+            // Remote access is getting ready (after a restart or a change): the page waits with a
+            // launch link instead of using it up.
+            settling: remoteAccessViewerOk(v) && remoteAccessAvailable() ? remoteAccessLib.isSettling() : false,
             clipboard: cfg.clipboard, idleTimeoutMin: cfg.idleTimeoutMin, maxDurationHours: cfg.maxDurationHours,
         });
     } catch (err) {

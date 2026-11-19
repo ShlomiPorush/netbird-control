@@ -1,6 +1,6 @@
 // Browser remote access (RDP / SSH through the Browser Gateway): API shapes, calls, and the
-// loader for the official Apache Guacamole client library (served unmodified from
-// /vendor/guacamole-common-js-1.6.0/, matched to the guacd 1.6.0 image).
+// loaders for the official Apache Guacamole client library (served unmodified from
+// /vendor/guacamole-common-js-1.6.0/, matched to the guacd 1.6.0 image) and its on-screen keyboard.
 import { api } from '@/lib/api';
 
 export type RemoteProtocol = 'rdp' | 'ssh';
@@ -9,14 +9,19 @@ export interface RemoteInfo {
   available: boolean;
   allowed: boolean;
   ssoRequired: boolean;
+  /** Remote access is getting ready (after a restart or a change): a launch link waits. */
+  settling?: boolean;
   clipboard: boolean;
   idleTimeoutMin: number;
   maxDurationHours: number;
 }
 
 export interface RemoteStep {
-  key: 'access' | 'path';
+  /** 'ready': remote access itself (sent only when it fails). */
+  key: 'ready' | 'access' | 'path';
   status: 'pass' | 'fail';
+  /** The failure passes by itself soon: check again in a moment. */
+  retry?: boolean;
   code?: string;
   message?: string;
   detail?: string;
@@ -142,7 +147,7 @@ export function cleanAddressInput(raw: string): { address: string; port?: string
 }
 
 export const remoteApi = {
-  info: () => api.get<RemoteInfo>('/api/remote-access/info'),
+  info: (signal?: AbortSignal) => api.get<RemoteInfo>('/api/remote-access/info', undefined, signal),
   check: (body: { protocol: RemoteProtocol; address: string; port: number }) => api.post<RemoteCheck>('/api/remote-access/check', body),
   createSession: (body: Record<string, unknown>) => api.post<RemoteSession>('/api/remote-access/sessions', body),
   lease: (id: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, {}),
@@ -209,6 +214,25 @@ export function loadGuacamole(): Promise<Guac> {
     document.head.appendChild(s);
   });
   return guacLoading;
+}
+
+// The official on-screen keyboard's US layout and stylesheet, from the Guacamole web client of the
+// same release (served unmodified from /vendor/guacamole-client-1.6.0/).
+const OSK_BASE = '/vendor/guacamole-client-1.6.0/';
+let oskLoading: Promise<Guac> | null = null;
+
+export function loadKeyboardLayout(): Promise<Guac> {
+  if (!document.querySelector('link[data-guac-osk]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = OSK_BASE + 'osk.css';
+    l.dataset.guacOsk = '1';
+    document.head.appendChild(l);
+  }
+  oskLoading ||= fetch(OSK_BASE + 'en-us-qwerty.json')
+    .then((r) => { if (!r.ok) throw new Error('The keyboard could not be loaded.'); return r.json(); })
+    .catch((e) => { oskLoading = null; throw e; });
+  return oskLoading;
 }
 
 // Guacamole status codes the UI explains in its own words.

@@ -1,6 +1,8 @@
 # Browser Remote Access (RDP and SSH)
 
-Users open RDP and SSH sessions from the browser, on the **Remote Access** page. They need no
+Users open RDP and SSH sessions from the browser, on the **Remote Access** page. The page opens
+on its own, without the portal's menu: only **Back To Portal**, the theme switch and the account
+menu stay above the connection form. They need no
 NetBird client on their device, and the servers need no NetBird client either: sessions reach
 Network resources through their routing peers, like any other NetBird traffic.
 
@@ -278,7 +280,8 @@ server's resource already chosen.
   bundled client sends; a larger or malformed one closes the session.
 - **Copy and paste.** Text copied on the remote side goes to the local clipboard, and the local
   clipboard is offered to the remote side when the session comes into use. Browsers that ask before
-  every read (Firefox) use the Clipboard panel instead. Text only; file transfer is off.
+  every read (Firefox) use the Clipboard panel instead, which opens right under its button in the
+  session bar. Text only; file transfer is off.
 - **A failed sign-in asks again.** When the server refuses the user name or password (RDP with
   Network Level Authentication, or SSH), the tab shows the sign-in form again with the user name
   kept. Signing in opens a new session to the same server, checked like any other, and the
@@ -288,9 +291,32 @@ server's resource already chosen.
   from the Remote Access page. Every password field has a button that shows what was typed.
 - **The session bar.** It hides itself a few seconds after a session comes to the front. A click
   on its handle at the top of the screen, or the pointer resting there for half a second, brings it
-  back. Pinned, it stays, and the session moves down below it and is resized to the space left.
-  Resizing needs Windows 8.1 or Windows Server 2012 R2 or later; an older server's screen is scaled
-  down to fit instead.
+  back. Pinned, it stays on top of the session; the session keeps the whole window. The NetBird
+  mark at its start goes back to the portal while the sessions keep running. On a narrow screen,
+  Full Screen, Keep The Bar Open and New Session move to the **More** menu. The browser's own
+  right-click menu does not open anywhere on the Remote Access page or in the session view (the
+  remote screen gets the right click), except in text fields such as the server address or the
+  Clipboard panel's, so pasting there still works.
+- **Special keys.** The **Special Keys** menu (⌘) sends key combinations that the local system
+  would take for itself or that a phone has no key for. RDP: Ctrl+Alt+Del, the Windows key,
+  Alt+Tab, Ctrl+Shift+Esc (Task Manager), Win+R, Win+L (locks the remote session), Alt+F4 and
+  Print Screen. SSH: Ctrl+C, Ctrl+D, Ctrl+Z, Ctrl+L, Esc and Tab. A bar menu takes the keys while
+  it is open (the arrows, Enter, Space, Escape and Tab); closed, it gives them back to the session.
+- **Keyboards.** The keyboard button opens the official Guacamole on-screen keyboard (US layout)
+  at the bottom of the screen, with Ctrl, Alt, the Windows key, F1 to F12 and the arrows; Shift,
+  Ctrl and Alt stay down until pressed again, and closing the keyboard lets go of them. While it
+  is open the session uses the rest of the window, so nothing typed is hidden behind it; its keys
+  take at most 40% of the window's height, and an RDP server gets the new screen size. On a
+  phone or a tablet the button also offers the **Device Keyboard**, the device's own keyboard
+  (Guacamole's InputSink), which types any language (Hebrew too) as Unicode text. Most phone
+  keyboards send a word when it is finished, not each letter; a tap on the session bar hides it.
+  On a phone held upright the on-screen keyboard's keys are small.
+- **Touch.** On a touch screen a tap is a click and a long press is a right click. To drag, tap,
+  then touch again at once and move.
+- **Screenshot and text size.** **More → Save A Screenshot** saves the remote screen, at its full
+  size, as a PNG on the user's device, once the session shows something. Over SSH, **Text Size** in
+  the same menu makes the terminal text smaller or larger for that tab; a session starts at the
+  size set in the settings, and a sign-in retry in the tab keeps the chosen size.
 - **Scaled screens.** The session uses the screen's real resolution and scaling (like the official
   Guacamole client), so text stays sharp at 125% or 150%. That means more pixels to send than at
   100%. A session keeps the scaling it opened with; moved to a screen with other scaling, it is

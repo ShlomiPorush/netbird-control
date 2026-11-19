@@ -1,19 +1,13 @@
-import { Suspense, useEffect, useLayoutEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar, MobileSidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 import { GlobalSearch } from './GlobalSearch';
+import { useAppShell } from './useAppShell';
 import { LoadingState, TopProgress } from '@/components/ui';
-import { useAppConfig } from '@/lib/queries';
-import { setTimeFormat } from '@/lib/logfmt';
-import { RemoteSessionsProvider } from '@/components/remote/RemoteSessions';
 
 export function Layout() {
-  const cfg = useAppConfig().data;
-  // Apply the configured timezone / date format / clock before child pages render
-  // their timestamps.
-  setTimeFormat({ timeZone: cfg?.timeZone, dateFormat: cfg?.dateFormat, hour12: cfg?.hour12 });
-  useEffect(() => { if (cfg?.appName) document.title = cfg.appName; }, [cfg?.appName]);
+  useAppShell();
 
   const [collapsed, setCollapsed] = useState<boolean>(
     () => localStorage.getItem('nb_sidebar_collapsed') === '1',
@@ -22,10 +16,6 @@ export function Layout() {
   const location = useLocation();
   // Close the mobile drawer whenever the route changes.
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);
-  // Reset scroll to the top when navigating to a different page (menu navigation), so a page
-  // never opens mid-scroll at the previous page's position. Keyed on pathname only, so in-page
-  // tab switches (`?tab=…`) keep their position. useLayoutEffect scrolls before paint (no flash).
-  useLayoutEffect(() => { window.scrollTo(0, 0); }, [location.pathname]);
 
   const toggleCollapse = () => {
     setCollapsed((c) => {
@@ -38,8 +28,7 @@ export function Layout() {
   return (
     // The page itself scrolls (the standard browser scrollbar at the window edge).
     // The top bar and the sidebar are sticky so they stay put while content scrolls.
-    // Browser remote sessions live above the pages, so moving around the portal keeps them open.
-    <RemoteSessionsProvider>
+    // Browser remote sessions live above the shells (App.tsx), so moving around keeps them open.
     <div className="flex flex-col min-h-screen">
       {/* Global loading bar for the heavy log queries - renders nothing while idle. */}
       <TopProgress />
@@ -59,6 +48,5 @@ export function Layout() {
       <MobileSidebar open={mobileOpen} onClose={() => setMobileOpen(false)} />
       <GlobalSearch />
     </div>
-    </RemoteSessionsProvider>
   );
 }

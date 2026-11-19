@@ -14,15 +14,25 @@ export type ViewerEvent =
 
 /** What the session tab bar can do to a running session. */
 export interface ScreenApi {
-  ctrlAltDel: () => void;
+  /** Press the keys in order, then release them in reverse (a key combination). */
+  sendKeys: (keysyms: number[]) => void;
+  /** One key going down or up (the on-screen keyboard). */
+  sendKey: (pressed: boolean, keysym: number) => void;
   sendClipboard: (text: string) => void;
   submit: (values: Record<string, string>) => void;
+  /** The remote screen as a PNG, at its full size. */
+  screenshot: () => Promise<Blob | null>;
 }
+
+// The other side of each modifier (Shift, Ctrl, Meta, Alt, Super): a terminal keeps one state for
+// both, so releasing the left one would also undo a right one held down.
+const OTHER_SIDE: Record<number, number> = {
+  0xffe1: 0xffe2, 0xffe2: 0xffe1, 0xffe3: 0xffe4, 0xffe4: 0xffe3, 0xffe7: 0xffe8, 0xffe8: 0xffe7,
+  0xffe9: 0xffea, 0xffea: 0xffe9, 0xffeb: 0xffec, 0xffec: 0xffeb,
+};
 
 const LEASE_MS = 60_000;
 const PAINT_WAIT_MS = 20_000;
-// Ctrl, Alt and Delete keysyms.
-const CTRL_ALT_DEL = [0xffe3, 0xffe9, 0xffff];
 
 // Remote content has arrived once the display holds more than one color. The first sync (and the
 // blank frame guacd duplicates on join) is a single flat color, so it never counts.
@@ -57,9 +67,12 @@ export function deviceSize(w: number, h: number, scaling = window.devicePixelRat
   return { width: Math.round(w * dpr), height: Math.round(h * dpr), dpi: Math.round(96 * dpr) };
 }
 
+// Keys go to the remote side unless one of our own fields or menus has the focus. The device
+// keyboard's field (data-remote-keys) belongs to the remote side: what it types goes there.
 const isTyping = () => {
-  const el = document.activeElement;
-  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el as HTMLElement).isContentEditable);
+  const el = document.activeElement as HTMLElement | null;
+  if (!el || el.closest('[data-remote-keys]')) return false;
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable || !!el.closest('[role="menu"]');
 };
 
 // Reading the local clipboard without a prompt on every read works where the browser keeps a
@@ -84,11 +97,15 @@ function clipboardAutoRead(): Promise<boolean> {
  * (/api/remote-access/tunnel?token=…), drawn into the parent's box. The keyboard and the clipboard
  * sync follow `active` - only the visible session gets keys and clipboard text.
  */
-export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRemoteClipboard, apiRef }: {
+export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFontSize, onEvent, onRemoteClipboard, apiRef }: {
   sessionId: string;
   token: string;
   active: boolean;
   clipboard: boolean;
+  /** SSH: the text size chosen in the session bar. Sent when it differs from the terminal's. */
+  fontSize?: number;
+  /** SSH: the terminal's text size, as guacd reports it. */
+  onFontSize?: (size: number) => void;
   onEvent: (e: ViewerEvent) => void;
   /** Text copied on the remote side. */
   onRemoteClipboard: (text: string) => void;
@@ -102,8 +119,12 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
   onEventRef.current = onEvent;
   const onClipRef = useRef(onRemoteClipboard);
   onClipRef.current = onRemoteClipboard;
+  const fontRef = useRef(fontSize);
+  fontRef.current = fontSize;
+  const onFontRef = useRef(onFontSize);
+  onFontRef.current = onFontSize;
   // Set while the session runs; called when it becomes inactive or visible again.
-  const hooks = useRef<{ release: () => void; resume: () => void; refit: () => void; syncLocal: () => void } | null>(null);
+  const hooks = useRef<{ release: () => void; resume: () => void; refit: () => void; syncLocal: () => void; applyFont: () => void } | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -113,7 +134,12 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
     let resizeTimer: number | undefined;
     let paintTimer: number | undefined;
     let releaseKeys: () => void = () => { };
-    const onFocusIn = () => { if (isTyping()) releaseKeys(); };
+    // The keyboard listens only while keys belong to the remote side. Listening, it cancels every
+    // keyup, so Space would do nothing on our own menus and fields.
+    let syncListen: () => void = () => { };
+    const onFocusIn = () => { if (isTyping()) releaseKeys(); syncListen(); };
+    // Focus leaving for nothing (a menu that closed) lands on the page body a moment later.
+    const onFocusOut = () => { window.setTimeout(() => { if (!disposed) syncListen(); }, 0); };
     const host = hostRef.current;
     const emit = (e: ViewerEvent) => { if (!disposed) onEventRef.current(e); };
     let cleanupListeners = () => { };
@@ -138,6 +164,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
           // the box size again (a change while connecting, such as pinning the bar, was dropped).
           syncLocal();
           refit();
+          applyFont();
           emit({ type: 'connected' });
           const started = Date.now();
           window.clearInterval(paintTimer);
@@ -188,25 +215,64 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
         });
       };
 
+      const sendArg = (name: string, value: string) => {
+        const writer = new G.StringWriter(c.createArgumentValueStream('text/plain', name));
+        writer.sendText(value);
+        writer.sendEnd();
+      };
+      // SSH text size: guacd reports the terminal's ("font-size" argument) once it is open and
+      // changes it in the running terminal when the browser sends another.
+      let termFont: number | undefined;
+      const applyFont = () => {
+        const f = fontRef.current;
+        if (!connected || !f || termFont === undefined || f === termFont) return;
+        termFont = f;
+        sendArg('font-size', String(f));
+      };
+      c.onargv = (stream: Guac, mimetype: string, name: string) => {
+        if (name !== 'font-size' || mimetype !== 'text/plain') return;
+        const reader = new G.StringReader(stream);
+        let text = '';
+        reader.ontext = (t: string) => { text += t; };
+        reader.onend = () => {
+          const n = Number.parseInt(text, 10);
+          if (!Number.isFinite(n) || n <= 0) return;
+          termFont = n;
+          onFontRef.current?.(n);
+          applyFont();
+        };
+      };
+      // Keys the on-screen keyboard holds down (a latched Ctrl): a combination from the menu leaves
+      // them down, and so a key held on the physical keyboard, so both agree with the remote side.
+      const held = new Set<number>();
+      const isDown = (k: number) => [k, OTHER_SIDE[k]].some((x) => x !== undefined && (held.has(x) || pressed.has(x)));
+
       apiRef.current = {
-        ctrlAltDel: () => {
-          for (const k of CTRL_ALT_DEL) c.sendKeyEvent(1, k);
-          for (const k of [...CTRL_ALT_DEL].reverse()) c.sendKeyEvent(0, k);
+        sendKeys: (keysyms) => {
+          const fresh = keysyms.filter((k) => !isDown(k));
+          for (const k of fresh) c.sendKeyEvent(1, k);
+          for (const k of [...fresh].reverse()) c.sendKeyEvent(0, k);
+        },
+        sendKey: (down, keysym) => {
+          if (down) held.add(keysym); else held.delete(keysym);
+          c.sendKeyEvent(down ? 1 : 0, keysym);
         },
         sendClipboard: (text) => sendClip(text),
-        submit: (values) => {
-          for (const [name, value] of Object.entries(values)) {
-            const stream = c.createArgumentValueStream('text/plain', name);
-            const writer = new G.StringWriter(stream);
-            writer.sendText(value);
-            writer.sendEnd();
-          }
-        },
+        submit: (values) => { for (const [name, value] of Object.entries(values)) sendArg(name, value); },
+        screenshot: () => new Promise((resolve) => {
+          try { display.flatten().toBlob((b: Blob | null) => resolve(b), 'image/png'); } catch { resolve(null); }
+        }),
       };
 
       // Mouse: the remote draws its own cursor.
       const mouse = new G.Mouse(el);
       mouse.onEach(['mousedown', 'mouseup', 'mousemove'], (e: Guac) => c.sendMouseState(e.state, true));
+      // Touch, like the official client's touchscreen mode: a tap clicks, a long press is a right
+      // click, and a tap followed at once by a touch that moves drags. The browser's own panning and zooming
+      // would take those gestures, so the screen turns them off.
+      const touch = new G.Mouse.Touchscreen(el);
+      touch.onEach(['mousedown', 'mouseup', 'mousemove'], (e: Guac) => c.sendMouseState(e.state, true));
+      el.style.touchAction = 'none';
       display.oncursor = (canvas: HTMLCanvasElement, x: number, y: number) => { el.style.cursor = `url(${canvas.toDataURL()}) ${x} ${y}, auto`; };
 
       // Keyboard: keys go to the session in front, except while typing in our own fields. A key
@@ -223,9 +289,13 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
         c.sendKeyEvent(1, keysym);
         return false;
       };
-      const keyUp = (keysym: number) => { if (pressed.delete(keysym)) c.sendKeyEvent(0, keysym); };
+      // A key the on-screen keyboard still holds (either side) stays down on the remote side too.
+      const keyUp = (keysym: number) => {
+        if (pressed.delete(keysym) && ![keysym, OTHER_SIDE[keysym]].some((x) => x !== undefined && held.has(x))) c.sendKeyEvent(0, keysym);
+      };
       const listen = (on: boolean) => { kb.onkeydown = on ? keyDown : null; kb.onkeyup = on ? keyUp : null; };
-      listen(activeRef.current);
+      syncListen = () => listen(activeRef.current && !isTyping());
+      syncListen();
       // Lost focus (another window, a field of ours, another tab): release everything held, so
       // nothing stays pressed or auto-repeats on the remote side.
       releaseKeys = () => {
@@ -236,6 +306,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       window.addEventListener('blur', releaseKeys);
       window.addEventListener('focus', syncLocal);
       document.addEventListener('focusin', onFocusIn);
+      document.addEventListener('focusout', onFocusOut);
       host.addEventListener('pointerenter', syncLocal);
 
       // Size: like the official Guacamole client, ask the remote for the box size in device pixels
@@ -269,7 +340,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       // The box changes with the window, full screen, and the session bar being pinned.
       const boxWatch = new ResizeObserver(refit);
       boxWatch.observe(host);
-      hooks.current = { release: () => { releaseKeys(); listen(false); }, resume: () => listen(true), refit, syncLocal };
+      hooks.current = { release: () => { releaseKeys(); listen(false); }, resume: () => syncListen(), refit, syncLocal, applyFont };
 
       c.connect('token=' + encodeURIComponent(token));
 
@@ -294,6 +365,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
       window.removeEventListener('beforeunload', onUnload);
       window.removeEventListener('blur', releaseKeys);
       document.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('focusout', onFocusOut);
       window.clearInterval(lease);
       window.clearTimeout(resizeTimer);
       window.clearInterval(paintTimer);
@@ -313,6 +385,8 @@ export function GuacScreen({ sessionId, token, active, clipboard, onEvent, onRem
     if (active) { hooks.current?.resume(); hooks.current?.refit(); hooks.current?.syncLocal(); }
     else hooks.current?.release();
   }, [active]);
+
+  useEffect(() => { hooks.current?.applyFont(); }, [fontSize]);
 
   return <div ref={hostRef} className="absolute inset-0 overflow-hidden flex items-center justify-center" />;
 }
