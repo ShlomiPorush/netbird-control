@@ -657,3 +657,27 @@ test('a session whose checks were already running is not approved when settling 
         live = null;
     }
 });
+
+test('settling that starts while a name is looked up gives no access refusal from old data', async () => {
+    const s = base();
+    live = {
+        '/api/users': s.users, '/api/peers': s.peers, '/api/groups': s.groups, '/api/policies': s.policies,
+        '/api/networks/resources': s.resources, '/api/networks': s.networks, '/api/routes': [], '/api/networks/n1/routers': [{ peer: 'p-r1', enabled: true }],
+    };
+    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'] });
+    settings.remote_access_nb = JSON.stringify({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw', namesGroupId: 'g-ngw', namesTargetGroupId: 'g-ngwt', namesPolicyId: 'pol-ngw' });
+    await ra.loadRemoteAccessConfig();
+    ra._internal.resetSettlingForTest();
+    ra._internal.invalidateSnapshot();
+    ra.setRemoteAccessDeps({ resolve4: async () => { ra.noteUncertainTargetWrite(); return ['192.0.2.10']; } });
+    try {
+        const check = await ra.checkAccess({ user_id: 'u-nobody', email: 'nobody@example.test' }, { protocol: 'rdp', address: 'unknown-host.example.test', port: 3389 });
+        assert.equal(check.steps.length, 1);
+        assert.equal(check.steps[0].key, 'ready');
+        assert.equal(check.steps[0].code, 'TARGETS_SETTLING');
+        // The session start too.
+        ra._internal.resetSettlingForTest();
+        ra._internal.invalidateSnapshot();
+        await assert.rejects(ra.createSession({ user_id: 'u-nobody', email: 'nobody@example.test' }, { protocol: 'rdp', address: 'unknown-host.example.test', port: 3389 }, '203.0.113.9'), (e) => e.code === 'TARGETS_SETTLING');
+    } finally { ra.setRemoteAccessDeps({ resolve4: null }); ra._internal.resetSettlingForTest(); live = null; }
+});

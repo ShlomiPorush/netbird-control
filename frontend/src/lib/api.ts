@@ -3,9 +3,12 @@
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The server's stable error code, when it sent one. */
+  code?: string;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -51,7 +54,7 @@ async function handle<T>(res: Response): Promise<T> {
   try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
   if (!res.ok) {
     const msg = (data as { error?: string })?.error || `HTTP ${res.status}`;
-    throw new ApiError(res.status, msg);
+    throw new ApiError(res.status, msg, (data as { code?: string })?.code);
   }
   return data as T;
 }

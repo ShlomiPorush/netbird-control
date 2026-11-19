@@ -387,3 +387,21 @@ test('no refusal record when the link record itself failed, or when the discarde
     assert.deepEqual(audits.map(a => a.action), ['remote_access.launch_refused']);
     ra._internal.sweepLaunches(Number.MAX_SAFE_INTEGER);
 });
+
+test('while remote access settles, a link for another user is still refused, recorded and used up', async () => {
+    const t = ticketOf(await ra.issueLaunch(KEY, rdp({ user: 'alice@example.test' })));
+    ra.noteUncertainTargetWrite();
+    try {
+        const before = audits.length;
+        await assert.rejects(ra.redeemLaunch(bob, { ticket: t }, '203.0.113.2'), (e) => e.status === 403 && e.code === 'WRONG_USER', 'no settling answer before the user check');
+        assert.ok(audits.slice(before).some(a => a.action === 'remote_access.launch_wrong_user'));
+        await assert.rejects(ra.redeemLaunch(alice, { ticket: t }, '203.0.113.1'), (e) => e.code === 'EXPIRED');
+    } finally { ra._internal.resetSettlingForTest(); }
+});
+
+test('isSettling tells the browser to wait before it opens a link', () => {
+    assert.equal(ra.isSettling(), false);
+    ra.noteUncertainTargetWrite();
+    try { assert.equal(ra.isSettling(), true); } finally { ra._internal.resetSettlingForTest(); }
+    assert.equal(ra.isSettling(), false);
+});

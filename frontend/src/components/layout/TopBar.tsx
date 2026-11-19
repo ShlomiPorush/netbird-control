@@ -15,24 +15,7 @@ export function TopBar({ collapsed, onToggleCollapse, onOpenMobile }: { collapse
   const { effective, toggle } = useTheme();
   const { viewer } = useViewer();
   const appName = useAppConfig().data?.appName || 'NetBird Control';
-  const name = viewer.name || viewer.email || 'User';
-  const initial = (name.trim()[0] || 'U').toUpperCase();
-  const tenant = getTenantMode();
-  const targets = useSwitchTargets(!!tenant);
-  // The tab may hold the id of a tenant that was since removed or deactivated (the backend
-  // refuses it with 403). Once both lists have loaded without it, fall back to the main account -
-  // once per page: if the switch is cancelled (storage blocked), the list refreshes must not keep
-  // retrying it; Exit Tenant still works by hand.
-  const tenantId = tenant?.id;
-  const fellBack = useRef(false);
-  useEffect(() => {
-    if (fellBack.current) return;
-    if (tenantId && targets.ready && !targets.known.has(tenantId)) {
-      fellBack.current = true;
-      // A launch link that brought the user here opens in the main account.
-      switchAccount(null, currentLaunchLink() || '/');
-    }
-  }, [tenantId, targets]);
+  const { tenant, targets } = useTenantFallback();
 
   return (
     <header className={cn(
@@ -89,10 +72,31 @@ export function TopBar({ collapsed, onToggleCollapse, onOpenMobile }: { collapse
         >
           {effective === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
         </button>
-        {viewer.authEnabled && <AccountMenu name={name} email={viewer.email} initial={initial} userId={viewer.user_id} />}
+        {viewer.authEnabled && <AccountMenu />}
       </div>
     </header>
   );
+}
+
+/** Every page shell runs this (the portal's and Remote Access's). The tab may hold the id of a
+ * tenant that was since removed or deactivated (the backend refuses it with 403). Once both lists
+ * have loaded without it, fall back to the main account - once per page: if the switch is
+ * cancelled (storage blocked), the list refreshes must not keep retrying it; Exit Tenant still
+ * works by hand. */
+export function useTenantFallback() {
+  const tenant = getTenantMode();
+  const targets = useSwitchTargets(!!tenant);
+  const tenantId = tenant?.id;
+  const fellBack = useRef(false);
+  useEffect(() => {
+    if (fellBack.current) return;
+    if (tenantId && targets.ready && !targets.known.has(tenantId)) {
+      fellBack.current = true;
+      // A launch link that brought the user here opens in the main account.
+      switchAccount(null, currentLaunchLink() || '/');
+    }
+  }, [tenantId, targets]);
+  return { tenant, targets };
 }
 
 /* Solid orange "Managing Tenant" chip inside the top bar - the unmistakable signal that every
@@ -263,9 +267,12 @@ function TenantSwitcher() {
   );
 }
 
-function AccountMenu({ name, email, initial, userId }: {
-  name: string; email?: string; initial: string; userId?: string | null;
-}) {
+export function AccountMenu() {
+  const { viewer } = useViewer();
+  const name = viewer.name || viewer.email || 'User';
+  const initial = (name.trim()[0] || 'U').toUpperCase();
+  const email = viewer.email;
+  const userId = viewer.user_id;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const version = useVersion().data;

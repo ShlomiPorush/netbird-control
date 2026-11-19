@@ -932,7 +932,7 @@ const MESSAGES = {
     ADDRESS_NOT_ALLOWED: "Browser access can't connect to this address. Loopback, link-local, multicast, NetBird peer (100.64.0.0/10) and the Browser Gateway's own addresses are never targets.",
     WILDCARD_DOMAIN_NOT_ALLOWED: "Browser access doesn't connect through wildcard domain resources. Ask an administrator to add this exact host name as a domain resource, or enter the server's IP address.",
     GATEWAY_REACH_UNKNOWN: "A NetBird policy gives the Browser Gateway access that NetBird Control can't read, so browser access is blocked for everyone until an administrator changes that policy.",
-    TARGETS_SETTLING: 'NetBird is still applying a change to the browser targets. Try again in a minute.',
+    TARGETS_SETTLING: 'Remote access is still applying a recent change. This usually takes about a minute.',
     SERVER_RESTARTING: 'The server is restarting. Try again in a moment.',
 };
 const REQUESTABLE = new Set(['NO_ACCESS', 'PORT_NOT_ALLOWED']);
@@ -992,30 +992,33 @@ async function resolveTarget(snap, userId, address, port, opts = {}) {
     return first;
 }
 
+const notReady = (code) => ({ key: 'ready', status: 'fail', code, message: MESSAGES[code], retry: code === 'TARGETS_SETTLING' });
+
 async function checkAccess(viewer, body) {
     const { protocol, address, port } = parseTarget(body);
     const steps = [];
-    if (targetsSettling()) return { steps: [{ key: 'access', status: 'fail', code: 'TARGETS_SETTLING', message: MESSAGES.TARGETS_SETTLING }] };
+    // The environment step ('ready') is reported only when it fails: remote access itself is not
+    // ready, which says nothing about the user's own access. retry: it passes by itself soon.
+    if (targetsSettling()) return { steps: [notReady('TARGETS_SETTLING')] };
     let snap;
     try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); }
-    catch (e) { return { steps: [{ key: 'access', status: 'fail', code: 'SNAPSHOT_FAILED', message: MESSAGES.SNAPSHOT_FAILED }] }; }
+    catch (e) { return { steps: [notReady('SNAPSHOT_FAILED')] }; }
     const rt = await resolveTarget(snap, viewer.user_id, address, port);
     const verdict = rt.verdict;
     const target = { protocol, address: rt.address || address, name: rt.name || '', gateway: rt.gateway || 'ip', port, resource: verdict.resource || null, network: verdict.network || null };
     if (!verdict.ok) {
+        // Settling may have started while the target was looked up (DNS): no refusal from old data.
+        if (targetsSettling() || !snapshotCurrent(snap)) return { steps: [notReady('TARGETS_SETTLING')], target };
         steps.push({ key: 'access', status: 'fail', code: verdict.code, message: MESSAGES[verdict.code] || verdict.code, requestable: REQUESTABLE.has(verdict.code) });
         return { steps, target };
     }
     steps.push({ key: 'access', status: 'pass', detail: `Granted by ${verdict.policies.join(', ')}` });
     const routers = await withDeadline(netbirdGet(`/api/networks/${encodeURIComponent(verdict.network.id)}/routers`), SNAPSHOT_DEADLINE_MS, 'Reading routers').catch(() => null);
-    if (!Array.isArray(routers)) {
-        steps.push({ key: 'path', status: 'fail', code: 'SNAPSHOT_FAILED', message: MESSAGES.SNAPSHOT_FAILED });
-        return { steps, target };
-    }
+    if (!Array.isArray(routers)) return { steps: [notReady('SNAPSHOT_FAILED')], target };
     const path = pathStatus(snap, authCfg(rt.gateway), routers);
     // Again after the reads: an unanswered write may have started settling meanwhile, or the
     // targets changed after the snapshot was read.
-    if (targetsSettling() || !snapshotCurrent(snap)) return { steps: [{ key: 'access', status: 'fail', code: 'TARGETS_SETTLING', message: MESSAGES.TARGETS_SETTLING }], target };
+    if (targetsSettling() || !snapshotCurrent(snap)) return { steps: [notReady('TARGETS_SETTLING')], target };
     steps.push(path.ok
         ? { key: 'path', status: 'pass', detail: `Gateway online, routing peer online for ${verdict.network.name}` }
         : { key: 'path', status: 'fail', code: path.code, message: MESSAGES[path.code] || path.code, troubleshoot: path.code === 'NO_ROUTER_ONLINE' });
@@ -1067,6 +1070,8 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
     const rt = await resolveTarget(snap, viewer.user_id, address, port);
     const verdict = rt.verdict;
+    // Settling may have started while the target was looked up (DNS): no refusal from old data.
+    if (!verdict.ok && (targetsSettling() || !snapshotCurrent(snap))) throw httpError(503, 'TARGETS_SETTLING');
     if (!verdict.ok) throw httpError(403, verdict.code);
     // The path check is enforced here too, not only shown by /check.
     const routers = await withDeadline(netbirdGet(`/api/networks/${encodeURIComponent(verdict.network.id)}/routers`), SNAPSHOT_DEADLINE_MS, 'Reading routers').catch(() => null);
@@ -2085,7 +2090,8 @@ async function issueLaunchChecked(key, body) {
 }
 
 // Open a launch link: the signed-in viewer gets the session. The ticket is used up on the first
-// try, whatever the outcome.
+// try, whatever the outcome. (The browser waits for remote access to be ready - /info settling -
+// before it opens a link.)
 async function redeemLaunch(viewer, body, clientIp) {
     const ticket = String((body && body.ticket) || '');
     const hash = TICKET_RE.test(ticket) ? ticketHash(ticket) : '';
@@ -2123,7 +2129,7 @@ module.exports = {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
     withTargetLock, noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
-    checkAccess, createSession, renewLease, endSession, takeToken, attachTunnel,
+    checkAccess, createSession, renewLease, isSettling: () => targetsSettling(), endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
     _internal: {

@@ -184,3 +184,32 @@ html.nb-session-open { scrollbar-color: transparent transparent; background-colo
 .nb-scroll::-webkit-scrollbar-thumb:hover { background-color: rgba(120, 130, 140, 0.65); }
 .dark .nb-scroll:hover::-webkit-scrollbar-thumb { background-color: rgba(160, 170, 180, 0.32); }
 .dark .nb-scroll::-webkit-scrollbar-thumb:hover { background-color: rgba(175, 185, 195, 0.5); }
+/* The official on-screen keyboard of a remote session (osk.css from the Guacamole web client,
+   loaded with it) in the session view's colors. Each rule has one class more than osk.css.
+   Narrower than the window when its height is capped, it stays centered. */
+.nb-osk .guac-keyboard { width: auto; }
+.nb-osk .guac-keyboard .guac-keyboard-key {
+  background: var(--color-nb-gray-900);
+  border: 1px solid var(--color-nb-gray-800);
+  border-radius: 0.2em;
+  color: var(--color-nb-gray-100);
+  font-weight: 500;
+  text-shadow: none;
+}
+.nb-osk .guac-keyboard .guac-keyboard-key:hover { background: var(--color-nb-gray-800); }
+.nb-osk .guac-keyboard.guac-keyboard-modifier-shift .guac-keyboard-key-rshift,
+.nb-osk .guac-keyboard.guac-keyboard-modifier-shift .guac-keyboard-key-lshift,
+.nb-osk .guac-keyboard.guac-keyboard-modifier-control .guac-keyboard-key-rctrl,
+.nb-osk .guac-keyboard.guac-keyboard-modifier-control .guac-keyboard-key-lctrl,
+.nb-osk .guac-keyboard.guac-keyboard-modifier-alt .guac-keyboard-key-ralt,
+.nb-osk .guac-keyboard.guac-keyboard-modifier-alt .guac-keyboard-key-lalt,
+.nb-osk .guac-keyboard.guac-keyboard-modifier-caps .guac-keyboard-key-caps,
+.nb-osk .guac-keyboard.guac-keyboard-modifier-meta .guac-keyboard-key-meta {
+  background: color-mix(in srgb, var(--color-netbird-400) 28%, var(--color-nb-gray-900));
+  border-color: var(--color-netbird-400);
+}
+.nb-osk .guac-keyboard .guac-keyboard-key.guac-keyboard-pressed {
+  background: var(--color-netbird-500);
+  border-color: var(--color-netbird-400);
+  color: #fff;
+}

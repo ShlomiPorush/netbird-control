@@ -29,3 +29,11 @@ This project includes third-party material:
   text is in frontend/public/licenses/apache-2.0.txt, and the upstream NOTICE
   is next to the library. The Browser Gateway also runs the official
   guacamole/guacd image (Apache License 2.0) as a separate container.
+
+- Apache Guacamole web client on-screen keyboard layout and stylesheet
+  (guacamole-client 1.6.0: en-us-qwerty.json and osk.css),
+  frontend/public/vendor/guacamole-client-1.6.0/
+  https://github.com/apache/guacamole-client, tag 1.6.0, unmodified.
+  Copyright 2020 The Apache Software Foundation. Apache License 2.0; the full
+  text is in frontend/public/licenses/apache-2.0.txt, and the upstream NOTICE
+  is next to the files.

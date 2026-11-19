@@ -134,7 +134,8 @@ every minute while it stays open.
 
 Send the user's browser to `url`. The link:
 
-- works once, even if opening it fails;
+- works once, even if opening it fails (while remote access is getting ready after a change or a
+  restart, the page waits until it is ready before it opens the link, usually within a minute);
 - expires after five minutes;
 - stops working when the key that made it is revoked or expires.
 

@@ -1,6 +1,8 @@
 import { lazy } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
+import { RemoteLayout } from '@/components/layout/RemoteLayout';
+import { RemoteSessionsProvider } from '@/components/remote/RemoteSessions';
 import { useViewer } from '@/contexts/ViewerContext';
 import { currentLaunchLink, getTenantMode, switchAccount } from '@/lib/api';
 import { Button } from '@/components/ui';
@@ -76,7 +78,15 @@ function LaunchInMainAccount() {
 
 export default function App() {
   return (
+    // Browser remote sessions live above both shells, so moving between the portal and the
+    // Remote Access page keeps them open.
+    <RemoteSessionsProvider>
     <Routes>
+      {/* Remote Access is a page of its own: no sidebar or portal top bar. Same address as
+          before, so launch links (/remote-access?launch=...) keep working. */}
+      <Route path="remote-access" element={<RemoteLayout />}>
+        <Route index element={<TenantSafeRoute><RemoteAccess /></TenantSafeRoute>} />
+      </Route>
       <Route element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="activity" element={<Activity />} />
@@ -97,7 +107,6 @@ export default function App() {
         {/* Old standalone pages now live under Operations - keep deep links alive. */}
         <Route path="automation" element={<Navigate to="/operations?tab=automation" replace />} />
         <Route path="request-access" element={<TenantSafeRoute><RequestAccess /></TenantSafeRoute>} />
-        <Route path="remote-access" element={<TenantSafeRoute><RemoteAccess /></TenantSafeRoute>} />
         {/* Troubleshoot works in tenant mode too - a support user diagnoses the tenant's devices. */}
         <Route path="troubleshoot" element={<Troubleshoot />} />
         <Route path="access" element={<AccessMgmtRoute><AccessManagement /></AccessMgmtRoute>} />
@@ -111,5 +120,6 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
+    </RemoteSessionsProvider>
   );
 }
