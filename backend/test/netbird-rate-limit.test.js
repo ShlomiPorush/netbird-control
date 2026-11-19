@@ -1,8 +1,9 @@
 // NetBird API rate limiting (lib/netbird.js): a 429 answer is sent again, for every method, up to
-// 5 attempts and 30 seconds of waiting per call. The wait is NetBird's Retry-After (seconds or an
-// HTTP date) when present, otherwise exponential backoff with jitter. When a limit is reached the
-// caller gets the last 429 answer unchanged. Network errors and 5xx answers are not retried.
-// After a 429, other calls wait out the same cooldown before they send.
+// 5 attempts, waiting at most 5 seconds in total for a read (GET) and 30 seconds for a write. The
+// wait is NetBird's Retry-After (seconds or an IMF-fixdate) when present, otherwise exponential
+// backoff with jitter, and it is a pause shared by every call (at most 10 minutes): nothing is
+// sent while it lasts, and a call that cannot wait it out ends at once with a 429. When a limit is
+// reached the caller gets a 429 in its usual result shape. Network errors and 5xx are not retried.
 // A local HTTP server plays NetBird; the clock and the sleep are fake, so no test waits.
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -126,6 +127,7 @@ test('an unreadable Retry-After falls back to the backoff, never to no wait', as
         'Mon, 30 Feb 2026 00:00:07 GMT',    // an impossible date, not 2 March
         'Thursday, 01-Jan-26 00:00:07 GMT', // obsolete RFC 850 form
         'Thu Jan  1 00:00:07 2026',         // obsolete asctime form
+        'Sat, 01 Jan 10000 00:00:00 GMT',   // IMF-fixdate has a 4-digit year
     ]) {
         waits = [];
         nb._setNetbirdTimingForTests({});
@@ -231,9 +233,9 @@ test('a call that is already waiting also waits out a longer cooldown set meanwh
     manual = [];
     routes['/api/b'] = [{ hold: limited(5) }, ok([])];
     routes['/api/a'] = [limited(1), ok([])];
-    const b = nb.netbirdGet('/api/b');
+    const b = nb.netbirdReq('PUT', '/api/b', {});
     await until(() => held.length === 1); // B is sent; its answer is held
-    const a = nb.netbirdGet('/api/a');
+    const a = nb.netbirdReq('PUT', '/api/a', {});
     await until(() => manual.length === 1); // A got its 429 and waits 1 s
     held.shift()(); // now B gets a 429 asking for 5 s
     await until(() => manual.length === 2);
@@ -242,7 +244,33 @@ test('a call that is already waiting also waits out a longer cooldown set meanwh
     assert.deepEqual(waits, [1000, 5000, 4000]); // ... and waits the 4 s left before it sends
     assert.equal(requests.filter((q) => q.path === '/api/a').length, 1);
     while (manual.length) { manual.shift()(); await new Promise((r) => setTimeout(r, 10)); }
-    assert.deepEqual(await Promise.all([a, b]), [[], []]);
+    assert.deepEqual((await Promise.all([a, b])).map((r) => r.status), [200, 200]);
+});
+
+test('a GET whose timer fires late does not send again past its 5 seconds', async () => {
+    nb._setNetbirdTimingForTests({ sleep: async (ms) => { waits.push(ms); clock += ms + 2000; } });
+    replies = [limited(4), ok([])];
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), TOO_MANY);
+    assert.equal(requests.length, 1);
+});
+
+test('a call that is never sent gets a plain 429, never another call\'s answer', async () => {
+    const detailed = { message: 'too many requests for account acc-1', code: 429 };
+    replies = [{ status: 429, body: detailed, headers: { 'Retry-After': '120' } }];
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), detailed); // its own answer
+    replies = [ok([])];
+    assert.deepEqual(await nb.netbirdGet('/api/peers'), TOO_MANY);
+    assert.deepEqual(await nb.netbirdPost('/api/groups', { name: 'g' }), { status: 429, body: TOO_MANY, raw: JSON.stringify(TOO_MANY) });
+    assert.equal(requests.length, 1);
+});
+
+test('a retry that ends in a network error reports the 429, not a status 0', async () => {
+    replies = [limited(1), 'drop'];
+    assert.deepEqual(await nb.netbirdReq('DELETE', '/api/groups/g1'), { status: 429, body: TOO_MANY, raw: JSON.stringify(TOO_MANY) });
+    clock += 60_000;
+    replies = [limited(1), 'drop'];
+    assert.deepEqual(await nb.netbirdGet('/api/groups'), TOO_MANY);
+    assert.equal(requests.length, 4);
 });
 
 test('a connection closed in the middle of the body ends the call as a network error', { timeout: 5000 }, async () => {

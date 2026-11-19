@@ -5736,6 +5736,9 @@ async function resetUserMfa(id) {
 // NetBird Networks (GET /api/networks) - fetched on demand for the Networks page.
 function fetchNetworksFromApi() {
     // The shared client handles the tenant context (tenant token / ?account=) and NetBird's rate limit.
+    // A tenant gets NetBird's answer as is, so an error answer still fails the request there instead
+    // of showing an empty list (the behavior before this went through the shared client).
+    if (currentTenantAccount()) return netbirdGet('/api/networks');
     return netbirdGet('/api/networks').then((json) => (Array.isArray(json) ? json : null));
 }
 

@@ -209,14 +209,12 @@ const _nbTiming = {
     wallNow: () => Date.now(),
 };
 let _nbPausedUntil = 0;
-let _nbPauseAnswer = null; // { body, raw } of the 429 that set the pause
 // Tests replace the clocks and the sleep, so no test waits for real time.
 function _setNetbirdTimingForTests({ sleep, now, wallNow } = {}) {
     if (sleep) _nbTiming.sleep = sleep;
     if (now) _nbTiming.now = now;
     if (wallNow) _nbTiming.wallNow = wallNow;
     _nbPausedUntil = 0;
-    _nbPauseAnswer = null;
 }
 
 // Retry-After as milliseconds to wait from `wallNow`, or null when it is absent or unreadable
@@ -228,6 +226,7 @@ function parseRetryAfter(value, wallNow) {
     if (value === undefined || value === null) return null;
     const s = String(value).trim();
     if (/^\d+$/.test(s)) return Number(s) * 1000;
+    if (!/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(s)) return null;
     const at = Date.parse(s);
     if (!Number.isFinite(at) || new Date(at).toUTCString() !== s) return null;
     return Math.max(0, at - wallNow);
@@ -238,16 +237,21 @@ function nbBackoffMs(n) {
     return Math.round(exp / 2 + Math.random() * (exp / 2));
 }
 
-// Run `attempt` (one HTTP call that resolves { status, retryAfter, answer: { body, raw }, value })
+// NetBird's own "too many requests" answer, for a call that was never sent because of the pause.
+// It is built fresh each time and never copied from another call's answer, which may belong to
+// another account (MSP tenant).
+const NB_429_RAW = '{"message":"too many requests","code":429}';
+const nb429Answer = () => ({ body: JSON.parse(NB_429_RAW), raw: NB_429_RAW });
+
+// Run `attempt` (one HTTP call that resolves { status, retryAfter, value })
 // and send it again while NetBird answers 429, within the limits above. Resolves the final
-// attempt's `value`; a call never sent because of the pause resolves `from429(answer)` instead,
-// built from the 429 that set the pause.
+// attempt's `value`; a call never sent because of the pause resolves `from429(nb429Answer())`.
 async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429) {
     let waited = 0;
     let last = null; // this call's own last 429
     const giveUp = () => {
         console.error('[NetBird %s] rate limited (429), giving up after %d ms of waiting', label, Math.round(waited));
-        return last ? last.value : from429(_nbPauseAnswer || { body: null, raw: '' });
+        return last ? last.value : from429(nb429Answer());
     };
     for (let n = 1; ; n++) {
         // Wait out the shared pause, and check it again after every sleep: another call may have
@@ -258,15 +262,20 @@ async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429) {
             await _nbTiming.sleep(cool);
             waited += _nbTiming.now() - t0; // the time that really passed (a timer can fire late)
         }
+        if (last && waited > maxWaitMs) return giveUp(); // a late timer used up the budget
         const r = await attempt();
-        if (r.status !== 429) return r.value;
+        // A retry that ends in a network error or timeout reports the 429 the call already got:
+        // the caller sees the same failure as before this retry existed, never a status 0 that some
+        // callers read as "done".
+        if (r.status !== 429) return r.status === 0 && last ? last.value : r.value;
         last = r;
         const retryAfter = parseRetryAfter(r.retryAfter, _nbTiming.wallNow());
         const wait = retryAfter !== null ? retryAfter : nbBackoffMs(n);
-        const until = _nbTiming.now() + Math.min(wait, NB_429_MAX_PAUSE_MS);
-        if (until > _nbPausedUntil) { _nbPausedUntil = until; _nbPauseAnswer = r.answer; }
-        if (n === NB_429_MAX_ATTEMPTS || wait > maxWaitMs - waited) return giveUp();
-        console.warn('[NetBird %s] rate limited (429), retry %d of %d in %d ms', label, n, NB_429_MAX_ATTEMPTS - 1, wait);
+        const now = _nbTiming.now();
+        _nbPausedUntil = Math.max(_nbPausedUntil, now + Math.min(wait, NB_429_MAX_PAUSE_MS));
+        const need = _nbPausedUntil - now; // may be longer than this answer's wait (another call's pause)
+        if (n === NB_429_MAX_ATTEMPTS || need > maxWaitMs - waited) return giveUp();
+        console.warn('[NetBird %s] rate limited (429), retry %d of %d in %d ms', label, n, NB_429_MAX_ATTEMPTS - 1, Math.round(need));
     }
 }
 const nbWaitFor = (method) => (String(method).toUpperCase() === 'GET' ? NB_429_READ_WAIT_MS : NB_429_WRITE_WAIT_MS);
@@ -289,7 +298,7 @@ function netbirdGet(apiPath) {
             // The connection closed in the middle of the body: a network error, not an answer.
             res.on('error', (err) => { console.error('[NetBird GET %s] error:', apiPath, err.message); resolve({ status: 0, value: null }); });
             res.on('end', () => {
-                const done = (value) => resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], answer: { body: value, raw: data }, value });
+                const done = (value) => resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], value });
                 try {
                     const j = JSON.parse(data);
                     if (res.statusCode >= 200 && res.statusCode < 300) noteNetbirdOk();
@@ -309,7 +318,7 @@ function netbirdGet(apiPath) {
     }), (a) => a.body);
 }
 
-// One write call (POST/PUT/DELETE, or a GET through netbirdReq) → { status, retryAfter, answer,
+// One write call (POST/PUT/DELETE, or a GET through netbirdReq) → { status, retryAfter,
 // value: { status, body, raw } or { status: 0, error } }
 function netbirdWriteOnce(transport, url, method, headers, body) {
     return new Promise((resolve) => {
@@ -321,7 +330,7 @@ function netbirdWriteOnce(transport, url, method, headers, body) {
             res.on('end', () => {
                 let j = null; try { j = JSON.parse(d); } catch (e) { }
                 if (res.statusCode >= 200 && res.statusCode < 300) noteNetbirdOk();
-                resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], answer: { body: j, raw: d }, value: { status: res.statusCode, body: j, raw: d } });
+                resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], value: { status: res.statusCode, body: j, raw: d } });
             });
         });
         req.on('error', e => resolve({ status: 0, value: { status: 0, error: e.message } }));
