@@ -125,6 +125,11 @@ Safari 16.4 or Firefox 128 or later.
    plan; without it, turn on **Traffic Events API Pull** and **Audit Events API Pull** on the same
    page. The manual setup is in [docs/features.md](docs/features.md#connecting-netbird-events).
 
+When NetBird answers a call with "too many requests" (HTTP 429), for example during a bulk change to
+hundreds of resources, the app waits and sends the call again: up to 5 attempts and 30 seconds per
+call, following NetBird's `Retry-After` when it sends one. Details are in
+[docs/features.md](docs/features.md#network-management-delegated-via-the-netbird-api).
+
 ## Configuration
 
 Most settings are stored in the database and edited in the app (**Settings**). The environment
