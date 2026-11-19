@@ -912,25 +912,25 @@ const MESSAGES = {
     USER_BLOCKED: 'Your NetBird account is blocked. Ask an administrator to unblock it.',
     UNKNOWN_ADDRESS: "NetBird has no resource for this address. Check the address, or ask an administrator to add it as a resource.",
     NO_DOMAIN_MATCH: "NetBird has no resource for this host name. Check the name, or ask an administrator to add it as a resource.",
-    NETWORK_NOT_ENABLED: "This server is in a NetBird network that Remote Access doesn't use. Ask an administrator to add the network in Settings > Remote Access.",
-    RESOURCE_DISABLED: "This server's resource is turned off in NetBird. Ask an administrator to turn it on.",
-    AMBIGUOUS_ROUTE: "More than one NetBird route leads to this address, so Remote Access can't tell which server you mean. Ask an administrator to remove the overlap.",
+    NETWORK_NOT_ENABLED: "This resource is in a NetBird network that Remote Access doesn't use. Ask an administrator to add the network in Settings > Remote Access.",
+    RESOURCE_DISABLED: "This resource is turned off in NetBird. Ask an administrator to turn it on.",
+    AMBIGUOUS_ROUTE: "More than one NetBird route leads to this address, so Remote Access can't tell which resource you mean. Ask an administrator to remove the overlap.",
     GATEWAY_NOT_ENROLLED: "The Browser Gateway isn't set up in NetBird yet, so Remote Access can't connect. Ask an administrator to set it up.",
     GATEWAY_DOMAIN_ROUTES: 'Connecting by IP address is blocked because the Browser Gateway receives domain routes. Ask an administrator to remove those routes from the gateway.',
-    GATEWAY_NOT_SYNCED: "The Browser Gateway has no route to this server yet. Try again in a minute. If it keeps happening, tell an administrator.",
-    GATEWAY_POLICY_MISSING: "The Browser Gateway's NetBird policy is missing or isn't set up correctly, so it can't reach this server. Ask an administrator to repair it.",
+    GATEWAY_NOT_SYNCED: "The Browser Gateway has no route to this resource yet. Try again in a minute. If it keeps happening, tell an administrator.",
+    GATEWAY_POLICY_MISSING: "The Browser Gateway's NetBird policy is missing or isn't set up correctly, so it can't reach this resource. Ask an administrator to repair it.",
     GATEWAY_POLICY_PORT: "The Browser Gateway's NetBird policy doesn't allow this port. Ask an administrator to allow the port in that policy.",
-    TARGET_NOT_OPEN_READONLY: "This NetBird Control is read-only, so it can't open this server to Remote Access. Ask an administrator where to connect instead.",
-    TARGET_OPEN_FAILED: "Remote Access couldn't prepare the connection to this server. Try again in a minute.",
-    TARGET_CHANGED: "This server's resource changed in NetBird while the session was opening. Connect again.",
-    BLOCKED_BY_POLICY: 'A NetBird policy blocks your access to this server. Ask an administrator if you need access.',
-    POSTURE_REQUIRED: "Your access to this server requires a device check that a browser can't pass. Connect with the NetBird app instead.",
+    TARGET_NOT_OPEN_READONLY: "This NetBird Control is read-only, so it can't open this resource to Remote Access. Ask an administrator where to connect instead.",
+    TARGET_OPEN_FAILED: "Remote Access couldn't prepare the connection to this resource. Try again in a minute.",
+    TARGET_CHANGED: "This resource changed in NetBird while the session was opening. Connect again.",
+    BLOCKED_BY_POLICY: 'A NetBird policy blocks your access to this resource. Ask an administrator if you need access.',
+    POSTURE_REQUIRED: "Your access to this resource requires a device check that a browser can't pass. Connect with the NetBird app instead.",
     PORT_NOT_ALLOWED: "Your access doesn't include this port. Request access if you need it.",
-    NO_ACCESS: "You don't have access to this server. Request access if you need it.",
-    GATEWAY_OFFLINE: "The Browser Gateway is offline, so this server can't be reached right now. Try again later, or tell an administrator.",
-    NO_ROUTER_ONLINE: "No routing peer for this server's network is online in NetBird, so the server can't be reached right now. Try again later, or tell an administrator.",
+    NO_ACCESS: "You don't have access to this resource. Request access if you need it.",
+    GATEWAY_OFFLINE: "The Browser Gateway is offline, so this resource can't be reached right now. Try again later, or tell an administrator.",
+    NO_ROUTER_ONLINE: "No routing peer for this resource's network is online in NetBird, so the resource can't be reached right now. Try again later, or tell an administrator.",
     SNAPSHOT_FAILED: "Remote Access couldn't read NetBird to check your access. Try again in a minute.",
-    ADDRESS_NOT_ALLOWED: "Remote Access can't connect to this kind of address, such as a loopback, multicast or NetBird peer address. Ask an administrator which address to use for this server.",
+    ADDRESS_NOT_ALLOWED: "Remote Access can't connect to this kind of address, such as a loopback, multicast or NetBird peer address. Ask an administrator which address to use for this resource.",
     WILDCARD_DOMAIN_NOT_ALLOWED: "This host name is covered only by a wildcard resource (such as *.example.com), and Remote Access doesn't connect through those. Enter the server's IP address, or ask an administrator to add this exact name as a resource.",
     GATEWAY_REACH_UNKNOWN: "Remote Access is blocked because a NetBird policy has a source NetBird Control can't read, so the Browser Gateway's access can't be checked. Ask an administrator to check that policy.",
     TARGETS_SETTLING: 'Remote Access is getting ready after a change. Try again in a minute.',
@@ -995,7 +995,7 @@ async function resolveTarget(snap, userId, address, port, opts = {}) {
     return first;
 }
 
-const SESSION_TARGET_CHANGED = "Your session ended because this server's resource changed in NetBird. Connect again.";
+const SESSION_TARGET_CHANGED = "Your session ended because this resource changed in NetBird. Connect again.";
 const notReady = (code) => ({ key: 'ready', status: 'fail', code, message: MESSAGES[code], retry: code === 'TARGETS_SETTLING' });
 
 async function checkAccess(viewer, body) {

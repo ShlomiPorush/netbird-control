@@ -282,7 +282,7 @@ export default function RemoteAccess() {
       }
       setStep('access', 'pass', access.detail);
       checked.current.access = access.detail;
-      if (!path || path.status === 'fail') { fail('path', { message: path?.message || "Remote Access couldn't check the way to this server. Try again.", troubleshoot: path?.troubleshoot }); return; }
+      if (!path || path.status === 'fail') { fail('path', { message: path?.message || "Remote Access couldn't check the way to this resource. Try again.", troubleshoot: path?.troubleshoot }); return; }
       setStep('path', 'pass', path.detail);
       checked.current.path = path.detail;
       if (protocol === 'ssh') { setPhase('ssh-creds'); return; }
