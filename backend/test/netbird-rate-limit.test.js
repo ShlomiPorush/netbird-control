@@ -10,26 +10,44 @@ const http = require('http');
 const crypto = require('crypto');
 
 let replies = [];
+let routes = {}; // path → its own reply queue (otherwise `replies` answers)
 let requests = [];
+let held = []; // answers a test sends later
 const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
         requests.push({ method: req.method, path: req.url, body });
-        const next = replies.length > 1 ? replies.shift() : replies[0];
+        const queue = routes[req.url] || replies;
+        const next = queue.length > 1 ? queue.shift() : queue[0];
         if (next === 'drop') { req.socket.destroy(); return; }
-        res.writeHead(next.status, { 'Content-Type': 'application/json', ...(next.headers || {}) });
-        res.end(JSON.stringify(next.body));
+        if (next === 'cut') { // headers and half the body, then the connection closes
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '100' });
+            res.write('[{"id":');
+            setTimeout(() => req.socket.destroy(), 20);
+            return;
+        }
+        if (next.hold) { held.push(() => answer(res, next.hold)); return; }
+        answer(res, next);
     });
 });
+function answer(res, next) {
+        res.writeHead(next.status, { 'Content-Type': 'application/json', ...(next.headers || {}) });
+        res.end(JSON.stringify(next.body));
+}
 
 const TOO_MANY = { message: 'too many requests', code: 429 };
 const limited = (retryAfter) => ({ status: 429, body: TOO_MANY, headers: retryAfter === undefined ? {} : { 'Retry-After': String(retryAfter) } });
 const ok = (body, status = 200) => ({ status, body });
 
 let nb;
-let clock = 0;
+let clock = 0; // the monotonic clock; the wall clock is WALL0 + clock
+const WALL0 = Date.parse('2026-01-01T00:00:00Z');
 let waits = [];
+let manual = null; // when set, sleeps wait here until the test releases them
+const autoSleep = async (ms) => { waits.push(ms); clock += ms; };
+const manualSleep = (ms) => new Promise((resolve) => { waits.push(ms); manual.push(() => { clock += ms; resolve(); }); });
+const until = async (cond) => { for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setTimeout(r, 2)); assert.ok(cond(), 'condition never met'); };
 const origWarn = console.warn;
 const origError = console.error;
 
@@ -54,12 +72,16 @@ after(async () => {
 
 beforeEach(() => {
     replies = [];
+    routes = {};
     requests = [];
+    held = [];
     waits = [];
-    clock = Date.parse('2026-01-01T00:00:00Z');
+    manual = null;
+    clock = 0;
     nb._setNetbirdTimingForTests({
         now: () => clock,
-        sleep: async (ms) => { waits.push(ms); clock += ms; },
+        wallNow: () => WALL0 + clock,
+        sleep: (ms) => (manual ? manualSleep(ms) : autoSleep(ms)),
     });
 });
 
@@ -93,9 +115,26 @@ test('Retry-After in seconds is honored', async () => {
 });
 
 test('Retry-After as an HTTP date is honored', async () => {
-    replies = [limited(new Date(clock + 7000).toUTCString()), ok([])];
+    replies = [limited(new Date(WALL0 + 7000).toUTCString()), ok([])];
     await nb.netbirdGet('/api/groups');
     assert.deepEqual(waits, [7000]);
+});
+
+test('Retry-After as an asctime date is read as UTC', async () => {
+    replies = [limited('Thu Jan  1 00:00:07 2026'), ok([])];
+    await nb.netbirdGet('/api/groups');
+    assert.deepEqual(waits, [7000]);
+});
+
+test('an unreadable Retry-After falls back to the backoff, never to no wait', async () => {
+    for (const value of ['-1', '1.5', 'soon', '2026-01-01']) {
+        waits = [];
+        nb._setNetbirdTimingForTests({});
+        replies = [limited(value), ok([])];
+        await nb.netbirdGet('/api/groups');
+        assert.equal(waits.length, 1, value);
+        assert.ok(waits[0] >= 500 && waits[0] <= 1000, `${value}: ${waits[0]} ms`);
+    }
 });
 
 test('without Retry-After the backoff grows exponentially, with jitter', async () => {
@@ -145,6 +184,33 @@ test('after a 429, the next call waits out the shared cooldown before it sends',
     replies = [ok([])];
     assert.deepEqual(await nb.netbirdGet('/api/peers'), []);
     assert.deepEqual(waits, [2000]);
+});
+
+test('a call that is already waiting also waits out a longer cooldown set meanwhile', async () => {
+    manual = [];
+    routes['/api/b'] = [{ hold: limited(5) }, ok([])];
+    routes['/api/a'] = [limited(1), ok([])];
+    const b = nb.netbirdGet('/api/b');
+    await until(() => held.length === 1); // B is sent; its answer is held
+    const a = nb.netbirdGet('/api/a');
+    await until(() => manual.length === 1); // A got its 429 and waits 1 s
+    held.shift()(); // now B gets a 429 asking for 5 s
+    await until(() => manual.length === 2);
+    manual.shift()(); // A wakes after 1 s ...
+    await until(() => manual.length === 2);
+    assert.deepEqual(waits, [1000, 5000, 4000]); // ... and waits the 4 s left before it sends
+    assert.equal(requests.filter((q) => q.path === '/api/a').length, 1);
+    while (manual.length) { manual.shift()(); await new Promise((r) => setTimeout(r, 10)); }
+    assert.deepEqual(await Promise.all([a, b]), [[], []]);
+});
+
+test('a connection closed in the middle of the body ends the call as a network error', { timeout: 5000 }, async () => {
+    replies = ['cut'];
+    assert.equal(await nb.netbirdGet('/api/groups'), null);
+    const r = await nb.netbirdReq('PUT', '/api/groups/g1', { name: 'g' });
+    assert.equal(r.status, 0);
+    assert.equal(typeof r.error, 'string');
+    assert.equal(requests.length, 2);
 });
 
 test('5xx answers and network errors are not retried', async () => {

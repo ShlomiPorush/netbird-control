@@ -194,25 +194,34 @@ function readOnlyResp() {
 const NB_429_MAX_ATTEMPTS = 5;
 const NB_429_MAX_WAIT_MS = 30 * 1000;
 const NB_429_BACKOFF_BASE_MS = 1000;
+// `now` is a monotonic clock for the cooldown, so a wall-clock change cannot stretch a wait;
+// `wallNow` is the wall clock, needed only to read a Retry-After date.
 const _nbTiming = {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    now: () => Date.now(),
+    now: () => performance.now(),
+    wallNow: () => Date.now(),
 };
 let _nbCooldownUntil = 0;
-// Tests replace the clock and the sleep, so no test waits for real time.
-function _setNetbirdTimingForTests({ sleep, now } = {}) {
+// Tests replace the clocks and the sleep, so no test waits for real time.
+function _setNetbirdTimingForTests({ sleep, now, wallNow } = {}) {
     if (sleep) _nbTiming.sleep = sleep;
     if (now) _nbTiming.now = now;
+    if (wallNow) _nbTiming.wallNow = wallNow;
     _nbCooldownUntil = 0;
 }
 
-// Retry-After as milliseconds to wait from `now`, or null when it is absent or unreadable.
-function parseRetryAfter(value, now) {
+// Retry-After as milliseconds to wait from `wallNow`, or null when it is absent or unreadable
+// (the caller then backs off as if there were none). RFC 9110 section 10.2.3: delay-seconds, or an
+// HTTP-date - IMF-fixdate and the obsolete RFC 850 form end in "GMT"; the obsolete asctime form
+// has no zone and is UTC.
+function parseRetryAfter(value, wallNow) {
     if (value === undefined || value === null) return null;
     const s = String(value).trim();
     if (/^\d+$/.test(s)) return Number(s) * 1000;
-    const at = Date.parse(s);
-    return Number.isFinite(at) ? Math.max(0, at - now) : null;
+    let at = NaN;
+    if (/^[A-Za-z]{3,9}, \d{2}[ -][A-Za-z]{3}[ -]\d{2,4} \d{2}:\d{2}:\d{2} GMT$/.test(s)) at = Date.parse(s);
+    else if (/^[A-Za-z]{3} [A-Za-z]{3} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/.test(s)) at = Date.parse(`${s} GMT`);
+    return Number.isFinite(at) ? Math.max(0, at - wallNow) : null;
 }
 // Backoff before retry n (1-based): 1s, 2s, 4s, ... with "equal jitter" (half fixed, half random).
 function nbBackoffMs(n) {
@@ -225,18 +234,23 @@ function nbBackoffMs(n) {
 async function withNbRateLimitRetry(label, attempt) {
     let waited = 0;
     let last = null;
-    for (let n = 1; n <= NB_429_MAX_ATTEMPTS; n++) {
-        const cool = _nbCooldownUntil - _nbTiming.now();
-        if (cool > 0) {
-            if (last && waited + cool > NB_429_MAX_WAIT_MS) break;
-            await _nbTiming.sleep(cool);
-            waited += cool;
+    attempts: for (let n = 1; n <= NB_429_MAX_ATTEMPTS; n++) {
+        // Wait out the shared cooldown, and check it again after every sleep: another call may have
+        // extended it meanwhile. The waiting never goes past this call's budget. A retry that would
+        // need more gives up; a first attempt sends once its budget is spent.
+        for (let cool; (cool = _nbCooldownUntil - _nbTiming.now()) > 0;) {
+            const room = NB_429_MAX_WAIT_MS - waited;
+            if (last && cool > room) break attempts;
+            if (room <= 0) break;
+            const ms = Math.min(cool, room);
+            await _nbTiming.sleep(ms);
+            waited += ms;
         }
         const r = await attempt();
         if (r.status !== 429) return r.value;
         last = r;
         const now = _nbTiming.now();
-        const retryAfter = parseRetryAfter(r.retryAfter, now);
+        const retryAfter = parseRetryAfter(r.retryAfter, _nbTiming.wallNow());
         const wait = retryAfter !== null ? retryAfter : nbBackoffMs(n);
         // A wait longer than any call may wait is not shared: other calls get their own 429 and
         // give up at once, instead of waiting for nothing.
@@ -261,6 +275,8 @@ function netbirdGet(apiPath) {
         }, (res) => {
             let data = '';
             res.on('data', c => data += c);
+            // The connection closed in the middle of the body: a network error, not an answer.
+            res.on('error', (err) => { console.error('[NetBird GET %s] error:', apiPath, err.message); resolve({ status: 0, value: null }); });
             res.on('end', () => {
                 const done = (value) => resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], value });
                 try {
@@ -288,6 +304,8 @@ function netbirdWriteOnce(transport, url, method, headers, body) {
         const req = transport.request(url, { method, headers, timeout: 15000 }, (res) => {
             let d = '';
             res.on('data', c => d += c);
+            // The connection closed in the middle of the body: a network error, not an answer.
+            res.on('error', e => resolve({ status: 0, value: { status: 0, error: e.message } }));
             res.on('end', () => {
                 let j = null; try { j = JSON.parse(d); } catch (e) { }
                 if (res.statusCode >= 200 && res.statusCode < 300) noteNetbirdOk();

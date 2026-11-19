@@ -1,5 +1,4 @@
 const https = require('https');
-const http = require('http');
 // Core infrastructure (the pg connection pool + the app_settings accessors) lives in lib/core.js
 // (one-way dependency: db.js -> lib/core.js). db.js imports the pool and re-exports
 // getSetting/setSetting under their original names so every existing call site and every name

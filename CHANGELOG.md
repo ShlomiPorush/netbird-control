@@ -56,8 +56,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   "too many requests" (HTTP 429), the app sends the call again, up to 5 attempts and 30 seconds of
   waiting per call. It follows NetBird's `Retry-After` when present, otherwise it backs off
   exponentially with jitter, and the app's other NetBird calls wait out the same pause. If NetBird
-  still refuses, the action fails with the same message as before. Timeouts, network errors and
-  server errors are not retried.
+  still refuses, the action fails the same way it did before. Timeouts, network errors and server
+  errors are not retried.
+- **A NetBird answer cut off in the middle no longer leaves the action waiting forever.** When the
+  connection closes while NetBird sends its answer, the call ends as a network error.
 
 ---
 
