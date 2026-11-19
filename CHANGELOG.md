@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.6.0] - 2026-11-19
+
 ### Added
 - **Special keys in a session.** A menu in the session bar sends the key combinations the local
   system keeps for itself or a phone has no key for: over RDP Ctrl+Alt+Del, the Windows key,
