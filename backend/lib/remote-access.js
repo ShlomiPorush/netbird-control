@@ -901,39 +901,42 @@ const authCfg = (kind = 'ip', { real = false, standing = false } = {}) => ({
 
 // ─── Checks (steps 1 and 2) ───
 const MESSAGES = {
-    INVALID_ADDRESS: 'Enter an IPv4 address, such as 10.0.0.5, or a host name, such as server.example.com.',
-    NAME_NOT_FOUND: "This host name wasn't found. Check the name, or enter the server's IP address.",
-    NO_IPV4_ADDRESS: 'This host name has no IPv4 address. Enter the IPv4 address instead.',
-    NAME_LOOKUP_FAILED: "The host name couldn't be looked up right now. Try again, or enter the IP address.",
-    NAMES_GATEWAY_NOT_ENROLLED: "Connecting by host name isn't set up yet. Ask an administrator to enroll the Browser Gateway for host names, or enter an IP address.",
-    NAMES_GATEWAY_EXTRA_REACH: 'The Browser Gateway for host names receives address routes, so connecting by name is blocked until an administrator fixes it.',
-    INVALID_PORT: 'Enter a port between 1 and 65535.',
-    USER_NOT_FOUND: "Your account wasn't found in NetBird, so your access can't be checked.",
-    USER_BLOCKED: 'Your NetBird account is blocked.',
-    UNKNOWN_ADDRESS: "This address isn't a NetBird resource. Check the address, or use Troubleshoot to see what covers it.",
-    NETWORK_NOT_ENABLED: "This address is in a network that isn't open to browser access. Ask an administrator to enable it.",
-    RESOURCE_DISABLED: 'This resource is disabled in NetBird.',
-    AMBIGUOUS_ROUTE: 'More than one NetBird route leads to this address, so the connection could reach the wrong server. An administrator needs to remove the overlap.',
-    GATEWAY_NOT_ENROLLED: "The Browser Gateway isn't set up yet. Ask an administrator to enroll it.",
-    GATEWAY_DOMAIN_ROUTES: 'The Browser Gateway receives domain-based routes, so browser access is blocked for everyone until an administrator fixes it.',
-    GATEWAY_NOT_SYNCED: "The route to this server isn't on the Browser Gateway yet. Try again in a minute.",
-    GATEWAY_POLICY_MISSING: "The Browser Gateway's NetBird policy is missing or turned off, so the gateway can't reach this server. Ask an administrator to save Settings > Remote Access again.",
-    GATEWAY_POLICY_PORT: "The Browser Gateway's NetBird policy doesn't open this port, so the gateway can't reach it. Ask an administrator to save Settings > Remote Access again.",
-    TARGET_NOT_OPEN_READONLY: "This server isn't open to the Browser Gateway right now, and this instance is read-only, so it can't open it. Connect through an instance that isn't read-only.",
-    TARGET_OPEN_FAILED: "The route to this server couldn't be opened in NetBird. Try again in a minute.",
-    TARGET_CHANGED: 'This server changed in NetBird while the session was opening. Connect again.',
-    BLOCKED_BY_POLICY: 'A NetBird policy blocks this connection.',
-    POSTURE_REQUIRED: 'Your access to this resource requires a managed device. Connect with the NetBird client instead.',
-    PORT_NOT_ALLOWED: "You have access to this resource, but not on this port. Request access if you need it.",
+    INVALID_ADDRESS: "This address isn't valid. Enter an IPv4 address, such as 10.0.0.5, or a host name, such as server.example.com.",
+    NAME_NOT_FOUND: "This host name wasn't found. Check the spelling, or enter the server's IP address.",
+    NO_IPV4_ADDRESS: "No IPv4 address was found for this host name. Enter the server's IPv4 address, or ask an administrator for it.",
+    NAME_LOOKUP_FAILED: "This host name couldn't be looked up right now. Try again in a moment, or enter the server's IP address.",
+    NAMES_GATEWAY_NOT_ENROLLED: "This host name can't be reached because the Browser Gateway for host names isn't set up. Enter the server's IP address, or ask an administrator to set up that gateway.",
+    NAMES_GATEWAY_EXTRA_REACH: "This host name can't be reached because the Browser Gateway for host names receives IP routes. Enter the server's IP address, or ask an administrator to remove those routes.",
+    INVALID_PORT: 'Enter a port from 1 to 65535.',
+    USER_NOT_FOUND: "Your account wasn't found in NetBird, so your access can't be checked. Ask an administrator to check your NetBird account.",
+    USER_BLOCKED: 'Your NetBird account is blocked. Ask an administrator to unblock it.',
+    UNKNOWN_ADDRESS: "NetBird has no resource for this address. Check the address, or ask an administrator to add it as a resource.",
+    NO_DOMAIN_MATCH: "NetBird has no resource for this host name. Check the name, or ask an administrator to add it as a resource.",
+    NETWORK_NOT_ENABLED: "This resource is in a NetBird network that Remote Access doesn't use. Ask an administrator to add the network in Settings > Remote Access.",
+    RESOURCE_DISABLED: "This resource is turned off in NetBird. Ask an administrator to turn it on.",
+    AMBIGUOUS_ROUTE: "More than one NetBird route leads to this address, so Remote Access can't tell which resource you mean. Ask an administrator to remove the overlap.",
+    GATEWAY_NOT_ENROLLED: "The Browser Gateway isn't set up in NetBird yet, so Remote Access can't connect. Ask an administrator to set it up.",
+    GATEWAY_DOMAIN_ROUTES: 'Connecting by IP address is blocked because the Browser Gateway receives domain routes. Ask an administrator to remove those routes from the gateway.',
+    GATEWAY_NOT_SYNCED: "The Browser Gateway has no route to this resource yet. Try again in a minute. If it keeps happening, tell an administrator.",
+    GATEWAY_POLICY_MISSING: "The Browser Gateway's NetBird policy is missing or isn't set up correctly, so it can't reach this resource. Ask an administrator to repair it.",
+    GATEWAY_POLICY_PORT: "The Browser Gateway's NetBird policy doesn't allow this port. Ask an administrator to allow the port in that policy.",
+    TARGET_NOT_OPEN_READONLY: "This NetBird Control is read-only, so it can't open this resource to Remote Access. Ask an administrator where to connect instead.",
+    TARGET_OPEN_FAILED: "Remote Access couldn't prepare the connection to this resource. Try again in a minute.",
+    TARGET_CHANGED: "This resource changed in NetBird while the session was opening. Connect again.",
+    BLOCKED_BY_POLICY: 'A NetBird policy blocks your access to this resource. Ask an administrator if you need access.',
+    POSTURE_REQUIRED: "Your access to this resource requires a device check that a browser can't pass. Connect with the NetBird app instead.",
+    PORT_NOT_ALLOWED: "Your access doesn't include this port. Request access if you need it.",
     NO_ACCESS: "You don't have access to this resource. Request access if you need it.",
-    GATEWAY_OFFLINE: 'The Browser Gateway is offline. Try again later, or tell an administrator.',
-    NO_ROUTER_ONLINE: 'No routing peer is online for this network, so the server cannot be reached right now.',
-    SNAPSHOT_FAILED: "NetBird couldn't be reached to check your access. Try again in a moment.",
-    ADDRESS_NOT_ALLOWED: "Browser access can't connect to this address. Loopback, link-local, multicast, NetBird peer (100.64.0.0/10) and the Browser Gateway's own addresses are never targets.",
-    WILDCARD_DOMAIN_NOT_ALLOWED: "Browser access doesn't connect through wildcard domain resources. Ask an administrator to add this exact host name as a domain resource, or enter the server's IP address.",
-    GATEWAY_REACH_UNKNOWN: "A NetBird policy gives the Browser Gateway access that NetBird Control can't read, so browser access is blocked for everyone until an administrator changes that policy.",
-    TARGETS_SETTLING: 'Remote access is still applying a recent change. This usually takes about a minute.',
-    SERVER_RESTARTING: 'The server is restarting. Try again in a moment.',
+    GATEWAY_OFFLINE: "The Browser Gateway is offline, so this resource can't be reached right now. Try again later, or tell an administrator.",
+    NO_ROUTER_ONLINE: "No routing peer for this resource's network is online in NetBird, so the resource can't be reached right now. Try again later, or tell an administrator.",
+    SNAPSHOT_FAILED: "Remote Access couldn't read NetBird to check your access. Try again in a minute.",
+    ADDRESS_NOT_ALLOWED: "Remote Access can't connect to this kind of address, such as a loopback, multicast or NetBird peer address. Ask an administrator which address to use for this resource.",
+    WILDCARD_DOMAIN_NOT_ALLOWED: "This host name is covered only by a wildcard resource (such as *.example.com), and Remote Access doesn't connect through those. Enter the server's IP address, or ask an administrator to add this exact name as a resource.",
+    GATEWAY_REACH_UNKNOWN: "Remote Access is blocked because a NetBird policy has a source NetBird Control can't read, so the Browser Gateway's access can't be checked. Ask an administrator to check that policy.",
+    TARGETS_SETTLING: 'Remote Access is getting ready after a change. Try again in a minute.',
+    TOO_MANY: "You've reached your session limit. Close a session, or wait a moment and try again.",
+    TOO_MANY_TOTAL: "Remote Access has reached its limit of open sessions. Try again later.",
+    SERVER_RESTARTING: 'NetBird Control is restarting or shutting down. Try again in a minute.',
 };
 const REQUESTABLE = new Set(['NO_ACCESS', 'PORT_NOT_ALLOWED']);
 
@@ -992,6 +995,7 @@ async function resolveTarget(snap, userId, address, port, opts = {}) {
     return first;
 }
 
+const SESSION_TARGET_CHANGED = "Your session ended because this resource changed in NetBird. Connect again.";
 const notReady = (code) => ({ key: 'ready', status: 'fail', code, message: MESSAGES[code], retry: code === 'TARGETS_SETTLING' });
 
 async function checkAccess(viewer, body) {
@@ -1062,8 +1066,8 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
     if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
     const { protocol, address, port } = parseTarget(body);
-    if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser) throw httpError(429, 'TOO_MANY', `You already have ${_cfg.maxSessionsPerUser} open sessions. Close one first.`);
-    if (_sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY_TOTAL', 'The Browser Gateway is at its session limit. Try again later.');
+    if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser) throw httpError(429, 'TOO_MANY', `You can have at most ${_cfg.maxSessionsPerUser} sessions at a time. Close a session, or wait a moment and try again.`);
+    if (_sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY_TOTAL');
     if (targetsSettling()) throw httpError(503, 'TARGETS_SETTLING');
 
     let snap;
@@ -1096,7 +1100,8 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     if (protocol === 'ssh' && !creds.username) throw httpError(400, 'USERNAME_REQUIRED', 'Enter the user name for the SSH server.');
 
     // Check the quota again: the snapshot read above may have let another request in.
-    if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser || _sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY');
+    if (countFor(viewer.user_id) >= _cfg.maxSessionsPerUser) throw httpError(429, 'TOO_MANY', `You can have at most ${_cfg.maxSessionsPerUser} sessions at a time. Close a session, or wait a moment and try again.`);
+    if (_sessions.size >= _cfg.maxSessionsTotal) throw httpError(429, 'TOO_MANY_TOTAL');
     // And the settling state: an unanswered write may have started it during the reads above, or
     // the targets changed after the snapshot was read.
     if (targetsSettling() || !snapshotCurrent(snap)) throw httpError(503, 'TARGETS_SETTLING');
@@ -1128,13 +1133,13 @@ async function createSession(viewer, body, clientIp, opts = {}) {
         // Whatever closes the session while its start is being recorded (a shutdown, a re-check),
         // closeSession writes the end record only after this start record, and none if it failed.
         s.started = recordStart(s);
-        if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', "The session couldn't be recorded, so it was not opened. Try again.");
+        if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', "Remote Access couldn't record the session, so it wasn't opened. Try again.");
         if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
         // An unanswered write may have started settling while the start was being recorded, or the
         // targets changed after the last evaluation.
         if (targetsSettling() || _targetsGen !== s.targetsGen) throw httpError(503, 'TARGETS_SETTLING');
         // Closed while its start was being written (a re-check, the feature turned off): no token for it.
-        if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
+        if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it finished opening. Connect again.');
 
         const token = crypto.randomBytes(32).toString('base64url');
         _tokens.set(token, { sessionId: s.id, expiresAt: Date.now() + TOKEN_TTL_MS });
@@ -1154,7 +1159,7 @@ async function createSession(viewer, body, clientIp, opts = {}) {
 }
 
 function closedError() {
-    return _shuttingDown ? httpError(503, 'SERVER_RESTARTING') : httpError(409, 'SESSION_CLOSED', 'The session was closed before it opened. Try again.');
+    return _shuttingDown ? httpError(503, 'SERVER_RESTARTING') : httpError(409, 'SESSION_CLOSED', 'The session was closed before it finished opening. Connect again.');
 }
 
 // Open the session's server to its gateway, then approve it again from NetBird as it is now:
@@ -1758,11 +1763,11 @@ async function recheckSessions() {
         const v = s.gateway === 'names'
             ? evaluateNameAccess(snap, cfg, { userId: s.userId, name: s.address, port: s.port })
             : evaluateUserAccess(snap, cfg, { userId: s.userId, address: s.address, port: s.port });
-        if (!v.ok || v.resource.id !== s.resourceId) { failSession(s, `Your access to this server ended: ${MESSAGES[v.code] || v.code || 'the route changed.'}`, 0x0303); return; }
+        if (!v.ok || v.resource.id !== s.resourceId) { failSession(s, v.ok ? SESSION_TARGET_CHANGED : `Your session ended. ${MESSAGES[v.code] || 'Connect again. If it keeps happening, tell an administrator.'}`, 0x0303); return; }
         // The approved resource itself changed (another network, another address): not the server
         // this session was approved and opened for.
-        if (v.network.id !== s.networkId || addressKey(v.resource.address) !== addressKey(s.resourceAddress)) { failSession(s, `Your access to this server ended: ${MESSAGES.TARGET_CHANGED}`, 0x0303); return; }
-        if (!(await permitted(s)) && !s.closed) { failSession(s, 'You no longer have permission to use browser remote access.', 0x0303); return; }
+        if (v.network.id !== s.networkId || addressKey(v.resource.address) !== addressKey(s.resourceAddress)) { failSession(s, SESSION_TARGET_CHANGED, 0x0303); return; }
+        if (!(await permitted(s)) && !s.closed) { failSession(s, "Your session ended because your Remote Access permission was removed or couldn't be confirmed. Ask an administrator if you need it.", 0x0303); return; }
         if (!s.closed) kept.push(s);
     }));
     await extendHolds(kept);
@@ -2102,12 +2107,12 @@ async function redeemLaunch(viewer, body, clientIp) {
     const actor = { actorId: viewer.user_id || viewer.oid || '', actorEmail: viewer.email || '', actorName: viewer.name || '' };
     const target = `${entry.protocol}://${entry.address}:${entry.port}`;
     let valid;
-    try { valid = await apiKeys.keyStillValid(entry.keyId, LAUNCH_SCOPE); } catch { throw httpError(503, 'UNAVAILABLE', "The link couldn't be checked. Open the connection again."); }
-    if (!valid) throw httpError(410, 'KEY_REVOKED', 'The API key that made this link was revoked or expired. Open the connection again from the system that sent you here.');
+    try { valid = await apiKeys.keyStillValid(entry.keyId, LAUNCH_SCOPE); } catch { throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't check this link. Wait a moment, then start the connection again from the system that sent you here."); }
+    if (!valid) throw httpError(410, 'KEY_REVOKED', 'The system that sent you here no longer has a valid key for Remote Access. Ask an administrator to update the key, then start the connection again from that system.');
     if (entry.userId && entry.userId !== viewer.user_id) {
         await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_wrong_user', target, meta: { ticketRef: ref, keyId: entry.keyId, intendedUser: entry.email }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS })
             .catch((e) => console.error('[remote-access] launch audit failed:', e.message));
-        throw httpError(403, 'WRONG_USER', 'This link was made for another user. Sign in as that user, or open the connection again from the system that sent you here.');
+        throw httpError(403, 'WRONG_USER', 'This link was made for another user. Sign in to NetBird Control with the right account, then start the connection again from the system that sent you here.');
     }
     try {
         await apiKeys.writeAuditStrict(pool, { ...actor, action: 'remote_access.launch_open', target, meta: { ticketRef: ref, keyId: entry.keyId, keyName: entry.keyName }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS });

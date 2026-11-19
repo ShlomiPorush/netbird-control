@@ -109,8 +109,8 @@ fragile. So a server joins its gateway's target group only when it is needed:
    (on a real account it arrived 0.5 to 1.1 seconds after the write). The session waits until
    2 seconds after the resource was added. When the resource was already in its group but its add
    was recorded less than 30 seconds earlier (that write may still have been on its way), the
-   session waits 2 seconds from when it saw the membership. The user sees this as **Opening The
-   Route To The Server**, for RDP and SSH alike.
+   session waits 2 seconds from when it saw the membership. The user sees this as **Opening
+   Route To Server**, for RDP and SSH alike.
 4. **The session is approved again** from a fresh read of NetBird: the same resource, network and
    address; the gateway has a real route to that resource, and no other route as specific or more;
    and the gateway's standing policy exists, is enabled, and has an enabled accept rule from the

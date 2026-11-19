@@ -1,7 +1,7 @@
 // Browser remote access (RDP / SSH through the Browser Gateway): API shapes, calls, and the
 // loaders for the official Apache Guacamole client library (served unmodified from
 // /vendor/guacamole-common-js-1.6.0/, matched to the guacd 1.6.0 image) and its on-screen keyboard.
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 
 export type RemoteProtocol = 'rdp' | 'ssh';
 
@@ -145,6 +145,11 @@ export function cleanAddressInput(raw: string): { address: string; port?: string
   if (m) return { address: m[1], port: String(Number(m[2])) };
   return { address: s.replace(/:$/, '') };
 }
+
+// The server's own text for a failed request, or the fallback when it sent none that fits: an
+// answer without a message (a proxy's 502 reads only "HTTP 502") or a generic server error.
+export const apiText = (err: unknown, fallback: string) =>
+  (err instanceof ApiError && (err.code || err.status < 500) && !/^HTTP \d+$/.test(err.message) ? err.message : fallback);
 
 export const remoteApi = {
   info: (signal?: AbortSignal) => api.get<RemoteInfo>('/api/remote-access/info', undefined, signal),

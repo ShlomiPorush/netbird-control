@@ -10,6 +10,21 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**
+  and **Connecting To Server**.
+- **Clearer error messages when a connection fails.** Remote Access says in plain words what went
+  wrong and what to do next, for example "NetBird has no resource for this address. Check the
+  address, or ask an administrator to add it as a resource." A launch link that failed now says to
+  start the connection again from the system that sent you, since the link is used up.
+
+### Fixed
+- **A session limit reached at the last moment now shows a sentence, not a code.** The page showed
+  `TOO_MANY`, and also used it when the limit for all users was full. It now says which limit was
+  reached. A host name whose resource was removed while a session opened showed
+  `NO_DOMAIN_MATCH`; it now says that NetBird has no resource for the name. An answer without a
+  message (such as a proxy's 502) no longer shows as `HTTP 502`.
+
 ---
 
 ## [1.6.0] - 2026-11-19

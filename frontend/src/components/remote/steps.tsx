@@ -20,10 +20,10 @@ export interface Failure { message: string; requestLink?: string; troubleshoot?:
 export const STEP_LABELS: Record<StepKey, string> = {
   ready: 'Checking Environment',
   access: 'Checking Permissions',
-  path: 'Checking The Path',
-  route: 'Opening The Route To The Server',
+  path: 'Checking Path',
+  route: 'Opening Route To Server',
   channel: 'Opening A Secure Channel',
-  server: 'Connecting To The Server',
+  server: 'Connecting To Server',
   signin: 'Signing In',
 };
 export const ARG_LABELS: Record<string, string> = { username: 'User Name', password: 'Password', domain: 'Domain' };
@@ -164,21 +164,27 @@ export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave
   );
 }
 
+const GUACD_ABORTED = 'Aborted. See logs.';
+const CONNECTION_FAILED = 'The connection failed. Try connecting again. If it keeps happening, tell an administrator.';
+
 // Translate a Guacamole status into the step it belongs to and a human sentence.
 export function explain(status: GuacStatus, stage: 'server' | 'signin'): { step: StepKey; message: string } {
-  if (PORTAL_MESSAGE_CODES.has(status.code) && status.message) return { step: stage, message: status.message };
+  // guacd's own catch-all text ("Aborted. See logs.") says nothing to the user, whatever its code.
+  if (PORTAL_MESSAGE_CODES.has(status.code) && status.message && status.message !== GUACD_ABORTED) return { step: stage, message: status.message };
   switch (status.code) {
     case GUAC.CLIENT_UNAUTHORIZED:
+      return { step: 'signin', message: 'Sign-in failed. Check the user name and password, then try again.' };
     case GUAC.CLIENT_FORBIDDEN:
-      return { step: 'signin', message: 'Sign-in failed. Check the user name and password, then connect again.' };
+      return { step: 'signin', message: 'The server refused the sign-in. Ask an administrator to check your account on that server.' };
     case GUAC.UPSTREAM_NOT_FOUND:
+      return { step: 'server', message: "Remote Access couldn't connect to the server. Check the address and port, and that the server accepts remote connections." };
     case GUAC.UPSTREAM_TIMEOUT:
-      return { step: 'server', message: "The server didn't answer. Check that it is running and accepts remote connections on this port." };
+      return { step: 'server', message: "The server didn't answer. Check the address and port, and that the server is on and accepts remote connections." };
     case GUAC.UPSTREAM_ERROR:
-      return { step: stage, message: 'The server ended the connection. It may not accept this kind of connection, or it refused the sign-in.' };
+      return { step: stage, message: CONNECTION_FAILED };
     case -1:
-      return { step: 'channel', message: status.message || 'The session could not start.' };
+      return { step: 'channel', message: "The browser couldn't start the session. Reload the page and try again." };
     default:
-      return { step: stage, message: status.message ? `The session ended: ${status.message}` : 'The session ended unexpectedly.' };
+      return { step: stage, message: 'The session ended unexpectedly. Try connecting again. If it keeps happening, tell an administrator.' };
   }
 }
