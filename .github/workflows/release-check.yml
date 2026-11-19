@@ -27,15 +27,32 @@ jobs:
       - name: Test the changelog helper
         run: node --test .github/scripts/changelog.test.js
 
+      # The checkout is GitHub's test merge commit (base + this pull request), so NEW is the
+      # VERSION main will have after the merge, and the merge commit's first parent is the base it
+      # was built on. OLD is read from that parent, not from pull_request.base.sha: base.sha can
+      # stay at the base the pull request started from, so a pull request that is behind main
+      # across a release would compare main's new VERSION with an old one and look like a release.
+      # The guards fail the step instead of guessing when the checkout is not that merge commit,
+      # or when it was built on a base that is not part of the current base branch.
       - name: Check the release version
+        shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           CL=.github/scripts/changelog.js
+          if [ "$(git rev-parse -q --verify 'HEAD^2' || true)" != "$HEAD_SHA" ]; then
+            echo "::error::The checkout is not the test merge commit of $HEAD_SHA - cannot tell which VERSION the base has"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD^1 "origin/$BASE_REF"; then
+            echo "::error::The test merge commit was built on $(git rev-parse HEAD^1), which is not in $BASE_REF - push to the branch or close and reopen the pull request for a fresh merge commit"
+            exit 1
+          fi
           NEW=$(tr -d '[:space:]' < VERSION)
-          OLD=$(git show "$BASE_SHA:VERSION" | tr -d '[:space:]')
+          OLD=$(git show HEAD^1:VERSION | tr -d '[:space:]')
           if [ "$NEW" = "$OLD" ]; then
             echo "VERSION is unchanged ($NEW): not a release pull request."
             exit 0
