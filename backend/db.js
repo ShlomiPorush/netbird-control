@@ -1,5 +1,4 @@
 const https = require('https');
-const http = require('http');
 // Core infrastructure (the pg connection pool + the app_settings accessors) lives in lib/core.js
 // (one-way dependency: db.js -> lib/core.js). db.js imports the pool and re-exports
 // getSetting/setSetting under their original names so every existing call site and every name
@@ -5736,32 +5735,11 @@ async function resetUserMfa(id) {
 
 // NetBird Networks (GET /api/networks) - fetched on demand for the Networks page.
 function fetchNetworksFromApi() {
-    if (!netbirdApiConfigured()) return Promise.resolve(null);
-    // Tenant context: go through the ALS-aware client (tenant token / ?account=) - this raw
-    // fetcher reads _nbApi directly and would silently return the MAIN account's networks.
+    // The shared client handles the tenant context (tenant token / ?account=) and NetBird's rate limit.
+    // A tenant gets NetBird's answer as is, so an error answer still fails the request there instead
+    // of showing an empty list (the behavior before this went through the shared client).
     if (currentTenantAccount()) return netbirdGet('/api/networks');
-    const url = new URL('/api/networks', _nbApi.url);
-    const transport = url.protocol === 'https:' ? https : http;
-    return new Promise((resolve) => {
-        const req = transport.get(url.toString(), {
-            headers: { 'Authorization': `Token ${_nbApi.token}`, 'Accept': 'application/json' },
-            timeout: 10000,
-        }, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    resolve(Array.isArray(json) ? json : null);
-                } catch (e) {
-                    console.error('[Networks] Parse error:', e.message);
-                    resolve(null);
-                }
-            });
-        });
-        req.on('error', (err) => { console.error('[Networks] Request error:', err.message); resolve(null); });
-        req.on('timeout', () => { console.error('[Networks] Request timeout'); req.destroy(); resolve(null); });
-    });
+    return netbirdGet('/api/networks').then((json) => (Array.isArray(json) ? json : null));
 }
 
 // Create a new (empty) network in NetBird.

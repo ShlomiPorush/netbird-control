@@ -51,6 +51,17 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   link that gave up waiting stays in the address, and reloading the page tries it again. An
   access refusal is never reported from data that changed during the check.
 
+### Fixed
+- **A NetBird rate limit no longer fails a bulk change at the first refusal.** When NetBird answers
+  "too many requests" (HTTP 429), the app pauses all its NetBird calls and sends the call again, up
+  to 5 attempts. The pause follows NetBird's `Retry-After` when present (at most 10 minutes),
+  otherwise it backs off exponentially with jitter. A change waits at most 30 seconds and a page
+  read at most 5 seconds; a call that cannot wait out the pause is not sent and fails at once. If
+  NetBird still refuses, the action fails the same way it did before, and a background job
+  continues on its next run. Timeouts, network errors and server errors are not retried.
+- **A NetBird answer cut off in the middle no longer leaves the action waiting forever.** When the
+  connection closes while NetBird sends its answer, the call ends as a network error.
+
 ---
 
 ## [1.5.0] - 2026-11-18

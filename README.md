@@ -125,6 +125,12 @@ Safari 16.4 or Firefox 128 or later.
    plan; without it, turn on **Traffic Events API Pull** and **Audit Events API Pull** on the same
    page. The manual setup is in [docs/features.md](docs/features.md#connecting-netbird-events).
 
+When NetBird answers a call with "too many requests" (HTTP 429), for example during a bulk change to
+hundreds of resources, the app pauses its NetBird calls and sends the call again. For the rate limit,
+a save waits at most 30 seconds and a page read at most 5 seconds, so the limit never holds a page for
+long. Details are in
+[docs/features.md](docs/features.md#network-management-delegated-via-the-netbird-api).
+
 ## Configuration
 
 Most settings are stored in the database and edited in the app (**Settings**). The environment
