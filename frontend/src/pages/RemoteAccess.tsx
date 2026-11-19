@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Loader2, Lock, MonitorPlay, Terminal, X as XIcon, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
-import { remoteApi, cleanAddressInput, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
+import { apiText, remoteApi, cleanAddressInput, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
 import { cn } from '@/lib/cn';
 import { Button, Field, Input, LoadingState, PasswordInput, Textarea } from '@/components/ui';
 import { sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
@@ -18,7 +18,12 @@ const DEFAULT_PORT: Record<RemoteProtocol, number> = { rdp: 3389, ssh: 22 };
 // While remote access is getting ready, ask again this often, for at most this long.
 const READY_RETRY_MS = 5000;
 const READY_WAIT_MS = 150_000;
-const NOT_READY = 'Remote access is still not ready. Try again in a few minutes, or tell an administrator.';
+const NOT_READY = "Remote Access still isn't ready. Try again in a few minutes, or tell an administrator.";
+// Launch link refusals whose text already says what to do (the link is used up): the ones that
+// say how to start again, and the ones where an administrator must act first.
+const LINK_SAYS_AGAIN = new Set(['EXPIRED', 'KEY_REVOKED', 'WRONG_USER', 'AUDIT_FAILED', 'UNAVAILABLE', 'NO_SSO', 'DISABLED', 'FORBIDDEN']);
+const sentence = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`);
+const START_AGAIN = 'Start the connection again from the system that sent you here.';
 const validPort = (p: number) => Number.isInteger(p) && p >= 1 && p <= 65535;
 // A request still unanswered this long after the deadline ends the wait (its answer is ignored).
 const REQUEST_GRACE_MS = 10_000;
@@ -157,8 +162,9 @@ export default function RemoteAccess() {
         const settling = err instanceof ApiError && err.code === 'TARGETS_SETTLING';
         setLaunch({
           state: 'failed', ticket: me.ticket, keep: true,
-          message: settling ? 'Remote access started a change as it opened. Open the link again in a minute.'
-            : err instanceof ApiError ? err.message : "The connection couldn't be opened. Open the link again.",
+          message: settling ? `Remote Access was getting ready, so the link couldn't be used. ${START_AGAIN}`
+            : err instanceof ApiError && err.code && LINK_SAYS_AGAIN.has(err.code) ? err.message
+              : `${sentence(apiText(err, "The connection couldn't be opened."))} ${START_AGAIN}`,
         });
       }
     })();
@@ -229,7 +235,7 @@ export default function RemoteAccess() {
       // check is asked again every few seconds instead of failing.
       const first = await bounded(remoteApi.check({ protocol, address: target, port: targetPort }), Date.now() + 20_000);
       if (attempt.current !== mine) return;
-      if (first === TIMED_OUT) { fail('ready', { message: "Remote access didn't answer. Try again in a moment." }); return; }
+      if (first === TIMED_OUT) { fail('ready', { message: 'The connection check took too long. Try again.' }); return; }
       let r = first;
       let announced = false;
       for (;;) {
@@ -239,7 +245,7 @@ export default function RemoteAccess() {
         // The next check only if it still starts before the deadline.
         if (!env.retry || Date.now() + READY_RETRY_MS >= deadline) {
           setWaiting(false);
-          fail('ready', { message: env.retry ? NOT_READY : env.message || 'Remote access is not ready. Try again in a moment.' });
+          fail('ready', { message: env.retry ? NOT_READY : env.message || "Remote Access isn't ready. Try again in a moment." });
           return;
         }
         if (!announced) {
@@ -271,12 +277,12 @@ export default function RemoteAccess() {
             networkId: t.network?.id, resourceType: t.resource.type || undefined,
           } : null)
           : undefined;
-        fail('access', { message: access?.message || 'Access was denied.', requestLink });
+        fail('access', { message: access?.message || "Your access couldn't be checked. Try again.", requestLink });
         return;
       }
       setStep('access', 'pass', access.detail);
       checked.current.access = access.detail;
-      if (!path || path.status === 'fail') { fail('path', { message: path?.message || 'The path could not be checked.', troubleshoot: path?.troubleshoot }); return; }
+      if (!path || path.status === 'fail') { fail('path', { message: path?.message || "Remote Access couldn't check the way to this server. Try again.", troubleshoot: path?.troubleshoot }); return; }
       setStep('path', 'pass', path.detail);
       checked.current.path = path.detail;
       if (protocol === 'ssh') { setPhase('ssh-creds'); return; }
@@ -284,7 +290,7 @@ export default function RemoteAccess() {
     } catch (err) {
       if (attempt.current !== mine) return;
       setWaiting(false);
-      fail('ready', { message: err instanceof ApiError ? err.message : 'Your access could not be checked. Try again.' });
+      fail('ready', { message: apiText(err, "Your access couldn't be checked. Try again.") });
     }
   };
 
@@ -314,9 +320,9 @@ export default function RemoteAccess() {
       // Again checks everything again and waits for it.
       if (err instanceof ApiError && (err.code === 'TARGETS_SETTLING' || err.code === 'SNAPSHOT_FAILED')) {
         setStep('route', 'pending');
-        fail('ready', { message: err.code === 'TARGETS_SETTLING' ? 'Remote access started applying a change. Try again: it waits until it is ready.' : err.message });
+        fail('ready', { message: apiText(err, "Remote Access isn't ready. Try again in a minute.") });
       } else {
-        fail('route', { message: err instanceof ApiError ? err.message : 'The session could not be opened. Try again.' });
+        fail('route', { message: apiText(err, "The session couldn't be opened. Try again.") });
       }
       setPhase('checking');
     }

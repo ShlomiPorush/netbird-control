@@ -4,8 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Keyboard, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, Pin, PinOff, Plus, Power, Smartphone, Terminal, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useScrollLock } from '@/lib/useScrollLock';
-import { ApiError } from '@/lib/api';
-import { remoteApi, GUAC, PORTAL_MESSAGE_CODES, type RemoteProtocol } from '@/lib/remoteAccess';
+import { apiText, remoteApi, GUAC, type RemoteProtocol } from '@/lib/remoteAccess';
 import { Button, Field, Input, PasswordInput, Textarea } from '@/components/ui';
 import { GuacScreen, deviceSize, type ScreenApi, type ViewerEvent } from './GuacScreen';
 import { ARG_LABELS, FailureBox, StepList, StepSummary, explain, usePacedSteps, withStep, type Failure, type Step } from './steps';
@@ -558,7 +557,7 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
         const x = explain(ev.status, stageRef.current);
         setRequired(null);
         if (phaseRef.current === 'live') {
-          setEnded(PORTAL_MESSAGE_CODES.has(ev.status.code) && ev.status.message ? ev.status.message : x.message);
+          setEnded(x.message);
         } else {
           setStep(x.step, 'fail', x.message);
           setFailure({ message: x.message, troubleshoot: x.step === 'server' });
@@ -620,7 +619,7 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
       // No session was opened (network, limit, access): the form stays, with the reason, so the
       // user can try again or cancel. The password is typed again.
       if (!mounted.current) return;
-      setRetryError(err instanceof ApiError ? err.message : 'The session could not be opened. Try again.');
+      setRetryError(apiText(err, "The session couldn't be opened. Try again."));
       setArgValues((v) => ({ ...v, password: '' }));
     } finally {
       if (mounted.current) setBusy(false);
