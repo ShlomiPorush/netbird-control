@@ -574,6 +574,10 @@ that the real end time is unknown.
 | guacd Address / Port | `remote-gateway` / 4822 | The IP gateway's guacd as the app reaches it. |
 | Names guacd Address / Port | `remote-names-gateway` / 4822 | The names gateway's guacd as the app reaches it. |
 | SSH Host Keys | None | Per IPv4 address or host name; enforced when present. |
+| Resources Created By Links: Turn On | Off | Lets launch links add a missing public server (see [Servers added by launch links](#servers-added-by-launch-links)). Turn it on only after every instance runs this version. |
+| Resources Created By Links: Network | None | One of the networks selected above. It holds only the servers that links add, and the app changes it no other way. |
+| Resources Created By Links: Group | None | An existing group, not *All* and not a Browser Gateway group. Your policy to this group decides who reaches the servers. |
+| Maximum Active Created Resources | 50 | 1 to 500. Servers added by links that still exist (or may). |
 
 The gateways' NetBird object ids are account-specific, so they are not part of the settings
 export.
@@ -587,3 +591,80 @@ browser never sees them. The person who opens the link goes through every check 
 for a manual connection. When the request names a user by email, only that user can open the link.
 When it names nobody, the first signed-in user whose access allows the target gets the session.
 See the [public API reference](api.md) and the [integration guide](remote-launch-integration.md).
+
+## Servers added by launch links
+
+A launch request may ask the app to add a server that NetBird has no resource for
+(`"createResource": true`, with the API key scope `remote-access:create-resource`), so the person
+can connect without waiting for an administrator. The [public API reference](api.md#adding-a-missing-server-createresource)
+describes the request and the answers.
+
+**Access stays with NetBird.** The new resources go into one group that you choose in
+**Settings > Remote Access > Resources Created By Links**, in one network that you choose there.
+You make one policy for that group, for example *CRM users -> Linked Servers*, and it decides who
+reaches the servers. The app never creates a policy or grants access. A resource that a request
+added stays when the link is then refused (for example, the user has no access); the answer says so
+with `resourceCreated`.
+
+**Only public IPv4 addresses.** Addresses in IANA special-purpose ranges (RFC 1918, 100.64.0.0/10,
+127.0.0.0/8, 169.254.0.0/16, 0.0.0.0/8, 192.0.0.0/24, the documentation ranges, 198.18.0.0/15,
+multicast, reserved and broadcast) and the Browser Gateways' own addresses are refused. A host name
+is looked up here and used only when every IPv4 answer is public; the resource is a host resource
+for the first answer (`x.x.x.x/32`), never a domain resource, and the session connects to that
+address. The blocklist applies to the address and to the name, with no override. When a resource or
+an enabled legacy route already covers the target, nothing is created.
+
+**Each create is recorded** in the `ra_created_resources` table before NetBird is called, together
+with a `resource.create_intent` audit record, in one transaction under a database lock. Two requests
+can't take the last place below the maximum, or create the same address, at the same time. The key
+is checked again right before the write. The resource's description holds the request's id
+(`Created by a Remote Access link (<id>)`). When NetBird doesn't answer clearly, the row is
+*unconfirmed*: the next sync adopts a resource only when it is in the network, carries that id and
+has exactly the expected name, address, description and group. An administrator's resource at the
+same address is never adopted. With no such resource after 10 minutes, the row is marked failed.
+
+**Created resources are temporary.** The target sync on the leader instance deletes a created
+resource when all of these hold:
+
+- its hold has ended (or it never had one) and no session row uses it;
+- it was created more than **Keep Opened Servers Available For** ago (10 hours by default);
+- a fresh read shows it exactly as it was created (the marker in the description, the name, the
+  address, enabled, and its group; the Browser Gateway target group doesn't count), and no policy
+  names it directly.
+
+Only the resource is deleted (`DELETE /api/networks/{network}/resources/{id}`): its group and the
+policies to the group stay. The audit log records `resource.delete` by *Remote Access*, with the
+reason *created by a launch link, hold ended*. A delete without a clear answer is read again by the
+next sync. A resource that someone changed, that a policy names, or that NetBird refused to delete
+is marked *kept* (recorded once as `resource.kept`) and never deleted by the app: remove it in
+NetBird when it isn't needed. At most 20 resources are deleted per sync. A read-only instance and a
+standby instance never create or delete one.
+
+**The network is managed by the app.** Every other write of the app to that network is refused with
+"This network holds resources created by Remote Access links; it is managed automatically.": adding,
+editing, enabling or disabling, deleting, moving or merging its resources, deleting the network,
+using its resources as a Reverse Proxy target, adding them to temporary grants or access requests,
+and policies whose destination is one of its resources. This includes automations and the blocklist's
+enforcement. Reading stays possible, and the Networks page shows the network
+as **Managed By Remote Access Links**. Choose a network that holds nothing else. The network can't be
+changed while servers added by links still exist in it.
+
+**The gateway check.** The Browser Gateway must never reach the group through a policy of its own:
+then the gateway could reach every server that links added, not only the ones a session opened.
+Saving with **Turn On** is refused when an enabled accept rule whose source carries gateway traffic
+(a group a gateway peer is in, *All*, or a gateway peer itself) has the group as a destination, or
+when such a rule's source can't be read. The sync runs the same check: when it fails, adding servers
+is paused (`CREATE_PAUSED`), and Settings > Remote Access and System Health show why. A later sync
+that passes, or a save that passes, resumes it.
+
+**Turn it on only after every instance runs this version.** An older instance doesn't know the
+network is managed and would let its pages change it.
+
+### Accepted risks
+
+- **Changes made directly in NetBird** in the same seconds as a create or a delete are not detected
+  by that create or delete. The next sync reads the resource again and keeps one that changed.
+- **A delete and a session start on two instances at the same moment.** The session fails and the
+  user connects again.
+- **A gateway added to a policy's source group through the Groups page.** The next sync detects it,
+  pauses adding servers and shows why.

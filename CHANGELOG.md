@@ -11,6 +11,19 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Added
+- **Launch links can add a missing server.** A launch request with `"createResource": true` and the
+  new API key permission **Add Missing Servers** (`remote-access:create-resource`) adds a public
+  server that NetBird has no resource for, as a temporary host resource in the network and group
+  chosen in **Settings > Remote Access > Resources Created By Links**. Your policy to that group
+  decides who reaches it; the app never creates a policy. Only public IPv4 addresses (a host name
+  only when every address it resolves to is public), never one on the blocklist, and at most the
+  configured number at a time (50 by default). The answer says whether the request made the
+  resource (`resource.created`), and a refusal after the resource was made says so
+  (`resourceCreated`). The leader removes such a resource once its hold time has passed and no
+  session uses it, and keeps one that someone changed. The app changes that network no other way,
+  and the Networks page labels it **Managed By Remote Access Links**. Adding pauses, with the reason
+  in Settings and System Health, when the Browser Gateway can reach the group. Off by default: turn
+  it on only after every instance runs this version.
 - **Add a missing server as a resource.** When the Remote Access check finds that nothing in
   NetBird covers the address, and the user may edit a network that Remote Access uses, the page
   offers **Add As Resource** on the failed step. It opens a modal: the network (when there is more
