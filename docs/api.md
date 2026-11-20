@@ -93,7 +93,6 @@ Every error is JSON with a message for people and a stable code for programs:
 | 409 | `CREATE_IN_PROGRESS` | Another request is adding or removing this server right now. Try again in a minute. |
 | 502 | `RESOURCE_CREATE_FAILED` | NetBird refused the new resource (also when it answered "too many requests"; the create is sent once). Nothing was created. |
 | 502, 503 | `CREATE_UNCONFIRMED` | NetBird didn't confirm the new resource (502, with `resourceCreated`), or an earlier request for this server is still unconfirmed (503). Try again in a few minutes. |
-| 503 | `CREATE_PAUSED` | Adding servers is paused because the Browser Gateway can reach their group. An admin sees why in Settings > Remote Access. |
 | 503 | `NAME_LOOKUP_FAILED`, `TARGETS_SETTLING` | The DNS didn't answer, or Remote Access is getting ready after a change. Try again shortly. |
 | 503 | `BUSY`, `SNAPSHOT_FAILED`, `AUDIT_FAILED`, `UNAVAILABLE` | Try again shortly. |
 
@@ -182,8 +181,7 @@ checks, in this order, and stops at the first refusal:
    whether or not the address is public. An integration can send `createResource: true` on every
    launch: private servers that already have a resource keep working. When NetBird or the DNS can't
    be read and adding servers is off, the request also goes on as without `createResource`.
-2. Adding servers is on, not paused, and the instance is not read-only (`CREATE_DISABLED`,
-   `CREATE_PAUSED`). The app reads these settings from the database on every request, so turning
+2. Adding servers is on and the instance is not read-only (`CREATE_DISABLED`). The app reads these settings from the database on every request, so turning
    the feature off stops it on every instance at once.
 3. The target is public. An IPv4 address must not be in the IANA IPv4 Special-Purpose Address
    Registry (every entry), multicast, or be a Browser Gateway's own address (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
@@ -195,8 +193,7 @@ checks, in this order, and stops at the first refusal:
    adding the same address.
 6. Right before the one send (inside the resource writer, after its own checks, its wait for the
    lock and any wait for NetBird's rate limit), the key is checked again (`401 KEY_REVOKED`), and so
-   are the settings (`CREATE_DISABLED` when adding was turned off meanwhile) and the pause
-   (`CREATE_PAUSED`). Then nothing is sent.
+   are the settings (`CREATE_DISABLED` when adding was turned off meanwhile). Then nothing is sent.
 
 Addresses that are never a Remote Access target (loopback, NetBird peers, multicast, reserved) go
 on as without `createResource`, and the usual checks refuse them. A host name with such an answer
