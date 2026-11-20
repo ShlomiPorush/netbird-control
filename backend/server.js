@@ -386,9 +386,11 @@ apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLi
         if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
         const out = await remoteAccessLib.issueLaunch(req.apiKey, req.body || {});
         const base = String(process.env.BASE_URL || '').replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`;
-        res.status(201).json({ url: `${base}/remote-access?launch=${out.ticket}`, expiresAt: out.expiresAt });
+        res.status(201).json({ url: `${base}/remote-access?launch=${out.ticket}`, expiresAt: out.expiresAt, ...(out.resource ? { resource: out.resource } : {}) });
     } catch (e) {
-        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        // resourceCreated: the refusal came after a resource was created for the request (true) or
+        // sent without a clear answer ('unknown'); the resource stays.
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code, ...(e.resourceCreated !== undefined ? { resourceCreated: e.resourceCreated } : {}) });
         console.error('[api v1] launch failed:', e.message);
         res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
     }
@@ -1931,7 +1933,11 @@ app.get('/api/system-health', requireAdmin, async (req, res) => {
                 netbird: stats.netbird,
                 telegram: { enabled: !!getTelegramConfig().enabled, hasToken: !!getTelegramConfig().hasToken, queue: getTelegramQueueStats() },
                 smtp: { enabled: !!getSmtpConfig().enabled },
-                remoteAccess: { enabled: !!getRemoteAccessConfig().enabled, activeSessions: getRemoteAccessStatusLite().activeSessions },
+                remoteAccess: {
+                    enabled: !!getRemoteAccessConfig().enabled, activeSessions: getRemoteAccessStatusLite().activeSessions,
+                    // Why adding servers from launch links is paused ('' when it isn't).
+                    createPaused: ((await remoteAccessLib.getCreatePause().catch(() => null)) || {}).reason || '',
+                },
             },
             db: stats.db,
             activeGrants: stats.activeGrants,
@@ -3532,21 +3538,24 @@ app.get('/api/remote-access/config', requireAdmin, (req, res) => {
 app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     const before = getRemoteAccessConfig();
+    const createMeta = (c) => ({ enabled: c.enabled, networkId: c.networkId, groupId: c.groupId, max: c.max });
     try {
         const out = await setRemoteAccessConfig(req.body || {});
         audit(await getViewer(req), 'settings.remote_access', '', {
             enabled: out.config.enabled, networks: out.config.networks.length, allowAll: out.config.allowAll,
-            wasEnabled: before.enabled, sync: out.sync || undefined,
+            wasEnabled: before.enabled, sync: out.sync || undefined, createResources: createMeta(out.config.createResources),
         });
         res.json(out);
     } catch (e) {
+        // Refused before anything was saved (the settings for servers added by links): the reason.
+        if (e.notSaved) return res.status(e.status || 400).json({ error: e.message, code: e.code, notSaved: true });
         // The settings are saved even when NetBird could not be updated; the error says what failed.
         // A change that was saved is audited all the same, with the error.
         const after = getRemoteAccessConfig();
         if (JSON.stringify(after) !== JSON.stringify(before)) {
             audit(await getViewer(req), 'settings.remote_access', '', {
                 enabled: after.enabled, networks: after.networks.length, allowAll: after.allowAll,
-                wasEnabled: before.enabled, netbirdError: String(e.message || e).slice(0, 300),
+                wasEnabled: before.enabled, netbirdError: String(e.message || e).slice(0, 300), createResources: createMeta(after.createResources),
             });
         }
         res.status(502).json({ error: e.message || 'Could not update NetBird', config: after });
@@ -3556,6 +3565,16 @@ app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     try { res.json(await getRemoteAccessStatus()); }
     catch (e) { sendRemoteError(res, e); }
+});
+// The servers that launch links added (Settings > Remote Access), and why adding is paused, if it is.
+app.get('/api/remote-access/created-resources', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    res.set('Cache-Control', 'no-store');
+    try { res.json(await remoteAccessLib.listCreatedResources()); }
+    catch (e) {
+        console.error('[remote-access] created resources:', e.message);
+        res.status(500).json({ error: "The servers added by links couldn't be listed. Try again." });
+    }
 });
 app.post('/api/remote-access/setup-key', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
@@ -5124,7 +5143,7 @@ async function start() {
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
-            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit,
+            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource,
             isLeader: leaderReady,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).

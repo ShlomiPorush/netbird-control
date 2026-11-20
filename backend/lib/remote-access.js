@@ -30,8 +30,9 @@ const { pool, getSetting, setSetting } = require('./core');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, nbDirectGet, getUsageData, _nbApi } = require('./netbird');
 const { addEvent } = require('./events');
 const apiKeys = require('./api-keys');
-const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem, userSourceGroups } = require('./remote-access-auth');
+const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem, userSourceGroups, ruleSourceIsGateway, ipv4ToInt } = require('./remote-access-auth');
 const { ipUncovered, nameUncovered, nameCovered } = require('./coverage');
+const { addressBlockedForNetwork, getBlocklist } = require('./blocklist');
 
 // The managed NetBird objects of each gateway. In NetBird each is named "<base> (<installation
 // name>)", so installations that share one NetBird account (production and DEV) never collide.
@@ -93,6 +94,10 @@ const DEFAULTS = {
         serverLayout: 'en-us-qwerty',
     },
     ssh: { fontSize: 12, colorScheme: 'gray-black' },
+    // Launch links may add a missing server as a temporary resource (see "Resources created by
+    // launch links"): off by default; the network and the group it goes into; the most such
+    // resources that may exist at once.
+    createResources: { enabled: false, networkId: '', groupId: '', max: 50 },
 };
 
 // What guacd 1.6 accepts (its built-in keymaps and terminal color schemes).
@@ -142,6 +147,20 @@ function normConfig(c) {
         sshHostKeys: keys,
         rdp: normRdp(x.rdp),
         ssh: normSsh(x.ssh),
+        createResources: normCreate(x.createResources),
+    };
+}
+
+function normCreate(v) {
+    const x = v && typeof v === 'object' ? v : {};
+    const d = DEFAULTS.createResources;
+    const networkId = String(x.networkId || '');
+    const groupId = String(x.groupId || '');
+    return {
+        enabled: !!x.enabled,
+        networkId: /^[A-Za-z0-9_-]{1,64}$/.test(networkId) ? networkId : '',
+        groupId: /^[A-Za-z0-9_|:.@-]{1,200}$/.test(groupId) ? groupId : '',
+        max: clampInt(x.max, 1, 500, d.max),
     };
 }
 
@@ -176,7 +195,7 @@ async function loadRemoteAccessConfig({ strict = false } = {}) {
 }
 
 function getRemoteAccessConfig() {
-    return { ..._cfg, networks: [..._cfg.networks], sshHostKeys: { ..._cfg.sshHostKeys }, rdp: { ..._cfg.rdp }, ssh: { ..._cfg.ssh },
+    return { ..._cfg, networks: [..._cfg.networks], sshHostKeys: { ..._cfg.sshHostKeys }, rdp: { ..._cfg.rdp }, ssh: { ..._cfg.ssh }, createResources: { ..._cfg.createResources },
         options: { rdpLayouts: RDP_LAYOUTS, rdpColorDepths: RDP_COLOR_DEPTHS, sshColorSchemes: SSH_COLOR_SCHEMES }, managed: { ..._nb }, lastApply: { ..._lastApply } };
 }
 
@@ -645,10 +664,16 @@ async function applyGatewayObjectsLocked() {
 
 async function setRemoteAccessConfig(input) {
     const next = normConfig({ ..._cfg, ...(input || {}) });
+    // A read-only instance never creates or deletes resources: that part stays as it is.
+    if (NETBIRD_READONLY) next.createResources = { ..._cfg.createResources };
+    // Refused before anything is saved (a 4xx with the reason).
+    else await validateCreateSettings(next);
     const wasEnabled = _cfg.enabled;
     _cfg = next;
     noteTargetsChanged();
     await setSetting('remote_access_config', JSON.stringify(_cfg));
+    // The group passed the gateway check just now: creation is no longer paused.
+    if (_cfg.createResources.enabled) await clearCreatePause().catch(e => console.error('[remote-access] could not clear the create pause:', e.message));
     if (!_cfg.enabled) closeAllSessions('Browser remote access was turned off by an administrator.');
     let sync = null;
     if (_cfg.enabled || wasEnabled || _nb.policyId || _nb.namesPolicyId) sync = await applyGatewayObjects();
@@ -658,10 +683,15 @@ async function setRemoteAccessConfig(input) {
 // Background reconcile (the leader, every 10 minutes): the target groups keep only what the rule
 // allows, and expired holds go. It runs while browser access is off too (the policies stay
 // disabled), so the groups drain; with no managed objects at all there is nothing to do.
+// After it, the resources created by launch links are checked (see maintainCreatedResources).
 async function reconcileRemoteAccess() {
     if (!netbirdApiConfigured() || NETBIRD_READONLY) return;
-    if (!_cfg.enabled && !targetGroupIds().length && !_nb.policyId && !_nb.namesPolicyId) return;
-    await applyGatewayObjects();
+    let failed = null;
+    if (_cfg.enabled || targetGroupIds().length || _nb.policyId || _nb.namesPolicyId) {
+        try { await applyGatewayObjects(); } catch (e) { failed = e; }
+    }
+    await maintainCreatedResources().catch(e => console.error('[remote-access] created resources:', e.message));
+    if (failed) throw failed;
 }
 
 async function createGatewaySetupKey(kind = 'ip') {
@@ -938,6 +968,16 @@ const MESSAGES = {
     TOO_MANY: "You've reached your session limit. Close a session, or wait a moment and try again.",
     TOO_MANY_TOTAL: "Remote Access has reached its limit of open sessions. Try again later.",
     SERVER_RESTARTING: 'NetBird Control is restarting or shutting down. Try again in a minute.',
+    // A launch link that adds a missing server (createResource: true).
+    CREATE_DISABLED: 'Adding missing servers from a link is turned off. Ask an administrator to turn it on in Settings > Remote Access.',
+    CREATE_PAUSED: 'Adding missing servers from a link is paused because the Browser Gateway can reach the group for these servers. Ask an administrator to check Settings > Remote Access.',
+    ADDRESS_NOT_PUBLIC: "Only a public IPv4 address can be added from a link. Ask an administrator to add this server as a resource.",
+    NAME_NOT_PUBLIC: "This host name points to an address that isn't public, so it can't be added from a link. Ask an administrator to add this server as a resource.",
+    ADDRESS_BLOCKED: "This address is on the blocklist, so it can't be added from a link.",
+    CREATE_LIMIT: 'Too many servers added from links are still in place. Try again later, or ask an administrator to raise the limit.',
+    CREATE_UNCONFIRMED: "NetBird didn't confirm that the server was added. Try again in a few minutes.",
+    CREATE_IN_PROGRESS: 'This server is being added or removed right now. Try again in a minute.',
+    RESOURCE_CREATE_FAILED: "NetBird didn't add the server, so no link was made. Try again later.",
 };
 const REQUESTABLE = new Set(['NO_ACCESS', 'PORT_NOT_ALLOWED']);
 
@@ -2186,6 +2226,10 @@ async function issueLaunch(key, body) {
 }
 
 async function issueLaunchChecked(key, body) {
+    // createResource: a strict boolean, and only with its own scope (checked before anything else).
+    const wantCreate = body ? body.createResource : undefined;
+    if (wantCreate !== undefined && typeof wantCreate !== 'boolean') throw httpError(400, 'INVALID_FIELD', '"createResource" must be true or false.');
+    if (wantCreate && !keyHasScope(key, CREATE_SCOPE)) throw httpError(403, 'SCOPE_MISSING', 'This API key has no permission to add servers.');
     if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
     // The port exactly as sent: an integer, or a string of digits ("3389.5" or "3389x" is refused).
     const rawPort = body && body.port;
@@ -2203,44 +2247,70 @@ async function issueLaunchChecked(key, body) {
     if (protocol === 'ssh' && !creds.username) throw httpError(400, 'USERNAME_REQUIRED', 'Send the user name for the SSH server.');
     if (protocol === 'rdp') { delete creds.privateKey; delete creds.passphrase; }
     else delete creds.domain;
+    if (email && !email.includes('@')) throw httpError(400, 'INVALID_USER', '"user" must be an email address.');
 
-    let userId = null;
-    if (email) {
-        if (!email.includes('@')) throw httpError(400, 'INVALID_USER', '"user" must be an email address.');
-        let snap;
-        try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
-        const matches = (snap.users || []).filter(u => u && String(u.email || '').toLowerCase() === email);
-        if (!matches.length) throw httpError(404, 'USER_NOT_FOUND', LAUNCH_MESSAGES.USER_NOT_FOUND);
-        if (matches.length > 1) throw httpError(409, 'USER_AMBIGUOUS', LAUNCH_MESSAGES.USER_AMBIGUOUS);
-        const u = matches[0];
-        if (u.is_blocked || u.status === 'blocked') throw httpError(403, 'USER_BLOCKED', LAUNCH_MESSAGES.USER_BLOCKED);
-        const rt = await resolveTarget(snap, u.id, address, port);
-        if (!rt.verdict.ok) throw httpError(403, rt.verdict.code);
-        userId = u.id;
+    // A missing server is added first (when asked to and allowed); the link then connects to its IP.
+    let connectTo = address;
+    let resource = null;
+    let createdFlag; // set once a create was sent: true (confirmed) or 'unknown'
+    if (wantCreate) {
+        // No server is added for a link that couldn't be made anyway.
+        if (!launchRoom()) throw httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
+        const made = await createForLaunch(key, address, email);
+        connectTo = made.address;
+        resource = made.resource;
+        createdFlag = made.sent;
     }
-
-    if (!launchRoom()) throw httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
-    const ticket = crypto.randomBytes(32).toString('base64url');
-    const hash = ticketHash(ticket);
-    const audit = { ...apiKeys.keyActor(key), target: `${protocol}://${address}:${port}` };
     try {
-        await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_issue', meta: { ticketRef: ticketRef(hash), keyId: key.id, user: email || null }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS });
+        let userId = null;
+        if (email) {
+            let snap;
+            try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+            const u = launchUser(snap, email);
+            const rt = await resolveTarget(snap, u.id, connectTo, port);
+            if (!rt.verdict.ok) throw httpError(403, rt.verdict.code);
+            if (resource && !resource.id && rt.verdict.resource && rt.verdict.resource.id) resource.id = rt.verdict.resource.id;
+            userId = u.id;
+        }
+
+        if (!launchRoom()) throw httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
+        const ticket = crypto.randomBytes(32).toString('base64url');
+        const hash = ticketHash(ticket);
+        const audit = { ...apiKeys.keyActor(key), target: `${protocol}://${address}:${port}` };
+        const meta = { ticketRef: ticketRef(hash), keyId: key.id, user: email || null, ...(connectTo !== address ? { connectTo } : {}), ...(resource ? { resourceCreated: resource.created } : {}) };
+        try {
+            await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_issue', meta, timeoutMs: apiKeys.QUERY_TIMEOUT_MS });
+        } catch (e) {
+            console.error('[remote-access] launch audit failed:', e.message);
+            throw httpError(503, 'AUDIT_FAILED', "The request couldn't be recorded, so no link was made. Try again.");
+        }
+        // Checked again with no await before the insert: other requests may have filled the room
+        // while the audit record was written.
+        if (!launchRoom()) {
+            const recorded = await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_discard', meta: { ticketRef: ticketRef(hash), reason: 'busy' }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS }).then(() => true, () => false);
+            const busy = httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
+            busy.audited = recorded; // the discard record already says why; else the refusal record does
+            throw busy;
+        }
+        const expiresAt = Date.now() + LAUNCH_TTL_MS;
+        _launches.set(hash, { userId, email, protocol, address: connectTo, port, creds, keyId: key.id, keyName: key.name, expiresAt });
+        if (!_launchSweep) { _launchSweep = setInterval(sweepLaunches, 30_000); _launchSweep.unref(); }
+        return { ticket, expiresAt: new Date(expiresAt).toISOString(), ...(resource ? { resource } : {}) };
     } catch (e) {
-        console.error('[remote-access] launch audit failed:', e.message);
-        throw httpError(503, 'AUDIT_FAILED', "The request couldn't be recorded, so no link was made. Try again.");
+        // A refusal after the create was sent says so: the resource stays.
+        if (createdFlag !== undefined && e && e.resourceCreated === undefined) e.resourceCreated = createdFlag;
+        throw e;
     }
-    // Checked again with no await before the insert: other requests may have filled the room
-    // while the audit record was written.
-    if (!launchRoom()) {
-        const recorded = await apiKeys.writeAuditStrict(pool, { ...audit, action: 'remote_access.launch_discard', meta: { ticketRef: ticketRef(hash), reason: 'busy' }, timeoutMs: apiKeys.QUERY_TIMEOUT_MS }).then(() => true, () => false);
-        const busy = httpError(503, 'BUSY', 'Too many connection links are waiting to be opened. Try again in a few minutes.');
-        busy.audited = recorded; // the discard record already says why; else the refusal record does
-        throw busy;
-    }
-    const expiresAt = Date.now() + LAUNCH_TTL_MS;
-    _launches.set(hash, { userId, email, protocol, address, port, creds, keyId: key.id, keyName: key.name, expiresAt });
-    if (!_launchSweep) { _launchSweep = setInterval(sweepLaunches, 30_000); _launchSweep.unref(); }
-    return { ticket, expiresAt: new Date(expiresAt).toISOString() };
+}
+
+// The one NetBird user a launch link is for (by email, any letter case), or a refusal.
+function launchUser(snap, email) {
+    const matches = (snap.users || []).filter(u => u && String(u.email || '').toLowerCase() === email);
+    if (!matches.length) throw httpError(404, 'USER_NOT_FOUND', LAUNCH_MESSAGES.USER_NOT_FOUND);
+    if (matches.length > 1) throw httpError(409, 'USER_AMBIGUOUS', LAUNCH_MESSAGES.USER_AMBIGUOUS);
+    const u = matches[0];
+    if (u.is_blocked || u.status === 'blocked') throw httpError(403, 'USER_BLOCKED', LAUNCH_MESSAGES.USER_BLOCKED);
+    return u;
 }
 
 // Open a launch link: the signed-in viewer gets the session. The ticket is used up on the first
@@ -2277,8 +2347,476 @@ async function redeemLaunch(viewer, body, clientIp) {
     return { ...out, protocol: entry.protocol, port: entry.port, serverCredentials: true };
 }
 
+// ─── Resources created by launch links ───
+// A launch request with createResource: true (and the key scope for it) adds a server that NetBird
+// has no resource for, so the user can connect without an administrator. Only public IPv4
+// addresses: a host name is looked up here and used only when every answer is public, and the
+// resource is a host resource for its first answer (x.x.x.x/32). Access stays NetBird's: the
+// resource goes into one group chosen in Settings, and an administrator's policy to that group
+// decides who reaches it. This code never writes a policy.
+//
+// Each create is a row in `ra_created_resources` (an attempt id, the address, what the resource
+// should look like, and a state), reserved under a transaction-level advisory lock so two requests
+// can never both take the last slot or both create the same address:
+//   creating -> created | failed | unknown   (unknown: sent, without a clear answer)
+//   unknown (or creating left by a crash) -> created | failed   (found by its marker, or not, by the sync)
+//   created -> deleting -> deleted | kept    created -> gone | kept
+// The leader's sync deletes a created resource once its hold has ended and no session uses it,
+// and only while it is exactly as it was created (else it is kept, and only an administrator
+// removes it). Only the resource is deleted: its group and the policies to the group stay.
+// The network chosen for these resources is managed by this code alone: every other write of the
+// app to it is refused (db.js, linkNetworkWriteRefused).
+const CREATE_SCOPE = 'remote-access:create-resource';
+const CREATE_LOCK_KEY = 0x4e425243; // "NBRC"; the other advisory locks of the app use other keys
+const CREATE_ACTIVE = ['creating', 'unknown', 'created', 'deleting'];
+const CREATE_LISTED = [...CREATE_ACTIVE, 'kept'];
+const CREATE_RECOVER_MS = 10 * 60_000;
+const CREATE_DELETE_BATCH = 20;
+const CREATE_PAUSE_KEY = 'remote_access_create_pause';
+const REMOTE_ACCESS_ACTOR = { actorId: '', actorEmail: '', actorName: 'Remote Access' };
+const DELETE_REASON = 'created by a launch link, hold ended';
+// Set while this code itself writes to the managed network (never from a request body).
+const _createCtx = new AsyncLocalStorage();
+
+const keyHasScope = (key, scope) => !!key && Array.isArray(key.scopes) && key.scopes.includes(scope);
+
+// The network that holds the created resources ('' when none is chosen), and whether a write to
+// `networkId` must be refused: every app write there that this code doesn't make itself.
+function linkManagedNetworkId() { return _cfg.createResources.networkId || ''; }
+function linkNetworkWriteRefused(networkId) {
+    const n = linkManagedNetworkId();
+    return !!n && String(networkId || '') === n && !_createCtx.getStore();
+}
+
+// IANA special-purpose IPv4 ranges: never added from a link.
+const NOT_PUBLIC_PREFIXES = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12',
+    '192.0.0.0/24', '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24',
+    '224.0.0.0/4', '240.0.0.0/4', '255.255.255.255/32'].map(parsePrefix);
+function isPublicIpv4(ip, gatewayIps) {
+    const n = ipv4ToInt(ip);
+    if (n === null || NOT_PUBLIC_PREFIXES.some(p => n >= p.start && n <= p.end)) return false;
+    return !(gatewayIps && gatewayIps.has(ip));
+}
+// The NetBird addresses of both gateways' peers.
+function gatewayPeerIps(snap) {
+    const gw = [_nb.gatewayGroupId, _nb.namesGroupId].filter(Boolean);
+    const out = new Set();
+    for (const p of (snap && Array.isArray(snap.peers) ? snap.peers : [])) {
+        if (p && p.ip && Array.isArray(p.groups) && p.groups.some(g => gw.includes(refId(g)))) out.add(String(p.ip).split('/')[0]);
+    }
+    return out;
+}
+
+// Paused: a sync found that the Browser Gateway can reach the group. Kept in the database so every
+// instance refuses; the next sync that finds it fixed, or a save that passes the check, clears it.
+async function readCreatePause() {
+    const v = await getSetting(CREATE_PAUSE_KEY);
+    if (!v) return null;
+    try { const p = JSON.parse(v); return p && p.reason ? { reason: String(p.reason), at: p.at || null } : null; } catch { return null; }
+}
+const setCreatePause = (reason) => setSetting(CREATE_PAUSE_KEY, JSON.stringify({ reason, at: new Date().toISOString() }));
+async function clearCreatePause() { if (await getSetting(CREATE_PAUSE_KEY)) await setSetting(CREATE_PAUSE_KEY, ''); }
+
+// A NetBird list read fresh: a 2xx with a list, or a throw.
+async function readListStrict(path, what) {
+    const r = await netbirdReq('GET', path);
+    if (!nbOk(r) || !Array.isArray(r.body)) throw new Error(`Couldn't read the ${what} from NetBird.`);
+    return r.body;
+}
+const emptyRef = (v) => v == null || v === '' || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+
+// The gateway check of the group for created resources: '' when it passes, else why not. It fails
+// when an enabled accept rule whose source carries Browser Gateway traffic (a group either
+// gateway's peer is in, All, or a gateway peer itself) has the group as a destination, or when such
+// a rule's source (or destinations) can't be read. Reads the groups, peers and policies fresh;
+// throws when one can't be read.
+async function createGroupProblem(groupId) {
+    const [groups, peers, policies] = await Promise.all([
+        readListStrict('/api/groups', 'groups'), readListStrict('/api/peers', 'peers'), readListStrict('/api/policies', 'policies')]);
+    const g = groups.find(x => x && x.id === groupId);
+    if (!g) return "The group for servers added by links doesn't exist in NetBird anymore. Choose another group.";
+    if (g.name === 'All') return "The All group can't hold servers added by links. Choose another group.";
+    if (isRemoteAccessManagedGroup(groupId, g.name)) return 'This group is managed by Browser Remote Access. Choose another group.';
+    const gwGroupIds = [_nb.gatewayGroupId, _nb.namesGroupId].filter(Boolean);
+    const gwPeers = peers.filter(p => p && Array.isArray(p.groups) && p.groups.some(x => gwGroupIds.includes(refId(x))));
+    // Checked whether or not a gateway is enrolled yet: All is a gateway source either way.
+    const sources = new Set(groups.filter(x => x && x.name === 'All').map(x => x.id));
+    for (const p of gwPeers) for (const x of p.groups) if (refId(x)) sources.add(refId(x));
+    const peerIds = new Set(gwPeers.map(p => p.id));
+    for (const p of policies) {
+        if (!p || p.enabled === false) continue;
+        for (const rule of (Array.isArray(p.rules) ? p.rules : [])) {
+            if (!rule || rule.enabled === false || (rule.action && rule.action !== 'accept')) continue;
+            const d = rule.destinations;
+            const toGroup = Array.isArray(d) ? d.some(x => refId(x) === groupId) : !emptyRef(d);
+            if (!toGroup) continue;
+            const src = ruleSourceIsGateway(rule, sources, peerIds);
+            if (src === 'unknown') return `The NetBird policy "${p.name || p.id}" has a source NetBird Control can't read, so it can't tell whether the Browser Gateway reaches the group "${g.name}". Change that policy, or choose another group.`;
+            if (src === 'yes') return `The NetBird policy "${p.name || p.id}" lets the Browser Gateway reach the group "${g.name}". Choose another group, or change that policy so the gateway doesn't reach it.`;
+        }
+    }
+    return '';
+}
+
+async function countActiveCreated(exceptNetworkId) {
+    const r = exceptNetworkId == null
+        ? await pool.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE])
+        : await pool.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1) AND network_id <> $2', [CREATE_ACTIVE, exceptNetworkId]);
+    return Number(r && r.rows && r.rows[0] && r.rows[0].n) || 0;
+}
+
+// The settings for created resources, checked before anything is saved. The network can't change
+// while servers added by links are still in the old one (the guard and the deletion follow it).
+async function validateCreateSettings(next) {
+    try { await checkCreateSettings(next); } catch (e) { e.notSaved = true; throw e; }
+}
+async function checkCreateSettings(next) {
+    const c = next.createResources;
+    const cur = _cfg.createResources;
+    if (cur.networkId && c.networkId !== cur.networkId) {
+        let n;
+        try { n = await countActiveCreated(c.networkId); } catch { throw httpError(503, 'UNAVAILABLE', "The servers added by links couldn't be counted, so the settings were not saved. Try again."); }
+        if (n) throw httpError(409, 'CREATED_RESOURCES_EXIST', `${n} server${n === 1 ? '' : 's'} added by links ${n === 1 ? 'is' : 'are'} still in the current network. Keep that network until ${n === 1 ? 'it is' : 'they are'} removed.`);
+    }
+    if (!c.enabled) return;
+    const refuse = (message) => { throw httpError(400, 'INVALID_SETTINGS', message); };
+    if (!c.networkId) refuse('Choose the network for servers added by links.');
+    if (!next.networks.includes(c.networkId)) refuse('The network for servers added by links must be one of the networks selected above.');
+    if (!c.groupId) refuse('Choose the group for servers added by links.');
+    if (!netbirdApiConfigured()) refuse('Connect the NetBird API first (Settings > NetBird API).');
+    let problem;
+    try { problem = await createGroupProblem(c.groupId); } catch (e) {
+        throw httpError(502, 'CHECK_FAILED', `${e.message} The group couldn't be checked, so the settings were not saved. Try again.`);
+    }
+    if (problem) refuse(`${problem} The settings were not saved.`);
+}
+
+const auditAs = (actor, action, target, meta) => apiKeys.writeAuditStrict(pool, { ...actor, action, target, meta, timeoutMs: apiKeys.QUERY_TIMEOUT_MS })
+    .catch(e => console.error('[remote-access] audit failed (%s):', action, e.message));
+
+// Move a row to `state` (only from `from`, when given). A failed write is logged: a row left in
+// 'creating' is found again by the sync's recovery.
+async function settleCreated(attemptId, state, { resourceId = '', reason = '', from = null } = {}) {
+    try {
+        const r = await pool.query(
+            `UPDATE ra_created_resources SET state = $2, resource_id = CASE WHEN $3 = '' THEN resource_id ELSE $3 END, reason = $4, updated_at = NOW()
+             WHERE attempt_id = $1${from ? ' AND state = $5' : ''}`,
+            from ? [attemptId, state, resourceId, reason, from] : [attemptId, state, resourceId, reason]);
+        return !!(r && r.rowCount);
+    } catch (e) {
+        console.error('[remote-access] could not record a created resource:', e.message);
+        return false;
+    }
+}
+
+// Step 5: reserve the create. One transaction under a transaction-level advisory lock: the same
+// address in progress, the limit, the row and its strict audit record. No NetBird call inside.
+async function reserveCreate(key, row, max) {
+    const client = await pool.connect();
+    let open = false;
+    try {
+        await client.query('BEGIN');
+        open = true;
+        await client.query('SELECT pg_advisory_xact_lock($1)', [CREATE_LOCK_KEY]);
+        const same = await client.query('SELECT attempt_id, state, resource_id FROM ra_created_resources WHERE ip = $1 AND state = ANY($2) ORDER BY created_at DESC', [row.ip, CREATE_ACTIVE]);
+        const prior = (same && same.rows) || [];
+        let existing = null;
+        if (prior.some(r => r.state === 'unknown')) throw httpError(503, 'CREATE_UNCONFIRMED', "An earlier request to add this server wasn't confirmed by NetBird yet. Try again in a few minutes.");
+        if (prior.some(r => r.state === 'creating' || r.state === 'deleting')) throw httpError(409, 'CREATE_IN_PROGRESS');
+        existing = prior.find(r => r.state === 'created') || null;
+        if (existing) {
+            await client.query('ROLLBACK');
+            open = false;
+            return { existing };
+        }
+        const cnt = await client.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE]);
+        if ((Number(cnt && cnt.rows && cnt.rows[0] && cnt.rows[0].n) || 0) >= max) throw httpError(409, 'CREATE_LIMIT');
+        await client.query(
+            `INSERT INTO ra_created_resources (attempt_id, account, ip, name, network_id, group_id, key_id, state, expected_name, expected_address, expected_description)
+             VALUES ($1, '', $2, $3, $4, $5, $6, 'creating', $7, $8, $9)`,
+            [row.attemptId, row.ip, row.name, row.networkId, row.groupId, key.id, row.expected.name, row.expected.address, row.expected.description]);
+        await apiKeys.writeAuditStrict(client, {
+            ...apiKeys.keyActor(key), action: 'resource.create_intent', target: row.expected.address,
+            meta: { attemptId: row.attemptId, name: row.name || null, networkId: row.networkId, groupId: row.groupId, keyId: key.id },
+            timeoutMs: apiKeys.QUERY_TIMEOUT_MS,
+        });
+        await client.query('COMMIT');
+        open = false;
+        return { attemptId: row.attemptId };
+    } catch (e) {
+        if (open) await client.query('ROLLBACK').catch(() => { });
+        if (e && e.status) throw e;
+        console.error('[remote-access] could not reserve a created resource:', e && e.message);
+        throw httpError(503, 'UNAVAILABLE', "The request couldn't be recorded, so no server was added. Try again.");
+    } finally {
+        client.release();
+    }
+}
+
+// Steps 1-8 of a launch with createResource: true. Returns what the link connects to and the
+// answer's `resource`; `sent` is set when a create was sent (true, or 'unknown'). A refusal after
+// the create was sent carries resourceCreated.
+async function createForLaunch(key, address, email) {
+    const cc = _cfg.createResources;
+    // 1. Allowed now?
+    if (NETBIRD_READONLY || !cc.enabled || !cc.networkId || !cc.groupId || !_cfg.networks.includes(cc.networkId)) throw httpError(403, 'CREATE_DISABLED');
+    let pause;
+    try { pause = await readCreatePause(); } catch { throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't check its settings. Try again."); }
+    if (pause) throw httpError(503, 'CREATE_PAUSED');
+    if (targetsSettling()) throw httpError(503, 'TARGETS_SETTLING');
+
+    // 2. The target: a public IPv4 address, typed or looked up; never one on the blocklist.
+    const t = normalizeTarget(address);
+    if (t.error) throw httpError(400, 'INVALID_ADDRESS');
+    let snap;
+    try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+    const gwIps = gatewayPeerIps(snap);
+    let ips;
+    if (t.kind === 'ip') {
+        if (!isPublicIpv4(t.ip, gwIps)) throw httpError(403, 'ADDRESS_NOT_PUBLIC');
+        ips = [t.ip];
+    } else {
+        const resolve4 = _deps.resolve4 || defaultResolve4;
+        let answers;
+        try { answers = await resolve4(t.name); } catch (e) {
+            if (e && (e.code === 'ENOTFOUND' || e.code === 'ENODATA')) throw httpError(403, 'NAME_NOT_FOUND');
+            throw httpError(503, 'NAME_LOOKUP_FAILED');
+        }
+        ips = (Array.isArray(answers) ? answers : []).map(String).filter(ip => normalizeTarget(ip).kind === 'ip');
+        if (!ips.length) throw httpError(403, 'NAME_NOT_FOUND');
+        if (!ips.every(ip => isPublicIpv4(ip, gwIps))) throw httpError(403, 'NAME_NOT_PUBLIC');
+    }
+    const ip = ips[0];
+    const name = t.kind === 'name' ? t.name : '';
+    let blocklist;
+    try { blocklist = await getBlocklist(); } catch { throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't read the blocklist. Try again."); }
+    if ([ip, `${ip}/32`, name].some(a => a && addressBlockedForNetwork(a, cc.networkId, blocklist))) throw httpError(403, 'ADDRESS_BLOCKED');
+
+    // 3. The user, when one is named: exists, only one, not blocked.
+    if (email) launchUser(snap, email);
+
+    // 4. Covered already (a resource, or an enabled route, for the address or the name): no create.
+    let inv;
+    try { inv = await getUsageData({ strict: true }); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+    if (!(name ? nameUncovered(inv, name, ips) : ipUncovered(inv, ip))) {
+        return { address, resource: { created: false, address: t.kind === 'ip' ? t.ip : t.name } };
+    }
+
+    // 5. Reserve it.
+    const attemptId = crypto.randomUUID();
+    const expected = { name: name ? `${name} (${ip})` : ip, address: `${ip}/32`, description: `Created by a Remote Access link (${attemptId})` };
+    const reserved = await reserveCreate(key, { attemptId, ip, name, networkId: cc.networkId, groupId: cc.groupId, expected }, cc.max);
+    if (reserved.existing) {
+        // Another request added it a moment ago: connect to it.
+        return { address: ip, resource: { created: false, ...(reserved.existing.resource_id ? { id: reserved.existing.resource_id } : {}), address: ip } };
+    }
+
+    // 6. The key, right before the write: still valid, with both scopes.
+    let valid;
+    try { valid = await apiKeys.keyStillValid(key.id, LAUNCH_SCOPE) && await apiKeys.keyStillValid(key.id, CREATE_SCOPE); } catch {
+        await settleCreated(attemptId, 'failed', { reason: 'The API key could not be checked.', from: 'creating' });
+        throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't check the API key, so no server was added. Try again.");
+    }
+    if (!valid) {
+        await settleCreated(attemptId, 'failed', { reason: 'The API key was revoked or lost a permission.', from: 'creating' });
+        throw httpError(403, 'KEY_REVOKED', 'This API key was revoked or lost a permission, so no server was added.');
+    }
+    if (typeof _deps.createClientResource !== 'function') {
+        await settleCreated(attemptId, 'failed', { reason: 'Not available.', from: 'creating' });
+        throw httpError(503, 'UNAVAILABLE', "Remote Access can't add servers right now. Try again.");
+    }
+
+    // 7. Create it: one host resource in the group, no policies. The group is checked afterwards
+    // (the writer drops a managed group without saying so).
+    let res = null;
+    let failure = null;
+    try {
+        const out = await _createCtx.run({ attemptId }, () => _deps.createClientResource(cc.networkId, {
+            name: expected.name, address: expected.address, description: expected.description, groups: [cc.groupId], policies: [],
+        }));
+        res = out && out.resource;
+    } catch (e) { failure = e; }
+    invalidateSnapshot();
+    const actor = apiKeys.keyActor(key);
+    const meta = { attemptId, name: name || null, networkId: cc.networkId, groupId: cc.groupId, keyId: key.id };
+
+    // 8. The outcome, on the row and in the audit log.
+    if (failure && failure.code !== 'RESOURCE_UNCONFIRMED') {
+        // Refused before anything was sent, or by NetBird: nothing was created.
+        await settleCreated(attemptId, 'failed', { reason: 'NetBird refused the resource.', from: 'creating' });
+        await auditAs(actor, 'resource.create_failed', expected.address, meta);
+        console.error('[remote-access] a launch link could not add %s: %s', expected.address, failure.message);
+        throw httpError(502, 'RESOURCE_CREATE_FAILED');
+    }
+    const id = res && typeof res === 'object' && typeof res.id === 'string' ? res.id : '';
+    const hasGroup = !!res && Array.isArray(res.groups) && res.groups.some(g => refId(g) === cc.groupId);
+    if (failure || !id || !hasGroup) {
+        const reason = !id ? "NetBird didn't confirm the resource." : "NetBird didn't put the resource in the group.";
+        await settleCreated(attemptId, 'unknown', { resourceId: id, reason, from: 'creating' });
+        await auditAs(actor, 'resource.create_unconfirmed', expected.address, { ...meta, resourceId: id || null, reason });
+        const e = httpError(502, 'CREATE_UNCONFIRMED');
+        e.resourceCreated = id ? true : 'unknown';
+        throw e;
+    }
+    await settleCreated(attemptId, 'created', { resourceId: id, from: 'creating' });
+    await auditAs(actor, 'resource.create', expected.address, { ...meta, resourceId: id });
+    return { address: ip, resource: { created: true, id, address: ip }, sent: true };
+}
+
+// Is this NetBird resource exactly what the row created? Its target group membership (the
+// sessions' doing) doesn't count.
+function sameAsCreated(res, row) {
+    if (!res || typeof res !== 'object') return false;
+    const targets = new Set(targetGroupIds());
+    const groups = (Array.isArray(res.groups) ? res.groups : []).map(refId).filter(g => g && !targets.has(g));
+    return res.name === row.expected_name && addressKey(res.address) === addressKey(row.expected_address)
+        && String(res.description || '') === row.expected_description && res.enabled !== false
+        && groups.length === 1 && groups[0] === row.group_id;
+}
+const policyUsing = (policies, rid) => policies.find(p => p && (Array.isArray(p.rules) ? p.rules : []).some(r => r
+    && [r.destinationResource, r.sourceResource].some(x => x && refId(x) === rid)));
+
+// The leader's part, after the target sync: the gateway check (pause or resume), the recovery of
+// creates without a clear answer, and the deletion of created resources whose hold has ended.
+// Never on a read-only instance, a standby, or in a tenant context.
+async function maintainCreatedResources() {
+    if (NETBIRD_READONLY || !netbirdApiConfigured() || (typeof currentTenantAccount === 'function' && currentTenantAccount())) return null;
+    if (_deps.isLeader && !_deps.isLeader()) return null;
+    const cc = _cfg.createResources;
+    // Nothing is ever created without a network, and the network can't change while any exist.
+    if (!cc.networkId) return null;
+    const out = { paused: '', recovered: 0, failed: 0, deleted: 0, gone: 0, kept: 0 };
+
+    if (cc.enabled && cc.groupId) {
+        let problem = null;
+        try { problem = await createGroupProblem(cc.groupId); } catch (e) { console.error('[remote-access] gateway check of the created-resources group:', e.message); }
+        if (problem) {
+            const cur = await readCreatePause().catch(() => null);
+            if (!cur || cur.reason !== problem) {
+                await setCreatePause(problem);
+                console.warn('[remote-access] adding servers from links is paused: %s', problem);
+                await auditAs({ ...REMOTE_ACCESS_ACTOR, actorName: 'System' }, 'remote_access.create_paused', '', { reason: problem });
+            }
+            out.paused = problem;
+        } else if (problem === '') {
+            await clearCreatePause();
+        }
+    }
+
+    // Creates without a clear answer (and rows a crash left in 'creating'): adopted only by their
+    // marker and exact fields, never an administrator's resource at the same address.
+    const pending = await pool.query(
+        `SELECT * FROM ra_created_resources WHERE state = 'unknown' OR (state = 'creating' AND created_at < NOW() - make_interval(secs => $1))
+         ORDER BY created_at LIMIT 50`, [CREATE_RECOVER_MS / 1000]);
+    const lists = new Map();
+    for (const row of (pending && pending.rows) || []) {
+        if (!lists.has(row.network_id)) lists.set(row.network_id, await readListStrict(`/api/networks/${encodeURIComponent(row.network_id)}/resources`, 'resources').catch(() => null));
+        const list = lists.get(row.network_id);
+        if (!list) continue;
+        const match = list.find(r => r && typeof r.id === 'string' && sameAsCreated(r, row) && String(r.description || '').includes(row.attempt_id));
+        const target = row.expected_address;
+        const meta = { attemptId: row.attempt_id, networkId: row.network_id, groupId: row.group_id, keyId: row.key_id, recovered: true };
+        // Created, but not as asked (NetBird left out the group): never deleted automatically.
+        const known = !match && row.resource_id ? list.find(r => r && r.id === row.resource_id) : null;
+        if (known) {
+            const reason = "It isn't exactly as it was created (for example, it isn't in the group). Remove it in NetBird if it isn't needed.";
+            if (await settleCreated(row.attempt_id, 'kept', { reason, from: row.state })) {
+                out.kept++;
+                await auditAs({ ...REMOTE_ACCESS_ACTOR, actorName: 'System' }, 'resource.kept', target, { ...meta, resourceId: row.resource_id, reason });
+            }
+            continue;
+        }
+        if (match) {
+            if (await settleCreated(row.attempt_id, 'created', { resourceId: match.id, from: row.state })) {
+                out.recovered++;
+                await auditAs({ ...REMOTE_ACCESS_ACTOR, actorName: 'System' }, 'resource.create', target, { ...meta, resourceId: match.id });
+            }
+        } else if (Date.now() - msOf(row.created_at) >= CREATE_RECOVER_MS) {
+            if (await settleCreated(row.attempt_id, 'failed', { reason: 'NetBird has no resource for this request.', from: row.state })) {
+                out.failed++;
+                await auditAs({ ...REMOTE_ACCESS_ACTOR, actorName: 'System' }, 'resource.create_failed', target, meta);
+            }
+        }
+    }
+
+    // Deletion: no valid hold, no session row, and older than the hold time.
+    const due = await pool.query(
+        `SELECT c.* FROM ra_created_resources c
+         WHERE c.state IN ('created', 'deleting') AND c.resource_id <> ''
+           AND c.created_at < NOW() - make_interval(hours => $1)
+           AND NOT EXISTS (SELECT 1 FROM remote_access_targets t WHERE t.resource_id = c.resource_id AND t.expires_at > NOW())
+           AND NOT EXISTS (SELECT 1 FROM remote_sessions s WHERE s.resource_id = c.resource_id)
+         ORDER BY c.created_at LIMIT $2`, [_cfg.holdHours, CREATE_DELETE_BATCH]);
+    const rows = (due && due.rows) || [];
+    if (!rows.length) return out;
+    let policies;
+    try { policies = await readListStrict('/api/policies', 'policies'); } catch (e) { console.error('[remote-access] created resources:', e.message); return out; }
+    for (const row of rows) {
+        const r = await withTargetLock(() => deleteCreatedLocked(row, policies)).catch(e => { console.error('[remote-access] deleting a created resource:', e.message); return 'retry'; });
+        if (out[r] !== undefined) out[r]++;
+    }
+    return out;
+}
+
+// One created resource whose hold has ended, under the target lock: read it fresh; delete only the
+// resource, and only while it is exactly as created and no policy uses it. A delete without a clear
+// answer stays 'deleting' and is read again by the next run.
+async function deleteCreatedLocked(row, policies) {
+    const path = `/api/networks/${encodeURIComponent(row.network_id)}/resources/${encodeURIComponent(row.resource_id)}`;
+    const target = row.expected_name || row.expected_address;
+    const meta = { attemptId: row.attempt_id, resourceId: row.resource_id, networkId: row.network_id, address: row.expected_address };
+    const got = await netbirdReq('GET', path);
+    if (got && got.status === 404) {
+        const state = row.state === 'deleting' ? 'deleted' : 'gone';
+        if (!(await settleCreated(row.attempt_id, state, { reason: state === 'gone' ? 'It was removed outside NetBird Control.' : '', from: row.state }))) return 'retry';
+        if (state === 'deleted') await auditAs(REMOTE_ACCESS_ACTOR, 'resource.delete', target, { ...meta, reason: DELETE_REASON });
+        return state;
+    }
+    if (!nbOk(got) || !got.body || typeof got.body !== 'object' || got.body.id !== row.resource_id) return 'retry';
+    const user = policyUsing(policies, row.resource_id);
+    const reason = !sameAsCreated(got.body, row) ? 'It was changed after it was created.'
+        : user ? `The policy "${user.name || user.id}" uses it.` : '';
+    if (reason) {
+        if (await settleCreated(row.attempt_id, 'kept', { reason, from: row.state })) await auditAs({ ...REMOTE_ACCESS_ACTOR, actorName: 'System' }, 'resource.kept', target, { ...meta, reason });
+        return 'kept';
+    }
+    if (row.state !== 'deleting' && !(await settleCreated(row.attempt_id, 'deleting', { from: 'created' }))) return 'retry';
+    noteTargetsChanged();
+    const d = await netbirdReq('DELETE', path);
+    bustNbCaches('policies', 'gref', 'usage');
+    invalidateSnapshot();
+    if (nbOk(d) || (d && d.status === 404)) {
+        await settleCreated(row.attempt_id, 'deleted', { from: 'deleting' });
+        await auditAs(REMOTE_ACCESS_ACTOR, 'resource.delete', target, { ...meta, reason: DELETE_REASON });
+        return 'deleted';
+    }
+    if (!d || !d.status || d.status >= 500) { noteUncertainTargetWrite(); return 'retry'; }
+    if (d.status === 429) return 'retry';
+    const why = `NetBird refused to delete it (HTTP ${d.status}).`;
+    if (await settleCreated(row.attempt_id, 'kept', { reason: why, from: 'deleting' })) await auditAs({ ...REMOTE_ACCESS_ACTOR, actorName: 'System' }, 'resource.kept', target, { ...meta, reason: why });
+    return 'kept';
+}
+
+// Settings > Remote Access: the servers added by links that still exist (or may), and the pause.
+async function listCreatedResources() {
+    const [r, paused] = await Promise.all([
+        pool.query(`SELECT attempt_id, ip, name, resource_id, state, reason, expected_name, created_at, updated_at
+                    FROM ra_created_resources WHERE state = ANY($1) ORDER BY created_at DESC LIMIT 200`, [CREATE_LISTED]),
+        readCreatePause(),
+    ]);
+    const iso = (v) => (msOf(v) ? new Date(msOf(v)).toISOString() : null);
+    return {
+        paused, readonly: !!NETBIRD_READONLY,
+        items: ((r && r.rows) || []).map(x => ({
+            id: x.attempt_id, address: x.ip, name: x.name || '', resourceName: x.expected_name || '', resourceId: x.resource_id || '',
+            state: x.state, reason: x.reason || '', createdAt: iso(x.created_at), updatedAt: iso(x.updated_at),
+        })),
+    };
+}
+
 module.exports = {
     issueLaunch, redeemLaunch,
+    linkManagedNetworkId, linkNetworkWriteRefused, listCreatedResources, getCreatePause: readCreatePause, maintainCreatedResources, CREATE_SCOPE,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
     withTargetLock, noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,
@@ -2311,5 +2849,6 @@ module.exports = {
         setSleepForTest: (fn) => { _sleep = fn || ((ms) => new Promise(r => setTimeout(r, ms))); },
         loadTargetHolds, heldTargets,
         lastMembershipForTest: () => ({ ..._lastMembership }),
+        isPublicIpv4, createGroupProblem, CREATE_RECOVER_MS,
     },
 };

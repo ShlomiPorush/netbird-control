@@ -16,6 +16,8 @@ const { pool } = require('./core');
 
 const SCOPES = Object.freeze({
     'remote-access:launch': 'Open browser remote sessions (RDP / SSH) for a user from another system',
+    // Only together with remote-access:launch, and only while Settings > Remote Access allows it.
+    'remote-access:create-resource': 'Add a missing server as a temporary NetBird resource when opening a session',
 });
 const KEY_PREFIX = 'nbc_';
 const KEY_RE = /^nbc_[A-Za-z0-9_-]{43}$/;

@@ -134,3 +134,12 @@ test('the re-check on a read-only instance extends the holds of its open session
     assert.ok(new Date(holds.rows.get('r-open').expires_at).getTime() > Date.now() + 3 * HOUR - 5000);
     assert.deepEqual(writes, []);
 });
+
+test('a read-only instance never adds or deletes a server for a launch link', async () => {
+    await reset();
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 50 } });
+    const key = { id: 7, name: 'Customer File', scopes: ['remote-access:launch', 'remote-access:create-resource'] };
+    await assert.rejects(ra.issueLaunch(key, { protocol: 'rdp', address: '8.8.8.8', port: 3389, createResource: true }), (e) => e.code === 'CREATE_DISABLED');
+    assert.equal(await ra.maintainCreatedResources(), null);
+    assert.deepEqual(writes, []);
+});
