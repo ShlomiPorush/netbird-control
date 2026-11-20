@@ -61,6 +61,13 @@ function dbQuery(sql, params = [], tx = null) {
         if (tx) tx.rows.push(row); else created.push(row);
         return { rows: [], rowCount: 1 };
     }
+    if (/^SELECT 1 FROM ra_created_resources WHERE resource_id = \$1/.test(s)) return { rows: created.filter(r => r.resource_id === params[0] && params[1].includes(r.state)).slice(0, 1).map(() => ({ '?column?': 1 })) };
+    if (/^SELECT resource_id FROM ra_created_resources/.test(s)) return { rows: created.filter(r => params[0].includes(r.state) && r.resource_id).map(r => ({ resource_id: r.resource_id })) };
+    if (/^UPDATE ra_created_resources .*WHERE resource_id = \$1/s.test(s)) {
+        const hit = created.filter(r => r.resource_id === params[0] && ['kept', 'gone'].includes(r.state));
+        for (const r of hit) Object.assign(r, { state: 'deleted', reason: 'Deleted by an administrator.', updated_at: Date.now() });
+        return { rows: [], rowCount: hit.length };
+    }
     if (s.startsWith('UPDATE ra_created_resources')) {
         const [id, state, rid, reason, from] = params;
         const r = created.find(x => x.attempt_id === id && (params.length < 5 || x.state === from));
@@ -226,7 +233,9 @@ const alice = { user_id: 'u1', email: 'alice@example.test', name: 'Alice', oid: 
 const rdp = (extra = {}) => ({ protocol: 'rdp', address: PUBLIC, port: 3389, username: 'admin', password: PASSWORD, createResource: true, ...extra });
 let dnsAnswers = {}; // name -> list, or an Error to throw
 const CFG = { enabled: true, networks: ['n-office', 'n-links'], guacdHost: '127.0.0.1', createResources: { enabled: true, networkId: 'n-links', groupId: 'g-links', max: 50 } };
-const setConfig = (extra = {}) => ra._internal.setConfigForTest({ ...CFG, ...extra, createResources: { ...CFG.createResources, ...(extra.createResources || {}) } });
+const cfgOf = (extra = {}) => ({ ...CFG, ...extra, createResources: { ...CFG.createResources, ...(extra.createResources || {}) } });
+// This instance's copy and the stored settings (which the create path and the sync read).
+const setConfig = (extra = {}) => { ra._internal.setConfigForTest(cfgOf(extra)); settings.remote_access_config = JSON.stringify(cfgOf(extra)); };
 const rowFor = (ip) => created.find(r => r.ip === ip);
 const resourceAt = (ip) => w.resources.find(r => r.address === `${ip}/32`);
 const HOUR = 3_600_000;
@@ -282,9 +291,18 @@ test('createResource is a strict boolean with its own scope, checked before anyt
 });
 
 test('only public addresses: a non-public IP, a name with any non-public answer, a missing name', async () => {
-    for (const ip of ['10.1.2.3', '100.90.0.9', '127.0.0.1', '169.254.1.1', '172.16.0.1', '192.168.1.1', '192.0.0.1', '192.0.2.1', '198.18.0.1', '198.51.100.1', '203.0.113.1', '224.0.0.1', '240.0.0.1', '255.255.255.255', '0.1.2.3']) {
+    for (const ip of ['10.1.2.3', '172.16.0.1', '192.168.1.1', '192.0.0.1', '192.0.2.1', '198.18.0.1', '198.51.100.1', '203.0.113.1']) {
         await rejects(ra.issueLaunch(KEY, rdp({ address: ip })), 'ADDRESS_NOT_PUBLIC', (e) => e.status === 403);
     }
+    // Never a target at all (loopback, peers, multicast...): the launch goes on as today and the
+    // usual checks refuse it; nothing is created.
+    for (const ip of ['100.90.0.9', '127.0.0.1', '169.254.1.1', '224.0.0.1', '240.0.0.1', '255.255.255.255', '0.1.2.3']) {
+        assert.deepEqual((await ra.issueLaunch(KEY, rdp({ address: ip }))).resource, { created: false, address: ip });
+    }
+    for (const ip of ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4'].map(p => p.split('/')[0])) {
+        assert.equal(ra._internal.isPublicIpv4(ip, new Set()), false, ip);
+    }
+    assert.equal(ra._internal.isPublicIpv4('255.255.255.255', new Set()), false);
     assert.equal(ra._internal.isPublicIpv4('8.8.8.8', new Set(['8.8.8.8'])), false, "a gateway peer's own address");
     assert.equal(ra._internal.isPublicIpv4('8.8.8.8', new Set()), true);
     dnsAnswers['mixed.example.com'] = ['8.8.8.10', '10.0.0.9'];
@@ -643,4 +661,70 @@ test('with no network for created resources the guard reads nothing and refuses 
     assert.ok(!reads.some(p => /^\/api\/networks\/[^/]+$/.test(p)), 'no network read for the guard');
     await db.createClientResource('n-links', { name: 'x', address: '9.9.2.9', groups: [], policies: [] });
     assert.ok(w.resources.some(r => r.address === '9.9.2.9'), 'created');
+});
+
+// ─── Coverage first, and the stored settings ───
+test('a covered target goes the normal way whatever the settings say, also a private one', async () => {
+    // Off in the stored settings, on in this instance's copy: a covered private server still works.
+    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } }));
+    const before = connects;
+    const out = await ra.issueLaunch(KEY, rdp({ address: '10.0.0.5' }));
+    assert.deepEqual(out.resource, { created: false, address: '10.0.0.5' });
+    // A name that a domain resource covers: no lookup, no create.
+    w.resources.push({ id: 'r-dom', name: 'crm', type: 'domain', address: 'crm.example.com', description: '', enabled: true, groups: [{ id: 'g-srv' }] });
+    w.networks.find(n => n.id === 'n-office').resources.push('r-dom');
+    setConfig();
+    assert.deepEqual((await ra.issueLaunch(KEY, rdp({ address: 'crm.example.com' }))).resource, { created: false, address: 'crm.example.com' });
+    // A name whose address a resource covers.
+    dnsAnswers['range.example.com'] = ['8.8.4.20'];
+    assert.equal((await ra.issueLaunch(KEY, rdp({ address: 'range.example.com' }))).resource.created, false);
+    assert.equal(posts.length, 0);
+    assert.equal(connects, before, 'nothing was reserved');
+    // NetBird can't be read and creating is off: the launch goes on as today.
+    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } }));
+    inventoryFails = true;
+    assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, false);
+});
+
+test('the stored settings decide, not this instance\'s copy', async () => {
+    // This instance still thinks it is on; the database says off.
+    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } }));
+    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
+    assert.equal(posts.length, 0);
+    assert.equal(created.length, 0);
+    // Turned off between the reservation and the write: nothing is sent, the row is failed.
+    setConfig();
+    const real = keyRows.get(7);
+    let reads = 0;
+    keyRows.set(7, new Proxy(real, { get(t, p) { if (p === 'scopes' && ++reads === 2) settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } })); return t[p]; } }));
+    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
+    assert.equal(posts.length, 0);
+    assert.equal(rowFor(PUBLIC).state, 'failed');
+    // The sync reads them too: with no network stored and nothing left, it does nothing.
+    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false, networkId: '', groupId: '' } }));
+    created = [];
+    assert.equal(await ra.maintainCreatedResources(), null);
+});
+
+// ─── An administrator may delete what the app no longer tracks ───
+test('a kept or untracked resource in the managed network can be deleted by an admin; a tracked one cannot', async () => {
+    const tracked = seed('9.9.1.1', { ageHours: 0 });
+    const kept = seed('9.9.1.2', { ageHours: 0 });
+    kept.state = 'kept';
+    w.resources.push({ id: 'r-stray', type: 'host', name: 'stray', address: '9.9.1.3/32', description: '', enabled: true, groups: [{ id: 'g-links' }] });
+    w.networks.find(n => n.id === 'n-links').resources.push('r-stray');
+    const detail = await db.getNetworkDetail('n-links');
+    const locked = Object.fromEntries(detail.resources.map(r => [r.id, r.linkLocked]));
+    assert.deepEqual(locked, { [tracked.resource_id]: true, [kept.resource_id]: false, 'r-stray': false });
+
+    await assert.rejects(db.deleteResource('n-links', tracked.resource_id), managedError);
+    assert.equal(deletesSent().length, 0);
+    await db.deleteResource('n-links', kept.resource_id);
+    await db.deleteResource('n-links', 'r-stray');
+    assert.deepEqual(deletesSent().sort(), [`/api/networks/n-links/resources/${kept.resource_id}`, '/api/networks/n-links/resources/r-stray'].sort());
+    assert.equal(kept.state, 'deleted');
+    // Only the resources: the feature's group and the policy to it stay.
+    assert.ok(!writes.some(([m, p]) => m === 'DELETE' && /\/api\/(groups|policies)\//.test(p)));
+    // Still no edit.
+    await assert.rejects(db.setResourceEnabled('n-links', tracked.resource_id, false), managedError);
 });

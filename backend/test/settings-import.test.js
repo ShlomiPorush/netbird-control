@@ -132,3 +132,12 @@ test('a tenant Telegram config drops the file secret and must be an object', asy
     r = await importAppSettings({ settings: { 'telegram_config:t1': 'null' } });
     assert.deepEqual(skippedKeys(r), ['telegram_config:t1']);
 });
+
+test('an import never turns on adding servers from launch links; the other fields are kept', async () => {
+    await seed();
+    const cfg = { enabled: false, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g1', max: 20 } };
+    const r = await importAppSettings({ settings: { remote_access_config: JSON.stringify(cfg) } });
+    assert.deepEqual(r.keys, ['remote_access_config']);
+    assert.deepEqual(JSON.parse(store.get('remote_access_config')).createResources, { enabled: false, networkId: 'n1', groupId: 'g1', max: 20 });
+    assert.equal(require('../lib/remote-access').getRemoteAccessConfig().createResources.enabled, false);
+});

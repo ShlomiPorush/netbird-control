@@ -2388,6 +2388,24 @@ function linkNetworkWriteRefused(networkId) {
     return !!n && String(networkId || '') === n && !_createCtx.getStore();
 }
 
+// An administrator may delete (never change) a resource of the managed network that this code no
+// longer tracks: kept, gone, failed or deleted rows, or none at all. A database error refuses.
+async function linkResourceDeleteRefused(networkId, resourceId) {
+    if (!linkNetworkWriteRefused(networkId)) return false;
+    const r = await pool.query('SELECT 1 FROM ra_created_resources WHERE resource_id = $1 AND state = ANY($2) LIMIT 1', [String(resourceId || ''), CREATE_ACTIVE]);
+    return !!(r && r.rows && r.rows.length);
+}
+// The resource ids this code still tracks (their rows are active).
+async function trackedCreatedResourceIds() {
+    const r = await pool.query("SELECT resource_id FROM ra_created_resources WHERE state = ANY($1) AND resource_id <> ''", [CREATE_ACTIVE]);
+    return new Set(((r && r.rows) || []).map(x => String(x.resource_id)));
+}
+// An administrator deleted a kept (or gone) created resource: its row leaves the list.
+async function noteCreatedResourceDeleted(resourceId) {
+    await pool.query(`UPDATE ra_created_resources SET state = 'deleted', reason = 'Deleted by an administrator.', updated_at = NOW()
+                      WHERE resource_id = $1 AND state IN ('kept', 'gone')`, [String(resourceId || '')]);
+}
+
 // IANA special-purpose IPv4 ranges: never added from a link.
 const NOT_PUBLIC_PREFIXES = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12',
     '192.0.0.0/24', '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24',
@@ -2553,53 +2571,92 @@ async function reserveCreate(key, row, max) {
     }
 }
 
-// Steps 1-8 of a launch with createResource: true. Returns what the link connects to and the
-// answer's `resource`; `sent` is set when a create was sent (true, or 'unknown'). A refusal after
-// the create was sent carries resourceCreated.
+// The settings for created resources as the database has them now. Every instance reads them here
+// before it creates or deletes, so turning the feature off on one instance stops all of them.
+async function readCreateSettings() {
+    let raw = null;
+    try { raw = JSON.parse(await getSetting('remote_access_config') || 'null'); } catch (e) { if (!(e instanceof SyntaxError)) throw e; }
+    const c = normConfig(raw);
+    return { createResources: c.createResources, networks: c.networks, holdHours: c.holdHours };
+}
+const createUsable = (s) => !NETBIRD_READONLY && s.createResources.enabled && !!s.createResources.networkId
+    && !!s.createResources.groupId && s.networks.includes(s.createResources.networkId);
+
+// A launch with createResource: true. Returns what the link connects to and the answer's
+// `resource`; `sent` is set when a create was sent (true, or 'unknown'). A refusal after the
+// create was sent carries resourceCreated. A target NetBird already covers goes on as without
+// createResource, whatever the settings say and whether or not it is public: an integration may
+// send createResource on every launch. Nothing here writes before the decision to create (no
+// snapshot read, which cleans up group members): the reads are the strict inventory and plain
+// lists.
 async function createForLaunch(key, address, email) {
-    const cc = _cfg.createResources;
-    // 1. Allowed now?
-    if (NETBIRD_READONLY || !cc.enabled || !cc.networkId || !cc.groupId || !_cfg.networks.includes(cc.networkId)) throw httpError(403, 'CREATE_DISABLED');
+    const normal = (as) => ({ address, resource: { created: false, address: as } });
+    const t = normalizeTarget(address);
+    if (t.error) throw httpError(400, 'INVALID_ADDRESS');
+    const shown = t.kind === 'ip' ? t.ip : t.name;
+    // Whether creating is allowed is read once, and only when it is needed (or to decide what an
+    // unreadable NetBird means).
+    let settings = null;
+    const allowed = async () => {
+        if (!settings) {
+            try { settings = await readCreateSettings(); } catch { throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't read its settings. Try again."); }
+        }
+        return createUsable(settings);
+    };
+
+    // 1. Covered already (a resource, or an enabled route; for a name, first by name, then each
+    // address it resolves to): no create. When NetBird or the DNS can't tell, and creating is off,
+    // the launch goes on as today.
+    let inv;
+    try { inv = await getUsageData({ strict: true }); } catch {
+        if (!(await allowed())) return normal(shown);
+        throw httpError(503, 'SNAPSHOT_FAILED');
+    }
+    let ips;
+    if (t.kind === 'ip') {
+        if (!ipUncovered(inv, t.ip)) return normal(shown);
+        ips = [t.ip];
+    } else {
+        if (nameCovered(inv, t.name)) return normal(shown);
+        const resolve4 = _deps.resolve4 || defaultResolve4;
+        let answers;
+        try { answers = await resolve4(t.name); } catch (e) {
+            if (!(await allowed())) return normal(shown);
+            if (e && (e.code === 'ENOTFOUND' || e.code === 'ENODATA')) throw httpError(403, 'NAME_NOT_FOUND');
+            throw httpError(503, 'NAME_LOOKUP_FAILED');
+        }
+        ips = (Array.isArray(answers) ? answers : []).map(String).filter(ip => normalizeTarget(ip).kind === 'ip');
+        if (!ips.length) {
+            if (!(await allowed())) return normal(shown);
+            throw httpError(403, 'NAME_NOT_FOUND');
+        }
+        if (!nameUncovered(inv, t.name, ips)) return normal(shown);
+    }
+
+    // 2. Allowed now? (the stored settings, not this instance's copy)
+    if (!(await allowed())) throw httpError(403, 'CREATE_DISABLED');
+    const cc = settings.createResources;
     let pause;
     try { pause = await readCreatePause(); } catch { throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't check its settings. Try again."); }
     if (pause) throw httpError(503, 'CREATE_PAUSED');
     if (targetsSettling()) throw httpError(503, 'TARGETS_SETTLING');
 
-    // 2. The target: a public IPv4 address, typed or looked up; never one on the blocklist.
-    const t = normalizeTarget(address);
-    if (t.error) throw httpError(400, 'INVALID_ADDRESS');
-    let snap;
-    try { snap = await freshSnapshot(CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
-    const gwIps = gatewayPeerIps(snap);
-    let ips;
-    if (t.kind === 'ip') {
-        if (!isPublicIpv4(t.ip, gwIps)) throw httpError(403, 'ADDRESS_NOT_PUBLIC');
-        ips = [t.ip];
-    } else {
-        const resolve4 = _deps.resolve4 || defaultResolve4;
-        let answers;
-        try { answers = await resolve4(t.name); } catch (e) {
-            if (e && (e.code === 'ENOTFOUND' || e.code === 'ENODATA')) throw httpError(403, 'NAME_NOT_FOUND');
-            throw httpError(503, 'NAME_LOOKUP_FAILED');
-        }
-        ips = (Array.isArray(answers) ? answers : []).map(String).filter(ip => normalizeTarget(ip).kind === 'ip');
-        if (!ips.length) throw httpError(403, 'NAME_NOT_FOUND');
-        if (!ips.every(ip => isPublicIpv4(ip, gwIps))) throw httpError(403, 'NAME_NOT_PUBLIC');
-    }
+    // 3. Public addresses only (not a Browser Gateway's own address either); never on the blocklist.
+    let peers;
+    try { peers = await readListStrict('/api/peers', 'peers'); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+    const gwIps = gatewayPeerIps({ peers });
+    if (!ips.every(ip => isPublicIpv4(ip, gwIps))) throw httpError(403, t.kind === 'ip' ? 'ADDRESS_NOT_PUBLIC' : 'NAME_NOT_PUBLIC');
     const ip = ips[0];
     const name = t.kind === 'name' ? t.name : '';
     let blocklist;
     try { blocklist = await getBlocklist(); } catch { throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't read the blocklist. Try again."); }
     if ([ip, `${ip}/32`, name].some(a => a && addressBlockedForNetwork(a, cc.networkId, blocklist))) throw httpError(403, 'ADDRESS_BLOCKED');
 
-    // 3. The user, when one is named: exists, only one, not blocked.
-    if (email) launchUser(snap, email);
-
-    // 4. Covered already (a resource, or an enabled route, for the address or the name): no create.
-    let inv;
-    try { inv = await getUsageData({ strict: true }); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
-    if (!(name ? nameUncovered(inv, name, ips) : ipUncovered(inv, ip))) {
-        return { address, resource: { created: false, address: t.kind === 'ip' ? t.ip : t.name } };
+    // 4. The user, when one is named: exists, only one, not blocked.
+    if (email) {
+        let users;
+        try { users = await readListStrict('/api/users', 'users'); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
+        launchUser({ users }, email);
     }
 
     // 5. Reserve it.
@@ -2611,15 +2668,24 @@ async function createForLaunch(key, address, email) {
         return { address: ip, resource: { created: false, ...(reserved.existing.resource_id ? { id: reserved.existing.resource_id } : {}), address: ip } };
     }
 
-    // 6. The key, right before the write: still valid, with both scopes.
+    // 6. Right before the write: the key is still valid with both scopes, and creating is still on
+    // for the same network and group (read again from the database).
     let valid;
-    try { valid = await apiKeys.keyStillValid(key.id, LAUNCH_SCOPE) && await apiKeys.keyStillValid(key.id, CREATE_SCOPE); } catch {
-        await settleCreated(attemptId, 'failed', { reason: 'The API key could not be checked.', from: 'creating' });
+    let still;
+    try {
+        valid = await apiKeys.keyStillValid(key.id, LAUNCH_SCOPE) && await apiKeys.keyStillValid(key.id, CREATE_SCOPE);
+        still = await readCreateSettings();
+    } catch {
+        await settleCreated(attemptId, 'failed', { reason: 'The API key or the settings could not be checked.', from: 'creating' });
         throw httpError(503, 'UNAVAILABLE', "Remote Access couldn't check the API key, so no server was added. Try again.");
     }
     if (!valid) {
         await settleCreated(attemptId, 'failed', { reason: 'The API key was revoked or lost a permission.', from: 'creating' });
         throw httpError(401, 'KEY_REVOKED', 'This API key was revoked, expired or lost a permission, so no server was added.');
+    }
+    if (!createUsable(still) || still.createResources.networkId !== cc.networkId || still.createResources.groupId !== cc.groupId) {
+        await settleCreated(attemptId, 'failed', { reason: 'Adding servers from links was turned off or changed.', from: 'creating' });
+        throw httpError(403, 'CREATE_DISABLED');
     }
     if (typeof _deps.createClientResource !== 'function') {
         await settleCreated(attemptId, 'failed', { reason: 'Not available.', from: 'creating' });
@@ -2682,9 +2748,12 @@ const policyUsing = (policies, rid) => policies.find(p => p && (Array.isArray(p.
 async function maintainCreatedResources() {
     if (NETBIRD_READONLY || !netbirdApiConfigured() || (typeof currentTenantAccount === 'function' && currentTenantAccount())) return null;
     if (_deps.isLeader && !_deps.isLeader()) return null;
-    const cc = _cfg.createResources;
-    // Nothing is ever created without a network, and the network can't change while any exist.
-    if (!cc.networkId) return null;
+    // The stored settings, not this instance's copy (another instance may have changed them).
+    const stored = await readCreateSettings();
+    const cc = stored.createResources;
+    // Nothing is created without a network. One cleared by a settings import still leaves its
+    // rows to recover and delete.
+    if (!cc.networkId && !(await countActiveCreated())) return null;
     const out = { paused: '', recovered: 0, failed: 0, deleted: 0, gone: 0, kept: 0 };
 
     if (cc.enabled && cc.groupId) {
@@ -2746,7 +2815,7 @@ async function maintainCreatedResources() {
            AND c.created_at < NOW() - make_interval(hours => $1)
            AND NOT EXISTS (SELECT 1 FROM remote_access_targets t WHERE t.resource_id = c.resource_id AND t.expires_at > NOW())
            AND NOT EXISTS (SELECT 1 FROM remote_sessions s WHERE s.resource_id = c.resource_id)
-         ORDER BY c.created_at LIMIT $2`, [_cfg.holdHours, CREATE_DELETE_BATCH]);
+         ORDER BY c.created_at LIMIT $2`, [stored.holdHours, CREATE_DELETE_BATCH]);
     const rows = (due && due.rows) || [];
     if (!rows.length) return out;
     let policies;
@@ -2816,7 +2885,7 @@ async function listCreatedResources() {
 
 module.exports = {
     issueLaunch, redeemLaunch,
-    linkManagedNetworkId, linkNetworkWriteRefused, listCreatedResources, getCreatePause: readCreatePause, maintainCreatedResources, CREATE_SCOPE,
+    linkManagedNetworkId, linkNetworkWriteRefused, linkResourceDeleteRefused, trackedCreatedResourceIds, noteCreatedResourceDeleted, listCreatedResources, getCreatePause: readCreatePause, maintainCreatedResources, CREATE_SCOPE,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
     withTargetLock, noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,

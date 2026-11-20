@@ -266,7 +266,7 @@ export default function NetworkDetail() {
             <div>
               <p className="text-[0.95rem] text-nb-gray-500 dark:text-nb-gray-400 mb-5">
                 {linkManaged
-                  ? "Remote Access links add and remove the resources in this network, so they can't be changed here."
+                  ? "Remote Access links add and remove the resources in this network. Only a resource it no longer manages can be deleted here."
                   : 'Add resources to this network to control what peers can access.'}
               </p>
 
@@ -421,7 +421,7 @@ export default function NetworkDetail() {
                     {sortedResources.length === 0 ? (
                       <tr><td colSpan={canBulk ? 6 : 5} className="px-6 py-8"><EmptyState title={search || anyFilter ? 'No Resources Match' : 'No Resources Yet'} /></td></tr>
                     ) : pageResources.map((r) => (
-                      <ResourceRow key={r.id} r={r} canEdit={canEditResources} canSelect={canBulk}
+                      <ResourceRow key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && canEdit && r.linkLocked === false)} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}
@@ -439,7 +439,7 @@ export default function NetworkDetail() {
                 ) : (
                   <div className="flex flex-col gap-2.5">
                     {pageResources.map((r) => (
-                      <ResourceCard key={r.id} r={r} canEdit={canEditResources} canSelect={canBulk}
+                      <ResourceCard key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && canEdit && r.linkLocked === false)} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}
@@ -786,8 +786,8 @@ function FilterChip({ onClear, children }: { onClear: () => void; children: Reac
   );
 }
 
-function ResourceRow({ r, canEdit, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
-  r: Resource; canEdit: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
+function ResourceRow({ r, canEdit, canDelete, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
+  r: Resource; canEdit: boolean; canDelete?: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
   onEdit: (tab: 'resource' | 'access') => void; onDuplicate: () => void; onToggleEnabled: () => void; onDelete: () => void;
 }) {
   const pc = r.policies?.length || 0;
@@ -855,14 +855,18 @@ function ResourceRow({ r, canEdit, canSelect, selected, onToggle, onEdit, onDupl
             <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
           </div>
         )}
+        {/* A server links added that Remote Access no longer manages: delete only. */}
+        {!canEdit && canDelete && (
+          <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
+        )}
       </td>
     </tr>
   );
 }
 
 // Mobile (md:hidden) card equivalent of ResourceRow.
-function ResourceCard({ r, canEdit, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
-  r: Resource; canEdit: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
+function ResourceCard({ r, canEdit, canDelete, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
+  r: Resource; canEdit: boolean; canDelete?: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
   onEdit: (tab: 'resource' | 'access') => void; onDuplicate: () => void; onToggleEnabled: () => void; onDelete: () => void;
 }) {
   const pc = r.policies?.length || 0;
@@ -892,6 +896,11 @@ function ResourceCard({ r, canEdit, canSelect, selected, onToggle, onEdit, onDup
               className={r.enabled === false ? 'hover:text-green-500 hover:border-green-500/30 hover:bg-green-500/10' : 'hover:text-amber-500 hover:border-amber-500/30 hover:bg-amber-500/10'}>
               <Power size={15} />
             </IconButton>
+            <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
+          </div>
+        )}
+        {!canEdit && canDelete && (
+          <div className="shrink-0 -mr-1" onClick={(e) => e.stopPropagation()}>
             <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
           </div>
         )}

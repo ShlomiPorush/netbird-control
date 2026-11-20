@@ -1352,6 +1352,8 @@ export interface Resource {
   enabled?: boolean;
   groups?: GroupRef[];
   policies?: ResourcePolicy[];
+  /** In the network for launch-link resources: Remote Access still manages it. An untracked one may be deleted. */
+  linkLocked?: boolean;
 }
 
 export interface Router {

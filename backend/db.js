@@ -29,7 +29,7 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
-    linkNetworkWriteRefused, linkManagedNetworkId,
+    linkNetworkWriteRefused, linkManagedNetworkId, linkResourceDeleteRefused, trackedCreatedResourceIds, noteCreatedResourceDeleted,
 } = require('./lib/remote-access');
 // "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
 const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered, nameCovered: coverageNameCovered } = require('./lib/coverage');
@@ -5971,6 +5971,12 @@ async function getNetworkDetail(id) {
         enabled: r.enabled !== false,
         groups: Array.isArray(r.groups) ? r.groups.map(g => ({ id: (g && g.id) || g, name: (g && g.name) || g })) : [],
     }));
+    // The network for launch-link resources: each resource says whether Remote Access still manages
+    // it (linkLocked). One it no longer tracks may be deleted by an admin. Unknown: locked.
+    if (raMain() && !!linkManagedNetworkId() && linkManagedNetworkId() === String(id)) {
+        const tracked = await trackedCreatedResourceIds().catch(() => null);
+        for (const r of resourceList) r.linkLocked = !tracked || tracked.has(String(r.id));
+    }
 
     // Attach the policies that grant access to each resource. A policy is "direct"
     // when it targets the resource via destinationResource (the app manages these);
@@ -8520,7 +8526,16 @@ async function getResourceInNetwork(networkId, resourceId) {
 
 // Delete a resource and best-effort clean up its auto-created policy + group
 async function deleteResource(networkId, resourceId) {
-    refuseLinkNetwork(networkId);
+    // In the network for launch-link resources, only a resource the app no longer tracks (kept,
+    // gone, or never its own) may be deleted, and its group (the feature's) is never cleaned up.
+    const linkNet = raMain() && !!linkManagedNetworkId() && linkManagedNetworkId() === String(networkId);
+    if (linkNet) {
+        let refused;
+        try { refused = await linkResourceDeleteRefused(networkId, resourceId); } catch {
+            const e = new Error("Couldn't check whether Remote Access still manages this resource - nothing was changed. Try again."); e.status = 503; throw e;
+        }
+        if (refused) throw linkNetworkError();
+    }
     // Fetch the resource first to learn its groups (and that it is in this network)
     const r = await getResourceInNetwork(networkId, resourceId);
     const groupIds = (r && Array.isArray(r.groups)) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
@@ -8546,6 +8561,11 @@ async function deleteResource(networkId, resourceId) {
     const del = await withTargets(() => resourceReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
     if (!del || del.status >= 300) throw new Error('Failed to delete resource: ' + (del && (del.raw || del.error || del.status)));
 
+    if (linkNet) {
+        await noteCreatedResourceDeleted(resourceId).catch(e => console.error('[deleteResource] created-resource row:', e.message));
+        bustNbCaches('policies', 'gref', 'usage');
+        return { status: 'ok' };
+    }
     // Clean up groups that are now empty (and the policies that targeted them)
     for (const gid of groupIds) {
         try {
@@ -11547,6 +11567,14 @@ async function importAppSettings(payload, actor) {
             if (smtpServer(imp) !== smtpServer(parseObject((await getSetting(k)) || '') || {})) {
                 skippedSettings.push({ key: k, reason: 'kept the current SMTP server - change it in Settings > Email (SMTP)' }); continue;
             }
+        }
+        if (k === 'remote_access_config') {
+            // An import never turns on adding servers from launch links: that needs the gateway
+            // check of a save in Settings > Remote Access. The other fields are kept.
+            const imp = parseObject(v);
+            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            if (imp.createResources && typeof imp.createResources === 'object' && !Array.isArray(imp.createResources)) imp.createResources = { ...imp.createResources, enabled: false };
+            val = JSON.stringify(imp);
         }
         if (isTelegramConfigKey(k)) {
             const imp = parseObject(v);

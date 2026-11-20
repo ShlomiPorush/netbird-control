@@ -139,7 +139,10 @@ test('a read-only instance never adds or deletes a server for a launch link', as
     await reset();
     ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 50 } });
     const key = { id: 7, name: 'Customer File', scopes: ['remote-access:launch', 'remote-access:create-resource'] };
-    await assert.rejects(ra.issueLaunch(key, { protocol: 'rdp', address: '8.8.8.8', port: 3389, createResource: true }), (e) => e.code === 'CREATE_DISABLED');
+    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 50 } });
+    // Read-only: creating is never allowed, so the launch goes on as without createResource.
+    const out = await ra.issueLaunch(key, { protocol: 'rdp', address: '8.8.8.8', port: 3389, createResource: true });
+    assert.equal(out.resource.created, false);
     assert.equal(await ra.maintainCreatedResources(), null);
     assert.deepEqual(writes, []);
 });
