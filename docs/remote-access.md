@@ -638,7 +638,7 @@ resource when all of these hold:
 
 - its hold has ended (or it never had one), no session row uses it, and no session of this
   instance (also one still opening) uses it, checked again under the target lock right before the
-  delete;
+  delete (the sessions of this instance last, with nothing in between);
 - it was created more than **Keep Opened Servers Available For** ago (10 hours by default);
 - a fresh read shows it exactly as it was created (the marker in the description, the name, the
   address, enabled, and its group; the Browser Gateway target group doesn't count), and no policy
@@ -659,7 +659,8 @@ using its resources as a Reverse Proxy target, adding them to temporary grants o
 and policies that name one of its resources as source or destination (creating, editing, enabling
 or duplicating one; deleting such a policy stays possible). This includes automations and the
 blocklist's enforcement. A Reverse Proxy change that keeps a service's targets is refused when one
-of them is such a resource. Tidy Names skips policies that name one (they are listed as skipped).
+of them is such a resource. Tidy Names skips policies that name one (they are listed as skipped; when NetBird's network list
+can't be read, every policy that names a resource is skipped).
 Routing peers of the network stay editable. Reading stays possible, and the
 Networks page shows the network as **Managed By Remote Access Links**.
 
@@ -670,8 +671,8 @@ refuses because a policy still uses it, the page shows NetBird's answer; delete 
 policy first. While a create for that address is still unresolved (or the resource carries the
 marker of a row that isn't finished), the delete waits until the next sync has resolved it. Choose a
 network that holds nothing else. Neither the network nor the group can be changed while servers
-added by links still exist; that check and the save run under the same database lock as a
-launch's reservation, so a launch can't reserve in the old network during the change.
+added by links still exist, and the networks open to the gateway must keep that network while
+adding servers is on or such servers exist.
 
 **The group.** The Browser Gateway must never reach the group through a policy of its own: then the
 gateway could reach every server that links added, not only the ones a session opened.
@@ -684,11 +685,20 @@ gateway could reach every server that links added, not only the ones a session o
   that would give a gateway source reach to the group, and a temporary grant of an Access Profile
   whose group is this group.
 - The group can't be one that an Access Profile uses (its group or a source): the picker leaves
-  those out and the save refuses them.
+  those out and the save refuses them. An Access Profile can't be created or changed to use the
+  group either. Turning adding servers off is always allowed.
 - The sync runs the same check. When it fails, or when NetBird can't be read for it, adding servers
   is paused (`CREATE_PAUSED`), and Settings > Remote Access and System Health show why. A later sync
   that passes, or a save of this section that passes the check, resumes it. A save of other fields
 leaves the pause as it is.
+
+**One lock for the configuration.** A database lock (the one a launch's reservation takes) is held,
+briefly, by every save of this section, every policy and Access Profile write that the group or the
+network concerns, a launch's reservation (which compares with the maximum stored at that moment), a
+settings import and a backup restore. NetBird is read before the lock is taken; under it the stored
+section is read again, and when another save changed it meanwhile, the request is refused with
+`409 SETTINGS_CHANGED` (try again). A save of this section changes only the fields it sends; the
+others stay as stored.
 
 **The settings are read from the database** each time, not from the instance's memory: by the
 create path, the sync, the guard and this page. Turning **Turn On** off on one instance stops adding
@@ -701,12 +711,12 @@ leaves the stored section as it is.
 
 **Settings import and backups.** A settings import or a backup restore never turns adding servers
 on: the imported `createResources.enabled` is set to off, and while servers added by links still
-exist, the stored network stays. The other fields are kept. Turn it on with a save on this page,
+exist, the stored network and group stay. The other fields are kept. Turn it on with a save on this page,
 which runs the gateway check. The internal (encrypted) backup carries the `ra_created_resources`
-table, so a restore keeps tracking the servers it lists; the plaintext settings export doesn't. A
-restore always turns adding servers off, also when the backup has no Remote Access settings, and
-sets the stored network and group to those of the restored rows. When those rows are in more than
-one network or group, that table is not restored (the current list stays) and the restore says so.
+table; the plaintext settings export doesn't. A restore never removes the rows tracked now: it adds
+the backup's rows that aren't there yet. It always turns adding servers off, also when the backup has
+no Remote Access settings, and sets the stored network and group to those of the rows. When the rows
+would then be in more than one network or group, nothing is added and the restore says so.
 
 **The list.** Settings > Remote Access lists every server added by links that still exists (or may),
 and the latest 50 finished entries (failed, removed, gone), with a note when older ones were left
