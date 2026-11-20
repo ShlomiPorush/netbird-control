@@ -243,6 +243,14 @@ export default function RemoteAccess() {
   // The target the form holds now (what a check would be for).
   const currentKey = () => targetKey(cleanAddressInput(address).address, portNum);
   const offerShown = !!addOffer && addOffer.key === currentKey() && nets.length > 0;
+  // With the button on screen, the refused step says the user can add it (the server's text asks
+  // an administrator to).
+  const isIpTarget = /^[0-9.]+$/.test(targetRef.current.address);
+  const listed = offerShown
+    ? shown.map((st) => (st.key === 'access' && st.state === 'fail'
+      ? { ...st, detail: `NetBird has no resource for this ${isIpTarget ? 'address' : 'host name'}. You can add it below.` }
+      : st))
+    : shown;
 
   const start = (e: FormEvent) => {
     e.preventDefault();
@@ -522,7 +530,7 @@ export default function RemoteAccess() {
                 : phase === 'checked' && caughtUp
                   ? <FlowHeader icon={<CheckCircle2 size={20} />} title="Ready To Connect" subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />
                   : <FlowHeader icon={protocol === 'rdp' ? <MonitorPlay size={19} /> : <Terminal size={19} />} title={checkOnlyRun ? 'Checking Again' : 'Connecting'} subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />}
-              <StepList steps={shown} />
+              <StepList steps={listed} />
             </>}
             {failure && caughtUp && (picking && offerShown ? (
               <div className="mt-5">

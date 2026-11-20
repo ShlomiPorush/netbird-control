@@ -289,6 +289,8 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
         ? `A copy of "${resource?.name || ''}" - adjust the name and address, then create.`
         : isEdit ? resource?.name : 'Add a resource to this network and control which peers can access it.'}
       size="lg"
+      // A save in flight can't be left: its answer (possibly "not confirmed") must land here.
+      closeDisabled={save.isPending}
       tabs={
         <Tabs
           bordered={false}
@@ -309,7 +311,7 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
               <ScanSearch size={14} /> Who Has Access
             </Button>
           )}
-          <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="secondary" size="sm" onClick={onClose} disabled={save.isPending}>Cancel</Button>
           <Button variant="primary" size="sm" onClick={submit} disabled={save.isPending || !!outcome || nameExists || addressExists || blockedHard}>
             {save.isPending ? '…' : isEdit ? 'Save Changes' : 'Create'}
           </Button>

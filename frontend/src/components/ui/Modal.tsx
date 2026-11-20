@@ -26,6 +26,8 @@ interface ModalProps {
   iconWrapClass?: string;
   /** Tabs row rendered under the header (e.g. Resource / Access Control). */
   tabs?: ReactNode;
+  /** While true the dialog can't be closed (X off, Escape ignored), e.g. while a save is in flight. */
+  closeDisabled?: boolean;
 }
 
 const sizes = { sm: 'max-w-[440px]', md: 'max-w-[560px]', lg: 'max-w-[820px]' };
@@ -34,7 +36,7 @@ const sizes = { sm: 'max-w-[440px]', md: 'max-w-[560px]', lg: 'max-w-[820px]' };
 // drawer, and any other full-screen overlay) - it must lock the html element, not just
 // body, or the global `html { overflow-x: hidden }` rule defeats it.
 
-export function Modal({ open, onClose, title, subtitle, icon, children, footer, size = 'md', widthClass, iconWrapClass, tabs }: ModalProps) {
+export function Modal({ open, onClose, title, subtitle, icon, children, footer, size = 'md', widthClass, iconWrapClass, tabs, closeDisabled = false }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const stackToken = useRef<symbol | undefined>(undefined);
@@ -52,7 +54,7 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (_modalStack[_modalStack.length - 1] !== stackToken.current) return; // not topmost
-      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key === 'Escape') { if (!closeDisabled) onClose(); return; }
       // Focus trap: keep Tab / Shift+Tab cycling inside the dialog.
       if (e.key === 'Tab' && panelRef.current) {
         const items = Array.from(panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE))
@@ -66,7 +68,7 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, closeDisabled]);
 
   // Initial focus into the dialog on open; restore focus to the opener on close.
   useEffect(() => {
@@ -121,7 +123,7 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
                 {subtitle && <p className="mt-0.5 text-[0.8rem] text-nb-gray-500 dark:text-nb-gray-500">{subtitle}</p>}
               </div>
             </div>
-            <button onClick={onClose} title="Close" aria-label="Close dialog" className="text-nb-gray-400 hover:text-red-500 transition-colors p-1 shrink-0">
+            <button onClick={onClose} disabled={closeDisabled} title="Close" aria-label="Close dialog" className="text-nb-gray-400 hover:text-red-500 transition-colors p-1 shrink-0 disabled:pointer-events-none disabled:opacity-40">
               <X size={20} />
             </button>
           </div>

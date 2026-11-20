@@ -143,18 +143,20 @@ export default function Troubleshoot() {
   const [error, setError] = useState('');
 
   // "Add As Resource" for an address that nothing in NetBird covers. It belongs to the device and the
-  // address that were checked (diagKey): a change of either hides it, and an answer that arrives
-  // after a change is not used for it. After an add whose outcome is unclear it stays hidden until
-  // the next check (noAdd).
+  // address that were checked (diagKey): a change of either hides it. Every run, every coverage
+  // refresh and every change of the inputs gets a new id (seq); only the answer of the latest one
+  // can show the button (shownRun), so an older answer never does, even for the same target again.
+  // After an add whose outcome is unclear it stays hidden until the next check (noAdd).
   const keyOf = (peer: string, address: string) => `${peer}|${address.trim().toLowerCase()}`;
   const [diagKey, setDiagKey] = useState('');
   const [noAdd, setNoAdd] = useState(false);
   const [picking, setPicking] = useState(false);
   const [adding, setAdding] = useState<{ networkId: string; address: string; key: string } | null>(null);
   const [rechecking, setRechecking] = useState(false);
-  const liveKey = useRef('');
-  liveKey.current = keyOf(peerId, addr);
-  const addable = !!targetDiag?.coverage?.addable && !noAdd && !!addr.trim() && diagKey === keyOf(peerId, addr);
+  const seq = useRef(0);
+  const [shownRun, setShownRun] = useState(-1);
+  useEffect(() => { seq.current += 1; }, [peerId, addr]);
+  const addable = !!targetDiag?.coverage?.addable && !noAdd && !!addr.trim() && diagKey === keyOf(peerId, addr) && shownRun === seq.current;
   // The networks this user may edit (the same list the Networks page shows), read only when needed.
   const editable = useQuery({
     queryKey: ['networks'], queryFn: () => api.get<Network[]>('/api/networks'), enabled: addable,
@@ -169,11 +171,12 @@ export default function Troubleshoot() {
   const startAdd = (networkId: string) => { setPicking(false); setAdding({ networkId, address: addAddress, key: keyOf(peerId, addr) }); };
   // After the add: the address check alone runs again (not the device or browser checks).
   const recheckCoverage = async (key: string) => {
-    if (key !== liveKey.current) return;
+    if (key !== keyOf(peerId, addr)) return;
+    const id = ++seq.current;
     setRechecking(true);
     try {
       const tgt = await api.get<TargetDiagnosis>('/api/diagnostics/address', { peer_id: peerId, address: addr.trim() });
-      if (key === liveKey.current) setTargetDiag(tgt);
+      if (id === seq.current) { setTargetDiag(tgt); setShownRun(id); }
     } catch { /* the earlier answer stays */ } finally {
       setRechecking(false);
     }
@@ -233,6 +236,7 @@ export default function Troubleshoot() {
     const freeAddr = addr.trim();
     const tgtLabel = target?.name || freeAddr;
     const runKey = keyOf(peerId, freeAddr);
+    const id = ++seq.current;
     setDiagKey('');
     setNoAdd(false);
     setPicking(false);
@@ -292,8 +296,9 @@ export default function Troubleshoot() {
       ]);
       setDevice(dev);
       setTargetDiag(tgt);
-      // The answer is for the device and address of this run only.
+      // The answer is for the device and address of this run only, and only while it is the latest.
       setDiagKey(freeAddr ? runKey : '');
+      if (id === seq.current) setShownRun(id);
     } catch (e) {
       setError((e as Error).message || 'Diagnostics failed');
     } finally {
