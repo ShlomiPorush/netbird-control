@@ -185,24 +185,26 @@ checks, in this order, and stops at the first refusal:
 2. Adding servers is on, not paused, and the instance is not read-only (`CREATE_DISABLED`,
    `CREATE_PAUSED`). The app reads these settings from the database on every request, so turning
    the feature off stops it on every instance at once.
-3. The target is public. An IPv4 address must not be in any IANA special-purpose range (private,
-   shared, loopback, link-local, documentation, benchmarking, multicast, reserved, broadcast) or be
-   a Browser Gateway's own address (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
+3. The target is public. An IPv4 address must not be in the IANA IPv4 Special-Purpose Address
+   Registry (every entry), multicast, or be a Browser Gateway's own address (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
    public (`NAME_NOT_PUBLIC`), and the app uses the first one. A name with no IPv4 answer is
-   `NAME_NOT_FOUND`. Neither the address nor the name may be on the blocklist (`ADDRESS_BLOCKED`).
+   `NAME_NOT_FOUND`. Neither the address nor the name may be on the blocklist (`ADDRESS_BLOCKED`;
+   names compare without regard to letter case, a trailing dot or international spelling).
 4. With `user`: the user exists, only once, and is not blocked.
 5. Fewer than the maximum servers added by links exist (`CREATE_LIMIT`), and no other request is
    adding the same address.
-6. Right before the write, the key is checked again (`401 KEY_REVOKED`), and so are the settings
-   (`CREATE_DISABLED` when adding was turned off meanwhile).
+6. Right before the write (inside the resource writer, after its own checks and its wait for the
+   lock), the key is checked again (`401 KEY_REVOKED`), and so are the settings (`CREATE_DISABLED`
+   when adding was turned off meanwhile). Then nothing is sent.
 
 Addresses that are never a Remote Access target (loopback, NetBird peers, multicast, reserved) go
-on as without `createResource`, and the usual checks refuse them.
+on as without `createResource`, and the usual checks refuse them. A host name with such an answer
+next to a public one is `NAME_NOT_PUBLIC`.
 
 The new resource is a host resource (`x.x.x.x/32`) named after the address (or `name (address)`
 for a host name), in the chosen network and group, with no policy. Then the usual checks follow:
 with `user`, that user's access to the address. The link connects to the address, also when the
-request sent a host name.
+request sent a host name; it then keeps the name for the SSH host key set for it.
 
 The `201` answer then has:
 
