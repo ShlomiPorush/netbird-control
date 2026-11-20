@@ -7696,13 +7696,37 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
     const gid = (g) => (g && g.id) || g;
     const typed = normalizeRemoteTarget(host);
     const mayAdd = inventoryRead && !NETBIRD_READONLY && !opts.clipped && portValid && !typed.error;
+    // The device's groups for route distribution: its own, its owner's, and All (read once).
+    let distGroups = null;
+    const deviceGroups = async () => {
+        if (distGroups) return distGroups;
+        const memberIds = new Set((peer.groups || []).map(g => g.id).filter(Boolean));
+        if (peer.user_id) {
+            for (const u of await getAllUsers().catch(() => [])) {
+                if (u.id === peer.user_id) { for (const g of (u.groups || [])) { const i = gid(g); if (i) memberIds.add(i); } break; }
+            }
+        }
+        const groupsRaw = await netbirdGet('/api/groups').catch(() => null);
+        const groupsArr = Array.isArray(groupsRaw) ? groupsRaw : [];
+        const allIds = new Set(groupsArr.filter(g => (g.name || '') === 'All').map(g => g.id));
+        distGroups = { memberIds, allIds, groupsArr };
+        return distGroups;
+    };
+    const receivesRoute = async (rt) => {
+        const { memberIds, allIds } = await deviceGroups();
+        return (Array.isArray(rt.groups) ? rt.groups : []).some(g => { const i = gid(g); return memberIds.has(i) || allIds.has(i); });
+    };
     let nameLookup = null; // { ips } or { code } for a host name that no domain resource matches
     const coverageNow = async () => {
         if (!mayAdd) return covered;
-        // For a device, an enabled default route (0.0.0.0/0, an exit node) does carry an address
-        // through NetBird, so nothing that resolves to an address is offered then. (Remote Access
-        // keeps its own rule: the gateway never uses a default route.)
-        const exitNode = (usage.routes || []).some(r => r && r.enabled !== false && String(r.network || '').trim() === '0.0.0.0/0');
+        // An enabled default route (0.0.0.0/0, an exit node) that is offered to this device does carry
+        // an address through NetBird for it, so nothing that resolves to an address is offered then.
+        // One for other groups doesn't count. (Remote Access keeps its own rule: the gateway never
+        // uses a default route.)
+        let exitNode = false;
+        for (const r of (usage.routes || [])) {
+            if (r && r.enabled !== false && String(r.network || '').trim() === '0.0.0.0/0' && await receivesRoute(r)) { exitNode = true; break; }
+        }
         if (typed.kind === 'ip') return { addable: !exitNode && coverageIpUncovered(usage, typed.ip) };
         if (nameLookup && nameLookup.ips) return { addable: !exitNode && coverageNameUncovered(usage, typed.name, nameLookup.ips) };
         if (!nameLookup || nameLookup.code !== 'ENOTFOUND' || !raMain() || coverageNameCovered(usage, typed.name)) return covered;
@@ -7818,17 +7842,8 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
         }
         if (route.enabled !== false) {
             // The device only receives the route if it is in one of the distribution groups.
-            const memberIds = new Set((peer.groups || []).map(g => g.id).filter(Boolean));
-            if (peer.user_id) {
-                for (const u of await getAllUsers().catch(() => [])) {
-                    if (u.id === peer.user_id) { for (const g of (u.groups || [])) { const i = gid(g); if (i) memberIds.add(i); } break; }
-                }
-            }
-            const groupsRaw = await netbirdGet('/api/groups').catch(() => null);
-            const groupsArr = Array.isArray(groupsRaw) ? groupsRaw : [];
-            const allIds = new Set(groupsArr.filter(g => (g.name || '') === 'All').map(g => g.id));
-            const dist = Array.isArray(route.groups) ? route.groups : [];
-            const receives = dist.some(g => { const i = gid(g); return memberIds.has(i) || allIds.has(i); });
+            const { groupsArr } = await deviceGroups();
+            const receives = await receivesRoute(route);
             if (receives) add('route', 'Route Distribution', 'PASS', `This device is in the route's distribution groups - it ${isExitNode ? 'is OFFERED the exit node' : 'receives the route'}`);
             else add('route', 'Route Distribution', 'FAIL', `This device is NOT in the route's distribution groups - ${isExitNode ? 'the exit node is not even offered to it' : 'it does not receive this route'}; ask an admin to add it`);
 

@@ -98,15 +98,3 @@ test('the strict read fails on a failed status, also when its body is an empty l
         await assert.rejects(nb.getUsageData({ strict: true }), /resources and routes/);
     } finally { st.failRoutes = false; }
 });
-
-test('the URL and token are handed out as one pair whose version changes with either value', () => {
-    const a = nb.getNbApiSnapshot();
-    assert.equal(nb.getNbApiSnapshot(), a, 'unchanged values: the same pair');
-    const token = nb._nbApi.token;
-    nb._nbApi.token = crypto.randomBytes(16).toString('hex');
-    const b = nb.getNbApiSnapshot();
-    assert.notEqual(b.version, a.version);
-    assert.equal(b.url, a.url);
-    assert.equal(Object.isFrozen(b), true);
-    nb._nbApi.token = token;
-});

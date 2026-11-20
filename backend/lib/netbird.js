@@ -111,7 +111,6 @@ async function loadNbApi({ strict = false } = {}) {
         // A value cleared in the database clears it here too (a reload must match the stored state).
         if (!_nbEnv.url) _nbApi.url = m.netbird_api_url || '';
         if (!_nbEnv.token) _nbApi.token = m.netbird_api_token || '';
-        _nbApiCommitted = getNbApiSnapshot().version;
     } catch (e) {
         if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[NetBird API] config load error:', e.message);
@@ -123,42 +122,17 @@ function getNbApiConfig() {
     return { url: _nbApi.url || '', hasToken: !!_nbApi.token, urlFromEnv: !!_nbEnv.url, tokenFromEnv: !!_nbEnv.token };
 }
 
-// For the service status probe only (lib/remote-access.js): the URL and token as one pair, read in
-// one synchronous step, with a version that changes whenever either one changed in memory; and
-// whether that pair is the committed one (loaded, or saved in full) with no save running. A save
-// that failed half way leaves a pair that was never committed: the probe sends nothing then.
-let _nbApiChanges = 0; // raised by every change setNbApiConfig makes
-let _nbApiVersion = 0;
-let _nbApiSnap = null;
-let _nbApiSaving = 0;
-let _nbApiCommitted = 0; // the snapshot version of the pair last loaded or saved in full
-function getNbApiSnapshot() {
-    if (!_nbApiSnap || _nbApiSnap.url !== _nbApi.url || _nbApiSnap.token !== _nbApi.token || _nbApiSnap.changes !== _nbApiChanges) {
-        _nbApiSnap = Object.freeze({ url: _nbApi.url, token: _nbApi.token, changes: _nbApiChanges, version: ++_nbApiVersion });
-    }
-    return _nbApiSnap;
-}
-const nbApiReady = () => _nbApiSaving === 0 && getNbApiSnapshot().version === _nbApiCommitted;
-
 // Persist + apply new connection settings. Env-managed fields are immutable; an
 // empty/omitted token keeps the existing one.
 async function setNbApiConfig({ url, token }) {
-    _nbApiSaving++;
-    try {
-        if (url !== undefined && !_nbEnv.url) {
-            _nbApi.url = String(url || '').trim();
-            _nbApiChanges++;
-            await setSetting('netbird_api_url', _nbApi.url);
-        }
-        if (token !== undefined && String(token).trim() !== '' && !_nbEnv.token) {
-            _nbApi.token = String(token).trim();
-            _nbApiChanges++;
-            await setSetting('netbird_api_token', _nbApi.token);
-        }
-    } finally {
-        _nbApiSaving--;
+    if (url !== undefined && !_nbEnv.url) {
+        _nbApi.url = String(url || '').trim();
+        await setSetting('netbird_api_url', _nbApi.url);
     }
-    _nbApiCommitted = getNbApiSnapshot().version;
+    if (token !== undefined && String(token).trim() !== '' && !_nbEnv.token) {
+        _nbApi.token = String(token).trim();
+        await setSetting('netbird_api_token', _nbApi.token);
+    }
     // Force the caches that depend on the API to refresh on next use.
     resetNbCaches();
     return getNbApiConfig();
@@ -599,15 +573,17 @@ function getUsageData({ strict = false } = {}) {
     return p;
 }
 
-// One direct GET to the NetBird API with the given { url, token } pair (getNbApiSnapshot): no
-// retry, no shared rate-limit pause, no tenant switch, no cache, and it does not count as the
-// "last good NetBird answer". Used by the service status probe. → { status, body } or { status: 0 }.
-function nbDirectGet(api, apiPath, { timeoutMs = 4000 } = {}) {
-    if (!api || !api.url || !api.token) return Promise.resolve({ status: 0, error: 'The NetBird API is not connected' });
+// One direct GET to the main account's NetBird API: no retry, no shared rate-limit pause, no tenant
+// switch, no cache, and it does not count as the "last good NetBird answer". Used by the service
+// status probe. Without opts.auth it sends no token at all (a reachability check). The URL and the
+// token are read in one step. → { status, body } or { status: 0 }.
+function nbDirectGet(apiPath, { auth = false, timeoutMs = 4000 } = {}) {
+    const { url: base, token } = _nbApi;
+    if (!base || (auth && !token)) return Promise.resolve({ status: 0, error: 'The NetBird API is not connected' });
     let url;
-    try { url = new URL(apiPath, api.url).toString(); } catch { return Promise.resolve({ status: 0, error: 'Invalid URL' }); }
+    try { url = new URL(apiPath, base).toString(); } catch { return Promise.resolve({ status: 0, error: 'Invalid URL' }); }
     return httpJson('GET', url, {
-        headers: { Authorization: `Token ${api.token}` },
+        headers: auth ? { Authorization: `Token ${token}` } : {},
         timeoutMs, deadlineMs: timeoutMs, maxBytes: 1024 * 1024, noteOk: false,
     });
 }
@@ -767,13 +743,13 @@ function getBypassedPeerCount() { return _bypassedPeerIds.size; }
 
 module.exports = {
     _nbApi,
-    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured, getNbApiSnapshot, nbApiReady, nbDirectGet,
+    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured,
     NETBIRD_READONLY, readOnlyResp,
     netbirdGet, netbirdPost, netbirdPut, netbirdReq,
     _setNetbirdTimingForTests,
     bustNbCaches, resetNbCaches, setCacheResetHook,
     ensureGroupsFresh, ensurePoliciesFresh, getGroupsMap, getPoliciesMap,
-    getGroupRefMap, getUsageData, invalidateUsage, getReverseProxyStatus, bustReverseProxyCache,
+    getGroupRefMap, getUsageData, invalidateUsage, nbDirectGet, getReverseProxyStatus, bustReverseProxyCache,
     refreshBypassedPeers, peerIsBypassed, getBypassedPeerCount,
     runWithTenant, currentTenantAccount, getMspStatus, bustMspCache,
     loadTenantTokens, setTenantTokenInMemory, hasTenantToken,

@@ -16,13 +16,7 @@ const crypto = require('crypto');
 const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] || null;
-let settingHold = null; // a settings save waits on this while it is set
-let settingFail = null; // a settings key whose save fails
-core.setSetting = async (k, v) => {
-    if (settingHold) await settingHold;
-    if (settingFail === k) throw new Error('database unavailable');
-    settings[k] = v;
-};
+core.setSetting = async (k, v) => { settings[k] = v; };
 core.pool.query = async () => ({ rows: [] });
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
@@ -218,7 +212,7 @@ function fakeNetbird() {
     const st = { status: {}, body: {}, seen: [], hold: null, slow: {} };
     st.server = http.createServer(async (req, res) => {
         st.seen.push({ path: req.url, auth: req.headers.authorization });
-        if (st.hold && req.url === '/api/accounts') await st.hold;
+        if (st.hold && req.url === '/api/users/current') await st.hold;
         if (st.slow[req.url]) await new Promise((r) => setTimeout(r, st.slow[req.url]));
         res.statusCode = st.status[req.url] || 200;
         res.setHeader('content-type', 'application/json');
@@ -239,16 +233,15 @@ test('status: set up the fake NetBird and guacd', async () => {
     urlB = `http://127.0.0.1:${await listen(nbB.server)}`;
 });
 
-// The NetBird connection is set the way the app sets it (a save that commits the pair).
 async function healthSetup({ namesPort = guacdPort, ipPort = guacdPort } = {}) {
     ra._internal.setConfigForTest({ enabled: true, guacdHost: '127.0.0.1', guacdPort: ipPort, namesGuacdHost: '127.0.0.1', namesGuacdPort: namesPort });
     ra._internal.setManagedForTest({ gatewayGroupId: 'g-gw', namesGroupId: 'g-ngw' });
     ra._internal.resetHealthForTest();
-    await nb.setNbApiConfig({ url: urlA, token: TOKEN_A });
+    nb._nbApi.url = urlA; nb._nbApi.token = TOKEN_A;
     for (const f of [nbA, nbB]) {
         f.status = {}; f.seen = []; f.hold = null; f.slow = {};
         f.body = {
-            '/api/accounts': [{ id: 'acc' }],
+            '/api/users/current': [{ id: 'acc' }],
             '/api/groups/g-gw': { id: 'g-gw', name: 'Browser Gateway', peers: [{ id: 'p-gw', name: 'gw' }] },
             '/api/groups/g-ngw': { id: 'g-ngw', name: 'Browser Gateway Names', peers: [{ id: 'p-ngw', name: 'ngw' }] },
             '/api/peers/p-gw': { id: 'p-gw', connected: true },
@@ -260,22 +253,26 @@ async function healthSetup({ namesPort = guacdPort, ipPort = guacdPort } = {}) {
 test('status: the answer has the three states and nothing else', async () => {
     await healthSetup();
     assert.deepEqual(await ra.getServiceHealth(), { netbird: 'up', gateway: 'up', namesGateway: 'up' });
-    assert.ok(nbA.seen.every(s => s.auth === `Token ${TOKEN_A}`));
+    // NetBird's own check carries no token; the gateway reads are ordinary authenticated reads.
+    const own = nbA.seen.filter(s => s.path === '/api/users/current');
+    assert.equal(own.length, 1);
+    assert.equal(own[0].auth, undefined, 'no Authorization header');
+    assert.ok(nbA.seen.filter(s => s.path !== '/api/users/current').every(s => s.auth === `Token ${TOKEN_A}`));
     // No names gateway peer: the names gateway isn't set up, so it is not in the answer.
     await healthSetup();
     nbA.body['/api/groups/g-ngw'] = { id: 'g-ngw', name: 'Browser Gateway Names', peers: null };
     assert.deepEqual(await ra.getServiceHealth(), { netbird: 'up', gateway: 'up' });
 });
 
-test('status: NetBird is down on no answer, 5xx, 401 or 403, and unknown on another answer', async () => {
-    const cases = { 200: 'up', 401: 'down', 403: 'down', 500: 'down', 503: 'down', 404: 'unknown', 429: 'unknown' };
+test('status: NetBird is up on any answer below 500 (it is reachable), and down on a 5xx or no answer', async () => {
+    const cases = { 200: 'up', 401: 'up', 403: 'up', 404: 'up', 429: 'up', 500: 'down', 503: 'down' };
     for (const [code, want] of Object.entries(cases)) {
         await healthSetup();
-        nbA.status['/api/accounts'] = Number(code);
+        nbA.status['/api/users/current'] = Number(code);
         assert.equal((await ra.getServiceHealth()).netbird, want, code);
     }
     await healthSetup();
-    await nb.setNbApiConfig({ url: `http://127.0.0.1:${closedPort}` });
+    nb._nbApi.url = `http://127.0.0.1:${closedPort}`;
     const off = await ra.getServiceHealth();
     assert.equal(off.netbird, 'down');
     assert.equal(off.gateway, 'unknown', 'guacd answers, but the gateway peers could not be read');
@@ -334,7 +331,7 @@ test('status: one probe at a time, kept for 15 seconds', async () => {
     const [a, b] = await Promise.all([ra.getServiceHealth(), ra.getServiceHealth()]);
     assert.deepEqual(a, b);
     await ra.getServiceHealth();
-    assert.equal(nbA.seen.filter(s => s.path === '/api/accounts').length, 1);
+    assert.equal(nbA.seen.filter(s => s.path === '/api/users/current').length, 1);
 });
 
 test('status: a settings change starts a new probe, and the old probe is never used or sent to the new URL', async () => {
@@ -342,20 +339,20 @@ test('status: a settings change starts a new probe, and the old probe is never u
     let release;
     nbA.hold = new Promise((r) => { release = r; });
     const pending = ra.getServiceHealth();
-    while (!nbA.seen.some(s => s.path === '/api/accounts')) await new Promise((r) => setTimeout(r, 5));
+    while (!nbA.seen.some(s => s.path === '/api/users/current')) await new Promise((r) => setTimeout(r, 5));
     // The NetBird connection changes while the probe runs (URL and token together).
-    await nb.setNbApiConfig({ url: urlB, token: TOKEN_B });
-    nbB.status['/api/accounts'] = 401;
+    nb._nbApi.url = urlB; nb._nbApi.token = TOKEN_B;
+    nbB.status['/api/users/current'] = 503;
     release();
     const out = await pending;
-    assert.equal(out.netbird, 'down', 'the answer is the new probe\'s (401 at the new URL), not the old one\'s');
-    assert.ok(nbA.seen.every(s => s.auth === `Token ${TOKEN_A}`), 'the old URL only ever got the old token');
-    assert.ok(nbB.seen.length > 0 && nbB.seen.every(s => s.auth === `Token ${TOKEN_B}`), 'the new URL only ever got the new token');
+    assert.equal(out.netbird, 'down', 'the answer is the new probe (a 503 at the new URL), not the old one');
+    assert.ok(nbB.seen.some(s => s.path === '/api/users/current'), 'the URL change started a new probe');
+    assert.ok([...nbA.seen, ...nbB.seen].filter(s => s.path === '/api/users/current').every(s => s.auth === undefined));
     // A gateway settings change also starts a new probe.
-    const before = nbB.seen.filter(s => s.path === '/api/accounts').length;
+    const before = nbB.seen.filter(s => s.path === '/api/users/current').length;
     ra._internal.setManagedForTest({ gatewayGroupId: 'g-gw', namesGroupId: '' });
     const again = await ra.getServiceHealth();
-    assert.equal(nbB.seen.filter(s => s.path === '/api/accounts').length, before + 1);
+    assert.equal(nbB.seen.filter(s => s.path === '/api/users/current').length, before + 1);
     assert.equal('namesGateway' in again, false);
 });
 
@@ -365,6 +362,10 @@ test('status: a part that runs out of time is unknown, and the other parts keep 
     try {
         nbA.slow['/api/groups/g-gw'] = 1000;
         assert.deepEqual(await ra.getServiceHealth(), { netbird: 'up', gateway: 'unknown', namesGateway: 'up' });
+        // NetBird that doesn't answer in time is down.
+        await healthSetup();
+        nbA.slow['/api/users/current'] = 1000;
+        assert.equal((await ra.getServiceHealth()).netbird, 'down');
         // No peer read starts after the time limit.
         await healthSetup();
         const ids = Array.from({ length: 12 }, (_, i) => `p-${i}`);
@@ -377,28 +378,12 @@ test('status: a part that runs out of time is unknown, and the other parts keep 
     } finally { ra._internal.setHealthDeadlineForTest(0); }
 });
 
-test('status: what was seen of the names gateway counts only for the same NetBird connection', async () => {
+test('status: what was seen of the names gateway counts only for the same NetBird URL', async () => {
     await healthSetup();
     assert.equal((await ra.getServiceHealth()).namesGateway, 'up');
-    await nb.setNbApiConfig({ token: TOKEN_B }); // another connection version
-    nbA.status['/api/groups/g-ngw'] = 500;
+    nb._nbApi.url = urlB; // another NetBird
+    nbB.status['/api/groups/g-ngw'] = 500;
     assert.equal('namesGateway' in (await ra.getServiceHealth()), false);
-});
-
-test('status: while the NetBird settings are being saved the probe sends nothing, and NetBird is unknown', async () => {
-    await healthSetup();
-    let release;
-    settingHold = new Promise((r) => { release = r; });
-    const saving = nb.setNbApiConfig({ url: urlB, token: TOKEN_B });
-    try {
-        const out = await ra.getServiceHealth();
-        assert.equal(out.netbird, 'unknown');
-        assert.equal(nbA.seen.length + nbB.seen.length, 0, 'no request was sent to either URL');
-    } finally { settingHold = null; release(); await saving; }
-    // After the save, a probe runs normally against the new connection.
-    nbB.seen = [];
-    assert.equal((await ra.getServiceHealth()).netbird, 'up');
-    assert.ok(nbB.seen.length > 0 && nbB.seen.every(x => x.auth === `Token ${TOKEN_B}`));
 });
 
 test('status: peer reads that run out of time: a known names gateway is unknown, a gateway with guacd down is down', async () => {
@@ -418,7 +403,7 @@ test('status: only the latest probe stores its answer (A, B, A)', async () => {
     let release;
     nbA.hold = new Promise((r) => { release = r; });
     const first = ra.getServiceHealth(); // settings A, held
-    while (!nbA.seen.some(x => x.path === '/api/accounts')) await new Promise((r) => setTimeout(r, 5));
+    while (!nbA.seen.some(x => x.path === '/api/users/current')) await new Promise((r) => setTimeout(r, 5));
     const cfgA = { enabled: true, guacdHost: '127.0.0.1', guacdPort, namesGuacdHost: '127.0.0.1', namesGuacdPort: guacdPort };
     ra._internal.setConfigForTest({ ...cfgA, namesGuacdPort: closedPort }); // settings B
     nbA.hold = null;
@@ -426,23 +411,9 @@ test('status: only the latest probe stores its answer (A, B, A)', async () => {
     ra._internal.setConfigForTest(cfgA); // back to A: the same key as the first probe
     release();
     await first;
-    const before = nbA.seen.filter(x => x.path === '/api/accounts').length;
+    const before = nbA.seen.filter(x => x.path === '/api/users/current').length;
     await ra.getServiceHealth();
-    assert.equal(nbA.seen.filter(x => x.path === '/api/accounts').length, before + 1, 'the older probe did not store its answer');
-});
-
-test('status: a save that failed half way leaves a pair that is never sent, and no answer is cached', async () => {
-    await healthSetup();
-    settingFail = 'netbird_api_url';
-    try {
-        await assert.rejects(nb.setNbApiConfig({ url: urlB, token: TOKEN_B }), /database unavailable/);
-    } finally { settingFail = null; }
-    assert.equal(nb._nbApi.url, urlB, 'the URL changed in memory (as on main), the token did not');
-    nbA.seen = []; nbB.seen = [];
-    assert.equal((await ra.getServiceHealth()).netbird, 'unknown');
-    assert.equal(nbA.seen.length + nbB.seen.length, 0, 'nothing was sent with the mixed pair');
-    await nb.setNbApiConfig({ url: urlA, token: TOKEN_A });
-    assert.equal((await ra.getServiceHealth()).netbird, 'up', 'a full save commits a pair again; the unknown answer was not cached');
+    assert.equal(nbA.seen.filter(x => x.path === '/api/users/current').length, before + 1, 'the older probe did not store its answer');
 });
 
 test('status: what is seen of the names gateway belongs to the group the probe started with', async () => {

@@ -275,7 +275,9 @@ cut to the length limit) and the instance is not read-only. A host name follows 
 above: found in the DNS with every address uncovered, or unknown to the DNS while the names gateway
 is set up (main account only; never while managing a tenant). Unlike Remote Access, an enabled
 default route (`0.0.0.0/0`, an exit node) counts here: the device reaches the address through it,
-so nothing that resolves to an address is offered then.
+so nothing that resolves to an address is offered then. This counts only when that route is offered
+to the selected device (it is in one of the route's distribution groups); a default route for other
+groups doesn't block the offer.
 After the save, only the address check runs again.
 
 After any create that may have added a resource, the app drops the cached NetBird lists of the
@@ -289,8 +291,10 @@ set up, **Host Name Gateway**, each **Online**, **Offline** or **Unknown**, with
 `GET /api/remote-access/health` answers `{ netbird, gateway, namesGateway? }` (each `up`, `down` or
 `unknown`) and nothing else. It is refused to a user blocked in NetBird.
 
-- **NetBird**: one light read with the main account's NetBird URL and token. A success is up; no
-  answer, a timeout, a server error, 401 or 403 is down; any other answer is unknown.
+- **NetBird**: is NetBird reachable? One request to the main account's NetBird URL, to an API path
+  that needs a sign-in, sent **without** the token. Any answer below 500 (401 included) is up: NetBird
+  is reachable and answering. No answer, a timeout or a server error (5xx) is down. Online does not
+  say that the app's own token is valid.
 - **Each gateway**: every peer of its group is read from NetBird (up to 50, a few at a time) and its
   guacd is probed over TCP. Up when a gateway peer is connected and guacd answers; down when either
   is known to be bad; unknown when NetBird couldn't be read. A names gateway whose group can't be
@@ -298,11 +302,11 @@ set up, **Host Name Gateway**, each **Online**, **Offline** or **Unknown**, with
 
 The probe is direct (no retry, no cache, independent of the session checks), runs once at a time and
 is kept for 15 seconds. Each part (NetBird, each gateway) has its own time limit of 9 seconds: a part
-that runs out of time is unknown (a gateway whose guacd is known to be down is down), the others keep
-their answers, and no peer read starts after the limit. A change of the NetBird connection or the
-gateway settings starts a new probe, and only the latest probe keeps its answer. The probe reads the
-URL and token in one step and sends nothing while the NetBird connection settings are being saved
-(NetBird then shows as unknown), so it never sends a token to another URL. The page asks only when
+that runs out of time is down for NetBird, and unknown for a gateway (down when its guacd is known to
+be down); the others keep their answers, and no peer read starts after the limit. The gateway peer
+reads are ordinary signed-in NetBird reads, like every other NetBird call of the app. A change of the
+NetBird URL or the gateway settings starts a new probe, and only the latest probe keeps its answer.
+The page asks only when
 it opens, when a check starts and when the user presses refresh, so the line never keeps an idle
 sign-in alive, and the status request never refreshes the app's copy of the NetBird users and
 peers: it uses the copy as it is.

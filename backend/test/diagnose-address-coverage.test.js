@@ -1,7 +1,8 @@
 // Troubleshoot's address check offers "Add As Resource" through `coverage.addable`
 // (db.diagnoseAddress): true only when the resources and the routes were both read fresh, the
 // address is valid as typed (not cut to the length limit, a port from 1 to 65535), and nothing in
-// NetBird covers it - a default route (exit node) or a disabled route doesn't count.
+// NetBird covers it - a disabled route doesn't count, and a default route (exit node) counts only
+// when it is offered to the device.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
@@ -23,6 +24,7 @@ const server = http.createServer((req, res) => {
     if (path === '/api/groups/g-ngw') return send(200, { id: 'g-ngw', name: 'Browser Gateway Names', peers: st.namesPeers });
     if (path === '/api/routes') return st.failRoutes ? send(500, { message: 'unavailable' }) : send(200, st.routes);
     if (path === '/api/networks/resources') return send(200, st.resources);
+    if (path === '/api/groups') return send(200, [{ id: 'g-all', name: 'All' }, { id: 'g-other', name: 'Other' }]);
     send(200, []);
 });
 const db = require('../db');
@@ -62,15 +64,17 @@ test('an uncovered IP address is addable, with or without a port', async () => {
     assert.deepEqual(r.coverage, { addable: true });
 });
 
-test('an enabled legacy route covers it, and so does an exit node for a device; a disabled route does not', async () => {
+test('an enabled legacy route covers it, and so does an exit node offered to the device; a disabled route does not', async () => {
     reset({ routes: [{ id: 'l1', network: '192.0.2.0/24', network_id: 'lan', enabled: true, groups: [] }] });
     assert.deepEqual((await check('192.0.2.44')).coverage, { addable: false });
     reset({ routes: [{ id: 'l1', network: '192.0.2.0/24', network_id: 'lan', enabled: false, groups: [] }] });
     assert.deepEqual((await check('192.0.2.44')).coverage, { addable: true });
-    reset({ routes: [{ id: 'exit', network: '0.0.0.0/0', network_id: 'exit', enabled: true, groups: [] }] });
+    reset({ routes: [{ id: 'exit', network: '0.0.0.0/0', network_id: 'exit', enabled: true, groups: [{ id: 'g-all' }] }] });
     const r = await check('192.0.2.44');
     assert.equal(r.findings.find(f => f.key === 'coverage').status, 'INFO', 'the exit node note is still shown');
-    assert.deepEqual(r.coverage, { addable: false }, 'the device reaches it through the exit node');
+    assert.deepEqual(r.coverage, { addable: false }, 'the device gets the exit node (All), so it reaches the address through it');
+    reset({ routes: [{ id: 'exit', network: '0.0.0.0/0', network_id: 'exit', enabled: true, groups: [{ id: 'g-other' }] }] });
+    assert.deepEqual((await check('192.0.2.44')).coverage, { addable: true }, 'an exit node for other groups is not offered to this device');
 });
 
 test('a failed resources or routes read never offers, and the diagnosis still answers', async () => {
