@@ -12,17 +12,25 @@ const crypto = require('crypto');
 // The settings saves go through a stub database client: every statement is recorded with the
 // connection the app used while it ran.
 const core = require('../lib/core');
+const { EventEmitter } = require('events');
 const statements = [];
+const releases = []; // what each client was released with (an error destroys it)
 let failInsert = null; // a key whose insert fails
-core.pool.connect = async () => ({
-    query: async (sql, params) => {
+let clientMode = null; // 'hang': the insert never answers; 'error': the connection breaks during it
+core.pool.connect = async () => {
+    const client = new EventEmitter();
+    const mode = clientMode;
+    client.query = async (sql, params) => {
         statements.push({ sql: String(sql).trim().split(/\s+/)[0], key: params && params[0], url: nb._nbApi.url, token: nb._nbApi.token });
+        if (params && mode === 'hang') return new Promise(() => { });
+        if (params && mode === 'error') { setTimeout(() => client.emit('error', new Error('connection terminated')), 10); return new Promise(() => { }); }
         await new Promise((r) => setTimeout(r, 5));
         if (failInsert && params && params[0] === failInsert) throw new Error('database unavailable');
         return { rows: [] };
-    },
-    release: () => { },
-});
+    };
+    client.release = (err) => { releases.push({ err, listeners: client.listenerCount('error') }); };
+    return client;
+};
 const nb = require('../lib/netbird');
 
 // A fake NetBird: answers by path, counts the reads of the resources list, and can hold them.
@@ -121,7 +129,7 @@ test('a settings save writes the URL and token in one transaction and publishes 
     statements.length = 0;
     try {
         await nb.setNbApiConfig(next);
-        assert.deepEqual(statements.map(s => s.sql), ['BEGIN', 'INSERT', 'INSERT', 'COMMIT']);
+        assert.deepEqual(statements.map(s => s.sql), ['BEGIN', 'SET', 'SET', 'INSERT', 'INSERT', 'COMMIT']);
         assert.deepEqual(statements.filter(s => s.key).map(s => s.key), ['netbird_api_url', 'netbird_api_token']);
         assert.ok(statements.every(s => s.url === old.url && s.token === old.token), 'nothing new is used before the commit');
         assert.equal(nb._nbApi.url, next.url);
@@ -147,7 +155,7 @@ test('saves run one at a time, in order', async () => {
         const a = nb.setNbApiConfig({ url: 'http://127.0.0.1:7/', token: crypto.randomBytes(16).toString('hex') });
         const b = nb.setNbApiConfig({ url: 'http://127.0.0.1:8/', token: crypto.randomBytes(16).toString('hex') });
         await Promise.all([a, b]);
-        assert.deepEqual(statements.map(s => s.sql), ['BEGIN', 'INSERT', 'INSERT', 'COMMIT', 'BEGIN', 'INSERT', 'INSERT', 'COMMIT']);
+        assert.deepEqual(statements.map(s => s.sql), ['BEGIN', 'SET', 'SET', 'INSERT', 'INSERT', 'COMMIT', 'BEGIN', 'SET', 'SET', 'INSERT', 'INSERT', 'COMMIT']);
         assert.equal(nb._nbApi.url, 'http://127.0.0.1:8/', 'the later save wins');
     } finally { nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
 });
@@ -167,4 +175,40 @@ test('every publish raises the version, also back to earlier values (A, B, A)', 
         assert.ok(a2.version > a1.version + 1);
         assert.equal(Object.isFrozen(a2), true);
     } finally { nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
+});
+
+test('a save whose connection hangs fails within the limit, destroys the client, and the next save runs', async () => {
+    const old = { url: nb._nbApi.url, token: nb._nbApi.token };
+    statements.length = 0; releases.length = 0;
+    clientMode = 'hang';
+    try {
+        const t0 = Date.now();
+        await assert.rejects(nb.setNbApiConfig({ url: 'http://127.0.0.1:7/', token: crypto.randomBytes(16).toString('hex') }), /in time/);
+        assert.ok(Date.now() - t0 < 7000, 'within the 5 second limit');
+        assert.ok(statements.some(st => st.sql === 'SET'), 'the database limits are set too');
+        assert.ok(releases[0].err instanceof Error, 'released with the error, so the pool destroys it');
+        assert.equal(releases[0].listeners, 0, 'its error listener is removed');
+        assert.deepEqual({ url: nb._nbApi.url, token: nb._nbApi.token }, old, 'nothing published');
+        clientMode = null;
+        await nb.setNbApiConfig({ url: 'http://127.0.0.1:8/', token: crypto.randomBytes(16).toString('hex') });
+        assert.equal(nb._nbApi.url, 'http://127.0.0.1:8/', 'the next save ran');
+    } finally { clientMode = null; nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
+});
+
+test('a connection that breaks mid-save rejects the save without an uncaught error, and the next save runs', async () => {
+    const old = { url: nb._nbApi.url, token: nb._nbApi.token };
+    releases.length = 0;
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on('uncaughtException', onUncaught);
+    clientMode = 'error';
+    try {
+        await assert.rejects(nb.setNbApiConfig({ url: 'http://127.0.0.1:7/', token: crypto.randomBytes(16).toString('hex') }), /connection terminated/);
+        assert.equal(releases[0].err.message, 'connection terminated');
+        assert.equal(releases[0].listeners, 0);
+        clientMode = null;
+        await nb.setNbApiConfig({ url: 'http://127.0.0.1:8/', token: crypto.randomBytes(16).toString('hex') });
+        assert.equal(nb._nbApi.url, 'http://127.0.0.1:8/');
+        assert.deepEqual(uncaught, []);
+    } finally { process.off('uncaughtException', onUncaught); clientMode = null; nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
 });

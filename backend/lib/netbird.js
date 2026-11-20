@@ -115,7 +115,8 @@ function publishNbApi(next) {
     _nbApiSnap = Object.freeze({ url: next.url, token: next.token, version: ++_nbApiVersion });
 }
 // Loads and saves of the connection run one at a time, in order, so an older one never publishes
-// after a newer one.
+// after a newer one. Each is bounded in time, so one that hangs can't hold the ones after it.
+const NB_SETTINGS_TIMEOUT_MS = 5000;
 let _nbApiChain = Promise.resolve();
 function inNbApiChain(fn) {
     const run = _nbApiChain.then(fn);
@@ -132,7 +133,7 @@ function getNbApiSnapshot() {
 function loadNbApi(opts) { return inNbApiChain(() => loadNbApiNow(opts)); }
 async function loadNbApiNow({ strict = false } = {}) {
     try {
-        const r = await pool.query("SELECT key, value FROM app_settings WHERE key IN ('netbird_api_url', 'netbird_api_token')");
+        const r = await pool.query({ text: "SELECT key, value FROM app_settings WHERE key IN ('netbird_api_url', 'netbird_api_token')", query_timeout: NB_SETTINGS_TIMEOUT_MS });
         const m = {};
         for (const row of r.rows) m[row.key] = row.value;
         // A value cleared in the database clears it here too (a reload must match the stored state).
@@ -170,18 +171,33 @@ async function saveNbApi({ url, token }) {
     }
     if (rows.length) {
         const client = await pool.connect();
+        // The whole transaction has a time limit, also when the connection hangs, and a connection
+        // that breaks emits 'error' (unhandled, it would stop the process): either way the save
+        // fails, the client is destroyed instead of going back to the pool, and the chain moves on.
+        let failure = null, fail;
+        const stop = new Promise((_, reject) => { fail = (e) => { failure = failure || e; reject(failure); }; });
+        stop.catch(() => { });
+        client.on('error', fail);
+        const timer = setTimeout(() => fail(new Error("The NetBird connection settings couldn't be saved in time.")), NB_SETTINGS_TIMEOUT_MS);
+        const q = (text, values) => Promise.race([client.query(text, values), stop]);
         try {
-            await client.query('BEGIN');
+            await q('BEGIN');
+            // The database's own limits, so a lock or a slow statement ends there too.
+            await q(`SET LOCAL statement_timeout = ${NB_SETTINGS_TIMEOUT_MS}`);
+            await q(`SET LOCAL lock_timeout = ${NB_SETTINGS_TIMEOUT_MS}`);
             for (const [key, value] of rows) {
-                await client.query(`INSERT INTO app_settings (key, value) VALUES ($1, $2)
+                await q(`INSERT INTO app_settings (key, value) VALUES ($1, $2)
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, value]);
             }
-            await client.query('COMMIT');
+            await q('COMMIT');
         } catch (e) {
-            await client.query('ROLLBACK').catch(() => { });
+            if (!failure) await q('ROLLBACK').catch(() => { });
+            failure = failure || e;
             throw e;
         } finally {
-            client.release();
+            clearTimeout(timer);
+            client.removeListener('error', fail);
+            client.release(failure || undefined);
         }
     }
     publishNbApi(next);
@@ -547,10 +563,10 @@ function getGroupRefMap() {
 // often). Each list degrades to [] when its endpoint is missing/unavailable.
 // One cache per account (the main account, and each tenant in its slot). Each has a generation:
 // invalidateUsage() raises it, and a read that started before that never stores its result, so a
-// write is never hidden by an older read that finishes after it. Reads are also numbered: an older
-// read that finishes last never replaces a newer one.
+// write is never hidden by an older read that finishes after it. Within one generation only one
+// read runs at a time (callers join it).
 const USAGE_TTL_MS = 60 * 1000;
-const newUsageState = () => ({ at: 0, data: null, refreshing: null, gen: 0, seq: 0, storedSeq: 0 });
+const newUsageState = () => ({ at: 0, data: null, refreshing: null, gen: 0 });
 const _usage = newUsageState();
 function usageState() {
     if (!currentTenantAccount()) return _usage;
@@ -589,12 +605,12 @@ async function fetchUsageData() {
 }
 
 // One read of the datasets for the account state `st`; it stores its result only while no
-// invalidation and no newer finished read came after it started.
+// invalidation came after it started.
 function readUsage(st) {
-    const read = { gen: st.gen, seq: ++st.seq };
+    const gen = st.gen;
     return fetchUsageData().then(d => {
-        if (read.gen === st.gen && read.seq > st.storedSeq) {
-            st.data = d; st.at = Date.now(); st.storedSeq = read.seq;
+        if (gen === st.gen) {
+            st.data = d; st.at = Date.now();
         }
         return d;
     });
