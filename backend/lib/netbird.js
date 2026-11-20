@@ -10,7 +10,7 @@
 const https = require('https');
 const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
-const { pool } = require('./core');
+const { pool, setSetting } = require('./core');
 const { noteNetbirdOk, httpJson } = require('./http');
 
 // ─── MSP tenant context ───
@@ -103,44 +103,14 @@ function tenantSlot() {
 const _nbEnv = { url: process.env['NETBIRD_API_URL'] || '', token: process.env['NETBIRD_API_TOKEN'] || '' };
 const _nbApi = { url: _nbEnv.url, token: _nbEnv.token };
 
-// The URL and the token are published together, in one synchronous step: no request ever pairs a new
-// URL with the old token (or the reverse). getNbApiSnapshot() hands out one frozen pair with a
-// version that every publish raises (also one that publishes the same values again), and that also
-// changes when either value was set some other way.
-let _nbApiVersion = 0;
-let _nbApiSnap = null;
-function publishNbApi(next) {
-    _nbApi.url = next.url;
-    _nbApi.token = next.token;
-    _nbApiSnap = Object.freeze({ url: next.url, token: next.token, version: ++_nbApiVersion });
-}
-// Loads and saves of the connection run one at a time, in order, so an older one never publishes
-// after a newer one. Each is bounded in time, so one that hangs can't hold the ones after it.
-const NB_SETTINGS_TIMEOUT_MS = 5000;
-let _nbApiChain = Promise.resolve();
-function inNbApiChain(fn) {
-    const run = _nbApiChain.then(fn);
-    _nbApiChain = run.catch(() => { });
-    return run;
-}
-function getNbApiSnapshot() {
-    if (!_nbApiSnap || _nbApiSnap.url !== _nbApi.url || _nbApiSnap.token !== _nbApi.token) {
-        _nbApiSnap = Object.freeze({ url: _nbApi.url, token: _nbApi.token, version: ++_nbApiVersion });
-    }
-    return _nbApiSnap;
-}
-
-function loadNbApi(opts) { return inNbApiChain(() => loadNbApiNow(opts)); }
-async function loadNbApiNow({ strict = false } = {}) {
+async function loadNbApi({ strict = false } = {}) {
     try {
-        const r = await pool.query({ text: "SELECT key, value FROM app_settings WHERE key IN ('netbird_api_url', 'netbird_api_token')", query_timeout: NB_SETTINGS_TIMEOUT_MS });
+        const r = await pool.query("SELECT key, value FROM app_settings WHERE key IN ('netbird_api_url', 'netbird_api_token')");
         const m = {};
         for (const row of r.rows) m[row.key] = row.value;
         // A value cleared in the database clears it here too (a reload must match the stored state).
-        publishNbApi({
-            url: _nbEnv.url ? _nbApi.url : (m.netbird_api_url || ''),
-            token: _nbEnv.token ? _nbApi.token : (m.netbird_api_token || ''),
-        });
+        if (!_nbEnv.url) _nbApi.url = m.netbird_api_url || '';
+        if (!_nbEnv.token) _nbApi.token = m.netbird_api_token || '';
     } catch (e) {
         if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[NetBird API] config load error:', e.message);
@@ -152,55 +122,39 @@ function getNbApiConfig() {
     return { url: _nbApi.url || '', hasToken: !!_nbApi.token, urlFromEnv: !!_nbEnv.url, tokenFromEnv: !!_nbEnv.token };
 }
 
+// For the service status probe only (lib/remote-access.js): the URL and token as one pair, read in
+// one synchronous step, with a version that changes whenever either one changed in memory; and
+// whether a settings save is running (the probe sends nothing then).
+let _nbApiChanges = 0; // raised by every change setNbApiConfig makes
+let _nbApiVersion = 0;
+let _nbApiSnap = null;
+let _nbApiSaving = 0;
+function getNbApiSnapshot() {
+    if (!_nbApiSnap || _nbApiSnap.url !== _nbApi.url || _nbApiSnap.token !== _nbApi.token || _nbApiSnap.changes !== _nbApiChanges) {
+        _nbApiSnap = Object.freeze({ url: _nbApi.url, token: _nbApi.token, changes: _nbApiChanges, version: ++_nbApiVersion });
+    }
+    return _nbApiSnap;
+}
+const nbApiSaving = () => _nbApiSaving > 0;
+
 // Persist + apply new connection settings. Env-managed fields are immutable; an
 // empty/omitted token keeps the existing one.
-// Both values are saved in one transaction and published together (publishNbApi) only after the
-// commit, so a request that starts during the save uses the old pair, and one that starts after it
-// the new pair - never a mix, also after a reload. Saves run one at a time.
-function setNbApiConfig(cfg) { return inNbApiChain(() => saveNbApi(cfg)); }
-async function saveNbApi({ url, token }) {
-    const next = { url: _nbApi.url, token: _nbApi.token };
-    const rows = [];
-    if (url !== undefined && !_nbEnv.url) {
-        next.url = String(url || '').trim();
-        rows.push(['netbird_api_url', next.url]);
-    }
-    if (token !== undefined && String(token).trim() !== '' && !_nbEnv.token) {
-        next.token = String(token).trim();
-        rows.push(['netbird_api_token', next.token]);
-    }
-    if (rows.length) {
-        const client = await pool.connect();
-        // The whole transaction has a time limit, also when the connection hangs, and a connection
-        // that breaks emits 'error' (unhandled, it would stop the process): either way the save
-        // fails, the client is destroyed instead of going back to the pool, and the chain moves on.
-        let failure = null, fail;
-        const stop = new Promise((_, reject) => { fail = (e) => { failure = failure || e; reject(failure); }; });
-        stop.catch(() => { });
-        client.on('error', fail);
-        const timer = setTimeout(() => fail(new Error("The NetBird connection settings couldn't be saved in time.")), NB_SETTINGS_TIMEOUT_MS);
-        const q = (text, values) => Promise.race([client.query(text, values), stop]);
-        try {
-            await q('BEGIN');
-            // The database's own limits, so a lock or a slow statement ends there too.
-            await q(`SET LOCAL statement_timeout = ${NB_SETTINGS_TIMEOUT_MS}`);
-            await q(`SET LOCAL lock_timeout = ${NB_SETTINGS_TIMEOUT_MS}`);
-            for (const [key, value] of rows) {
-                await q(`INSERT INTO app_settings (key, value) VALUES ($1, $2)
-                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, value]);
-            }
-            await q('COMMIT');
-        } catch (e) {
-            if (!failure) await q('ROLLBACK').catch(() => { });
-            failure = failure || e;
-            throw e;
-        } finally {
-            clearTimeout(timer);
-            client.removeListener('error', fail);
-            client.release(failure || undefined);
+async function setNbApiConfig({ url, token }) {
+    _nbApiSaving++;
+    try {
+        if (url !== undefined && !_nbEnv.url) {
+            _nbApi.url = String(url || '').trim();
+            _nbApiChanges++;
+            await setSetting('netbird_api_url', _nbApi.url);
         }
+        if (token !== undefined && String(token).trim() !== '' && !_nbEnv.token) {
+            _nbApi.token = String(token).trim();
+            _nbApiChanges++;
+            await setSetting('netbird_api_token', _nbApi.token);
+        }
+    } finally {
+        _nbApiSaving--;
     }
-    publishNbApi(next);
     // Force the caches that depend on the API to refresh on next use.
     resetNbCaches();
     return getNbApiConfig();
@@ -809,7 +763,7 @@ function getBypassedPeerCount() { return _bypassedPeerIds.size; }
 
 module.exports = {
     _nbApi,
-    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured, getNbApiSnapshot, nbDirectGet,
+    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured, getNbApiSnapshot, nbApiSaving, nbDirectGet,
     NETBIRD_READONLY, readOnlyResp,
     netbirdGet, netbirdPost, netbirdPut, netbirdReq,
     _setNetbirdTimingForTests,

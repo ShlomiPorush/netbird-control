@@ -17,7 +17,6 @@ for (const k of ['NETBIRD_API_URL', 'NETBIRD_API_TOKEN', 'SMTP_HOST', 'SMTP_PASS
 const store = new Map();
 const core = require('../lib/core');
 core.pool.query = async (sql, params = []) => {
-    if (sql && typeof sql === 'object') sql = sql.text; // a query config ({ text, query_timeout })
     if (/SELECT value FROM app_settings WHERE key = \$1/.test(sql)) return { rows: store.has(params[0]) ? [{ value: store.get(params[0]) }] : [] };
     if (/INSERT INTO app_settings/.test(sql)) { store.set(params[0], params[1]); return { rows: [] }; }
     if (/FROM app_settings WHERE key IN/.test(sql)) {
