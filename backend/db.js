@@ -7699,8 +7699,12 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
     let nameLookup = null; // { ips } or { code } for a host name that no domain resource matches
     const coverageNow = async () => {
         if (!mayAdd) return covered;
-        if (typed.kind === 'ip') return { addable: coverageIpUncovered(usage, typed.ip) };
-        if (nameLookup && nameLookup.ips) return { addable: coverageNameUncovered(usage, typed.name, nameLookup.ips) };
+        // For a device, an enabled default route (0.0.0.0/0, an exit node) does carry an address
+        // through NetBird, so nothing that resolves to an address is offered then. (Remote Access
+        // keeps its own rule: the gateway never uses a default route.)
+        const exitNode = (usage.routes || []).some(r => r && r.enabled !== false && String(r.network || '').trim() === '0.0.0.0/0');
+        if (typed.kind === 'ip') return { addable: !exitNode && coverageIpUncovered(usage, typed.ip) };
+        if (nameLookup && nameLookup.ips) return { addable: !exitNode && coverageNameUncovered(usage, typed.name, nameLookup.ips) };
         if (!nameLookup || nameLookup.code !== 'ENOTFOUND' || !raMain() || coverageNameCovered(usage, typed.name)) return covered;
         // The names gateway is set up: its group has a gateway peer (an unreadable group: no).
         const namesGroupId = (getRemoteAccessConfig().managed || {}).namesGroupId;

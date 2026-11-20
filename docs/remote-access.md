@@ -261,7 +261,8 @@ When NetBird's answer is only partly known, the form keeps **Create** off and li
 |---|---|---|
 | The resource was added, but an access rule was refused or answered without a rule | `RESOURCE_CREATED_POLICY_FAILED`, with the resource id | The resource was added, but its access rules weren't all saved. Open the network to finish them. |
 | NetBird gave no answer, a server error (5xx), or a success without an id | `RESOURCE_UNCONFIRMED` | NetBird didn't confirm the resource was saved. Check the network before you try again. |
-| The browser lost the answer (a network error, or a proxy error page) | - | The same as the row above. |
+| The browser lost the answer (a network error, no answer within 60 seconds, or a 5xx from a proxy, such as a 504) | - | The same as the row above. |
+| A definite failure (refused before any write, or a 4xx from NetBird) | `RESOURCE_CREATE_FAILED` | The error itself; **Create** stays on. |
 
 The first case is audited as `resource.create` with the resource id, the account and
 `policiesSaved: false`. The page offers nothing more for that address until a new check.
@@ -272,7 +273,9 @@ check (`GET /api/diagnostics/address`) answers `coverage: { addable }`, true onl
 resources and routes were read fresh, the address is valid as typed (a port from 1 to 65535, not
 cut to the length limit) and the instance is not read-only. A host name follows the same rule as
 above: found in the DNS with every address uncovered, or unknown to the DNS while the names gateway
-is set up (main account only; never while managing a tenant).
+is set up (main account only; never while managing a tenant). Unlike Remote Access, an enabled
+default route (`0.0.0.0/0`, an exit node) counts here: the device reaches the address through it,
+so nothing that resolves to an address is offered then.
 After the save, only the address check runs again.
 
 After any create that may have added a resource, the app drops the cached NetBird lists of the

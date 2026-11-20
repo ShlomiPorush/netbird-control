@@ -4529,7 +4529,8 @@ app.post('/api/networks/:id/resources', async (req, res) => {
         res.json({ status: 'ok', ...result });
     } catch (err) {
         console.error('Error creating resource:', err.message);
-        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to create resource' });
+        // Refused before any write, or by NetBird (4xx): nothing was created.
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to create resource', code: 'RESOURCE_CREATE_FAILED' });
     }
 });
 

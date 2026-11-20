@@ -111,6 +111,7 @@ async function loadNbApi({ strict = false } = {}) {
         // A value cleared in the database clears it here too (a reload must match the stored state).
         if (!_nbEnv.url) _nbApi.url = m.netbird_api_url || '';
         if (!_nbEnv.token) _nbApi.token = m.netbird_api_token || '';
+        _nbApiCommitted = getNbApiSnapshot().version;
     } catch (e) {
         if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[NetBird API] config load error:', e.message);
@@ -124,18 +125,20 @@ function getNbApiConfig() {
 
 // For the service status probe only (lib/remote-access.js): the URL and token as one pair, read in
 // one synchronous step, with a version that changes whenever either one changed in memory; and
-// whether a settings save is running (the probe sends nothing then).
+// whether that pair is the committed one (loaded, or saved in full) with no save running. A save
+// that failed half way leaves a pair that was never committed: the probe sends nothing then.
 let _nbApiChanges = 0; // raised by every change setNbApiConfig makes
 let _nbApiVersion = 0;
 let _nbApiSnap = null;
 let _nbApiSaving = 0;
+let _nbApiCommitted = 0; // the snapshot version of the pair last loaded or saved in full
 function getNbApiSnapshot() {
     if (!_nbApiSnap || _nbApiSnap.url !== _nbApi.url || _nbApiSnap.token !== _nbApi.token || _nbApiSnap.changes !== _nbApiChanges) {
         _nbApiSnap = Object.freeze({ url: _nbApi.url, token: _nbApi.token, changes: _nbApiChanges, version: ++_nbApiVersion });
     }
     return _nbApiSnap;
 }
-const nbApiSaving = () => _nbApiSaving > 0;
+const nbApiReady = () => _nbApiSaving === 0 && getNbApiSnapshot().version === _nbApiCommitted;
 
 // Persist + apply new connection settings. Env-managed fields are immutable; an
 // empty/omitted token keeps the existing one.
@@ -155,6 +158,7 @@ async function setNbApiConfig({ url, token }) {
     } finally {
         _nbApiSaving--;
     }
+    _nbApiCommitted = getNbApiSnapshot().version;
     // Force the caches that depend on the API to refresh on next use.
     resetNbCaches();
     return getNbApiConfig();
@@ -763,7 +767,7 @@ function getBypassedPeerCount() { return _bypassedPeerIds.size; }
 
 module.exports = {
     _nbApi,
-    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured, getNbApiSnapshot, nbApiSaving, nbDirectGet,
+    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured, getNbApiSnapshot, nbApiReady, nbDirectGet,
     NETBIRD_READONLY, readOnlyResp,
     netbirdGet, netbirdPost, netbirdPut, netbirdReq,
     _setNetbirdTimingForTests,

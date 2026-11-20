@@ -148,6 +148,13 @@ test('create: an unconfirmed resource answers RESOURCE_UNCONFIRMED; a success ca
     assert.equal(lastAudit().meta.resourceId, 'res-10');
 });
 
+test('create: a definite failure answers RESOURCE_CREATE_FAILED', async () => {
+    createImpl = async () => { throw new Error('Failed to create resource: invalid address'); };
+    const r = await h.call('admin', 'POST', '/api/networks/net-1/resources', body);
+    assert.equal(r.status, 502);
+    assert.equal(r.json.code, 'RESOURCE_CREATE_FAILED');
+});
+
 test('create: still the ordinary permission check (no network edit, no create)', async () => {
     const before = createCalls;
     const r = await h.call('remote', 'POST', '/api/networks/net-1/resources', body);

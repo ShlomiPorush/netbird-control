@@ -62,7 +62,7 @@ test('an uncovered IP address is addable, with or without a port', async () => {
     assert.deepEqual(r.coverage, { addable: true });
 });
 
-test('an enabled legacy route covers it; an exit node or a disabled route does not', async () => {
+test('an enabled legacy route covers it, and so does an exit node for a device; a disabled route does not', async () => {
     reset({ routes: [{ id: 'l1', network: '192.0.2.0/24', network_id: 'lan', enabled: true, groups: [] }] });
     assert.deepEqual((await check('192.0.2.44')).coverage, { addable: false });
     reset({ routes: [{ id: 'l1', network: '192.0.2.0/24', network_id: 'lan', enabled: false, groups: [] }] });
@@ -70,7 +70,7 @@ test('an enabled legacy route covers it; an exit node or a disabled route does n
     reset({ routes: [{ id: 'exit', network: '0.0.0.0/0', network_id: 'exit', enabled: true, groups: [] }] });
     const r = await check('192.0.2.44');
     assert.equal(r.findings.find(f => f.key === 'coverage').status, 'INFO', 'the exit node note is still shown');
-    assert.deepEqual(r.coverage, { addable: true });
+    assert.deepEqual(r.coverage, { addable: false }, 'the device reaches it through the exit node');
 });
 
 test('a failed resources or routes read never offers, and the diagnosis still answers', async () => {

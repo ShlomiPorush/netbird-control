@@ -27,7 +27,7 @@ const dns = require('dns');
 const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { pool, getSetting, setSetting } = require('./core');
-const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, getNbApiSnapshot, nbApiSaving, nbDirectGet, getUsageData } = require('./netbird');
+const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, getNbApiSnapshot, nbApiReady, nbDirectGet, getUsageData } = require('./netbird');
 const { addEvent } = require('./events');
 const apiKeys = require('./api-keys');
 const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem, userSourceGroups } = require('./remote-access-auth');
@@ -1987,10 +1987,11 @@ const HEALTH_PEERS_PARALLEL = 5; // at a time
 let _health = null;    // { key, value, at }
 let _healthRun = null; // { key, promise }
 // What the last read of the names group showed, for one NetBird connection (its version) and one
-// names group: { key, seen }. Only the latest probe that started updates it.
+// names group: { key, seen }. Only the latest probe that started updates it, under the names group
+// it started with, and only while that group is still the current one.
 let _namesSeen = null;
 let _probeGen = 0; // raised by every probe that starts; only the latest may store its answer
-const namesSeenKey = (api) => JSON.stringify([api.version, _nb.namesGroupId]);
+const namesSeenKey = (api, groupId) => JSON.stringify([api.version, groupId]);
 const healthKey = (api) => JSON.stringify([api.version, _nb.gatewayGroupId, _nb.namesGroupId, _cfg.guacdHost, _cfg.guacdPort, _cfg.namesGuacdHost, _cfg.namesGuacdPort]);
 const okStatus = (r) => !!r && r.status >= 200 && r.status < 300;
 
@@ -2031,11 +2032,14 @@ function gatewayState(peers, guacdUp) {
 // Each part (NetBird, the IP gateway, the names gateway) has its own time limit; a part that runs
 // out of time is unknown (a gateway whose guacd is already known to be down is down), and the others
 // keep what they measured. Nothing is sent to NetBird while its connection settings are being saved,
-// or once they changed after this probe read them; NetBird is then unknown.
+// while the pair in memory is not the committed one (a save that failed half way), or once they
+// changed after this probe read them; NetBird is then unknown. Resolves [answer, skipped]: an
+// answer that skipped NetBird is never cached.
 const PART_TIMED_OUT = Symbol('timed out');
 async function probeHealth(api, gen) {
     const stopAt = Date.now() + healthDeadlineMs;
-    const stale = () => nbApiSaving() || getNbApiSnapshot().version !== api.version;
+    const namesGroup = _nb.namesGroupId;
+    const stale = () => !nbApiReady() || getNbApiSnapshot().version !== api.version;
     let skipped = false;
     const get = (path) => {
         if (stale()) { skipped = true; return Promise.resolve({ status: 0 }); }
@@ -2051,18 +2055,19 @@ async function probeHealth(api, gen) {
     const [nb, ip, names] = await Promise.all([
         part(get('/api/accounts').then(netbirdState)),
         gatewayPart(_nb.gatewayGroupId, _cfg.guacdHost, _cfg.guacdPort),
-        _nb.namesGroupId ? gatewayPart(_nb.namesGroupId, _cfg.namesGuacdHost, _cfg.namesGuacdPort) : Promise.resolve(null),
+        namesGroup ? gatewayPart(namesGroup, _cfg.namesGuacdHost, _cfg.namesGuacdPort) : Promise.resolve(null),
     ]);
     const stateOf = (g) => (g.timedOut ? (g.info.up === false ? 'down' : 'unknown') : gatewayState(g.peers, g.up));
-    const out = { netbird: nb === PART_TIMED_OUT || skipped || stale() ? 'unknown' : nb, gateway: stateOf(ip) };
-    if (!names) return out;
+    skipped = skipped || stale();
+    const out = { netbird: nb === PART_TIMED_OUT || skipped ? 'unknown' : nb, gateway: stateOf(ip) };
+    if (!names) return [out, skipped];
     // The names gateway only when it is set up: a read of its group showed a peer. When the group
     // couldn't be read, it stays in as unknown if the last read, for this connection, had shown one.
-    const seenKey = namesSeenKey(api);
-    if (gen === _probeGen && names.info.peers !== undefined) _namesSeen = { key: seenKey, seen: names.info.peers > 0 };
+    const seenKey = namesSeenKey(api, namesGroup);
+    if (gen === _probeGen && names.info.peers !== undefined && _nb.namesGroupId === namesGroup) _namesSeen = { key: seenKey, seen: names.info.peers > 0 };
     if (names.info.peers > 0) out.namesGateway = stateOf(names);
     else if (names.info.peers === undefined && _namesSeen && _namesSeen.key === seenKey && _namesSeen.seen) out.namesGateway = 'unknown';
-    return out;
+    return [out, skipped];
 }
 async function getServiceHealth() {
     for (let i = 0; i < 3; i++) {
@@ -2074,9 +2079,9 @@ async function getServiceHealth() {
             const mine = { key, promise: null };
             const gen = ++_probeGen;
             mine.promise = probeHealth(api, gen)
-                .catch(() => ({ netbird: 'unknown', gateway: 'unknown' }))
-                .then(value => {
-                    if (gen === _probeGen && !nbApiSaving() && healthKey(getNbApiSnapshot()) === key) _health = { key, value, at: Date.now() };
+                .catch(() => [{ netbird: 'unknown', gateway: 'unknown' }, true])
+                .then(([value, skipped]) => {
+                    if (!skipped && gen === _probeGen && healthKey(getNbApiSnapshot()) === key) _health = { key, value, at: Date.now() };
                     return value;
                 })
                 .finally(() => { if (_healthRun === mine) _healthRun = null; });
