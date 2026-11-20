@@ -927,6 +927,8 @@ async function getViewer(req) {
         authEnabled: true,
         isAdmin,
         canApprove,
+        // Blocked in NetBird: holds no groups or permissions here (see above).
+        blocked,
         role,
         oid,
         user_id: v ? v.user_id : null,
@@ -3437,6 +3439,30 @@ app.post('/api/remote-access/check', requireRemoteUser, async (req, res) => {
     try { res.json(await checkRemoteAccess(req.remoteViewer, req.body || {})); }
     catch (e) { sendRemoteError(res, e); }
 });
+// Where "Add As Resource" may add a missing server: the networks open to Remote Access (Settings >
+// Remote Access) that this user may edit. Ids and names only. Empty on a read-only instance. The
+// add itself is the ordinary POST /api/networks/:id/resources, with all of its checks.
+app.get('/api/remote-access/add-networks', requireRemoteUser, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const open = new Set((getRemoteAccessConfig().networks || []).map(String));
+        if (NETBIRD_READONLY || !open.size) return res.json({ networks: [] });
+        const [networks, grants] = await Promise.all([getNetworks(), getAllGrants()]);
+        res.json({
+            networks: networks
+                .filter(n => n && open.has(String(n.id)) && canEditNetwork(req.remoteViewer, n.id, grants))
+                .map(n => ({ id: String(n.id), name: n.name || String(n.id) })),
+        });
+    } catch (e) { sendRemoteError(res, e); }
+});
+// The service status line on the connect page: { netbird, gateway, namesGateway? }, each 'up',
+// 'down' or 'unknown', and nothing else. Asked only on a user action (the page polls nothing).
+app.get('/api/remote-access/health', requireRemoteUser, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (req.remoteViewer.blocked) return res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
+    try { res.json(await remoteAccessLib.getServiceHealth()); }
+    catch (e) { sendRemoteError(res, e); }
+});
 app.post('/api/remote-access/sessions', requireRemoteUser, async (req, res) => {
     try { res.json(await createRemoteSession(req.remoteViewer, req.body || {}, req.ip)); }
     catch (e) { sendRemoteError(res, e); }
@@ -3656,11 +3682,13 @@ app.get('/api/diagnostics/address', async (req, res) => {
     try {
         const viewer = await getViewer(req);
         const peerId = String(req.query.peer_id || '');
-        const address = String(req.query.address || '').trim().slice(0, 260);
+        const typed = String(req.query.address || '').trim();
+        const address = typed.slice(0, 260);
         if (!peerId || !address) return res.status(400).json({ error: 'peer_id and address are required' });
         if (!/^[A-Za-z0-9.:*/_-]+$/.test(address)) return res.status(400).json({ error: 'Invalid address' });
         if (!(await canDiagnosePeer(viewer, peerId))) return res.status(403).json({ error: 'Forbidden' });
-        const out = await diagnoseAddress(peerId, address);
+        // An address cut to the limit is still diagnosed, but never offered as a resource.
+        const out = await diagnoseAddress(peerId, address, { clipped: typed.length > address.length });
         if (!out) return res.status(404).json({ error: 'Peer not found' });
         res.json(out);
     } catch (err) {
@@ -4469,9 +4497,33 @@ app.post('/api/networks/:id/resources', async (req, res) => {
         if (blocked) audit(viewer, 'blocklist.override', name, { network: await netLabel(req.params.id), address, rule: blocked });
 
         const finalPolicies = await resolvePolicySources(viewer, req.params.id, grants, policies);
-        const result = await createClientResource(req.params.id, { name, address, description, groups, policies: finalPolicies, allowBlocked: viewer.isAdmin });
+        let result;
+        try {
+            result = await createClientResource(req.params.id, { name, address, description, groups, policies: finalPolicies, allowBlocked: viewer.isAdmin });
+        } catch (err) {
+            // The resource exists, but not all of its access policies: audited as a create, and the
+            // answer names the resource so the user can finish it on the network page.
+            if (err.code === 'RESOURCE_CREATED_POLICY_FAILED') {
+                const rid = (err.resource && err.resource.id) || '';
+                console.error(`Resource "${name}" (${rid}) created, but an access policy failed: ${err.cause}`);
+                audit(viewer, 'resource.create', name, {
+                    network: await netLabel(req.params.id), address, resourceId: rid, account: currentTenantAccount() || 'main',
+                    policies: (finalPolicies || []).length, policiesSaved: false,
+                });
+                return res.status(502).json({ error: err.message, code: err.code, resource: { id: rid } });
+            }
+            // No answer, or one without an id: the resource may or may not exist.
+            if (err.code === 'RESOURCE_UNCONFIRMED') {
+                console.error(`Resource "${name}" (${address}) not confirmed by NetBird: ${err.cause}`);
+                audit(viewer, 'resource.create', name, {
+                    network: await netLabel(req.params.id), address, account: currentTenantAccount() || 'main', confirmed: false,
+                });
+                return res.status(502).json({ error: err.message, code: err.code });
+            }
+            throw err;
+        }
         console.log(`[${new Date().toISOString()}] ${viewer.email || 'user'} added resource "${name}" (${address}) to network ${req.params.id}`);
-        audit(viewer, 'resource.create', name, { network: await netLabel(req.params.id), address, policies: (finalPolicies || []).length });
+        audit(viewer, 'resource.create', name, { network: await netLabel(req.params.id), address, resourceId: (result.resource && result.resource.id) || '', policies: (finalPolicies || []).length });
         res.json({ status: 'ok', ...result });
     } catch (err) {
         console.error('Error creating resource:', err.message);
