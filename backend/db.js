@@ -28,8 +28,11 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 // writes, grants and routers never add, remove or reuse the groups (helpers below).
 const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
-    loadRemoteAccessConfig, enforceManagedMembership,
+    loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
 } = require('./lib/remote-access');
+// "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
+const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered, nameCovered: coverageNameCovered } = require('./lib/coverage');
+const { normalizeTarget: normalizeRemoteTarget } = require('./lib/remote-access-auth');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
 // notify*Email helpers stay in db.js and use the imported sendMail/mailLayout/mailRows/htmlEsc.
@@ -6789,6 +6792,20 @@ async function assertAddressUniqueInNetwork(networkId, address, excludeId) {
     }
 }
 
+// A create whose outcome is only partly known. Both keep the resource that may exist:
+//   RESOURCE_CREATED_POLICY_FAILED - the resource was created (err.resource has its id), but an
+//     access policy was refused or got no usable answer; the policies after it were not sent.
+//   RESOURCE_UNCONFIRMED - NetBird gave no answer (or a 2xx without an id), so the resource may or
+//     may not exist.
+const CREATE_POLICY_FAILED = "The resource was added, but its access rules weren't all saved. Open the network to finish them.";
+const CREATE_UNCONFIRMED = "NetBird didn't confirm the resource was saved. Check the network before you try again.";
+function createOutcomeError(code, message, cause, resource) {
+    const e = new Error(message);
+    e.code = code; e.status = 502; e.cause = cause;
+    if (resource) e.resource = resource;
+    return e;
+}
+
 // Create a resource: a NetBird group + a network resource in that group + one access
 // policy per provided entry (its source groups → the resource, with protocol/ports).
 // A resource with no policies is reachable by no one (NetBird's model).
@@ -6812,28 +6829,45 @@ async function createClientResource(networkId, { name, address, description, gro
 
     // Network resource - groups are optional (a management convenience). NetBird
     // derives host/subnet/domain from the address.
-    const resp = await withTargets(async () => noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, {
-        name, address, description: description || '', enabled: true, groups: targetsFor(null, networkId, String(address || '').trim(), groupIds),
-    })));
-    if (!nbWriteOk(resp)) {
-        throw new Error('Failed to create resource: ' + (resp && (resp.raw || resp.error || resp.status)));
-    }
-    const resourceId = resp.body && resp.body.id;
-    const resType = resp.body && resp.body.type;
+    let sent = false;
+    try {
+        const resp = await withTargets(async () => {
+            const body = {
+                name, address, description: description || '', enabled: true, groups: targetsFor(null, networkId, String(address || '').trim(), groupIds),
+            };
+            // Not configured and read-only answer without sending anything.
+            sent = netbirdApiConfigured() && !NETBIRD_READONLY;
+            return noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body));
+        });
+        // No answer, or a 5xx: NetBird can save the resource and then fail building its answer.
+        if (sent && resp && (resp.status === 0 || resp.status >= 500)) throw createOutcomeError('RESOURCE_UNCONFIRMED', CREATE_UNCONFIRMED, resp.error || resp.raw || String(resp.status || 'no answer'));
+        if (!nbWriteOk(resp)) {
+            throw new Error('Failed to create resource: ' + (resp && (resp.raw || resp.error || resp.status)));
+        }
+        const resourceId = resp.body && resp.body.id;
+        const resType = resp.body && resp.body.type;
+        if (!resourceId) throw createOutcomeError('RESOURCE_UNCONFIRMED', CREATE_UNCONFIRMED, 'an answer without an id');
 
-    // Access policies target the resource directly (destinationResource), so they
-    // work whether or not the resource is in any group.
-    if (resourceId) {
+        // Access policies target the resource directly (destinationResource), so they
+        // work whether or not the resource is in any group. A 2xx without a policy in it is not
+        // a saved policy.
         for (const p of (policies || [])) {
             if (!p || !Array.isArray(p.sources) || !p.sources.length) continue;
-            await createOneResourcePolicy(name, { id: resourceId, type: resType }, p);
+            let pol;
+            try { pol = await createOneResourcePolicy(name, { id: resourceId, type: resType }, p); }
+            catch (e) { throw createOutcomeError('RESOURCE_CREATED_POLICY_FAILED', CREATE_POLICY_FAILED, e.message, resp.body); }
+            if (!pol || typeof pol !== 'object' || !pol.id) throw createOutcomeError('RESOURCE_CREATED_POLICY_FAILED', CREATE_POLICY_FAILED, 'a policy answer without a policy id', resp.body);
+        }
+        return { resource: resp.body };
+    } finally {
+        // Once the resource was sent it may exist: refresh the policy + group-ref + usage caches of
+        // this account (detail views and Access Profile counts), and the Remote Access snapshot for
+        // a main-account write, whatever the outcome.
+        if (sent) {
+            bustNbCaches('policies', 'gref', 'usage');
+            if (raMain()) invalidateRemoteSnapshot();
         }
     }
-
-    // Refresh policy + group-ref + usage caches so detail views and Access Profile
-    // resource counts reflect the new resource immediately.
-    bustNbCaches('policies', 'gref', 'usage');
-    return { resource: resp.body };
 }
 
 // Create a single accept policy: source groups → the resource itself. The shared policy
@@ -7626,29 +7660,81 @@ async function diagnoseTarget(peerId, { type, id, port, probeHost, probePort } =
 // THIS device have access (running the standard access-path analysis + a port verdict).
 // The liveness probe runs only when the host IS covered - i.e. it is declared NetBird
 // infrastructure - so this cannot be used to scan arbitrary hosts through the server.
-async function diagnoseAddress(peerId, addressRaw) {
+// Every answer also carries `coverage: { addable }`: true only when the address is valid as typed
+// (opts.clipped: the route cut it to its length limit), the resources and the routes were both read
+// (a strict read), nothing in NetBird covers it (lib/coverage.js) and the instance may write. A
+// host name must also be found in the DNS, with every IPv4 address uncovered - or, as in Remote
+// Access, be unknown to the DNS while the names gateway is set up (main account only).
+async function diagnoseAddress(peerId, addressRaw, opts = {}) {
     const input = String(addressRaw || '').trim();
     const peer = await getPeerDetail(peerId);
     if (!peer) return null;
 
     // Split an optional :port suffix (IPv4 or hostname only - IPv6 isn't supported here).
-    let host = input, port = 0;
+    let host = input, port = 0, portValid = true;
     const ci = input.lastIndexOf(':');
     if (ci > 0 && /^\d{1,5}$/.test(input.slice(ci + 1))) {
         host = input.slice(0, ci);
-        port = Math.min(65535, parseInt(input.slice(ci + 1), 10));
+        const typedPort = parseInt(input.slice(ci + 1), 10);
+        portValid = typedPort >= 1 && typedPort <= 65535;
+        port = Math.min(65535, typedPort);
     }
     host = host.toLowerCase();
 
     const findings = [];
     const add = (key, label, status, detail, at) => findings.push({ key, label, status, detail, ...(at ? { at } : {}) });
+    const covered = { addable: false };
     if (!host || !/^[a-z0-9.*/_-]+$/.test(host)) {
         add('coverage', 'Address', 'FAIL', 'Enter an IPv4 address or a hostname, optionally with :port (e.g. 10.20.0.5:443)');
-        return { target: null, findings };
+        return { target: null, findings, coverage: covered };
     }
 
-    const usage = await getUsageData();
+    // A fresh read of the resources and routes decides the button; if it fails, the diagnosis still
+    // runs on the cached data, but nothing is offered.
+    let usage, inventoryRead = true;
+    try { usage = await getUsageData({ strict: true }); } catch { inventoryRead = false; usage = await getUsageData(); }
     const gid = (g) => (g && g.id) || g;
+    const typed = normalizeRemoteTarget(host);
+    const mayAdd = inventoryRead && !NETBIRD_READONLY && !opts.clipped && portValid && !typed.error;
+    // The device's groups for route distribution: its own, its owner's, and All (read once).
+    let distGroups = null;
+    const deviceGroups = async () => {
+        if (distGroups) return distGroups;
+        const memberIds = new Set((peer.groups || []).map(g => g.id).filter(Boolean));
+        if (peer.user_id) {
+            for (const u of await getAllUsers().catch(() => [])) {
+                if (u.id === peer.user_id) { for (const g of (u.groups || [])) { const i = gid(g); if (i) memberIds.add(i); } break; }
+            }
+        }
+        const groupsRaw = await netbirdGet('/api/groups').catch(() => null);
+        const groupsArr = Array.isArray(groupsRaw) ? groupsRaw : [];
+        const allIds = new Set(groupsArr.filter(g => (g.name || '') === 'All').map(g => g.id));
+        distGroups = { memberIds, allIds, groupsArr };
+        return distGroups;
+    };
+    const receivesRoute = async (rt) => {
+        const { memberIds, allIds } = await deviceGroups();
+        return (Array.isArray(rt.groups) ? rt.groups : []).some(g => { const i = gid(g); return memberIds.has(i) || allIds.has(i); });
+    };
+    let nameLookup = null; // { ips } or { code } for a host name that no domain resource matches
+    const coverageNow = async () => {
+        if (!mayAdd) return covered;
+        // An enabled default route (0.0.0.0/0, an exit node) that is offered to this device does carry
+        // an address through NetBird for it, so nothing that resolves to an address is offered then.
+        // One for other groups doesn't count. (Remote Access keeps its own rule: the gateway never
+        // uses a default route.)
+        let exitNode = false;
+        for (const r of (usage.routes || [])) {
+            if (r && r.enabled !== false && String(r.network || '').trim() === '0.0.0.0/0' && await receivesRoute(r)) { exitNode = true; break; }
+        }
+        if (typed.kind === 'ip') return { addable: !exitNode && coverageIpUncovered(usage, typed.ip) };
+        if (nameLookup && nameLookup.ips) return { addable: !exitNode && coverageNameUncovered(usage, typed.name, nameLookup.ips) };
+        if (!nameLookup || nameLookup.code !== 'ENOTFOUND' || !raMain() || coverageNameCovered(usage, typed.name)) return covered;
+        // The names gateway is set up: its group has a gateway peer (an unreadable group: no).
+        const namesGroupId = (getRemoteAccessConfig().managed || {}).namesGroupId;
+        const g = namesGroupId ? await netbirdGet('/api/groups/' + encodeURIComponent(namesGroupId)).catch(() => null) : null;
+        return { addable: !!(g && Array.isArray(g.peers) && g.peers.length) };
+    };
 
     // Which resource covers this host? Most specific wins: exact match, then the
     // smallest containing IPv4 range, then exact domain over a *.wildcard.
@@ -7669,7 +7755,7 @@ async function diagnoseAddress(peerId, addressRaw) {
             type: 'resource', id: best.id,
             port: port || undefined, probeHost: host, probePort: port || undefined,
         });
-        return { target: inner && inner.target, findings: [...findings, ...((inner && inner.findings) || [])] };
+        return { target: inner && inner.target, findings: [...findings, ...((inner && inner.findings) || [])], coverage: covered };
     }
 
     // FQDN ↔ IP awareness: domain resources are routed by NAME, so a raw IP that sits
@@ -7677,14 +7763,15 @@ async function diagnoseAddress(peerId, addressRaw) {
     // read as "not routed through NetBird at all". Resolution is best-effort from the
     // app server (1.5s cap per lookup, all in parallel) - a miss just falls through.
     const dnsp = require('dns').promises;
-    const resolveA = async (name) => {
-        try {
-            return await Promise.race([
-                dnsp.resolve4(String(name)),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500)),
-            ]);
-        } catch { return []; }
+    // One lookup, capped at 1.5 s: { ips }, or { code } of why it failed (ETIMEOUT at the cap).
+    const lookupA = (name) => {
+        let timer;
+        const cap = new Promise((_, rej) => { timer = setTimeout(() => rej(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' })), 1500); });
+        return Promise.race([dnsp.resolve4(String(name)), cap])
+            .then((found) => ({ ips: (Array.isArray(found) ? found : []).map(String) }), (e) => ({ code: (e && e.code) || 'ERROR' }))
+            .finally(() => clearTimeout(timer));
     };
+    const resolveA = async (name) => (await lookupA(name)).ips || [];
     const isSingleIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
     if (isSingleIp) {
         // Does any DOMAIN resource resolve to this IP right now?
@@ -7704,11 +7791,13 @@ async function diagnoseAddress(peerId, addressRaw) {
                 type: 'resource', id: best.id,
                 port: port || undefined, probeHost: String(best.address).toLowerCase(), probePort: port || undefined,
             });
-            return { target: inner && inner.target, findings: [...findings, ...((inner && inner.findings) || [])] };
+            return { target: inner && inner.target, findings: [...findings, ...((inner && inner.findings) || [])], coverage: covered };
         }
     } else if (/[a-z]/.test(host) && !host.includes('*') && !host.includes('/')) {
         // A name with NO matching domain resource - maybe it resolves into a covered range.
-        const ips = await resolveA(host);
+        // Looked up once, keeping why a lookup failed (only a name the DNS found may be offered).
+        nameLookup = await lookupA(host);
+        const ips = nameLookup.ips || [];
         for (const ip of ips) {
             const cov = (usage.resources || []).filter(r => {
                 try { return addressesOverlap(ip, String(r.address || '')); } catch { return false; }
@@ -7721,7 +7810,7 @@ async function diagnoseAddress(peerId, addressRaw) {
                     type: 'resource', id: best.id,
                     port: port || undefined, probeHost: ip, probePort: port || undefined,
                 });
-                return { target: inner && inner.target, findings: [...findings, ...((inner && inner.findings) || [])] };
+                return { target: inner && inner.target, findings: [...findings, ...((inner && inner.findings) || [])], coverage: covered };
             }
         }
     }
@@ -7753,17 +7842,8 @@ async function diagnoseAddress(peerId, addressRaw) {
         }
         if (route.enabled !== false) {
             // The device only receives the route if it is in one of the distribution groups.
-            const memberIds = new Set((peer.groups || []).map(g => g.id).filter(Boolean));
-            if (peer.user_id) {
-                for (const u of await getAllUsers().catch(() => [])) {
-                    if (u.id === peer.user_id) { for (const g of (u.groups || [])) { const i = gid(g); if (i) memberIds.add(i); } break; }
-                }
-            }
-            const groupsRaw = await netbirdGet('/api/groups').catch(() => null);
-            const groupsArr = Array.isArray(groupsRaw) ? groupsRaw : [];
-            const allIds = new Set(groupsArr.filter(g => (g.name || '') === 'All').map(g => g.id));
-            const dist = Array.isArray(route.groups) ? route.groups : [];
-            const receives = dist.some(g => { const i = gid(g); return memberIds.has(i) || allIds.has(i); });
+            const { groupsArr } = await deviceGroups();
+            const receives = await receivesRoute(route);
             if (receives) add('route', 'Route Distribution', 'PASS', `This device is in the route's distribution groups - it ${isExitNode ? 'is OFFERED the exit node' : 'receives the route'}`);
             else add('route', 'Route Distribution', 'FAIL', `This device is NOT in the route's distribution groups - ${isExitNode ? 'the exit node is not even offered to it' : 'it does not receive this route'}; ask an admin to add it`);
 
@@ -7792,11 +7872,15 @@ async function diagnoseAddress(peerId, addressRaw) {
                 }
             }
         }
-        return { target: null, findings };
+        return { target: null, findings, coverage: await coverageNow() };
     }
 
-    add('coverage', 'NetBird Routing', 'FAIL', `${host} is not covered by any NetBird resource or network route - traffic to it does NOT go through NetBird at all (it takes the regular network/internet path). If it should be reachable via NetBird, an admin needs to add it as a resource`);
-    return { target: null, findings };
+    // When the user can add it (coverage.addable), the page offers that; the text doesn't send them to an admin.
+    const coverage = await coverageNow();
+    add('coverage', 'NetBird Routing', 'FAIL', coverage.addable
+        ? `${host} is not covered by any NetBird resource or network route`
+        : `${host} is not covered by any NetBird resource or network route - traffic to it does NOT go through NetBird at all (it takes the regular network/internet path). If it should be reachable via NetBird, an admin needs to add it as a resource`);
+    return { target: null, findings, coverage };
 }
 
 // ── Access Check (Access Management → Access Check) ──

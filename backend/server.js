@@ -874,7 +874,9 @@ app.use('/api', async (req, res, next) => {
 
 // Resolve the current viewer (logged-in user) → identity + role.
 // Without SSO configured, everyone is treated as an admin (open access, legacy behavior).
-async function getViewer(req) {
+// opts.refresh: false resolves from the users and peers mirror as it is, without refreshing it first
+// (a passive read, such as the Remote Access status line). That viewer is not kept on the request.
+async function getViewer(req, { refresh = true } = {}) {
     // Support elevation: req.tenantSupportAdmin is set by the tenant middleware ONLY on an
     // allowlisted in-context request by a non-admin tenants.support holder. It grants admin
     // rights WITHIN that request without polluting the cached real viewer - identity fields
@@ -889,7 +891,7 @@ async function getViewer(req) {
     const claims = (req.oidc && req.oidc.user) || {};
     const oid = claims.oid || claims.sub || '';
     const email = claims.email || claims.preferred_username || claims.upn || '';
-    await Promise.all([ensureUsersFresh().catch(() => { }), ensurePeersFresh().catch(() => { })]);
+    if (refresh) await Promise.all([ensureUsersFresh().catch(() => { }), ensurePeersFresh().catch(() => { })]);
     const v = await resolveViewer(oid, email);
     // A user blocked in NetBird holds no role, groups or permissions here. Direct per-user grants
     // and delegations count only for an existing, unblocked NetBird user (`live`).
@@ -923,10 +925,12 @@ async function getViewer(req) {
     const canApprove = isAdmin || getApproverGroupIds().some(g => groups.includes(g))
         || (!!live && await isActiveDelegate({ oid, userId: live.user_id, email }));
 
-    req._viewer = {
+    const viewer = {
         authEnabled: true,
         isAdmin,
         canApprove,
+        // Blocked in NetBird: holds no groups or permissions here (see above).
+        blocked,
         role,
         oid,
         user_id: v ? v.user_id : null,
@@ -939,7 +943,8 @@ async function getViewer(req) {
         // Fine-grained feature permissions (admins get everything).
         perms: resolveFeaturePerms({ isAdmin, userId: live ? live.user_id : null, oid: live ? oid : '', email: live ? (live.email || email) : '', groups }),
     };
-    return elevate(req._viewer);
+    if (refresh) req._viewer = viewer;
+    return elevate(viewer);
 }
 
 // Middleware: admins, or holders of the given feature permission (Settings → Permissions).
@@ -3394,12 +3399,13 @@ function remoteAccessViewerOk(v) {
     const cfg = getRemoteAccessConfig();
     return !!(v && v.authEnabled && v.user_id && (cfg.allowAll || v.isAdmin || (v.perms && v.perms['remote.connect'])));
 }
-async function requireRemoteUser(req, res, next) {
+// opts.refresh: false for a passive read (the status line): it never refreshes the users and peers.
+const remoteUserGate = ({ refresh = true } = {}) => async (req, res, next) => {
     try {
         if (currentTenantAccount()) return res.status(404).json({ error: 'Browser remote access is not available while managing a tenant.' });
         if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
         if (!remoteAccessAvailable()) return res.status(403).json({ error: 'Browser remote access is turned off.', code: 'DISABLED' });
-        const v = await getViewer(req);
+        const v = await getViewer(req, { refresh });
         if (!remoteAccessViewerOk(v)) return res.status(403).json({ error: "You don't have permission to use browser remote access.", code: 'FORBIDDEN' });
         req.remoteViewer = v;
         next();
@@ -3407,7 +3413,8 @@ async function requireRemoteUser(req, res, next) {
         console.error('[remote-access] viewer:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
-}
+};
+const requireRemoteUser = remoteUserGate();
 function sendRemoteError(res, e) {
     const status = e.status || 500;
     if (status >= 500 && !e.code) console.error('[remote-access]', e.message);
@@ -3435,6 +3442,30 @@ app.get('/api/remote-access/info', async (req, res) => {
 });
 app.post('/api/remote-access/check', requireRemoteUser, async (req, res) => {
     try { res.json(await checkRemoteAccess(req.remoteViewer, req.body || {})); }
+    catch (e) { sendRemoteError(res, e); }
+});
+// Where "Add As Resource" may add a missing server: the networks open to Remote Access (Settings >
+// Remote Access) that this user may edit. Ids and names only. Empty on a read-only instance. The
+// add itself is the ordinary POST /api/networks/:id/resources, with all of its checks.
+app.get('/api/remote-access/add-networks', requireRemoteUser, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const open = new Set((getRemoteAccessConfig().networks || []).map(String));
+        if (NETBIRD_READONLY || !open.size) return res.json({ networks: [] });
+        const [networks, grants] = await Promise.all([getNetworks(), getAllGrants()]);
+        res.json({
+            networks: networks
+                .filter(n => n && open.has(String(n.id)) && canEditNetwork(req.remoteViewer, n.id, grants))
+                .map(n => ({ id: String(n.id), name: n.name || String(n.id) })),
+        });
+    } catch (e) { sendRemoteError(res, e); }
+});
+// The service status line on the connect page: { netbird, gateway, namesGateway? }, each 'up',
+// 'down' or 'unknown', and nothing else. Asked only on a user action (the page polls nothing).
+app.get('/api/remote-access/health', remoteUserGate({ refresh: false }), async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (req.remoteViewer.blocked) return res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
+    try { res.json(await remoteAccessLib.getServiceHealth()); }
     catch (e) { sendRemoteError(res, e); }
 });
 app.post('/api/remote-access/sessions', requireRemoteUser, async (req, res) => {
@@ -3656,11 +3687,13 @@ app.get('/api/diagnostics/address', async (req, res) => {
     try {
         const viewer = await getViewer(req);
         const peerId = String(req.query.peer_id || '');
-        const address = String(req.query.address || '').trim().slice(0, 260);
+        const typed = String(req.query.address || '').trim();
+        const address = typed.slice(0, 260);
         if (!peerId || !address) return res.status(400).json({ error: 'peer_id and address are required' });
         if (!/^[A-Za-z0-9.:*/_-]+$/.test(address)) return res.status(400).json({ error: 'Invalid address' });
         if (!(await canDiagnosePeer(viewer, peerId))) return res.status(403).json({ error: 'Forbidden' });
-        const out = await diagnoseAddress(peerId, address);
+        // An address cut to the limit is still diagnosed, but never offered as a resource.
+        const out = await diagnoseAddress(peerId, address, { clipped: typed.length > address.length });
         if (!out) return res.status(404).json({ error: 'Peer not found' });
         res.json(out);
     } catch (err) {
@@ -4469,13 +4502,35 @@ app.post('/api/networks/:id/resources', async (req, res) => {
         if (blocked) audit(viewer, 'blocklist.override', name, { network: await netLabel(req.params.id), address, rule: blocked });
 
         const finalPolicies = await resolvePolicySources(viewer, req.params.id, grants, policies);
-        const result = await createClientResource(req.params.id, { name, address, description, groups, policies: finalPolicies, allowBlocked: viewer.isAdmin });
+        let result;
+        try {
+            result = await createClientResource(req.params.id, { name, address, description, groups, policies: finalPolicies, allowBlocked: viewer.isAdmin });
+        } catch (err) {
+            // The resource exists, but not all of its access policies: audited as a create, and the
+            // answer names the resource so the user can finish it on the network page.
+            if (err.code === 'RESOURCE_CREATED_POLICY_FAILED') {
+                const rid = (err.resource && err.resource.id) || '';
+                console.error(`Resource "${name}" (${rid}) created, but an access policy failed: ${err.cause}`);
+                audit(viewer, 'resource.create', name, {
+                    network: await netLabel(req.params.id), address, resourceId: rid, account: currentTenantAccount() || 'main',
+                    policies: (finalPolicies || []).length, policiesSaved: false,
+                });
+                return res.status(502).json({ error: err.message, code: err.code, resource: { id: rid } });
+            }
+            // No answer, or one without an id: the resource may or may not exist.
+            if (err.code === 'RESOURCE_UNCONFIRMED') {
+                console.error(`Resource "${name}" (${address}) not confirmed by NetBird: ${err.cause}`);
+                return res.status(502).json({ error: err.message, code: err.code });
+            }
+            throw err;
+        }
         console.log(`[${new Date().toISOString()}] ${viewer.email || 'user'} added resource "${name}" (${address}) to network ${req.params.id}`);
-        audit(viewer, 'resource.create', name, { network: await netLabel(req.params.id), address, policies: (finalPolicies || []).length });
+        audit(viewer, 'resource.create', name, { network: await netLabel(req.params.id), address, resourceId: (result.resource && result.resource.id) || '', policies: (finalPolicies || []).length });
         res.json({ status: 'ok', ...result });
     } catch (err) {
         console.error('Error creating resource:', err.message);
-        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to create resource' });
+        // Refused before any write, or by NetBird (4xx): nothing was created.
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to create resource', code: 'RESOURCE_CREATE_FAILED' });
     }
 });
 

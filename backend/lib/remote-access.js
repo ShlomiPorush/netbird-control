@@ -27,10 +27,11 @@ const dns = require('dns');
 const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { pool, getSetting, setSetting } = require('./core');
-const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount } = require('./netbird');
+const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, nbDirectGet, getUsageData, _nbApi } = require('./netbird');
 const { addEvent } = require('./events');
 const apiKeys = require('./api-keys');
-const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem } = require('./remote-access-auth');
+const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem, userSourceGroups } = require('./remote-access-auth');
+const { ipUncovered, nameUncovered, nameCovered } = require('./coverage');
 
 // The managed NetBird objects of each gateway. In NetBird each is named "<base> (<installation
 // name>)", so installations that share one NetBird account (production and DEV) never collide.
@@ -961,37 +962,58 @@ function defaultResolve4(name) {
     return r.resolve4(name);
 }
 
+// Is the names gateway set up: does its NetBird group have at least one peer (an enrolled gateway)?
+// The same rule decides what "Add As Resource" suggests for a host name and whether the service
+// status shows the names gateway.
+const namesGatewayEnrolled = (snap, namesCfg) => {
+    const gid = namesCfg && namesCfg.gatewayGroupId;
+    return !!gid && (Array.isArray(snap && snap.peers) ? snap.peers : []).some(p => p && Array.isArray(p.groups) && p.groups.some(g => ((g && g.id) || g) === gid));
+};
+
 // What the typed address means and whether this user may reach it:
 //   { ok, gateway: 'ip', address: <ip>, name: <typed name or ''>, verdict }
 //   { ok, gateway: 'names', address: <name>, name: <name>, verdict }
 // A name that matches a NetBird domain resource goes to the names gateway; any other name is
 // looked up and each IPv4 answer is checked like a typed IP (the first allowed one is used).
+// A refusal may also carry `add: { suggest }`: nothing in NetBird covers the target, so adding it as
+// a resource is what is missing (see lib/coverage.js). Only the check shows it; it never changes
+// the verdict. Not on a read-only instance.
 async function resolveTarget(snap, userId, address, port, opts = {}) {
     const ipCfg = opts.ipCfg || authCfg('ip', { standing: true });
     const namesCfg = opts.namesCfg || authCfg('names', { standing: true });
     const resolve4 = opts.resolve4 || _deps.resolve4 || defaultResolve4;
+    const canAdd = !ipCfg.readonly;
     const t = normalizeTarget(address);
     if (t.error) return { ok: false, verdict: { ok: false, code: t.error } };
     if (t.kind === 'ip') {
         const verdict = evaluateUserAccess(snap, ipCfg, { userId, address: t.ip, port });
-        return { ok: verdict.ok, gateway: 'ip', address: t.ip, name: '', verdict };
+        const add = canAdd && verdict.code === 'UNKNOWN_ADDRESS' && ipUncovered(snap, t.ip) ? { suggest: t.ip } : null;
+        return { ok: verdict.ok, gateway: 'ip', address: t.ip, name: '', verdict, ...(add ? { add } : {}) };
     }
     const named = evaluateNameAccess(snap, namesCfg, { userId, name: t.name, port });
     if (named.code !== 'NO_DOMAIN_MATCH') return { ok: named.ok, gateway: 'names', address: t.name, name: t.name, verdict: named };
+    const namesReady = namesGatewayEnrolled(snap, namesCfg);
     let ips;
     try { ips = await resolve4(t.name); }
     catch (e) {
         const code = e && e.code === 'ENOTFOUND' ? 'NAME_NOT_FOUND' : e && e.code === 'ENODATA' ? 'NO_IPV4_ADDRESS' : 'NAME_LOOKUP_FAILED';
-        return { ok: false, gateway: 'ip', address: '', name: t.name, verdict: { ok: false, code } };
+        // A name the DNS doesn't know can still be added as a domain resource for the names gateway
+        // (NetBird DNS answers it there). A temporary lookup failure says nothing either way.
+        const add = canAdd && code === 'NAME_NOT_FOUND' && namesReady && !nameCovered(snap, t.name) && !userSourceGroups(snap, userId, Date.now()).error
+            ? { suggest: t.name, name: t.name } : null;
+        return { ok: false, gateway: 'ip', address: '', name: t.name, verdict: { ok: false, code }, ...(add ? { add } : {}) };
     }
     const list = (Array.isArray(ips) ? ips : []).map(String).filter(ip => !normalizeTarget(ip).error && normalizeTarget(ip).kind === 'ip');
     if (!list.length) return { ok: false, gateway: 'ip', address: '', name: t.name, verdict: { ok: false, code: 'NO_IPV4_ADDRESS' } };
     let first = null;
+    let unknownEverywhere = true; // no resource in any network covers any of the addresses
     for (const ip of list) {
         const verdict = evaluateUserAccess(snap, ipCfg, { userId, address: ip, port });
         if (verdict.ok) return { ok: true, gateway: 'ip', address: ip, name: t.name, verdict };
+        if (verdict.code !== 'UNKNOWN_ADDRESS') unknownEverywhere = false;
         if (!first) first = { ok: false, gateway: 'ip', address: ip, name: t.name, verdict };
     }
+    if (canAdd && unknownEverywhere && nameUncovered(snap, t.name, list)) first.add = { suggest: namesReady ? t.name : list[0], name: t.name, ips: list };
     return first;
 }
 
@@ -1011,9 +1033,22 @@ async function checkAccess(viewer, body) {
     const verdict = rt.verdict;
     const target = { protocol, address: rt.address || address, name: rt.name || '', gateway: rt.gateway || 'ip', port, resource: verdict.resource || null, network: verdict.network || null };
     if (!verdict.ok) {
+        // The snapshot reads lists without their status, so "nothing covers it" is confirmed by a
+        // strict read of the resources and routes (2xx answers only) before it is offered.
+        let add = null;
+        if (rt.add) {
+            const inv = await getUsageData({ strict: true }).catch(() => null);
+            const free = !!inv && (rt.add.ips ? nameUncovered(inv, rt.add.name, rt.add.ips) : rt.add.name ? !nameCovered(inv, rt.add.name) : ipUncovered(inv, rt.add.suggest));
+            if (free) add = rt.add;
+        }
         // Settling may have started while the target was looked up (DNS): no refusal from old data.
         if (targetsSettling() || !snapshotCurrent(snap)) return { steps: [notReady('TARGETS_SETTLING')], target };
-        steps.push({ key: 'access', status: 'fail', code: verdict.code, message: MESSAGES[verdict.code] || verdict.code, requestable: REQUESTABLE.has(verdict.code) });
+        // addable: nothing in NetBird covers the target; the page offers to add it (to a network the
+        // user may edit), with the suggested address.
+        steps.push({
+            key: 'access', status: 'fail', code: verdict.code, message: MESSAGES[verdict.code] || verdict.code, requestable: REQUESTABLE.has(verdict.code),
+            ...(add ? { addable: true, suggest: { address: add.suggest } } : {}),
+        });
         return { steps, target };
     }
     steps.push({ key: 'access', status: 'pass', detail: `Granted by ${verdict.policies.join(', ')}` });
@@ -1933,6 +1968,120 @@ async function getRemoteAccessStatus() {
     return out;
 }
 
+// ─── Service status (the connect page) ───
+// One line for the user: is NetBird answering, and is each Browser Gateway up? Measured by an active,
+// read-only probe of the main account, independent of the snapshot and of every cache:
+//   - netbird: is NetBird reachable? One GET to an API path that needs a sign-in, sent WITHOUT the
+//     token: any answer below 500 (401 included) is up; no answer, a timeout or a 5xx is down.
+//   - each gateway: its group's peers read from NetBird (the connected flag of each peer) and a TCP
+//     probe of that gateway's guacd; up when a peer is connected and guacd answers, down when either
+//     is known bad, unknown when NetBird couldn't be read for another reason.
+// The gateway reads are ordinary authenticated NetBird reads (as every other NetBird call). One probe
+// at a time, kept for 15 s; a settings change (another NetBird URL, other gateway groups or guacd
+// addresses) starts a new probe and a probe from the old settings is never used.
+const HEALTH_TTL_MS = 15_000;
+let healthDeadlineMs = 9_000; // per part of the probe (tests shorten it)
+const HEALTH_GET_MS = 4_000;
+const HEALTH_PEERS_MAX = 50;      // peers read per gateway group
+const HEALTH_PEERS_PARALLEL = 5; // at a time
+let _health = null;    // { key, value, at }
+let _healthRun = null; // { key, promise }
+// What the last read of the names group showed, for one NetBird URL and one names group:
+// { key, seen }. Only the latest probe that started updates it, under the names group
+// it started with, and only while that group is still the current one.
+let _namesSeen = null;
+let _probeGen = 0; // raised by every probe that starts; only the latest may store its answer
+const namesSeenKey = (url, groupId) => JSON.stringify([url, groupId]);
+const healthKey = () => JSON.stringify([_nbApi.url, _nb.gatewayGroupId, _nb.namesGroupId, _cfg.guacdHost, _cfg.guacdPort, _cfg.namesGuacdHost, _cfg.namesGuacdPort]);
+const okStatus = (r) => !!r && r.status >= 200 && r.status < 300;
+
+const netbirdState = (r) => (r && r.status > 0 && r.status < 500 ? 'up' : 'down');
+// The peers of a gateway group: { read: true, peers, connected }, or { read: false } when NetBird
+// couldn't be read (with `peers` when the group itself was read). NetBird answers an empty list as
+// null. `info.peers` is set as soon as the group was read, so a part that runs out of time still
+// knows whether the group has peers. No peer read starts after `stopAt`.
+async function gatewayPeers(get, groupId, stopAt, info) {
+    if (!groupId) { info.peers = 0; return { read: true, peers: 0, connected: false }; }
+    const g = await get('/api/groups/' + encodeURIComponent(groupId));
+    if (g && g.status === 404) { info.peers = 0; return { read: true, peers: 0, connected: false }; }
+    const list = okStatus(g) && g.body && typeof g.body === 'object' ? (g.body.peers === null ? [] : g.body.peers) : undefined;
+    if (!Array.isArray(list)) return { read: false };
+    const ids = list.map(refId).filter(Boolean);
+    info.peers = ids.length;
+    if (!ids.length) return { read: true, peers: 0, connected: false };
+    // Every peer of the group (up to HEALTH_PEERS_MAX), a few at a time; one connected peer is enough.
+    let allRead = ids.length <= HEALTH_PEERS_MAX;
+    const todo = ids.slice(0, HEALTH_PEERS_MAX);
+    for (let i = 0; i < todo.length; i += HEALTH_PEERS_PARALLEL) {
+        if (Date.now() >= stopAt) return { read: false, peers: ids.length };
+        const peers = await Promise.all(todo.slice(i, i + HEALTH_PEERS_PARALLEL).map(id => get('/api/peers/' + encodeURIComponent(id))));
+        if (peers.some(r => okStatus(r) && r.body && r.body.connected === true)) return { read: true, peers: ids.length, connected: true };
+        if (!peers.every(r => okStatus(r) && r.body && typeof r.body.connected === 'boolean')) allRead = false;
+    }
+    return allRead ? { read: true, peers: ids.length, connected: false } : { read: false, peers: ids.length };
+}
+function gatewayState(peers, guacdUp) {
+    if (peers.read && peers.connected && guacdUp) return 'up';
+    if (!guacdUp || (peers.read && !peers.connected)) return 'down';
+    return 'unknown';
+}
+// Each part (NetBird, the IP gateway, the names gateway) has its own time limit; a part that runs
+// out of time is unknown (NetBird down; a gateway whose guacd is already known to be down is down),
+// and the others keep what they measured.
+const PART_TIMED_OUT = Symbol('timed out');
+async function probeHealth(gen) {
+    const stopAt = Date.now() + healthDeadlineMs;
+    const url = _nbApi.url;
+    const namesGroup = _nb.namesGroupId;
+    const get = (path) => nbDirectGet(path, { auth: true, timeoutMs: HEALTH_GET_MS });
+    const part = (promise) => withDeadline(promise, healthDeadlineMs, 'A status check').catch(() => PART_TIMED_OUT);
+    const gatewayPart = (groupId, host, port) => {
+        const info = {};
+        const guacd = probeGuacd(host, port).then(up => { info.up = up; return up; });
+        return part(Promise.all([gatewayPeers(get, groupId, stopAt, info), guacd]))
+            .then(r => (r === PART_TIMED_OUT ? { timedOut: true, info } : { peers: r[0], up: r[1], info }));
+    };
+    const [nb, ip, names] = await Promise.all([
+        part(nbDirectGet('/api/users/current', { timeoutMs: HEALTH_GET_MS }).then(netbirdState)),
+        gatewayPart(_nb.gatewayGroupId, _cfg.guacdHost, _cfg.guacdPort),
+        namesGroup ? gatewayPart(namesGroup, _cfg.namesGuacdHost, _cfg.namesGuacdPort) : Promise.resolve(null),
+    ]);
+    const stateOf = (g) => (g.timedOut ? (g.info.up === false ? 'down' : 'unknown') : gatewayState(g.peers, g.up));
+    const out = { netbird: nb === PART_TIMED_OUT ? 'down' : nb, gateway: stateOf(ip) };
+    if (!names) return out;
+    // The names gateway only when it is set up: a read of its group showed a peer. When the group
+    // couldn't be read, it stays in as unknown if the last read, for this URL, had shown one.
+    const seenKey = namesSeenKey(url, namesGroup);
+    if (gen === _probeGen && names.info.peers !== undefined && _nb.namesGroupId === namesGroup) _namesSeen = { key: seenKey, seen: names.info.peers > 0 };
+    if (names.info.peers > 0) out.namesGateway = stateOf(names);
+    else if (names.info.peers === undefined && _namesSeen && _namesSeen.key === seenKey && _namesSeen.seen) out.namesGateway = 'unknown';
+    return out;
+}
+async function getServiceHealth() {
+    for (let i = 0; i < 3; i++) {
+        const key = healthKey();
+        if (_health && _health.key === key && Date.now() - _health.at < HEALTH_TTL_MS) return { ..._health.value };
+        let run = _healthRun && _healthRun.key === key ? _healthRun : null;
+        if (!run) {
+            const mine = { key, promise: null };
+            const gen = ++_probeGen;
+            mine.promise = probeHealth(gen)
+                .catch(() => ({ netbird: 'unknown', gateway: 'unknown' }))
+                .then(value => {
+                    if (gen === _probeGen && healthKey() === key) _health = { key, value, at: Date.now() };
+                    return value;
+                })
+                .finally(() => { if (_healthRun === mine) _healthRun = null; });
+            _healthRun = mine;
+            run = mine;
+        }
+        const value = await run.promise;
+        // Settings changed while it ran: its answer is about the old settings.
+        if (healthKey() === key) return { ...value };
+    }
+    return { netbird: 'unknown', gateway: 'unknown' };
+}
+
 // ─── Launch links (POST /api/v1/remote-access/launch) ───
 // Another system (the customer file) asks, server to server with an API key, for a session to a
 // target with stored credentials. It gets a one-time link; the browser opens it signed in to the
@@ -2136,6 +2285,7 @@ module.exports = {
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, isSettling: () => targetsSettling(), endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
+    getServiceHealth, invalidateSnapshot,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
     _internal: {
         GuacParser, CLIENT_MAX_ELEMENTS, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, syncTargetGroup, applyGatewayObjects,
@@ -2150,6 +2300,8 @@ module.exports = {
         settleTimerPendingForTest: () => !!_settleTimer,
         clearSettleTimerForTest: () => { clearTimeout(_settleTimer); _settleTimer = null; },
         freshSnapshot, invalidateSnapshot,
+        resetHealthForTest: () => { _health = null; _healthRun = null; _namesSeen = null; },
+        setHealthDeadlineForTest: (ms) => { healthDeadlineMs = ms || 9_000; },
         membershipIdleForTest: async () => { while (_membershipRun) await _membershipRun; },
         resetMembershipForTest: () => { _membershipFailed.clear(); _lastMembership = { at: null, removed: [], error: '' }; _membershipPending = null; },
         passMembershipRetryForTest: () => { for (const f of _membershipFailed.values()) f.at -= MEMBERSHIP_RETRY_MS; },

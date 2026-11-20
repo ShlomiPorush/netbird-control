@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useNavigate } from 'react-router-dom';
-import { Share2, Plus, MoreVertical, Edit2, Trash2, Lock, ShieldCheck, Copy, ClipboardPaste, Check, X as XIcon, Rows3, ScanSearch } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { Share2, Plus, MoreVertical, Edit2, Trash2, Lock, ShieldCheck, Copy, ClipboardPaste, Check, X as XIcon, Rows3, ScanSearch, AlertTriangle } from 'lucide-react';
+import { ApiError } from '@/lib/api';
 import {
   Modal, Tabs, Input, Field, Button, Spinner, GroupMultiSelect, SearchInput, SortTh, Pagination,
 } from '@/components/ui';
@@ -25,10 +26,35 @@ interface Props {
   existingNames?: string[]; // names of OTHER resources in this network (for duplicate check)
   existingResources?: { name: string; address: string }[]; // OTHER resources here (overlap check)
   allowDuplicates?: boolean; // per-network opt-out: overlapping addresses are allowed here
+  /** Create only: the address (and name) the form starts with. */
+  initialAddress?: string;
+  /** Create only: the resource was saved, with this id. */
+  onCreated?: (resourceId: string) => void;
+  /** Create only: NetBird's answer was only partly known (see CreateOutcome). */
+  onUncertain?: () => void;
   onClose: () => void;
 }
 
-export function ResourceModal({ networkId, resource, duplicate = false, initialTab = 'resource', existingNames = [], existingResources = [], allowDuplicates = false, onClose }: Props) {
+// A create whose outcome is only partly known. The form stays open with the text, and Save stays
+// off: sending it again could add the resource twice.
+type CreateOutcome = 'policy' | 'unconfirmed';
+const OUTCOME_TEXT: Record<CreateOutcome, string> = {
+  policy: "The resource was added, but its access rules weren't all saved. Open the network to finish them.",
+  unconfirmed: "NetBird didn't confirm the resource was saved. Check the network before you try again.",
+};
+// The answer to the create never arrived, or is not the server's own definite answer (no answer, a
+// time-out, or a 5xx without RESOURCE_CREATE_FAILED, such as a proxy's 504): the resource may exist.
+// A 4xx and RESOURCE_CREATE_FAILED are definite failures (nothing was created).
+function createOutcome(e: unknown): CreateOutcome | null {
+  if (e instanceof ApiError) {
+    if (e.code === 'RESOURCE_CREATED_POLICY_FAILED') return 'policy';
+    if (e.code === 'RESOURCE_CREATE_FAILED') return null;
+    return e.code === 'RESOURCE_UNCONFIRMED' || e.status === 0 || e.status >= 500 ? 'unconfirmed' : null;
+  }
+  return 'unconfirmed';
+}
+
+export function ResourceModal({ networkId, resource, duplicate = false, initialTab = 'resource', existingNames = [], existingResources = [], allowDuplicates = false, initialAddress, onCreated, onUncertain, onClose }: Props) {
   const opts = usePolicyOptions(networkId);
   const profiles = useAccessProfiles();
   const ready = !opts.isLoading && !profiles.isLoading;
@@ -61,6 +87,9 @@ export function ResourceModal({ networkId, resource, duplicate = false, initialT
       existingNames={existingNames}
       existingResources={existingResources}
       allowDuplicates={allowDuplicates}
+      initialAddress={initialAddress}
+      onCreated={onCreated}
+      onUncertain={onUncertain}
       onClose={onClose}
     />
   );
@@ -83,9 +112,10 @@ function policiesFromResource(resource: Resource | null, forDuplicate = false): 
   }));
 }
 
-function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profiles, existingNames, existingResources, allowDuplicates, onClose }: {
+function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profiles, existingNames, existingResources, allowDuplicates, initialAddress, onCreated, onUncertain, onClose }: {
   networkId: string; resource: Resource | null; duplicate: boolean; initialTab: 'resource' | 'access';
-  opts: PolicyOptions; profiles: AccessProfile[]; existingNames: string[]; existingResources: { name: string; address: string }[]; allowDuplicates: boolean; onClose: () => void;
+  opts: PolicyOptions; profiles: AccessProfile[]; existingNames: string[]; existingResources: { name: string; address: string }[]; allowDuplicates: boolean;
+  initialAddress?: string; onCreated?: (resourceId: string) => void; onUncertain?: () => void; onClose: () => void;
 }) {
   // Duplicating: everything initializes from the source resource, but saving CREATES.
   const isEdit = !!resource && !duplicate;
@@ -98,8 +128,8 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
   const profileGroupIds = useMemo(() => new Set(sharedProfiles.map((p) => p.groupId)), [sharedProfiles]);
   const [tab, setTab] = useState<'resource' | 'access'>(initialTab);
   // A copy starts with a "(copy)" name so it never collides with the source's unique name.
-  const [name, setName] = useState(resource ? (duplicate ? `${resource.name || ''} (copy)` : resource.name || '') : '');
-  const [address, setAddress] = useState(resource?.address || '');
+  const [name, setName] = useState(resource ? (duplicate ? `${resource.name || ''} (copy)` : resource.name || '') : (initialAddress || ''));
+  const [address, setAddress] = useState(resource?.address || initialAddress || '');
   const [description, setDescription] = useState(resource?.description || '');
   // Shared access profiles the resource is assigned to (it inherits their policy).
   // New resources start from the network's default profiles; existing ones from their groups.
@@ -123,6 +153,7 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
   const [initialPolicies] = useState(() => JSON.stringify(policiesFromResource(resource)));
   const [editing, setEditing] = useState<{ index: number | null } | null>(null);
   const [error, setError] = useState('');
+  const [outcome, setOutcome] = useState<CreateOutcome | null>(null);
   const save = useSaveResource(networkId);
 
   const groupName = useMemo(() => {
@@ -234,9 +265,19 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
       })),
     };
     try {
-      await save.mutateAsync({ rid: isEdit ? resource?.id : undefined, payload });
+      const out = await save.mutateAsync({ rid: isEdit ? resource?.id : undefined, payload }) as { resource?: { id?: string } } | null;
+      if (!isEdit && onCreated) {
+        const id = out?.resource?.id;
+        // A success without an id can't be confirmed either.
+        if (!id) { setOutcome('unconfirmed'); onUncertain?.(); return; }
+        onCreated(id);
+      }
       onClose();
-    } catch (e) { setError('Failed: ' + (e as Error).message); }
+    } catch (e) {
+      const partly = isEdit ? null : createOutcome(e);
+      if (partly) { setOutcome(partly); onUncertain?.(); return; }
+      setError('Failed: ' + (e as Error).message);
+    }
   };
 
   return (
@@ -249,6 +290,8 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
         ? `A copy of "${resource?.name || ''}" - adjust the name and address, then create.`
         : isEdit ? resource?.name : 'Add a resource to this network and control which peers can access it.'}
       size="lg"
+      // A save in flight can't be left: its answer (possibly "not confirmed") must land here.
+      closeDisabled={save.isPending}
       tabs={
         <Tabs
           bordered={false}
@@ -269,13 +312,23 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
               <ScanSearch size={14} /> Who Has Access
             </Button>
           )}
-          <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" size="sm" onClick={submit} disabled={save.isPending || nameExists || addressExists || blockedHard}>
+          <Button variant="secondary" size="sm" onClick={onClose} disabled={save.isPending}>Cancel</Button>
+          <Button variant="primary" size="sm" onClick={submit} disabled={save.isPending || !!outcome || nameExists || addressExists || blockedHard}>
             {save.isPending ? '…' : isEdit ? 'Save Changes' : 'Create'}
           </Button>
         </>
       }
     >
+      {/* Shown first, so it is seen without scrolling. */}
+      {outcome && (
+        <div role="alert" className="mb-4 flex items-start gap-2.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-800 dark:text-amber-300">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="min-w-0">
+            <p>{OUTCOME_TEXT[outcome]}</p>
+            <Link to={`/networks/${encodeURIComponent(networkId)}`} onClick={onClose} className="mt-1 inline-block font-semibold underline underline-offset-2">Open Network</Link>
+          </div>
+        </div>
+      )}
       {tab === 'resource' ? (
         <div className="flex flex-col gap-4">
           <Field label="Name" hint="Set an easily identifiable name for your resource">

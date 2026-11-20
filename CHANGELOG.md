@@ -10,6 +10,23 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **Add a missing server as a resource.** When the Remote Access check finds that nothing in
+  NetBird covers the address, and the user may edit a network that Remote Access uses, the page
+  offers **Add As Resource** on the failed step. It opens a modal: the network (when there is more
+  than one to choose from), then the same Add Resource form as the Networks page, filled in with the
+  address. After the save, the page checks the server
+  again and shows **Ready To Connect**; it never opens a session by itself. Troubleshoot offers the
+  same button for an address that nothing in NetBird covers. The save uses the network's own
+  permission, blocklist and duplicate checks.
+- **Clear answers when a new resource is only partly saved.** If the resource was added but not all
+  of its access rules were, or NetBird didn't confirm the save, or the answer never reached the
+  browser, the Add Resource form says so, keeps **Create** off and links to the network. A resource
+  whose access rules failed is recorded in the audit log as created, with `policiesSaved: false`.
+- **Service status on the connect page.** One line shows whether NetBird and the Browser Gateways
+  are online (one item for all gateways: Online, Offline or Partly Online), with a refresh button. It is checked when the page opens, when a check starts and
+  when you press refresh, never on a timer.
+
 ### Changed
 - **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
   **Network**, **Access** and **Administration**. A group with no page you may open is not shown.

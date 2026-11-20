@@ -659,6 +659,8 @@ export interface DeviceDiagnosis {
 export interface TargetDiagnosis {
   target: { type: string; id: string; name: string; address?: string; network?: string; networkId?: string; resourceType?: string } | null;
   findings: DiagCheck[];
+  /** Address checks only: nothing in NetBird covers the address, so it can be added as a resource. */
+  coverage?: { addable: boolean };
 }
 /** A still-relevant NetBird account notification (routing peer down / integration issue). */
 export interface NbNotice {

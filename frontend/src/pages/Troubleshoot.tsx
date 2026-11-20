@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Download, Play, X, MonitorSmartphone, Globe, Route, History, Check, Loader2, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { Download, Play, X, MonitorSmartphone, Globe, Route, History, Check, Loader2, ChevronDown, ChevronUp, AlertTriangle, Plus } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { api, getTenantMode } from '@/lib/api';
+import { AddResourceModal } from '@/components/networks/AddResourceModal';
 import { usePeers, useDiagnosticsInfo, useDiagNotices } from '@/lib/queries';
 import { useNetbirdRefresh, useDismissNbNotice } from '@/lib/mutations';
 import { useViewer } from '@/contexts/ViewerContext';
 import { formatTimestamp } from '@/lib/logfmt';
 import { requestAccessLink } from '@/lib/requestAccess';
-import type { DeviceDiagnosis, DiagCheck, GrantTarget, TargetDiagnosis } from '@/lib/types';
+import type { DeviceDiagnosis, DiagCheck, GrantTarget, Network, TargetDiagnosis } from '@/lib/types';
 import { Badge, Button, PageHeader, SelectMenu } from '@/components/ui';
 import { TargetSearch } from '@/components/access/TargetSearch';
 
@@ -140,6 +142,45 @@ export default function Troubleshoot() {
   const [targetDiag, setTargetDiag] = useState<TargetDiagnosis | null>(null);
   const [error, setError] = useState('');
 
+  // "Add As Resource" for an address that nothing in NetBird covers. It belongs to the device and the
+  // address that were checked (diagKey): a change of either hides it. Every run, every coverage
+  // refresh and every change of the inputs gets a new id (seq); only the answer of the latest one
+  // can show the button (shownRun), so an older answer never does, even for the same target again.
+  // After an add whose outcome is unclear it stays hidden until the next check (noAdd).
+  const keyOf = (peer: string, address: string) => `${peer}|${address.trim().toLowerCase()}`;
+  const [diagKey, setDiagKey] = useState('');
+  const [noAdd, setNoAdd] = useState(false);
+  const [adding, setAdding] = useState<{ address: string; key: string } | null>(null);
+  const [rechecking, setRechecking] = useState(false);
+  const seq = useRef(0);
+  const [shownRun, setShownRun] = useState(-1);
+  useEffect(() => { seq.current += 1; }, [peerId, addr]);
+  const addable = !!targetDiag?.coverage?.addable && !noAdd && !!addr.trim() && diagKey === keyOf(peerId, addr) && shownRun === seq.current;
+  // The networks this user may edit (the same list the Networks page shows), read only when needed.
+  const editable = useQuery({
+    queryKey: ['networks'], queryFn: () => api.get<Network[]>('/api/networks'), enabled: addable,
+  });
+  const addNets = (editable.data || []).filter((n) => n.canEdit);
+  const addShown = addable && addNets.length > 0;
+  // The address that was checked, without its :port.
+  const addAddress = (() => {
+    const a = addr.trim();
+    const i = a.lastIndexOf(':');
+    return i > 0 && /^\d{1,5}$/.test(a.slice(i + 1)) ? a.slice(0, i) : a;
+  })();
+  // After the add: the address check alone runs again (not the device or browser checks).
+  const recheckCoverage = async (key: string) => {
+    if (key !== keyOf(peerId, addr)) return;
+    const id = ++seq.current;
+    setRechecking(true);
+    try {
+      const tgt = await api.get<TargetDiagnosis>('/api/diagnostics/address', { peer_id: peerId, address: addr.trim() });
+      if (id === seq.current) { setTargetDiag(tgt); setShownRun(id); }
+    } catch { /* the earlier answer stays */ } finally {
+      setRechecking(false);
+    }
+  };
+
   // Preselect: ?peer= deep link → IP-matched device → the only device there is.
   useEffect(() => {
     if (peerId) return;
@@ -193,6 +234,10 @@ export default function Troubleshoot() {
     const peerName = peers.find((p) => p.id === peerId)?.name || 'device';
     const freeAddr = addr.trim();
     const tgtLabel = target?.name || freeAddr;
+    const runKey = keyOf(peerId, freeAddr);
+    const id = ++seq.current;
+    setDiagKey('');
+    setNoAdd(false);
 
     // Every probe runs concurrently; each ticks its own step off as it lands, so the
     // progress list is honest (slow probes visibly stay "checking" until their timeout).
@@ -249,6 +294,9 @@ export default function Troubleshoot() {
       ]);
       setDevice(dev);
       setTargetDiag(tgt);
+      // The answer is for the device and address of this run only, and only while it is the latest.
+      setDiagKey(freeAddr ? runKey : '');
+      if (id === seq.current) setShownRun(id);
     } catch (e) {
       setError((e as Error).message || 'Diagnostics failed');
     } finally {
@@ -283,7 +331,7 @@ export default function Troubleshoot() {
   // One plain-language conclusion for non-technical users: what is wrong, whose fault
   // it is, and the single next step. First matching rule wins (most fundamental first);
   // the technical rows stay below as "Details".
-  const verdict = useMemo((): { tone: 'ok' | 'warn' | 'bad'; headline: string; todo: string; button?: { label: string; to: string } } | null => {
+  const verdict = useMemo((): { tone: 'ok' | 'warn' | 'bad'; headline: string; todo: string; button?: { label: string; to: string }; coverage?: boolean } | null => {
     if (!ran) return null;
     const fail = (key: string) => allChecks.some((c) => c.key === key && c.status === 'FAIL');
     if (fail('compliance')) return {
@@ -305,8 +353,10 @@ export default function Troubleshoot() {
       todo: 'An admin disabled or removed it. If you still need it, contact your admin.',
     };
     if (fail('coverage')) return {
-      tone: 'bad', headline: 'This address is not part of the NetBird network.',
-      todo: 'NetBird is not involved when you connect to it, so whatever fails there is not a NetBird problem. If it SHOULD be reachable through NetBird, ask your admin to add it as a resource.',
+      tone: 'bad', headline: 'This address is not part of the NetBird network.', coverage: true,
+      todo: addShown
+        ? 'NetBird is not involved when you connect to it. If it should be reachable through NetBird, you can add it as a resource below.'
+        : 'NetBird is not involved when you connect to it, so whatever fails there is not a NetBird problem. If it SHOULD be reachable through NetBird, ask your admin to add it as a resource.',
     };
     if (fail('routers')) return {
       tone: 'bad', headline: 'The problem is on the server side - not your device.',
@@ -343,7 +393,7 @@ export default function Troubleshoot() {
       tone: 'ok', headline: 'Everything looks good.',
       todo: 'All checks passed. If something still does not work, run the downloadable script on the device itself - it checks what a browser cannot.',
     };
-  }, [ran, allChecks, warns, device, requestLink]);
+  }, [ran, allChecks, warns, device, requestLink, addShown]);
 
   const matchNote = info && info.matches.length > 0 && (
     <span className="text-[0.8rem] text-nb-gray-500">
@@ -475,6 +525,20 @@ export default function Troubleshoot() {
                 <Link to={verdict.button.to}><Button variant="primary">{verdict.button.label}</Button></Link>
               </div>
             )}
+            {addShown && verdict.coverage && (
+              <div className="mt-3">
+                <p className="text-sm text-nb-gray-700 dark:text-nb-gray-200">You can add this address to a network you manage, so it goes through NetBird.</p>
+                <Button variant="primary" className="mt-2" disabled={rechecking}
+                  onClick={() => setAdding({ address: addAddress, key: keyOf(peerId, addr) })}>
+                  <Plus size={14} className="mr-1" /> Add As Resource
+                </Button>
+              </div>
+            )}
+            {rechecking && (
+              <p className="mt-3 inline-flex items-center gap-2 text-sm text-nb-gray-600 dark:text-nb-gray-300">
+                <Loader2 size={14} className="animate-spin text-netbird" /> Checking the address again…
+              </p>
+            )}
             {(fails.length > 0 || warns.length > 0) && (
               <div className="mt-3 pt-2.5 border-t border-nb-gray-200/70 dark:border-nb-gray-800/70">
                 <div className="text-[0.68rem] uppercase tracking-wide text-nb-gray-500 mb-1">Details</div>
@@ -518,6 +582,16 @@ export default function Troubleshoot() {
           <Section icon={<Route size={15} />} title={`Access Path${targetDiag.target ? ` - ${targetDiag.target.name}` : ''}`}>
             {targetDiag.findings.map((c) => <CheckRow key={c.key + c.label} c={c} />)}
           </Section>
+        )}
+
+        {adding && (
+          <AddResourceModal
+            networks={addNets.map((n) => ({ id: String(n.id), name: n.name || String(n.id) }))}
+            address={adding.address}
+            onCreated={() => { setNoAdd(true); void recheckCoverage(adding.key); }}
+            onUncertain={() => setNoAdd(true)}
+            onClose={() => setAdding(null)}
+          />
         )}
 
         {showDetails && device && device.recentEvents.length > 0 && (

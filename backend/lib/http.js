@@ -19,10 +19,11 @@ function noteNetbirdOk() { _nbLastOkAt = Date.now(); }
 // timeoutMs is the socket idle timeout. deadlineMs bounds the whole request (connect, headers and
 // body) and maxBytes bounds the response body; crossing either destroys the request and resolves
 // with status 0 and an error, so a slow or oversized response can never hold the caller.
+// noteOk: false keeps a 2xx answer from counting as the last good NetBird answer (a status probe).
 const HTTP_DEADLINE_MS = 30000;
 const HTTP_MAX_BYTES = 10 * 1024 * 1024;
 
-function httpJson(method, urlStr, { headers = {}, body = undefined, timeoutMs = 15000, deadlineMs = HTTP_DEADLINE_MS, maxBytes = HTTP_MAX_BYTES } = {}) {
+function httpJson(method, urlStr, { headers = {}, body = undefined, timeoutMs = 15000, deadlineMs = HTTP_DEADLINE_MS, maxBytes = HTTP_MAX_BYTES, noteOk = true } = {}) {
     return new Promise((resolve) => {
         let deadline = null;
         let settled = false;
@@ -43,7 +44,7 @@ function httpJson(method, urlStr, { headers = {}, body = undefined, timeoutMs = 
                 chunks.push(c);
             });
             res.on('error', e => finish({ status: 0, error: e.message }));
-            res.on('end', () => { if (settled) return; const d =Buffer.concat(chunks).toString('utf8'); let j = null; try { j = JSON.parse(d); } catch (e) { } if (res.statusCode >= 200 && res.statusCode < 300) _nbLastOkAt = Date.now(); finish({ status: res.statusCode, body: j, raw: d }); });
+            res.on('end', () => { if (settled) return; const d =Buffer.concat(chunks).toString('utf8'); let j = null; try { j = JSON.parse(d); } catch (e) { } if (noteOk && res.statusCode >= 200 && res.statusCode < 300) _nbLastOkAt = Date.now(); finish({ status: res.statusCode, body: j, raw: d }); });
         });
         deadline = setTimeout(() => { req.destroy(); finish({ status: 0, error: `response not completed within ${deadlineMs / 1000} s` }); }, deadlineMs);
         req.on('error', e => finish({ status: 0, error: e.message }));

@@ -25,13 +25,25 @@ export function useToggleResource(networkId: string) {
   });
 }
 
+const CREATE_TIMEOUT_MS = 60_000;
 export function useSaveResource(networkId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ rid, payload }: { rid?: string; payload: ResourcePayload }) =>
-      rid
-        ? api.put(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`, payload)
-        : api.post(`/api/networks/${encodeURIComponent(networkId)}/resources`, payload),
+    // Never paused offline: an offline save fails at once, and the form treats it as an answer that
+    // never arrived (it can't tell whether the server got it).
+    networkMode: 'always',
+    mutationFn: async ({ rid, payload }: { rid?: string; payload: ResourcePayload }) => {
+      if (rid) return api.put(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`, payload);
+      // A create waits at most CREATE_TIMEOUT_MS; the form then treats it as an answer that never
+      // arrived (the resource may exist).
+      const ctrl = new AbortController();
+      const timer = window.setTimeout(() => ctrl.abort(), CREATE_TIMEOUT_MS);
+      try {
+        return await api.post(`/api/networks/${encodeURIComponent(networkId)}/resources`, payload, ctrl.signal);
+      } finally {
+        window.clearTimeout(timer);
+      }
+    },
     // onSettled: a partial save (resource saved, policies refused) still changed the resource.
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['network-detail', networkId] });

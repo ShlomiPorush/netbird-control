@@ -11,7 +11,7 @@ const https = require('https');
 const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
 const { pool, setSetting } = require('./core');
-const { noteNetbirdOk } = require('./http');
+const { noteNetbirdOk, httpJson } = require('./http');
 
 // ─── MSP tenant context ───
 // The NetBird Cloud MSP portal manages child tenants with the SAME token plus an
@@ -146,7 +146,7 @@ function bustNbCaches(...names) {
         if (n === 'groups') _groupsAt = 0;
         else if (n === 'policies') _policiesAt = 0;
         else if (n === 'gref') _grefAt = 0;
-        else if (n === 'usage') _usage.at = 0;
+        else if (n === 'usage') invalidateUsage();
     }
 }
 
@@ -493,8 +493,27 @@ function getGroupRefMap() {
 // NetBird has no per-group usage endpoint, so the dashboard cross-references the
 // global lists. We do the same and cache the datasets briefly (admin pages reload
 // often). Each list degrades to [] when its endpoint is missing/unavailable.
+// One cache per account (the main account, and each tenant in its slot). Each has a generation:
+// invalidateUsage() raises it, and a read that started before that never stores its result, so a
+// write is never hidden by an older read that finishes after it. Within one generation only one
+// read runs at a time (callers join it).
 const USAGE_TTL_MS = 60 * 1000;
-let _usage = { at: 0, data: null, refreshing: null };
+const newUsageState = () => ({ at: 0, data: null, refreshing: null, gen: 0 });
+const _usage = newUsageState();
+function usageState() {
+    if (!currentTenantAccount()) return _usage;
+    const s = tenantSlot();
+    if (!s.usageState) s.usageState = newUsageState();
+    return s.usageState;
+}
+// Drop the CURRENT account's usage datasets (after a write to that account): the next read fetches
+// anew, and no read that is already running can store its result or be joined.
+function invalidateUsage() {
+    const st = usageState();
+    st.gen++;
+    st.at = 0;
+    st.refreshing = null;
+}
 
 function emptyUsage() {
     return { policies: [], routes: [], nameservers: [], zones: [], setupKeys: [], resources: [], networks: [] };
@@ -517,24 +536,56 @@ async function fetchUsageData() {
     };
 }
 
-// Cached usage datasets; coalesces concurrent callers into one refresh.
-function getUsageData() {
-    if (!netbirdApiConfigured()) return Promise.resolve(emptyUsage());
-    // Tenant context: per-tenant slot, never the main-account cache.
-    if (currentTenantAccount()) {
-        const s = tenantSlot();
-        if (s.usage && Date.now() - (s.usageAt || 0) < TENANT_TTL_MS) return Promise.resolve(s.usage);
-        return fetchUsageData()
-            .then(d => { s.usage = d; s.usageAt = Date.now(); return d; })
-            .catch(e => { console.error('[Groups] tenant usage fetch error:', e.message); return s.usage || emptyUsage(); });
-    }
-    if (_usage.data && Date.now() - _usage.at < USAGE_TTL_MS) return Promise.resolve(_usage.data);
-    if (_usage.refreshing) return _usage.refreshing;
-    _usage.refreshing = fetchUsageData()
-        .then(d => { _usage.data = d; _usage.at = Date.now(); return d; })
-        .catch(e => { console.error('[Groups] usage fetch error:', e.message); return _usage.data || emptyUsage(); })
-        .finally(() => { _usage.refreshing = null; });
-    return _usage.refreshing;
+// One read of the datasets for the account state `st`; it stores its result only while no
+// invalidation came after it started.
+function readUsage(st) {
+    const gen = st.gen;
+    return fetchUsageData().then(d => {
+        if (gen === st.gen) {
+            st.data = d; st.at = Date.now();
+        }
+        return d;
+    });
+}
+
+// Cached usage datasets of the current account (main, or the tenant's own slot); coalesces
+// concurrent callers into one refresh.
+// { strict: true }: only { resources, routes }, read fresh for the current account. It never joins a
+// read already running, never answers from the cache and never stores anything in it; it rejects
+// unless both answers were a 2xx with a list (a failed status can carry a JSON body too).
+async function readInventoryStrict() {
+    const [resources, routes] = await Promise.all(['/api/networks/resources', '/api/routes'].map(p => netbirdReq('GET', p)));
+    const ok = (r) => !!r && r.status >= 200 && r.status < 300 && Array.isArray(r.body);
+    if (!ok(resources) || !ok(routes)) throw new Error("Couldn't read the resources and routes from NetBird");
+    return { resources: resources.body, routes: routes.body };
+}
+function getUsageData({ strict = false } = {}) {
+    if (!netbirdApiConfigured()) return strict ? Promise.reject(new Error('The NetBird API is not connected')) : Promise.resolve(emptyUsage());
+    if (strict) return readInventoryStrict();
+    const tenant = !!currentTenantAccount();
+    const st = usageState();
+    if (st.data && Date.now() - st.at < (tenant ? TENANT_TTL_MS : USAGE_TTL_MS)) return Promise.resolve(st.data);
+    if (st.refreshing) return st.refreshing;
+    const p = readUsage(st)
+        .catch(e => { console.error(tenant ? '[Groups] tenant usage fetch error:' : '[Groups] usage fetch error:', e.message); return st.data || emptyUsage(); })
+        .finally(() => { if (st.refreshing === p) st.refreshing = null; });
+    st.refreshing = p;
+    return p;
+}
+
+// One direct GET to the main account's NetBird API: no retry, no shared rate-limit pause, no tenant
+// switch, no cache, and it does not count as the "last good NetBird answer". Used by the service
+// status probe. Without opts.auth it sends no token at all (a reachability check). The URL and the
+// token are read in one step. → { status, body } or { status: 0 }.
+function nbDirectGet(apiPath, { auth = false, timeoutMs = 4000 } = {}) {
+    const { url: base, token } = _nbApi;
+    if (!base || (auth && !token)) return Promise.resolve({ status: 0, error: 'The NetBird API is not connected' });
+    let url;
+    try { url = new URL(apiPath, base).toString(); } catch { return Promise.resolve({ status: 0, error: 'Invalid URL' }); }
+    return httpJson('GET', url, {
+        headers: auth ? { Authorization: `Token ${token}` } : {},
+        timeoutMs, deadlineMs: timeoutMs, maxBytes: 1024 * 1024, noteOk: false,
+    });
 }
 
 // ─── Reverse proxy (NetBird Cloud ingress) status ───
@@ -698,7 +749,7 @@ module.exports = {
     _setNetbirdTimingForTests,
     bustNbCaches, resetNbCaches, setCacheResetHook,
     ensureGroupsFresh, ensurePoliciesFresh, getGroupsMap, getPoliciesMap,
-    getGroupRefMap, getUsageData, getReverseProxyStatus, bustReverseProxyCache,
+    getGroupRefMap, getUsageData, invalidateUsage, nbDirectGet, getReverseProxyStatus, bustReverseProxyCache,
     refreshBypassedPeers, peerIsBypassed, getBypassedPeerCount,
     runWithTenant, currentTenantAccount, getMspStatus, bustMspCache,
     loadTenantTokens, setTenantTokenInMemory, hasTenantToken,

@@ -143,11 +143,12 @@ export const api = {
   get<T>(path: string, query?: Query, signal?: AbortSignal): Promise<T> {
     return send(buildUrl(path, query), { headers: baseHeaders(), signal }).then(handle<T>);
   },
-  post<T>(path: string, body?: unknown): Promise<T> {
+  post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return send(path, {
       method: 'POST',
       headers: baseHeaders({ 'Content-Type': 'application/json' }),
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     }).then(handle<T>);
   },
   put<T>(path: string, body?: unknown): Promise<T> {
