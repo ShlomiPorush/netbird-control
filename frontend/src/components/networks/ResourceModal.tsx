@@ -42,13 +42,14 @@ const OUTCOME_TEXT: Record<CreateOutcome, string> = {
   policy: "The resource was added, but its access rules weren't all saved. Open the network to finish them.",
   unconfirmed: "NetBird didn't confirm the resource was saved. Check the network before you try again.",
 };
-// The answer to the create never arrived (a network error, or a proxy's error page instead of the
-// server's own answer): the resource may exist.
+// The answer to the create never arrived, or is not the server's own definite answer (no answer, a
+// time-out, or a 5xx without RESOURCE_CREATE_FAILED, such as a proxy's 504): the resource may exist.
+// A 4xx and RESOURCE_CREATE_FAILED are definite failures (nothing was created).
 function createOutcome(e: unknown): CreateOutcome | null {
   if (e instanceof ApiError) {
     if (e.code === 'RESOURCE_CREATED_POLICY_FAILED') return 'policy';
-    if (e.code === 'RESOURCE_UNCONFIRMED') return 'unconfirmed';
-    return !e.code && e.status >= 502 && e.status <= 504 && /^HTTP \d+$/.test(e.message) ? 'unconfirmed' : null;
+    if (e.code === 'RESOURCE_CREATE_FAILED') return null;
+    return e.code === 'RESOURCE_UNCONFIRMED' || e.status === 0 || e.status >= 500 ? 'unconfirmed' : null;
   }
   return 'unconfirmed';
 }

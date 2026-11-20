@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { CheckCircle2, Loader2, Lock, MonitorPlay, Terminal, X as XIcon, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
-import { apiText, remoteApi, cleanAddressInput, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
+import { apiText, remoteApi, cleanAddressInput, type RemoteHealth, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
 import { cn } from '@/lib/cn';
 import { Button, Field, Input, LoadingState, PasswordInput, Textarea } from '@/components/ui';
 import { sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
@@ -63,6 +63,10 @@ export default function RemoteAccess() {
     staleTime: Infinity, refetchOnMount: 'always', refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false,
   });
   const healthHidden = health.error instanceof ApiError && health.error.status === 403;
+  // A refresh that failed shows every part as unknown, not the earlier answer.
+  const healthShown: RemoteHealth | null = health.isError
+    ? { netbird: 'unknown', gateway: 'unknown', ...(health.data?.namesGateway ? { namesGateway: 'unknown' as const } : {}) }
+    : health.data || null;
   const sessions = useRemoteSessions();
   const [protocol, setProtocol] = useState<RemoteProtocol>('rdp');
   const [address, setAddress] = useState('');
@@ -589,7 +593,7 @@ export default function RemoteAccess() {
           </form>
         )}
 
-        {!healthHidden && <ServiceStatus health={health.data || null} loading={health.isFetching} onRefresh={() => { void health.refetch(); }} />}
+        {!healthHidden && <ServiceStatus health={healthShown} loading={health.isFetching} onRefresh={() => { void health.refetch(); }} />}
       </FlowCard>
 
       {adding && (
