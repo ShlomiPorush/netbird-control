@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -116,7 +116,10 @@ function StepIcon({ state }: { state: StepState }) {
   return <Circle size={17} className="shrink-0 text-nb-gray-300 dark:text-nb-gray-700" />;
 }
 
-export function StepList({ steps }: { steps: Step[] }) {
+/** An action shown on one step, right under its text (such as "Add As Resource" on a failed step). */
+export interface StepAction { key: StepKey; label: string; icon?: ReactNode; onClick: () => void }
+
+export function StepList({ steps, action }: { steps: Step[]; action?: StepAction }) {
   return (
     <ol className="flex flex-col">
       {steps.map((s) => (
@@ -126,6 +129,11 @@ export function StepList({ steps }: { steps: Step[] }) {
             <div className={cn('text-[0.9rem] font-medium',
               s.state === 'pending' ? 'text-nb-gray-400 dark:text-nb-gray-500' : 'text-nb-gray-800 dark:text-nb-gray-100')}>{s.label}</div>
             {s.detail && <div className="text-[0.8rem] text-nb-gray-500 dark:text-nb-gray-400 mt-0.5">{s.detail}</div>}
+            {action?.key === s.key && (
+              <Button size="sm" variant="primary" className="mt-2" onClick={action.onClick}>
+                {action.icon}{action.label}
+              </Button>
+            )}
           </div>
         </li>
       ))}
@@ -148,18 +156,15 @@ export function StepSummary({ steps }: { steps: Step[] }) {
 
 // The reason is already on the failed step; this holds what the user can do next, one full-width
 // button each. The first one is the main action.
-export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave, onAdd }: {
+export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave }: {
   failure: Failure; onRetry: () => void; retryLabel?: string;
   /** Called before following a link out of the session view. */
   onLeave?: () => void;
-  /** The target isn't in NetBird and this user may add it: "Add As Resource". */
-  onAdd?: () => void;
 }) {
-  const main = onAdd ? 'add' : failure.requestLink ? 'request' : failure.troubleshoot ? 'troubleshoot' : 'retry';
+  const main = failure.requestLink ? 'request' : failure.troubleshoot ? 'troubleshoot' : 'retry';
   const variant = (k: typeof main) => (k === main ? 'primary' : 'secondary');
   return (
     <div className="mt-5 flex flex-col gap-2">
-      {onAdd && <Button variant={variant('add')} className={FLOW_BUTTON} onClick={onAdd}>Add As Resource</Button>}
       {failure.requestLink && <Link to={failure.requestLink} onClick={onLeave} className="block"><Button variant={variant('request')} className={FLOW_BUTTON}>Request Access</Button></Link>}
       {failure.troubleshoot && <Link to="/troubleshoot" onClick={onLeave} className="block"><Button variant={variant('troubleshoot')} className={FLOW_BUTTON}>Open Troubleshoot</Button></Link>}
       <Button variant={variant('retry')} className={FLOW_BUTTON} onClick={onRetry}>{retryLabel}</Button>

@@ -248,9 +248,10 @@ shows on a read-only instance
 hides it. The suggested address is the IP address, or the host name when the names gateway is set
 up (otherwise the first address it resolved to).
 
-The button opens the Networks page's own **Add Resource** form for a network the user chooses: only
-networks open to Remote Access (Settings → Remote Access) that the user may edit
-(`GET /api/remote-access/add-networks`). The save is the ordinary `POST /api/networks/:id/resources`,
+The button sits on the failed step, under its message. It opens one modal: first the network, when
+the user may add to more than one (only networks open to Remote Access, Settings → Remote Access,
+that the user may edit: `GET /api/remote-access/add-networks`), then the Networks page's own **Add
+Resource** form for it. The save is the ordinary `POST /api/networks/:id/resources`,
 with its permission, blocklist, duplicate and policy source checks. After the save, the page runs
 the checks again and stops after **Checking Path**: it shows **Ready To Connect**, and the user
 presses **Connect** to open the session.
@@ -286,8 +287,10 @@ check reads the new resource.
 
 ## Service status
 
-The connect card ends with one line: **NetBird**, **Browser Gateway** and, when the names gateway is
-set up, **Host Name Gateway**, each **Online**, **Offline** or **Unknown**, with a refresh button.
+The connect card ends with one line: **NetBird** and **Browser Gateways**, each **Online**,
+**Offline** or **Unknown**, with a refresh button that turns while it checks. Browser Gateways is one
+item for both gateways (the names gateway counts only when it is set up): **Online** when every one
+is up, **Offline** when every one is down, **Partly Online** when some are up.
 `GET /api/remote-access/health` answers `{ netbird, gateway, namesGateway? }` (each `up`, `down` or
 `unknown`) and nothing else. It is refused to a user blocked in NetBird.
 

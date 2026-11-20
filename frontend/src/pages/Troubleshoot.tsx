@@ -150,8 +150,7 @@ export default function Troubleshoot() {
   const keyOf = (peer: string, address: string) => `${peer}|${address.trim().toLowerCase()}`;
   const [diagKey, setDiagKey] = useState('');
   const [noAdd, setNoAdd] = useState(false);
-  const [picking, setPicking] = useState(false);
-  const [adding, setAdding] = useState<{ networkId: string; address: string; key: string } | null>(null);
+  const [adding, setAdding] = useState<{ address: string; key: string } | null>(null);
   const [rechecking, setRechecking] = useState(false);
   const seq = useRef(0);
   const [shownRun, setShownRun] = useState(-1);
@@ -169,7 +168,6 @@ export default function Troubleshoot() {
     const i = a.lastIndexOf(':');
     return i > 0 && /^\d{1,5}$/.test(a.slice(i + 1)) ? a.slice(0, i) : a;
   })();
-  const startAdd = (networkId: string) => { setPicking(false); setAdding({ networkId, address: addAddress, key: keyOf(peerId, addr) }); };
   // After the add: the address check alone runs again (not the device or browser checks).
   const recheckCoverage = async (key: string) => {
     if (key !== keyOf(peerId, addr)) return;
@@ -240,7 +238,6 @@ export default function Troubleshoot() {
     const id = ++seq.current;
     setDiagKey('');
     setNoAdd(false);
-    setPicking(false);
 
     // Every probe runs concurrently; each ticks its own step off as it lands, so the
     // progress list is honest (slow probes visibly stay "checking" until their timeout).
@@ -531,22 +528,10 @@ export default function Troubleshoot() {
             {addShown && verdict.coverage && (
               <div className="mt-3">
                 <p className="text-sm text-nb-gray-700 dark:text-nb-gray-200">You can add this address to a network you manage, so it goes through NetBird.</p>
-                {picking ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <span className="text-[0.8rem] font-medium text-nb-gray-700 dark:text-nb-gray-200">Choose A Network:</span>
-                    {addNets.map((n) => (
-                      <Button key={n.id} size="sm" onClick={() => startAdd(n.id)} title={n.name || n.id}>
-                        <span className="max-w-[16rem] truncate">{n.name || n.id}</span>
-                      </Button>
-                    ))}
-                    <Button size="sm" variant="ghost" onClick={() => setPicking(false)}>Cancel</Button>
-                  </div>
-                ) : (
-                  <Button variant="primary" className="mt-2" disabled={rechecking}
-                    onClick={() => (addNets.length === 1 ? startAdd(addNets[0].id) : setPicking(true))}>
-                    <Plus size={14} className="mr-1" /> Add As Resource
-                  </Button>
-                )}
+                <Button variant="primary" className="mt-2" disabled={rechecking}
+                  onClick={() => setAdding({ address: addAddress, key: keyOf(peerId, addr) })}>
+                  <Plus size={14} className="mr-1" /> Add As Resource
+                </Button>
               </div>
             )}
             {rechecking && (
@@ -601,7 +586,7 @@ export default function Troubleshoot() {
 
         {adding && (
           <AddResourceModal
-            networkId={adding.networkId}
+            networks={addNets.map((n) => ({ id: String(n.id), name: n.name || String(n.id) }))}
             address={adding.address}
             onCreated={() => { setNoAdd(true); void recheckCoverage(adding.key); }}
             onUncertain={() => setNoAdd(true)}

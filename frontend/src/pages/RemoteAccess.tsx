@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { CheckCircle2, Loader2, Lock, MonitorPlay, Terminal, X as XIcon, XCircle } from 'lucide-react';
+import { CheckCircle2, Loader2, Lock, MonitorPlay, Plus, Terminal, X as XIcon, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
 import { apiText, remoteApi, cleanAddressInput, type RemoteHealth, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
@@ -204,8 +204,7 @@ export default function RemoteAccess() {
   // target that was checked (key) and shows only while the form still holds that target, and only
   // when the user may edit a network that Remote Access uses.
   const [addOffer, setAddOffer] = useState<{ key: string; address: string } | null>(null);
-  const [picking, setPicking] = useState(false);
-  const [adding, setAdding] = useState<{ networkId: string; address: string; key: string } | null>(null);
+  const [adding, setAdding] = useState<{ address: string; key: string } | null>(null);
   const addNets = useQuery({
     queryKey: ['remote-add-networks'], queryFn: () => remoteApi.addNetworks(), enabled: !!addOffer,
     staleTime: 0, refetchOnWindowFocus: false, retry: false,
@@ -216,7 +215,7 @@ export default function RemoteAccess() {
     attempt.current += 1;
     setWaiting(false);
     setPhase('form'); setSteps(freshSteps()); setFailure(null);
-    setAddOffer(null); setPicking(false); setCheckOnlyRun(false);
+    setAddOffer(null); setCheckOnlyRun(false);
     setSshPass(''); setSshKey(''); setSshPassphrase('');
   };
 
@@ -252,7 +251,7 @@ export default function RemoteAccess() {
   const isIpTarget = /^[0-9.]+$/.test(targetRef.current.address);
   const listed = offerShown
     ? shown.map((st) => (st.key === 'access' && st.state === 'fail'
-      ? { ...st, detail: `NetBird has no resource for this ${isIpTarget ? 'address' : 'host name'}. You can add it below.` }
+      ? { ...st, detail: `NetBird has no resource for this ${isIpTarget ? 'address' : 'host name'}. You can add it now.` }
       : st))
     : shown;
 
@@ -283,7 +282,7 @@ export default function RemoteAccess() {
     setSshPass(''); setSshKey(''); setSshPassphrase('');
     targetRef.current = { address: target, port: targetPort };
     setFailure(null);
-    setAddOffer(null); setPicking(false);
+    setAddOffer(null);
     setCheckOnlyRun(checkOnly);
     void health.refetch();
     setSteps(freshSteps());
@@ -536,29 +535,12 @@ export default function RemoteAccess() {
                 : phase === 'checked' && caughtUp
                   ? <FlowHeader icon={<CheckCircle2 size={20} />} title="Ready To Connect" subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />
                   : <FlowHeader icon={protocol === 'rdp' ? <MonitorPlay size={19} /> : <Terminal size={19} />} title={checkOnlyRun ? 'Checking Again' : 'Connecting'} subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />}
-              <StepList steps={listed} />
+              <StepList steps={listed} action={failure && caughtUp && offerShown ? {
+                key: 'access', label: 'Add As Resource', icon: <Plus size={14} />,
+                onClick: () => setAdding({ address: addOffer!.address, key: addOffer!.key }),
+              } : undefined} />
             </>}
-            {failure && caughtUp && (picking && offerShown ? (
-              <div className="mt-5">
-                <p className="mb-1 text-[0.9rem] font-semibold text-nb-gray-900 dark:text-white">Choose A Network</p>
-                <p className="mb-3 text-[0.8rem] text-nb-gray-500 dark:text-nb-gray-400">The resource is added to the network you choose.</p>
-                <div className="flex flex-col gap-2">
-                  {nets.map((n) => (
-                    <Button key={n.id} className={FLOW_BUTTON} title={n.name}
-                      onClick={() => { setPicking(false); setAdding({ networkId: n.id, address: addOffer!.address, key: addOffer!.key }); }}>
-                      <span className="truncate">{n.name}</span>
-                    </Button>
-                  ))}
-                  <Button variant="ghost" className={FLOW_QUIET} onClick={() => setPicking(false)}>Cancel</Button>
-                </div>
-              </div>
-            ) : (
-              <FailureBox failure={failure} onRetry={() => formRef.current?.requestSubmit()}
-                onAdd={offerShown ? () => {
-                  if (nets.length === 1) setAdding({ networkId: nets[0].id, address: addOffer!.address, key: addOffer!.key });
-                  else setPicking(true);
-                } : undefined} />
-            ))}
+            {failure && caughtUp && <FailureBox failure={failure} onRetry={() => formRef.current?.requestSubmit()} />}
             {phase === 'checked' && caughtUp && !failure && (
               <div className="mt-5 flex flex-col gap-1">
                 <Button variant="primary" className={FLOW_BUTTON} onClick={() => formRef.current?.requestSubmit()}>
@@ -598,7 +580,7 @@ export default function RemoteAccess() {
 
       {adding && (
         <AddResourceModal
-          networkId={adding.networkId}
+          networks={nets}
           address={adding.address}
           onCreated={() => { const key = adding.key; setAddOffer(null); recheck(key); }}
           // Saved or not is unclear: no new offer for this target until a new check.
