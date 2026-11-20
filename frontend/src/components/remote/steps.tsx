@@ -148,15 +148,18 @@ export function StepSummary({ steps }: { steps: Step[] }) {
 
 // The reason is already on the failed step; this holds what the user can do next, one full-width
 // button each. The first one is the main action.
-export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave }: {
+export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave, onAdd }: {
   failure: Failure; onRetry: () => void; retryLabel?: string;
   /** Called before following a link out of the session view. */
   onLeave?: () => void;
+  /** The target isn't in NetBird and this user may add it: "Add As Resource". */
+  onAdd?: () => void;
 }) {
-  const main = failure.requestLink ? 'request' : failure.troubleshoot ? 'troubleshoot' : 'retry';
+  const main = onAdd ? 'add' : failure.requestLink ? 'request' : failure.troubleshoot ? 'troubleshoot' : 'retry';
   const variant = (k: typeof main) => (k === main ? 'primary' : 'secondary');
   return (
     <div className="mt-5 flex flex-col gap-2">
+      {onAdd && <Button variant={variant('add')} className={FLOW_BUTTON} onClick={onAdd}>Add As Resource</Button>}
       {failure.requestLink && <Link to={failure.requestLink} onClick={onLeave} className="block"><Button variant={variant('request')} className={FLOW_BUTTON}>Request Access</Button></Link>}
       {failure.troubleshoot && <Link to="/troubleshoot" onClick={onLeave} className="block"><Button variant={variant('troubleshoot')} className={FLOW_BUTTON}>Open Troubleshoot</Button></Link>}
       <Button variant={variant('retry')} className={FLOW_BUTTON} onClick={onRetry}>{retryLabel}</Button>

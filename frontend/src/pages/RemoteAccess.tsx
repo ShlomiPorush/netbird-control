@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { Loader2, Lock, MonitorPlay, Terminal, X as XIcon, XCircle } from 'lucide-react';
+import { CheckCircle2, Loader2, Lock, MonitorPlay, Terminal, X as XIcon, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
 import { apiText, remoteApi, cleanAddressInput, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
@@ -9,6 +9,8 @@ import { cn } from '@/lib/cn';
 import { Button, Field, Input, LoadingState, PasswordInput, Textarea } from '@/components/ui';
 import { sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
 import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from '@/components/remote/flow';
+import { ServiceStatus } from '@/components/remote/ServiceStatus';
+import { AddResourceModal } from '@/components/networks/AddResourceModal';
 import {
   FailureBox, PACE_KEY, StepList, StepSummary, freshSteps, handoffSteps, pickDwell, usePacedSteps, withStep,
   type Failure, type Step, type StepKey, type StepState,
@@ -42,13 +44,25 @@ function sessionTitle(s: RemoteSession, port: number): string {
   return s.resource?.name ? `${s.resource.name} (${where}:${port})` : `${where}:${port}`;
 }
 
+// The target a check was for: "Add As Resource" belongs to it, and goes away when the form changes.
+const targetKey = (address: string, port: number) => `${address.trim().toLowerCase()}|${port}`;
+
 // The page runs the checks (access, path, SSH credentials) and asks the server for a session.
 // The session itself opens as a tab in the session view (components/remote/RemoteSessions.tsx),
 // which keeps it running while the user moves around the portal.
-type Phase = 'form' | 'checking' | 'ssh-creds' | 'opening';
+// 'checked': the checks passed after a resource was added; the user connects from there.
+type Phase = 'form' | 'checking' | 'checked' | 'ssh-creds' | 'opening';
 
 export default function RemoteAccess() {
   const info = useQuery({ queryKey: ['remote-access-info'], queryFn: ({ signal }) => remoteApi.info(signal) });
+  const canUse = !!info.data?.available && !!info.data?.allowed;
+  // The service status line: asked when the page loads, when a check starts, and on its refresh
+  // button. Never on a timer, on focus or on reconnect: every request is the user's own action.
+  const health = useQuery({
+    queryKey: ['remote-access-health'], queryFn: ({ signal }) => remoteApi.health(signal), enabled: canUse,
+    staleTime: Infinity, refetchOnMount: 'always', refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false,
+  });
+  const healthHidden = health.error instanceof ApiError && health.error.status === 403;
   const sessions = useRemoteSessions();
   const [protocol, setProtocol] = useState<RemoteProtocol>('rdp');
   const [address, setAddress] = useState('');
@@ -179,11 +193,26 @@ export default function RemoteAccess() {
   const attempt = useRef(0);
   useEffect(() => () => { attempt.current += 1; }, []);
   const [waiting, setWaiting] = useState(false);
+  // A check-only run (after a resource was added): it stops after the path step.
+  const [checkOnlyRun, setCheckOnlyRun] = useState(false);
+
+  // "Add As Resource": the failed check found nothing in NetBird for the target. It is bound to the
+  // target that was checked (key) and shows only while the form still holds that target, and only
+  // when the user may edit a network that Remote Access uses.
+  const [addOffer, setAddOffer] = useState<{ key: string; address: string } | null>(null);
+  const [picking, setPicking] = useState(false);
+  const [adding, setAdding] = useState<{ networkId: string; address: string; key: string } | null>(null);
+  const addNets = useQuery({
+    queryKey: ['remote-add-networks'], queryFn: () => remoteApi.addNetworks(), enabled: !!addOffer,
+    staleTime: 0, refetchOnWindowFocus: false, retry: false,
+  });
+  const nets = addNets.data?.networks || [];
 
   const reset = () => {
     attempt.current += 1;
     setWaiting(false);
     setPhase('form'); setSteps(freshSteps()); setFailure(null);
+    setAddOffer(null); setPicking(false); setCheckOnlyRun(false);
     setSshPass(''); setSshKey(''); setSshPassphrase('');
   };
 
@@ -211,18 +240,40 @@ export default function RemoteAccess() {
     return c;
   };
 
-  const start = async (e: FormEvent) => {
+  // The target the form holds now (what a check would be for).
+  const currentKey = () => targetKey(cleanAddressInput(address).address, portNum);
+  const offerShown = !!addOffer && addOffer.key === currentKey() && nets.length > 0;
+
+  const start = (e: FormEvent) => {
     e.preventDefault();
-    const typed = applyAddress(address);
-    const target = typed.address;
-    const targetPort = typed.port ? Number(typed.port) : portNum;
-    // The same rule as the Connect button, also for Try Again (which submits the form as it is).
-    if (!target || !validPort(targetPort)) { portRef.current?.focus(); return; }
+    void runCheck(false);
+  };
+  // After a resource was added for the target: the same checks again, stopping after the path step.
+  // It never opens a session; Connect does that, with every check again.
+  const recheck = (key: string) => {
+    if (key === currentKey() && key === targetKey(targetRef.current.address, targetRef.current.port)) void runCheck(true);
+  };
+
+  const runCheck = async (checkOnly: boolean) => {
+    let target: string;
+    let targetPort: number;
+    if (checkOnly) {
+      ({ address: target, port: targetPort } = targetRef.current);
+    } else {
+      const typed = applyAddress(address);
+      target = typed.address;
+      targetPort = typed.port ? Number(typed.port) : portNum;
+      // The same rule as the Connect button, also for Try Again (which submits the form as it is).
+      if (!target || !validPort(targetPort)) { portRef.current?.focus(); return; }
+    }
     // SSH secrets are typed again for every attempt: even the same name may lead to another server
     // now (DNS), and they must never go to a server they were not typed for. The user name stays.
     setSshPass(''); setSshKey(''); setSshPassphrase('');
     targetRef.current = { address: target, port: targetPort };
     setFailure(null);
+    setAddOffer(null); setPicking(false);
+    setCheckOnlyRun(checkOnly);
+    void health.refetch();
     setSteps(freshSteps());
     setDwell(pickDwell());
     try { sessionStorage.setItem(PACE_KEY, '1'); } catch { /* private mode: every connection is paced as the first */ }
@@ -277,6 +328,8 @@ export default function RemoteAccess() {
             networkId: t.network?.id, resourceType: t.resource.type || undefined,
           } : null)
           : undefined;
+        // Nothing in NetBird covers the target: offer to add it, for this target only.
+        if (access?.addable && access.suggest?.address) setAddOffer({ key: targetKey(target, targetPort), address: access.suggest.address });
         fail('access', { message: access?.message || "Your access couldn't be checked. Try again.", requestLink });
         return;
       }
@@ -285,6 +338,7 @@ export default function RemoteAccess() {
       if (!path || path.status === 'fail') { fail('path', { message: path?.message || "Remote Access couldn't check the way to this resource. Try again.", troubleshoot: path?.troubleshoot }); return; }
       setStep('path', 'pass', path.detail);
       checked.current.path = path.detail;
+      if (checkOnly) { setPhase('checked'); return; }
       if (protocol === 'ssh') { setPhase('ssh-creds'); return; }
       await openSession();
     } catch (err) {
@@ -464,11 +518,41 @@ export default function RemoteAccess() {
             {phase === 'ssh-creds' && caughtUp ? <StepSummary steps={shown} /> : <>
               {/* The big heading is away while the steps run: say what is happening. */}
               {failure && caughtUp
-                ? <FlowHeader icon={<XIcon size={20} />} tone="danger" title="Couldn't Connect" subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />
-                : <FlowHeader icon={protocol === 'rdp' ? <MonitorPlay size={19} /> : <Terminal size={19} />} title="Connecting" subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />}
+                ? <FlowHeader icon={<XIcon size={20} />} tone="danger" title={checkOnlyRun ? 'Not Ready Yet' : "Couldn't Connect"} subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />
+                : phase === 'checked' && caughtUp
+                  ? <FlowHeader icon={<CheckCircle2 size={20} />} title="Ready To Connect" subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />
+                  : <FlowHeader icon={protocol === 'rdp' ? <MonitorPlay size={19} /> : <Terminal size={19} />} title={checkOnlyRun ? 'Checking Again' : 'Connecting'} subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />}
               <StepList steps={shown} />
             </>}
-            {failure && caughtUp && <FailureBox failure={failure} onRetry={() => formRef.current?.requestSubmit()} />}
+            {failure && caughtUp && (picking && offerShown ? (
+              <div className="mt-5">
+                <p className="mb-1 text-[0.9rem] font-semibold text-nb-gray-900 dark:text-white">Choose A Network</p>
+                <p className="mb-3 text-[0.8rem] text-nb-gray-500 dark:text-nb-gray-400">The resource is added to the network you choose.</p>
+                <div className="flex flex-col gap-2">
+                  {nets.map((n) => (
+                    <Button key={n.id} className={FLOW_BUTTON} title={n.name}
+                      onClick={() => { setPicking(false); setAdding({ networkId: n.id, address: addOffer!.address, key: addOffer!.key }); }}>
+                      <span className="truncate">{n.name}</span>
+                    </Button>
+                  ))}
+                  <Button variant="ghost" className={FLOW_QUIET} onClick={() => setPicking(false)}>Cancel</Button>
+                </div>
+              </div>
+            ) : (
+              <FailureBox failure={failure} onRetry={() => formRef.current?.requestSubmit()}
+                onAdd={offerShown ? () => {
+                  if (nets.length === 1) setAdding({ networkId: nets[0].id, address: addOffer!.address, key: addOffer!.key });
+                  else setPicking(true);
+                } : undefined} />
+            ))}
+            {phase === 'checked' && caughtUp && !failure && (
+              <div className="mt-5 flex flex-col gap-1">
+                <Button variant="primary" className={FLOW_BUTTON} onClick={() => formRef.current?.requestSubmit()}>
+                  {protocol === 'rdp' ? <MonitorPlay size={17} /> : <Terminal size={17} />} Connect
+                </Button>
+                <Button variant="ghost" className={FLOW_QUIET} onClick={reset}>Cancel</Button>
+              </div>
+            )}
             {waiting && !failure && <Button variant="ghost" className={cn(FLOW_QUIET, 'mt-4')} onClick={reset}>Cancel</Button>}
           </div>
         )}
@@ -494,7 +578,20 @@ export default function RemoteAccess() {
             </div>
           </form>
         )}
+
+        {!healthHidden && <ServiceStatus health={health.data || null} loading={health.isFetching} onRefresh={() => { void health.refetch(); }} />}
       </FlowCard>
+
+      {adding && (
+        <AddResourceModal
+          networkId={adding.networkId}
+          address={adding.address}
+          onCreated={() => { const key = adding.key; setAddOffer(null); recheck(key); }}
+          // Saved or not is unclear: no new offer for this target until a new check.
+          onUncertain={() => setAddOffer(null)}
+          onClose={() => setAdding(null)}
+        />
+      )}
     </div>
   );
 }

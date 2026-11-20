@@ -27,7 +27,17 @@ export interface RemoteStep {
   detail?: string;
   requestable?: boolean;
   troubleshoot?: boolean;
+  /** Nothing in NetBird covers the target: it can be added as a resource (with this address). */
+  addable?: boolean;
+  suggest?: { address: string };
 }
+
+/** A network "Add As Resource" may add to: open to Remote Access, and the user may edit it. */
+export interface RemoteAddNetwork { id: string; name: string }
+
+export type ServiceState = 'up' | 'down' | 'unknown';
+/** The service status line; namesGateway only when that gateway is set up. */
+export interface RemoteHealth { netbird: ServiceState; gateway: ServiceState; namesGateway?: ServiceState }
 
 export interface RemoteCheck {
   steps: RemoteStep[];
@@ -154,6 +164,8 @@ export const apiText = (err: unknown, fallback: string) =>
 export const remoteApi = {
   info: (signal?: AbortSignal) => api.get<RemoteInfo>('/api/remote-access/info', undefined, signal),
   check: (body: { protocol: RemoteProtocol; address: string; port: number }) => api.post<RemoteCheck>('/api/remote-access/check', body),
+  addNetworks: () => api.get<{ networks: RemoteAddNetwork[] }>('/api/remote-access/add-networks'),
+  health: (signal?: AbortSignal) => api.get<RemoteHealth>('/api/remote-access/health', undefined, signal),
   createSession: (body: Record<string, unknown>) => api.post<RemoteSession>('/api/remote-access/sessions', body),
   lease: (id: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, {}),
   end: (id: string) => api.del<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
