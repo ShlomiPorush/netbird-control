@@ -392,7 +392,7 @@ apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLi
         // sent without a clear answer ('unknown'); the resource stays.
         if (e.status) return res.status(e.status).json({ error: e.message, code: e.code, ...(e.resourceCreated !== undefined ? { resourceCreated: e.resourceCreated } : {}) });
         console.error('[api v1] launch failed:', e.message);
-        res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
+        res.status(500).json({ error: 'Internal server error', code: 'INTERNAL', ...(e && e.resourceCreated !== undefined ? { resourceCreated: e.resourceCreated } : {}) });
     }
 });
 apiV1.use((req, res) => res.status(404).json({ error: 'Not Found', code: 'NOT_FOUND' }));
@@ -4619,13 +4619,15 @@ app.delete('/api/networks/:id/resources/:rid', async (req, res) => {
         // Resolve the resource's NAME before it's gone - the audit target should be readable.
         let rname = req.params.rid;
         try { rname = (((await getNetworkDetail(req.params.id)).resources || []).find(r => r && r.id === req.params.rid) || {}).name || rname; } catch { /* keep the id */ }
-        await deleteResource(req.params.id, req.params.rid);
+        // Only an admin, only here, may delete a resource Remote Access no longer manages in the
+        // network for launch-link resources (db.js deleteResource).
+        await deleteResource(req.params.id, req.params.rid, { linkAdminDelete: !!viewer.isAdmin });
         console.log(`[${new Date().toISOString()}] ${viewer.email || 'user'} deleted resource ${req.params.rid} from network ${req.params.id}`);
         audit(viewer, 'resource.delete', rname, { network: await netLabel(req.params.id) });
         res.json({ status: 'ok' });
     } catch (err) {
         console.error('Error deleting resource:', err.message);
-        res.status(err.status === 404 ? 404 : 502).json({ error: err.message || 'Failed to delete resource' });
+        res.status(err.status >= 400 && err.status < 600 ? err.status : 502).json({ error: err.message || 'Failed to delete resource', code: err.code });
     }
 });
 
@@ -4867,7 +4869,7 @@ app.post('/api/policies', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error creating policy:', err.message);
-        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to create policy' });
+        res.status([400, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to create policy', code: err.code });
     }
 });
 
@@ -4881,7 +4883,7 @@ app.put('/api/policies/:id', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error updating policy:', err.message);
-        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to update policy' });
+        res.status([400, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to update policy', code: err.code });
     }
 });
 

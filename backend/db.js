@@ -29,7 +29,7 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
-    linkNetworkWriteRefused, linkManagedNetworkId, linkResourceDeleteRefused, trackedCreatedResourceIds, noteCreatedResourceDeleted,
+    linkGuardNetworkId, linkGroupId, linkResourceTracked, linkPolicyProblem, importedCreateSettings, LINK_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted,
 } = require('./lib/remote-access');
 // "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
 const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered, nameCovered: coverageNameCovered } = require('./lib/coverage');
@@ -197,27 +197,61 @@ function resourcePost(apiPath, body) {
 }
 // The network that holds the resources Remote Access launch links create is managed by
 // lib/remote-access.js alone: every other app write that targets it (creating, editing, enabling,
-// deleting, moving or merging its resources, using them as a Reverse Proxy target, in a temporary
-// grant, or as a policy's destination) is refused here, in the shared helpers. Reading stays
-// allowed. Main account only; with no such network chosen, nothing is read or refused.
-const LINK_NETWORK_ERROR = 'This network holds resources created by Remote Access links; it is managed automatically.';
-function linkNetworkError() { const e = new Error(LINK_NETWORK_ERROR); e.status = 409; e.code = 'NETWORK_MANAGED'; return e; }
-function refuseLinkNetwork(...networkIds) {
-    if (!raMain()) return;
-    if (networkIds.some(id => id && linkNetworkWriteRefused(String(id)))) throw linkNetworkError();
+// deleting, moving or merging its resources, using them as a Reverse Proxy target or in a
+// temporary grant, and policies that name them) is refused here, in the shared helpers. Reading
+// stays allowed, and so do routing peers. The network and the group are read from the database (the
+// same settings the create path reads), so every instance guards the same network. Main account
+// only. A failed read refuses the write.
+function linkNetworkError() { const e = new Error(LINK_NETWORK_MESSAGE); e.status = 409; e.code = 'NETWORK_MANAGED'; return e; }
+function linkSettingsError() { const e = new Error("Couldn't read the Remote Access settings - nothing was changed. Try again."); e.status = 503; return e; }
+async function guardedLinkNetwork() {
+    if (!raMain()) return '';
+    try { return await linkGuardNetworkId(); } catch { throw linkSettingsError(); }
+}
+async function refuseLinkNetwork(...networkIds) {
+    const ids = networkIds.filter(Boolean).map(String);
+    if (!ids.length) return;
+    const net = await guardedLinkNetwork();
+    if (net && ids.includes(net)) throw linkNetworkError();
 }
 // The same for writes that name resources by id only: one read of the managed network's resource
 // list (an unreadable list refuses the write).
 async function refuseLinkNetworkResources(resourceIds) {
-    const net = raMain() ? linkManagedNetworkId() : '';
     const ids = (Array.isArray(resourceIds) ? resourceIds : []).map(gid).filter(Boolean).map(String);
-    if (!net || !ids.length || !linkNetworkWriteRefused(net)) return;
+    if (!ids.length) return;
+    const net = await guardedLinkNetwork();
+    if (!net) return;
     const n = await netbirdGet('/api/networks/' + encodeURIComponent(net));
     if (!n || typeof n !== 'object' || n.id !== net) {
         const e = new Error("Couldn't read NetBird to check the resources - nothing was changed. Try again."); e.status = 502; throw e;
     }
     const inNet = new Set((Array.isArray(n.resources) ? n.resources : []).map(gid).map(String));
     if (ids.some(id => inNet.has(id))) throw linkNetworkError();
+}
+// A temporary grant of an Access Profile whose destination group is the group for launch-link
+// resources would open every one of them: refused.
+async function refuseLinkGroupProfiles(targets) {
+    const profiles = (Array.isArray(targets) ? targets : []).filter(t => t && t.type === 'profile');
+    if (!raMain() || !profiles.length) return;
+    let group;
+    try { group = await linkGroupId(); } catch { throw linkSettingsError(); }
+    if (!group) return;
+    const byId = new Map((await listAccessProfiles()).map(p => [String(p.id), p.groupId]));
+    if (profiles.some(t => [t.groupId, byId.get(String(t.id))].includes(group))) {
+        const e = new Error("This access profile's group holds the servers Remote Access links add, so it can't be granted. Choose another profile.");
+        e.status = 409; e.code = 'NETWORK_MANAGED'; throw e;
+    }
+}
+// Is this the network for launch-link resources? A failed read throws (the write is refused).
+async function isLinkNetworkStrict(networkId) {
+    const net = await guardedLinkNetwork();
+    return !!net && net === String(networkId);
+}
+// The network detail and list label: is this the network for launch-link resources?
+async function isLinkNetwork(networkId) {
+    if (!raMain()) return false;
+    const net = await linkGuardNetworkId().catch(() => '');
+    return !!net && net === String(networkId);
 }
 const sameIdSet = (a, b) => { const A = new Set(a), B = new Set(b); return A.size === B.size && [...A].every(x => B.has(x)); };
 // resetNbCaches (delegated to lib/netbird.js) must also drop db.js's own peers/users caches to
@@ -1486,6 +1520,13 @@ async function getProxyDomains() {
 }
 
 // Normalize ONE target from the UI into NetBird's shape. Shared by create + update.
+// The NetBird object a proxy target names, exactly as buildProxyTarget sends it ('' for a direct
+// cluster target, or one buildProxyTarget refuses).
+function proxyTargetResourceId(t) {
+    const type = t && PROXY_TARGET_TYPES.includes(t.target_type || t.type) ? (t.target_type || t.type) : null;
+    if (!type || type === 'cluster') return '';
+    return String(t.id || t.target_id || '').trim();
+}
 function buildProxyTarget(t) {
     const type = PROXY_TARGET_TYPES.includes(t.target_type || t.type) ? (t.target_type || t.type) : null;
     if (!type) throw new Error('a target type is required');
@@ -1550,9 +1591,10 @@ function proxyAccessActionError(service) {
 async function planContainerTargets(rawTargets, canEdit) {
     const plan = [];
     // The resources launch links created are never a proxy target, and their network gets no
-    // container resource.
-    refuseLinkNetwork(...(rawTargets || []).map(t => (t && (t.type || t.target_type) === 'container' ? t.networkId : '')));
-    await refuseLinkNetworkResources((rawTargets || []).filter(t => t && ['host', 'domain', 'subnet'].includes(t.type || t.target_type)).map(t => t.id || t.target_id));
+    // container resource. Checked on the target as it will be sent: a container target as this
+    // plan reads it, any other one as buildProxyTarget does (its type and trimmed id).
+    await refuseLinkNetwork(...(rawTargets || []).map(t => (t && (t.type || t.target_type) === 'container' ? String(t.networkId || '').trim() : '')));
+    await refuseLinkNetworkResources((rawTargets || []).filter(t => t && (t.type || t.target_type) !== 'container').map(proxyTargetResourceId).filter(Boolean));
     for (const t of (rawTargets || [])) {
         const type = t && (t.type || t.target_type);
         if (type !== 'container') { plan.push({ t }); continue; }
@@ -4176,7 +4218,6 @@ async function initializeDatabase() {
         await client.query(`
           CREATE TABLE IF NOT EXISTS ra_created_resources (
             attempt_id TEXT PRIMARY KEY,
-            account TEXT NOT NULL DEFAULT '',
             ip TEXT NOT NULL,
             name TEXT NOT NULL DEFAULT '',
             network_id TEXT NOT NULL,
@@ -4189,9 +4230,12 @@ async function initializeDatabase() {
             expected_description TEXT NOT NULL,
             reason TEXT NOT NULL DEFAULT '',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            -- Audit records of state changes still to write (retried by the sync).
+            pending_audit JSONB
           );
         `);
+        await client.query(`ALTER TABLE ra_created_resources ADD COLUMN IF NOT EXISTS pending_audit JSONB`);
         await client.query(`CREATE INDEX IF NOT EXISTS ra_created_resources_state ON ra_created_resources (state, ip)`);
 
         // API keys for the versioned public API (/api/v1), created by admins in Settings. Only the
@@ -5889,7 +5933,7 @@ async function deleteNetworkRouter(networkId, routerId) {
 // deleteResource (which also cleans up its auto-created policy + group), routers are
 // removed, then the network itself is deleted.
 async function deleteNetwork(id) {
-    refuseLinkNetwork(id);
+    await refuseLinkNetwork(id);
     const detail = await getNetworkDetail(id).catch(() => null);
     if (detail) {
         for (const r of (detail.resources || [])) {
@@ -5922,6 +5966,7 @@ async function getNetworks() {
     const nets = await fetchNetworksFromApi();
     if (!nets) return [];
     const dupOk = new Set(await getDupAllowedNetworkIds());
+    const linkNet = raMain() ? await linkGuardNetworkId().catch(() => '') : '';
     return nets.map(n => ({
         id: n.id,
         name: n.name || '',
@@ -5933,7 +5978,7 @@ async function getNetworks() {
         policies: Array.isArray(n.policies) ? n.policies.length : 0,
         allowDuplicates: dupOk.has(String(n.id)),
         // Holds the resources Remote Access launch links create; the app doesn't change it otherwise.
-        managedByLinks: raMain() && !!linkManagedNetworkId() && linkManagedNetworkId() === String(n.id),
+        managedByLinks: !!linkNet && linkNet === String(n.id),
     })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -5973,7 +6018,8 @@ async function getNetworkDetail(id) {
     }));
     // The network for launch-link resources: each resource says whether Remote Access still manages
     // it (linkLocked). One it no longer tracks may be deleted by an admin. Unknown: locked.
-    if (raMain() && !!linkManagedNetworkId() && linkManagedNetworkId() === String(id)) {
+    const linkNet = await isLinkNetwork(id);
+    if (linkNet) {
         const tracked = await trackedCreatedResourceIds().catch(() => null);
         for (const r of resourceList) r.linkLocked = !tracked || tracked.has(String(r.id));
     }
@@ -6065,7 +6111,7 @@ async function getNetworkDetail(id) {
         routers: routerList,
         policies: policyList,
         allowDuplicates: (await getDupAllowedNetworkIds()).includes(String(id)),
-        managedByLinks: raMain() && !!linkManagedNetworkId() && linkManagedNetworkId() === String(id),
+        managedByLinks: linkNet,
     };
 }
 
@@ -6160,7 +6206,19 @@ function buildPolicyRule({ name, description, enabled, protocol, ports, bidirect
 }
 
 // The resources a policy's rules name as their destination.
-const destinationResourceIds = (rules) => (Array.isArray(rules) ? rules : []).map(r => r && r.destinationResource).filter(Boolean).map(gid).filter(Boolean).map(String);
+// A policy save that would touch the resources launch links create (as source or destination), or
+// let a Browser Gateway reach their group, is refused (lib/remote-access.js linkPolicyProblem).
+// `resourceRules`: the rules whose resources count (an edit counts the stored ones too: a policy
+// that names such a resource can only be deleted); `groupRules`: the rules being saved. Main
+// account only; a failed read refuses.
+async function refuseLinkPolicy(resourceRules, groupRules) {
+    if (!raMain()) return;
+    let problem;
+    try { problem = await linkPolicyProblem({ resourceRules, groupRules }); } catch {
+        const e = new Error("Couldn't check this policy against the resources Remote Access links create - nothing was changed. Try again."); e.status = 502; throw e;
+    }
+    if (problem) { const e = new Error(problem); e.status = 409; e.code = 'NETWORK_MANAGED'; throw e; }
+}
 
 function policyBody(cfg) {
     return {
@@ -6192,7 +6250,7 @@ async function createPolicy(cfg) {
     } else {
         body = policyBody(cfg);
     }
-    await refuseLinkNetworkResources(destinationResourceIds(body.rules));
+    await refuseLinkPolicy(body.rules, body.rules);
     const resp = await netbirdPost('/api/policies', body);
     if (!resp || resp.status >= 300 || !resp.body || !resp.body.id) {
         throw new Error('Failed to create policy: ' + (resp && (resp.raw || resp.error || resp.status)));
@@ -6291,9 +6349,7 @@ async function updatePolicy(id, cfg) {
         body = policyBody(cfg);
         body.rules = [carryRuleExtras(r0, body.rules[0])];
     }
-    // A destination resource the policy didn't have before must not be one that launch links created.
-    const had = new Set(destinationResourceIds(existing.rules));
-    await refuseLinkNetworkResources(destinationResourceIds(body.rules).filter(rid => !had.has(rid)));
+    await refuseLinkPolicy([...existing.rules, ...body.rules], body.rules);
     const resp = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(id), body);
     if (!resp || resp.status >= 300) {
         throw new Error('Failed to update policy: ' + (resp && (resp.raw || resp.error || resp.status)));
@@ -6878,8 +6934,10 @@ function createOutcomeError(code, message, cause, resource) {
 // Create a resource: a NetBird group + a network resource in that group + one access
 // policy per provided entry (its source groups → the resource, with protocol/ports).
 // A resource with no policies is reachable by no one (NetBird's model).
-async function createClientResource(networkId, { name, address, description, groups, policies, allowBlocked }) {
-    refuseLinkNetwork(networkId);
+// beforeSend (server side only, never from a request): runs under the target lock, after every read
+// above and right before the write; a throw sends nothing.
+async function createClientResource(networkId, { name, address, description, groups, policies, allowBlocked, beforeSend }) {
+    await refuseLinkNetwork(networkId);
     let groupIds = Array.isArray(groups) ? groups.filter(Boolean) : [];
     // The managed Browser Gateway groups are never the caller's to set: dropped here, and the
     // target group is set by the rule (open network, address type) under the target lock.
@@ -6905,6 +6963,7 @@ async function createClientResource(networkId, { name, address, description, gro
             const body = {
                 name, address, description: description || '', enabled: true, groups: targetsFor(null, networkId, String(address || '').trim(), groupIds),
             };
+            if (typeof beforeSend === 'function') await beforeSend();
             // Not configured and read-only answer without sending anything.
             sent = netbirdApiConfigured() && !NETBIRD_READONLY;
             return noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body));
@@ -7053,7 +7112,7 @@ async function mergeResourcesLocked(networkId, resourceIds, keepId) {
         if (!r) throw new Error('one of the selected resources no longer exists');
         chosen.push({ ...r, __netId: nid });
     }
-    refuseLinkNetwork(networkId, ...chosen.map(r => r.__netId));
+    await refuseLinkNetwork(networkId, ...chosen.map(r => r.__netId));
     const survivor = chosen.find(r => r.id === String(keepId)) || chosen[0];
     const addr = String(survivor.address || '').trim().toLowerCase();
     const mismatch = chosen.find(r => String(r.address || '').trim().toLowerCase() !== addr);
@@ -7147,7 +7206,7 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
     const target = String(targetNetworkId || '').trim();
     if (!target) throw new Error('a target network is required');
     if (target === String(sourceNetworkId)) throw new Error('the resource is already in this network');
-    refuseLinkNetwork(sourceNetworkId, target);
+    await refuseLinkNetwork(sourceNetworkId, target);
     const tgtNet = await netbirdGet('/api/networks/' + encodeURIComponent(target));
     if (!tgtNet || !tgtNet.id) throw new Error('the target network no longer exists');
 
@@ -8297,7 +8356,7 @@ async function checkResourcePolicySync(resourceId, policies) {
     return dedicated;
 }
 async function syncResourcePolicies(networkId, resourceId, policies) {
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     const r = await getResourceInNetwork(networkId, resourceId);
     const name = (r && r.name) || 'resource';
     const resType = r && r.type;
@@ -8351,7 +8410,7 @@ async function resolveGrantGroups(adGroupIds) {
 
 // Update a resource's name/address/description (groups optional)
 async function editResource(networkId, resourceId, { name, address, description, groups, enabled, allowBlocked }) {
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     // allowBlocked = an ADMIN acting deliberately (the route audits the override).
     if (!allowBlocked) {
         const blocked = addressBlockedForNetwork(String(address || '').trim(), networkId, await getBlocklist());
@@ -8378,7 +8437,7 @@ async function editResource(networkId, resourceId, { name, address, description,
     });
 }
 async function putEditedResource(networkId, resourceId, body) {
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
     if (!nbWriteOk(resp)) throw new Error('Failed to update resource: ' + (resp && (resp.raw || resp.error || resp.status)));
     bustNbCaches('policies', 'gref', 'usage');
@@ -8387,7 +8446,7 @@ async function putEditedResource(networkId, resourceId, body) {
 
 // Toggle a resource's enabled flag without clobbering its other fields (GET-then-PUT).
 async function setResourceEnabled(networkId, resourceId, enabled) {
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     return withTargets(async () => {
         const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
         if (!r || !r.id) throw new Error('Resource not found');
@@ -8403,7 +8462,7 @@ async function setResourceEnabled(networkId, resourceId, enabled) {
 // Rename a resource from an automation's source, keeping its address, enabled state and groups
 // (the managed target groups by the rule). Read fresh under the target lock.
 async function renameResource(networkId, resourceId, name, description) {
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     return withTargets(async () => {
         const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
         if (!r || !r.id) throw new Error('Resource not found');
@@ -8431,7 +8490,7 @@ async function renameResource(networkId, resourceId, name, description) {
 async function addResourceGroups(networkId, resourceId, wantGroupIds) {
     const want = [...new Set((wantGroupIds || []).filter(Boolean))];
     if (!want.length) return false;
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     return withTargets(async () => {
         const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
         if (!r || !r.id) throw new Error('Resource not found');
@@ -8461,7 +8520,7 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
 async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
     const drop = new Set((dropGroupIds || []).filter(Boolean));
     if (!drop.size || !networkId || !resourceId) return false;
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     return withTargets(async () => {
         // Read with the HTTP status: only a 404 means the resource is gone (nothing to detach); any
         // other failed read must not pass for "already detached".
@@ -8485,7 +8544,7 @@ async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
 // Name of the fixed Access-Control source group (for display in the modal)
 // Update the protocol/ports of the policy attached to a resource (keeps source/dest)
 async function setResourcePolicy(networkId, resourceId, protocol, ports) {
-    refuseLinkNetwork(networkId);
+    await refuseLinkNetwork(networkId);
     const r = await netbirdGet(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
     const groupIds = (r && Array.isArray(r.groups)) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
     if (!groupIds.length) return;
@@ -8524,17 +8583,29 @@ async function getResourceInNetwork(networkId, resourceId) {
     return r;
 }
 
-// Delete a resource and best-effort clean up its auto-created policy + group
-async function deleteResource(networkId, resourceId) {
-    // In the network for launch-link resources, only a resource the app no longer tracks (kept,
-    // gone, or never its own) may be deleted, and its group (the feature's) is never cleaned up.
-    const linkNet = raMain() && !!linkManagedNetworkId() && linkManagedNetworkId() === String(networkId);
-    if (linkNet) {
-        let refused;
-        try { refused = await linkResourceDeleteRefused(networkId, resourceId); } catch {
+// Delete a resource and best-effort clean up its auto-created policy + group.
+// In the network for launch-link resources (main account), only `linkAdminDelete` (an admin, from
+// the manual delete route) may delete, only a resource the app no longer tracks (kept, gone, or
+// never its own), and only the resource: no policy that names it and no group is touched. When
+// NetBird refuses (a policy still uses it, say), the admin gets NetBird's answer.
+async function deleteResource(networkId, resourceId, { linkAdminDelete = false } = {}) {
+    if (await isLinkNetworkStrict(networkId)) {
+        if (!linkAdminDelete) throw linkNetworkError();
+        let tracked;
+        try { tracked = await linkResourceTracked(resourceId); } catch {
             const e = new Error("Couldn't check whether Remote Access still manages this resource - nothing was changed. Try again."); e.status = 503; throw e;
         }
-        if (refused) throw linkNetworkError();
+        if (tracked) throw linkNetworkError();
+        await getResourceInNetwork(networkId, resourceId);
+        const del = await withTargets(() => resourceReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
+        bustNbCaches('policies', 'gref', 'usage');
+        if (!del || del.status >= 300) {
+            const e = new Error('NetBird refused to delete this resource: ' + ((del && (del.raw || del.error || del.status)) || 'no response'));
+            e.status = del && del.status >= 400 && del.status < 500 ? del.status : 502;
+            throw e;
+        }
+        await noteCreatedResourceDeleted(resourceId).catch(e => console.error('[deleteResource] created-resource row:', e.message));
+        return { status: 'ok' };
     }
     // Fetch the resource first to learn its groups (and that it is in this network)
     const r = await getResourceInNetwork(networkId, resourceId);
@@ -8561,11 +8632,6 @@ async function deleteResource(networkId, resourceId) {
     const del = await withTargets(() => resourceReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
     if (!del || del.status >= 300) throw new Error('Failed to delete resource: ' + (del && (del.raw || del.error || del.status)));
 
-    if (linkNet) {
-        await noteCreatedResourceDeleted(resourceId).catch(e => console.error('[deleteResource] created-resource row:', e.message));
-        bustNbCaches('policies', 'gref', 'usage');
-        return { status: 'ok' };
-    }
     // Clean up groups that are now empty (and the policies that targeted them)
     for (const gid of groupIds) {
         try {
@@ -9882,8 +9948,9 @@ async function createGrantTracked(cfg, actor, run) {
     // recurring window) puts anyone into them. Checked live, before anything is recorded.
     await refuseManagedGroupTargets(targets);
     // Nor the resources launch links created (their network, or one of them by id).
-    refuseLinkNetwork(...targets.map(t => (t.type === 'network' ? t.id : t.type === 'resource' ? t.networkId : '')));
+    await refuseLinkNetwork(...targets.map(t => (t.type === 'network' ? t.id : t.type === 'resource' ? t.networkId : '')));
     await refuseLinkNetworkResources(targets.filter(t => t.type === 'resource').map(t => t.id));
+    await refuseLinkGroupProfiles(targets);
 
     const peers = await getUserPeers(userId);
     const label = String(cfg.userLabel || (peers[0] && (peers[0].owner_name || peers[0].owner_email)) || userId);
@@ -11441,6 +11508,9 @@ const EXPORT_TABLES = [
     { name: 'network_grants', idCol: null, strip: [], required: ['network_id', 'group_id'] }, // composite PK - no serial
     { name: 'templates', idCol: 'id', strip: [], required: ['name'] }, // global (no tenant column)
     { name: 'cleanup_ignores', idCol: 'id', strip: [], required: ['category', 'object_id'] },
+    // Internal (encrypted) backup only: the resources launch links created, so a restore keeps
+    // tracking (and deleting) them. Runtime state, never in the plaintext export.
+    { name: 'ra_created_resources', idCol: null, strip: [], required: ['attempt_id', 'ip', 'state'], internalOnly: true },
 ];
 const EXPORT_TABLES_VERSION = 1;
 const EXPORT_TABLE_ROW_CAP = 50000; // bomb guard - config tables are tiny; a giant section means a bad file
@@ -11450,6 +11520,7 @@ const EXPORT_TABLE_ROW_CAP = 50000; // bomb guard - config tables are tiny; a gi
 async function exportConfigTables(full = false) {
     const tables = {};
     for (const t of EXPORT_TABLES) {
+        if (t.internalOnly && !full) continue;
         const order = t.idCol ? ` ORDER BY ${t.idCol}` : '';
         const r = await pool.query(`SELECT * FROM ${t.name}${order}`); // ALL rows, ALL tenants
         tables[t.name] = r.rows.map(row => {
@@ -11471,8 +11542,19 @@ async function tableColumnTypes(table) {
 // REPLACE each section PRESENT in the file, one transaction per section: DELETE the whole table then
 // re-INSERT the file's rows WITH their original ids; a section ABSENT from the file leaves its live
 // table untouched. results/skipped are filled in place (per-section kept vs dropped counts).
+// remote_access_config from a settings file or a backup: createResources goes through
+// lib/remote-access.js importedCreateSettings (never on; the stored network while servers added by
+// links exist). Returns the value to write, or null for a value that isn't a settings object.
+async function importedRemoteAccessConfig(v) {
+    let imp = null;
+    try { imp = JSON.parse(v); } catch { return null; }
+    if (!imp || typeof imp !== 'object' || Array.isArray(imp)) return null;
+    imp.createResources = await importedCreateSettings(imp.createResources);
+    return JSON.stringify(imp);
+}
 async function importConfigTables(tables, results, skipped, full = false) {
     for (const t of EXPORT_TABLES) {
+        if (t.internalOnly && !full) continue; // never from a plaintext file
         const rows = tables[t.name];
         if (!Array.isArray(rows)) continue; // section absent → do not touch the live table
         if (rows.length > EXPORT_TABLE_ROW_CAP) throw new Error(`section "${t.name}" has too many rows (${rows.length} > ${EXPORT_TABLE_ROW_CAP})`);
@@ -11569,12 +11651,12 @@ async function importAppSettings(payload, actor) {
             }
         }
         if (k === 'remote_access_config') {
-            // An import never turns on adding servers from launch links: that needs the gateway
-            // check of a save in Settings > Remote Access. The other fields are kept.
-            const imp = parseObject(v);
-            if (!imp) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
-            if (imp.createResources && typeof imp.createResources === 'object' && !Array.isArray(imp.createResources)) imp.createResources = { ...imp.createResources, enabled: false };
-            val = JSON.stringify(imp);
+            // An import never turns on adding servers from launch links (that needs the gateway check of
+            // a save in Settings > Remote Access), and keeps the stored network while servers added by
+            // links still exist. The other fields are kept.
+            const out = await importedRemoteAccessConfig(v);
+            if (out === null) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            val = out;
         }
         if (isTelegramConfigKey(k)) {
             const imp = parseObject(v);
@@ -11817,6 +11899,14 @@ async function importInternalBackupPayload(payload) {
     for (const [k, v] of Object.entries(settings)) {
         if (typeof k !== 'string' || k.length > 100 || typeof v !== 'string') continue;
         if (BACKUP_KEY_SETTINGS.has(k)) continue; // keep this server's own backup keypair (see BACKUP_KEY_SETTINGS)
+        if (k === 'remote_access_config') {
+            // A restore never turns on adding servers from launch links either (see importAppSettings).
+            const out = await importedRemoteAccessConfig(v);
+            if (out === null) continue;
+            await setSetting(k, out);
+            settingsCount++;
+            continue;
+        }
         await setSetting(k, v);
         settingsCount++;
     }

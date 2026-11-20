@@ -115,7 +115,7 @@ export interface CreateResourcesConfig {
   max: number;
 }
 
-export type CreatedResourceState = 'creating' | 'unknown' | 'created' | 'deleting' | 'kept';
+export type CreatedResourceState = 'creating' | 'unknown' | 'created' | 'deleting' | 'kept' | 'failed' | 'deleted' | 'gone';
 
 /** A server a launch link added as a temporary NetBird resource. */
 export interface CreatedResource {
@@ -137,7 +137,10 @@ export interface CreatedResources {
   /** Adding servers from links is paused, and why. */
   paused: { reason: string; at: string | null } | null;
   readonly: boolean;
+  /** Every active one, then the latest finished ones (failed, deleted, gone). */
   items: CreatedResource[];
+  /** Older finished ones were left out. */
+  finishedMore?: boolean;
 }
 
 export interface RemoteAccessStatus {

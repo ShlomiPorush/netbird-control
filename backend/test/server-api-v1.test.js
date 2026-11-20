@@ -224,3 +224,16 @@ test('the router answers 201 with `resource`, and passes resourceCreated through
         ra.issueLaunch = real;
     }
 });
+
+test('an unexpected failure after a create still says resourceCreated', async () => {
+    const ra = require('../lib/remote-access');
+    const real = ra.issueLaunch;
+    try {
+        ra.issueLaunch = async () => { const e = new Error('boom'); e.resourceCreated = true; throw e; };
+        const r = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '8.8.8.8', port: 3389 } });
+        assert.equal(r.status, 500);
+        assert.deepEqual(JSON.parse(r.text), { error: 'Internal server error', code: 'INTERNAL', resourceCreated: true });
+    } finally {
+        ra.issueLaunch = real;
+    }
+});

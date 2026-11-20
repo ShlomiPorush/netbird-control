@@ -146,3 +146,14 @@ test('a read-only instance never adds or deletes a server for a launch link', as
     assert.equal(await ra.maintainCreatedResources(), null);
     assert.deepEqual(writes, []);
 });
+
+test('a save on a read-only instance writes the stored createResources back unchanged', async () => {
+    await reset();
+    const stored = { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 7 };
+    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], createResources: stored });
+    // This instance's copy is older; the save asks to change it.
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: { enabled: false, networkId: '', groupId: '', max: 50 } });
+    await ra.setRemoteAccessConfig({ idleTimeoutMin: 45, createResources: { enabled: false, networkId: 'other', groupId: 'g-x', max: 1 } }).catch(() => { });
+    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, stored);
+    assert.equal(JSON.parse(settings.remote_access_config).idleTimeoutMin, 45);
+});

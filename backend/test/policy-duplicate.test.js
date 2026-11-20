@@ -6,6 +6,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 // Stub the NetBird client BEFORE db.js loads (it destructures these at require time).
+// No database here: the stored settings (the Remote Access launch-link guard reads them) are empty.
+require('../lib/core').getSetting = async () => null;
 const nb = require('../lib/netbird');
 let stored = {}, sent = [];
 nb.netbirdGet = async (path) => {

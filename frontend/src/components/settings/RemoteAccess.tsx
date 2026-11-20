@@ -35,7 +35,12 @@ const CREATED_STATES: Record<CreatedResourceState, { label: string; tone: string
   created: { label: 'Active', tone: 'text-green-600 dark:text-green-500' },
   deleting: { label: 'Removing', tone: 'text-nb-gray-500' },
   kept: { label: 'Kept', tone: 'text-amber-600 dark:text-amber-400' },
+  failed: { label: 'Failed', tone: 'text-nb-gray-500' },
+  deleted: { label: 'Removed', tone: 'text-nb-gray-500' },
+  gone: { label: 'Gone', tone: 'text-nb-gray-500' },
 };
+// States that come with a reason worth showing under them.
+const CREATED_REASON_STATES: CreatedResourceState[] = ['kept', 'unknown', 'failed', 'gone'];
 const CREATE_DEFAULTS: CreateResourcesConfig = { enabled: false, networkId: '', groupId: '', max: 50 };
 const createdCols = 'grid grid-cols-2 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)_11rem_minmax(0,1fr)] gap-x-3 gap-y-1.5';
 
@@ -436,7 +441,7 @@ export function RemoteAccessSettings() {
                             <div className="min-w-0">
                               <span className={cellLabel}>State</span>
                               <span className={`text-[0.8rem] font-medium ${s.tone}`}>{s.label}</span>
-                              {(it.state === 'kept' || it.state === 'unknown') && it.reason && (
+                              {CREATED_REASON_STATES.includes(it.state) && it.reason && (
                                 <span className="block text-[0.76rem] text-nb-gray-500 break-words">{it.reason}</span>
                               )}
                             </div>
@@ -444,6 +449,9 @@ export function RemoteAccessSettings() {
                         );
                       })}
                     </ul>
+                    {created.finishedMore && (
+                      <div className="pt-2 text-[0.76rem] text-nb-gray-500">Only the latest 50 finished entries are shown.</div>
+                    )}
                   </div>
                 )}
         </div>

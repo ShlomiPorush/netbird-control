@@ -421,7 +421,7 @@ export default function NetworkDetail() {
                     {sortedResources.length === 0 ? (
                       <tr><td colSpan={canBulk ? 6 : 5} className="px-6 py-8"><EmptyState title={search || anyFilter ? 'No Resources Match' : 'No Resources Yet'} /></td></tr>
                     ) : pageResources.map((r) => (
-                      <ResourceRow key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && canEdit && r.linkLocked === false)} canSelect={canBulk}
+                      <ResourceRow key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && isAdmin && r.linkLocked === false)} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}
@@ -439,7 +439,7 @@ export default function NetworkDetail() {
                 ) : (
                   <div className="flex flex-col gap-2.5">
                     {pageResources.map((r) => (
-                      <ResourceCard key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && canEdit && r.linkLocked === false)} canSelect={canBulk}
+                      <ResourceCard key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && isAdmin && r.linkLocked === false)} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}
