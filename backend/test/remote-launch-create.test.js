@@ -1048,8 +1048,7 @@ test('no gateway check: a save, a launch and the sync work while the gateway rea
     assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true);
     const out = await ra.maintainCreatedResources();
     assert.equal(out.paused, undefined);
-    // Policy and Access Profile writes are as on main: no settings read, no refusal.
-    reads.length = 0;
+    // Policy writes are as on main: no refusal.
     await db.createPolicy({ name: 'Gateway To Linked 2', protocol: 'all', sources: ['g-gw'], destinations: ['g-links'] });
     assert.equal(posts.filter(([p]) => p === '/api/policies').length, 1);
 });
@@ -1077,4 +1076,54 @@ test('C44: an import keeps the network for created resources among the networks 
     const saved = JSON.parse(settings.remote_access_config);
     assert.deepEqual(saved.networks, ['n-office', 'n-links']);
     assert.deepEqual(saved.createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links' });
+});
+
+// ─── Final review ───
+test('C47: kept servers keep the network in use; the creation limit counts active rows only', async () => {
+    const kept = seed('9.9.23.1');
+    kept.state = 'kept';
+    setConfig({ createResources: { enabled: false } });
+    await rejects(ra.setRemoteAccessConfig({ networks: ['n-office'] }), 'NETWORK_IN_USE');
+    await rejects(ra.setRemoteAccessConfig({ createResources: { groupId: 'g-srv' } }), 'CREATED_RESOURCES_EXIST');
+    assert.equal(await ra.writeImportedRemoteAccessConfig(JSON.stringify({ networks: ['n-office'], createResources: { networkId: 'n-office' } })), true);
+    assert.equal(JSON.parse(settings.remote_access_config).createResources.networkId, 'n-links');
+    // The limit: one kept row and a maximum of 1 still allow a create.
+    setConfig({ createResources: { max: 1 } });
+    assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true);
+});
+
+test('C48: a regular create is checked again at the send point', async () => {
+    setConfig({ createResources: { enabled: false, networkId: '', groupId: '' } });
+    let release;
+    const held = ra.withTargetLock(() => new Promise(r => { release = r; }));
+    const p = db.createClientResource('n-office', { name: 'late', address: '9.9.24.1', groups: [], policies: [] });
+    for (let i = 0; i < 50; i++) await new Promise(r => setImmediate(r)); // waiting for the lock
+    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false, networkId: 'n-office' } }));
+    release();
+    await held;
+    await assert.rejects(p, managedError);
+    assert.equal(posts.length, 0);
+});
+
+test('C49: the admin delete counts only a success or a 404; no answer leaves the row', async () => {
+    const kept = seed('9.9.25.1', { ageHours: 0 });
+    kept.state = 'kept';
+    deleteAnswer = () => ({ status: 0, error: 'timeout' });
+    await assert.rejects(db.deleteResource('n-links', kept.resource_id, { linkAdminDelete: true }), (e) => e.status === 502 && /didn't confirm the delete/.test(e.message));
+    assert.equal(kept.state, 'kept');
+    deleteAnswer = () => ({ status: 503, raw: 'down' });
+    await assert.rejects(db.deleteResource('n-links', kept.resource_id, { linkAdminDelete: true }), (e) => e.status === 502);
+    assert.equal(kept.state, 'kept');
+    deleteAnswer = () => ({ status: 404, body: null });
+    await db.deleteResource('n-links', kept.resource_id, { linkAdminDelete: true });
+    assert.equal(kept.state, 'deleted');
+});
+
+test('C50: a restore that adopts the network from its rows also opens it to the gateway', async () => {
+    seed('9.9.26.1');
+    settings.remote_access_config = JSON.stringify(cfgOf({ networks: ['n-office'], createResources: { enabled: true, networkId: '', groupId: '' } }));
+    await ra.restoreCreatedRowsForcingOff(null);
+    const saved = JSON.parse(settings.remote_access_config);
+    assert.deepEqual(saved.networks, ['n-office', 'n-links']);
+    assert.deepEqual(saved.createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 50 });
 });

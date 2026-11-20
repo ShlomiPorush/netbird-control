@@ -178,8 +178,9 @@ export function RemoteAccessSettings() {
     <div className="max-w-2xl flex flex-col gap-5">
       <p className="text-nb-gray-500 text-sm">
         Let users open RDP and SSH sessions from the browser through the Browser Gateway - NetBird peers next to this app.
-        Each session is checked against the user's own NetBird access. The gateways reach only servers in the networks you pick here, and
-        only once someone has opened a session to them.
+        Each session is checked against the user's own NetBird access. The gateways reach only servers in the networks you pick here,
+        once someone has opened a session to them, unless one of your NetBird policies lets them reach more. Servers added by links are
+        public, so the app doesn't check that for their group.
         The IP gateway serves IPv4 addresses. The names gateway, which is optional, serves host names of NetBird domain resources.
       </p>
 

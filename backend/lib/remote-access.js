@@ -693,11 +693,11 @@ async function setRemoteAccessConfig(input) {
             const nc = now.cfg.createResources;
             if (!sameCreate(nc, sc)) throw changedMeanwhile();
             const moves = cr.networkId !== nc.networkId || cr.groupId !== nc.groupId;
-            const active = (moves || (cr.networkId && !next.networks.includes(cr.networkId))) ? await countActiveVia(client) : 0;
-            if (moves && active) {
-                throw httpError(409, 'CREATED_RESOURCES_EXIST', `${active} server${active === 1 ? '' : 's'} added by links ${active === 1 ? 'is' : 'are'} still in the current network and group. Keep them until ${active === 1 ? 'it is' : 'they are'} removed.`);
+            const inUse = (moves || (cr.networkId && !next.networks.includes(cr.networkId))) ? await countInUseVia(client) : 0;
+            if (moves && inUse) {
+                throw httpError(409, 'CREATED_RESOURCES_EXIST', `${inUse} server${inUse === 1 ? '' : 's'} added by links ${inUse === 1 ? 'is' : 'are'} still in the current network and group. Keep them until ${inUse === 1 ? 'it is' : 'they are'} removed.`);
             }
-            if (cr.networkId && !next.networks.includes(cr.networkId) && (cr.enabled || active)) {
+            if (cr.networkId && !next.networks.includes(cr.networkId) && (cr.enabled || inUse)) {
                 throw httpError(409, 'NETWORK_IN_USE', 'The network for servers added by links must stay open to the gateway while adding servers is on or such servers still exist. Turn adding servers off, or keep that network selected.');
             }
             await client.query(CONFIG_UPSERT, [JSON.stringify(next)]);
@@ -2513,8 +2513,15 @@ async function restoreCreatedRowsForcingOff(rows) {
         const cr = { ...stored.cfg.createResources, enabled: false };
         const r = await client.query('SELECT DISTINCT network_id, group_id FROM ra_created_resources WHERE state = ANY($1)', [CREATE_LISTED]);
         const pairs = (r && r.rows) || [];
-        if (pairs.length === 1) { cr.networkId = String(pairs[0].network_id || ''); cr.groupId = String(pairs[0].group_id || ''); }
-        await client.query(CONFIG_UPSERT, [JSON.stringify({ ...stored.raw, createResources: cr })]);
+        const raw = { ...stored.raw };
+        if (pairs.length === 1) {
+            cr.networkId = String(pairs[0].network_id || '');
+            cr.groupId = String(pairs[0].group_id || '');
+            // The restored servers stay reachable: their network is open to the gateway.
+            const nets = Array.isArray(raw.networks) ? raw.networks.map(String) : [];
+            if (cr.networkId && !nets.includes(cr.networkId)) raw.networks = [...nets, cr.networkId];
+        }
+        await client.query(CONFIG_UPSERT, [JSON.stringify({ ...raw, createResources: cr })]);
         return { added: message ? 0 : add.length, message, cr };
     });
     noteKnownCreate(out.cr);
@@ -2579,10 +2586,8 @@ async function readListStrict(path, what) {
     if (!nbOk(r) || !Array.isArray(r.body)) throw new Error(`Couldn't read the ${what} from NetBird.`);
     return r.body;
 }
-async function countActiveCreated(exceptNetworkId) {
-    const r = exceptNetworkId == null
-        ? await pool.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE])
-        : await pool.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1) AND network_id <> $2', [CREATE_ACTIVE, exceptNetworkId]);
+async function countActiveCreated() {
+    const r = await pool.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE]);
     return Number(r && r.rows && r.rows[0] && r.rows[0].n) || 0;
 }
 
@@ -2600,8 +2605,10 @@ async function storedConfigVia(client) {
     try { raw = JSON.parse((sv && sv.rows && sv.rows[0] && sv.rows[0].value) || 'null'); } catch { raw = null; }
     return { raw: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}, cfg: normConfig(raw) };
 }
-async function countActiveVia(client) {
-    const cnt = await client.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE]);
+// The servers added by links that still exist in NetBird (or may): active and kept rows. What keeps
+// the network and group in use (the creation limit counts active rows only).
+async function countInUseVia(client) {
+    const cnt = await client.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_LISTED]);
     return Number(cnt && cnt.rows && cnt.rows[0] && cnt.rows[0].n) || 0;
 }
 // fn(client, stored) runs in the transaction, with the stored settings read under the lock
@@ -2639,7 +2646,7 @@ async function writeImportedRemoteAccessConfig(value) {
         const x = imp.createResources && typeof imp.createResources === 'object' && !Array.isArray(imp.createResources) ? imp.createResources : {};
         const out = { ...x, enabled: false };
         const next = { ...imp };
-        if (await countActiveVia(client)) {
+        if (await countInUseVia(client)) {
             out.networkId = stored.cfg.createResources.networkId;
             out.groupId = stored.cfg.createResources.groupId;
             const nets = Array.isArray(imp.networks) ? imp.networks.map(String) : [];

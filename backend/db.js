@@ -6938,9 +6938,15 @@ async function createClientResource(networkId, { name, address, description, gro
             };
             // Not configured and read-only answer without sending anything.
             sent = netbirdApiConfigured() && !NETBIRD_READONLY;
-            // With beforeSend (a launch link): one send, no retry after a 429, the hook right before it.
+            // At the send point, after every wait (the target lock, the rate-limit pause), the network
+            // may have become the one for launch-link resources meanwhile. With beforeSend (a launch
+            // link): one send, no retry after a 429, its hook right after this check.
+            const atSend = async () => {
+                await refuseLinkNetwork(networkId);
+                if (typeof beforeSend === 'function') await beforeSend();
+            };
             return noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body,
-                typeof beforeSend === 'function' ? { once: true, beforeSend } : undefined));
+                { once: typeof beforeSend === 'function', beforeSend: atSend }));
         });
         // No answer, or a 5xx: NetBird can save the resource and then fail building its answer.
         if (sent && resp && (resp.status === 0 || resp.status >= 500)) throw createOutcomeError('RESOURCE_UNCONFIRMED', CREATE_UNCONFIRMED, resp.error || resp.raw || String(resp.status || 'no answer'));
@@ -8579,9 +8585,14 @@ async function deleteResource(networkId, resourceId, { linkAdminDelete = false }
         if (pending) { const e = new Error("Remote Access is still finishing adding a server at this address. Try again after its next check, in about 10 minutes."); e.status = 409; e.code = 'NETWORK_MANAGED'; throw e; }
         const del = await withTargets(() => resourceReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
         bustNbCaches('policies', 'gref', 'usage');
-        if (!del || del.status >= 300) {
-            const e = new Error('NetBird refused to delete this resource: ' + ((del && (del.raw || del.error || del.status)) || 'no response'));
-            e.status = del && del.status >= 400 && del.status < 500 ? del.status : 502;
+        // Only a success or NetBird's own 404 is a delete; no answer or a 5xx may not be, and the row
+        // stays as it was.
+        if (!del || !del.status || del.status >= 500) {
+            const e = new Error("NetBird didn't confirm the delete. Check the network and try again."); e.status = 502; throw e;
+        }
+        if (del.status >= 300 && del.status !== 404) {
+            const e = new Error('NetBird refused to delete this resource: ' + (del.raw || del.error || del.status));
+            e.status = del.status >= 400 && del.status < 500 ? del.status : 502;
             throw e;
         }
         await noteCreatedResourceDeleted(resourceId).catch(e => console.error('[deleteResource] created-resource row:', e.message));
@@ -11619,10 +11630,10 @@ async function importAppSettings(payload, actor) {
             }
         }
         if (k === 'remote_access_config') {
-            // An import never turns on adding servers from launch links (that needs the gateway check of
-            // a save in Settings > Remote Access), and keeps the stored network and group while servers
-            // added by links still exist. The other fields are kept. Written under the created-resources
-            // configuration lock (lib/remote-access.js).
+            // An import never turns on adding servers from launch links (that needs a save in
+            // Settings > Remote Access), and keeps the stored network and group, and that network among the
+            // networks, while servers added by links still exist. The other fields are kept. Written under
+            // the created-resources configuration lock (lib/remote-access.js).
             if (!(await writeImportedRemoteAccessConfig(v))) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
             importedKeys.push(k);
             continue;

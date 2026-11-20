@@ -669,7 +669,8 @@ One exception: an administrator may delete (never change) a resource there that 
 manages, a *kept* or *gone* one or one the app never created, with the delete button on the
 network's page. Only that resource is deleted: no policy that names it and no group. When NetBird
 refuses because a policy still uses it, the page shows NetBird's answer; delete or change that
-policy first. While a create for that address is still unresolved (or the resource carries the
+policy first. When NetBird doesn't confirm the delete (no answer or a server error), the
+resource counts as still there and the page says so. While a create for that address is still unresolved (or the resource carries the
 marker of a row that isn't finished), the delete waits until the next sync has resolved it. Choose a
 network that holds nothing else. Neither the network nor the group can be changed while servers
 added by links still exist, and the networks open to the gateway must keep that network while
@@ -698,7 +699,8 @@ gateway. The other fields are kept. Turn it on with a save on this page. The int
 backup carries the `ra_created_resources` table; the plaintext settings export doesn't. A restore
 never removes the rows tracked now: in one transaction under the lock, it adds the backup's rows
 that aren't there yet, turns adding servers off (also when the backup has no Remote Access
-settings), and sets the stored network and group to those of the rows. When the rows would then be
+settings), and sets the stored network and group to those of the rows, opening that network to the
+gateway when it isn't yet. When the rows would then be
 in more than one network or group, nothing is added and the restore says so.
 
 **The list.** Settings > Remote Access lists every server added by links that still exists (or may),
