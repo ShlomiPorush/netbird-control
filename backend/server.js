@@ -4515,9 +4515,6 @@ app.post('/api/networks/:id/resources', async (req, res) => {
             // No answer, or one without an id: the resource may or may not exist.
             if (err.code === 'RESOURCE_UNCONFIRMED') {
                 console.error(`Resource "${name}" (${address}) not confirmed by NetBird: ${err.cause}`);
-                audit(viewer, 'resource.create', name, {
-                    network: await netLabel(req.params.id), address, account: currentTenantAccount() || 'main', confirmed: false,
-                });
                 return res.status(502).json({ error: err.message, code: err.code });
             }
             throw err;

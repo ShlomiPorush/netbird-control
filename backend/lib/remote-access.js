@@ -1985,8 +1985,9 @@ function netbirdState(r) {
     if (!r || !r.status || r.status >= 500 || r.status === 401 || r.status === 403) return 'down';
     return 'unknown';
 }
-// The peers of a gateway group: { read: true, peers, connected } or { read: false } when NetBird
-// couldn't be read. NetBird answers an empty list as null.
+// The peers of a gateway group: { read: true, peers, connected }, or { read: false } when NetBird
+// couldn't be read (with `peers` when the group itself was read). NetBird answers an empty list as
+// null.
 async function gatewayPeers(api, groupId) {
     if (!groupId) return { read: true, peers: 0, connected: false };
     const g = await nbDirectGet(api, '/api/groups/' + encodeURIComponent(groupId), { timeoutMs: HEALTH_GET_MS });
@@ -1998,7 +1999,7 @@ async function gatewayPeers(api, groupId) {
     const peers = await Promise.all(ids.slice(0, HEALTH_PEERS_MAX).map(id => nbDirectGet(api, '/api/peers/' + encodeURIComponent(id), { timeoutMs: HEALTH_GET_MS })));
     if (peers.some(r => okStatus(r) && r.body && r.body.connected === true)) return { read: true, peers: ids.length, connected: true };
     if (peers.every(r => okStatus(r) && r.body && typeof r.body.connected === 'boolean')) return { read: true, peers: ids.length, connected: false };
-    return { read: false };
+    return { read: false, peers: ids.length };
 }
 function gatewayState(peers, guacdUp) {
     if (peers.read && peers.connected && guacdUp) return 'up';
@@ -2014,8 +2015,8 @@ async function probeHealth(api) {
         _nb.namesGroupId ? probeGuacd(_cfg.namesGuacdHost, _cfg.namesGuacdPort) : Promise.resolve(false),
     ]);
     const out = { netbird: netbirdState(nb), gateway: gatewayState(ipPeers, ipGuacd) };
-    // The names gateway only when it is set up: its group has a peer (or couldn't be read).
-    if (namesPeers && (!namesPeers.read || namesPeers.peers > 0)) out.namesGateway = gatewayState(namesPeers, namesGuacd);
+    // The names gateway only when it is set up: a read of its group showed a peer.
+    if (namesPeers && namesPeers.peers > 0) out.namesGateway = gatewayState(namesPeers, namesGuacd);
     return out;
 }
 async function getServiceHealth() {

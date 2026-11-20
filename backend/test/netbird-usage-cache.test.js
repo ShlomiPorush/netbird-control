@@ -7,6 +7,14 @@ const assert = require('node:assert/strict');
 const http = require('http');
 const crypto = require('crypto');
 
+// Settings saves are recorded with the connection the app used while each one ran (stubbed before
+// lib/netbird.js destructures it).
+const core = require('../lib/core');
+const saves = [];
+core.setSetting = async (k) => {
+    saves.push({ key: k, url: nb._nbApi.url, token: nb._nbApi.token });
+    await new Promise((r) => setTimeout(r, 5));
+};
 const nb = require('../lib/netbird');
 
 // A fake NetBird: answers by path, counts the reads of the resources list, and can hold them.
@@ -100,6 +108,19 @@ test('the strict read never joins a read in flight, and fails when the routes ca
         const lenient = await nb.getUsageData();
         assert.deepEqual(lenient.routes, [], 'a normal read still turns the failed list into []');
     } finally { st.failRoutes = false; }
+});
+
+test('a settings save publishes the new URL and token together, after both were saved', async () => {
+    const old = { url: nb._nbApi.url, token: nb._nbApi.token };
+    const next = { url: 'http://127.0.0.1:9/', token: crypto.randomBytes(16).toString('hex') };
+    saves.length = 0;
+    try {
+        await nb.setNbApiConfig(next);
+        assert.deepEqual(saves.map(s => s.key), ['netbird_api_url', 'netbird_api_token']);
+        assert.ok(saves.every(s => s.url === old.url && s.token === old.token), 'nothing new is used while saving');
+        assert.equal(nb._nbApi.url, next.url);
+        assert.equal(nb._nbApi.token, next.token);
+    } finally { nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
 });
 
 test('the URL and token are handed out as one pair whose version changes with either value', () => {

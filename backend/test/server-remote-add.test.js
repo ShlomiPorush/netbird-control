@@ -122,7 +122,7 @@ test('create: an unconfirmed resource answers RESOURCE_UNCONFIRMED; a success ca
     let r = await h.call('admin', 'POST', '/api/networks/net-1/resources', body);
     assert.equal(r.status, 502);
     assert.equal(r.json.code, 'RESOURCE_UNCONFIRMED');
-    assert.equal(lastAudit().meta.confirmed, false);
+    assert.equal(audits.length, 0, 'not recorded as a create');
     createImpl = async () => ({ resource: { id: 'res-10', name: 'srv' } });
     r = await h.call('admin', 'POST', '/api/networks/net-1/resources', body);
     assert.equal(r.status, 200);

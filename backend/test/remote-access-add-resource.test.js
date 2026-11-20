@@ -242,6 +242,11 @@ test('status: NetBird is down on no answer, 5xx, 401 or 403, and unknown on anot
     const off = await ra.getServiceHealth();
     assert.equal(off.netbird, 'down');
     assert.equal(off.gateway, 'unknown', 'guacd answers, but the gateway peers could not be read');
+    assert.equal('namesGateway' in off, false, 'a names gateway no read has shown is not in the answer');
+    // The names group was read and has a peer, but the peer couldn't be read: still shown.
+    healthSetup({ namesPort: closedPort });
+    nbA.status['/api/peers/p-ngw'] = 500;
+    assert.equal((await ra.getServiceHealth()).namesGateway, 'down', 'its guacd is closed');
 });
 
 test('status: a gateway is down when its peer is offline or guacd is closed, unknown when NetBird could not be read', async () => {
