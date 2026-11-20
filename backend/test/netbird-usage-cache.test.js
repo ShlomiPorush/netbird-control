@@ -1,28 +1,37 @@
 // The usage datasets cache (lib/netbird.js getUsageData): one cache per account, invalidated per
 // account after a write; a read that started before an invalidation never stores its old result
-// and is never joined afterwards; an older read that finishes last never replaces a newer one; the
-// strict read never joins a running read and fails when the resources or the routes can't be read.
+// and is never joined afterwards. The strict read reads only the resources and the routes, never
+// joins a running read, never touches the cache, and fails unless both answers were a 2xx list.
+// The NetBird URL and token are saved in one transaction, one save at a time, and published only
+// after the commit.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
 const crypto = require('crypto');
 
-// Settings saves are recorded with the connection the app used while each one ran (stubbed before
-// lib/netbird.js destructures it).
+// The settings saves go through a stub database client: every statement is recorded with the
+// connection the app used while it ran.
 const core = require('../lib/core');
-const saves = [];
-core.setSetting = async (k) => {
-    saves.push({ key: k, url: nb._nbApi.url, token: nb._nbApi.token });
-    await new Promise((r) => setTimeout(r, 5));
-};
+const statements = [];
+let failInsert = null; // a key whose insert fails
+core.pool.connect = async () => ({
+    query: async (sql, params) => {
+        statements.push({ sql: String(sql).trim().split(/\s+/)[0], key: params && params[0], url: nb._nbApi.url, token: nb._nbApi.token });
+        await new Promise((r) => setTimeout(r, 5));
+        if (failInsert && params && params[0] === failInsert) throw new Error('database unavailable');
+        return { rows: [] };
+    },
+    release: () => { },
+});
 const nb = require('../lib/netbird');
 
 // A fake NetBird: answers by path, counts the reads of the resources list, and can hold them.
-const st = { reads: { main: 0, t1: 0 }, version: { main: 1, t1: 1 }, holds: [], failRoutes: false };
+const st = { reads: { main: 0, t1: 0 }, version: { main: 1, t1: 1 }, holds: [], fail503: null, failRoutes: false };
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     const account = url.searchParams.get('account') || 'main';
     const send = (status, body) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(body)); };
+    if (st.fail503 === url.pathname) return send(503, []);
     if (url.pathname === '/api/routes' && st.failRoutes) return send(500, { message: 'unavailable' });
     if (url.pathname !== '/api/networks/resources') return send(200, []);
     st.reads[account]++;
@@ -30,9 +39,10 @@ const server = http.createServer((req, res) => {
     const hold = st.holds.shift();
     if (hold) hold.then(() => send(200, answer)); else send(200, answer);
 });
-let release = [];
+const release = [];
 const holdNext = () => { let r; st.holds.push(new Promise((ok) => { r = ok; })); release.push(r); };
 const idOf = (u) => u.resources[0] && u.resources[0].id;
+const waitHeld = async () => { while (st.holds.length) await new Promise((r) => setTimeout(r, 5)); };
 
 test.before(async () => {
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -66,7 +76,7 @@ test('a read that started before an invalidation is not joined and never stores 
     nb.invalidateUsage();
     holdNext();
     const old = nb.getUsageData(); // reads v1 and is held
-    while (st.holds.length) await new Promise((r) => setTimeout(r, 5));
+    await waitHeld();
     st.version.main = 2;
     nb.invalidateUsage(); // the write happened while the old read was running
     const fresh = await nb.getUsageData();
@@ -76,61 +86,85 @@ test('a read that started before an invalidation is not joined and never stores 
     assert.equal(idOf(await nb.getUsageData()), 'main-v2', 'the old read did not replace the cache');
 });
 
-test('an older read that finishes after a newer one never replaces it', async () => {
-    nb.invalidateUsage();
-    st.version.main = 3;
-    holdNext();
-    const older = nb.getUsageData({ strict: true });
-    while (st.holds.length) await new Promise((r) => setTimeout(r, 5));
-    st.version.main = 4;
-    const newer = await nb.getUsageData({ strict: true });
-    assert.equal(idOf(newer), 'main-v4');
-    release.shift()();
-    assert.equal(idOf(await older), 'main-v3');
-    assert.equal(idOf(await nb.getUsageData()), 'main-v4');
-});
-
-test('the strict read never joins a read in flight, and fails when the routes cannot be read', async () => {
+test('the strict read: only resources and routes, its own request, and nothing stored in the cache', async () => {
     nb.invalidateUsage();
     holdNext();
-    const normal = nb.getUsageData();
-    while (st.holds.length) await new Promise((r) => setTimeout(r, 5));
+    const normal = nb.getUsageData(); // reads v2 and is held
+    await waitHeld();
     const reads = st.reads.main;
+    st.version.main = 3;
     const strict = await nb.getUsageData({ strict: true });
     assert.equal(st.reads.main, reads + 1, 'the strict read made its own request');
-    assert.equal(idOf(strict), 'main-v4');
+    assert.deepEqual(Object.keys(strict).sort(), ['resources', 'routes']);
+    assert.equal(idOf(strict), 'main-v3');
     release.shift()();
-    await normal;
+    assert.equal(idOf(await normal), 'main-v2');
+    assert.equal(idOf(await nb.getUsageData()), 'main-v2', 'the strict answer did not go into the cache');
+});
+
+test('the strict read fails on a failed status, also when its body is an empty list', async () => {
+    for (const path of ['/api/networks/resources', '/api/routes']) {
+        st.fail503 = path;
+        try {
+            await assert.rejects(nb.getUsageData({ strict: true }), /resources and routes/, path);
+        } finally { st.fail503 = null; }
+    }
     st.failRoutes = true;
     try {
         await assert.rejects(nb.getUsageData({ strict: true }), /resources and routes/);
-        nb.invalidateUsage();
-        const lenient = await nb.getUsageData();
-        assert.deepEqual(lenient.routes, [], 'a normal read still turns the failed list into []');
     } finally { st.failRoutes = false; }
 });
 
-test('a settings save publishes the new URL and token together, after both were saved', async () => {
+test('a settings save writes the URL and token in one transaction and publishes them after the commit', async () => {
     const old = { url: nb._nbApi.url, token: nb._nbApi.token };
     const next = { url: 'http://127.0.0.1:9/', token: crypto.randomBytes(16).toString('hex') };
-    saves.length = 0;
+    statements.length = 0;
     try {
         await nb.setNbApiConfig(next);
-        assert.deepEqual(saves.map(s => s.key), ['netbird_api_url', 'netbird_api_token']);
-        assert.ok(saves.every(s => s.url === old.url && s.token === old.token), 'nothing new is used while saving');
+        assert.deepEqual(statements.map(s => s.sql), ['BEGIN', 'INSERT', 'INSERT', 'COMMIT']);
+        assert.deepEqual(statements.filter(s => s.key).map(s => s.key), ['netbird_api_url', 'netbird_api_token']);
+        assert.ok(statements.every(s => s.url === old.url && s.token === old.token), 'nothing new is used before the commit');
         assert.equal(nb._nbApi.url, next.url);
         assert.equal(nb._nbApi.token, next.token);
     } finally { nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
 });
 
-test('the URL and token are handed out as one pair whose version changes with either value', () => {
-    const a = nb.getNbApiSnapshot();
-    assert.equal(nb.getNbApiSnapshot(), a, 'unchanged values: the same pair');
-    const token = nb._nbApi.token;
-    nb._nbApi.token = crypto.randomBytes(16).toString('hex');
-    const b = nb.getNbApiSnapshot();
-    assert.notEqual(b.version, a.version);
-    assert.equal(b.url, a.url);
-    assert.equal(Object.isFrozen(b), true);
-    nb._nbApi.token = token;
+test('a failed save rolls back and publishes nothing', async () => {
+    const old = { url: nb._nbApi.url, token: nb._nbApi.token };
+    statements.length = 0;
+    failInsert = 'netbird_api_token';
+    try {
+        await assert.rejects(nb.setNbApiConfig({ url: 'http://127.0.0.1:9/', token: crypto.randomBytes(16).toString('hex') }), /database unavailable/);
+        assert.equal(statements[statements.length - 1].sql, 'ROLLBACK');
+        assert.deepEqual({ url: nb._nbApi.url, token: nb._nbApi.token }, old);
+    } finally { failInsert = null; nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
+});
+
+test('saves run one at a time, in order', async () => {
+    const old = { url: nb._nbApi.url, token: nb._nbApi.token };
+    statements.length = 0;
+    try {
+        const a = nb.setNbApiConfig({ url: 'http://127.0.0.1:7/', token: crypto.randomBytes(16).toString('hex') });
+        const b = nb.setNbApiConfig({ url: 'http://127.0.0.1:8/', token: crypto.randomBytes(16).toString('hex') });
+        await Promise.all([a, b]);
+        assert.deepEqual(statements.map(s => s.sql), ['BEGIN', 'INSERT', 'INSERT', 'COMMIT', 'BEGIN', 'INSERT', 'INSERT', 'COMMIT']);
+        assert.equal(nb._nbApi.url, 'http://127.0.0.1:8/', 'the later save wins');
+    } finally { nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
+});
+
+test('every publish raises the version, also back to earlier values (A, B, A)', async () => {
+    const old = { url: nb._nbApi.url, token: nb._nbApi.token };
+    try {
+        const tokenA = crypto.randomBytes(16).toString('hex');
+        await nb.setNbApiConfig({ url: 'http://127.0.0.1:7/', token: tokenA });
+        const a1 = nb.getNbApiSnapshot();
+        assert.equal(nb.getNbApiSnapshot(), a1, 'unchanged values: the same pair');
+        await nb.setNbApiConfig({ url: 'http://127.0.0.1:8/', token: crypto.randomBytes(16).toString('hex') });
+        await nb.setNbApiConfig({ url: 'http://127.0.0.1:7/', token: tokenA });
+        const a2 = nb.getNbApiSnapshot();
+        assert.equal(a2.url, a1.url);
+        assert.equal(a2.token, a1.token);
+        assert.ok(a2.version > a1.version + 1);
+        assert.equal(Object.isFrozen(a2), true);
+    } finally { nb._nbApi.url = old.url; nb._nbApi.token = old.token; }
 });

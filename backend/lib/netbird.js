@@ -10,7 +10,7 @@
 const https = require('https');
 const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
-const { pool, setSetting } = require('./core');
+const { pool } = require('./core');
 const { noteNetbirdOk, httpJson } = require('./http');
 
 // ─── MSP tenant context ───
@@ -105,13 +105,23 @@ const _nbApi = { url: _nbEnv.url, token: _nbEnv.token };
 
 // The URL and the token are published together, in one synchronous step: no request ever pairs a new
 // URL with the old token (or the reverse). getNbApiSnapshot() hands out one frozen pair with a
-// version that changes whenever either value changed.
+// version that every publish raises (also one that publishes the same values again), and that also
+// changes when either value was set some other way.
+let _nbApiVersion = 0;
+let _nbApiSnap = null;
 function publishNbApi(next) {
     _nbApi.url = next.url;
     _nbApi.token = next.token;
+    _nbApiSnap = Object.freeze({ url: next.url, token: next.token, version: ++_nbApiVersion });
 }
-let _nbApiVersion = 0;
-let _nbApiSnap = null;
+// Loads and saves of the connection run one at a time, in order, so an older one never publishes
+// after a newer one.
+let _nbApiChain = Promise.resolve();
+function inNbApiChain(fn) {
+    const run = _nbApiChain.then(fn);
+    _nbApiChain = run.catch(() => { });
+    return run;
+}
 function getNbApiSnapshot() {
     if (!_nbApiSnap || _nbApiSnap.url !== _nbApi.url || _nbApiSnap.token !== _nbApi.token) {
         _nbApiSnap = Object.freeze({ url: _nbApi.url, token: _nbApi.token, version: ++_nbApiVersion });
@@ -119,7 +129,8 @@ function getNbApiSnapshot() {
     return _nbApiSnap;
 }
 
-async function loadNbApi({ strict = false } = {}) {
+function loadNbApi(opts) { return inNbApiChain(() => loadNbApiNow(opts)); }
+async function loadNbApiNow({ strict = false } = {}) {
     try {
         const r = await pool.query("SELECT key, value FROM app_settings WHERE key IN ('netbird_api_url', 'netbird_api_token')");
         const m = {};
@@ -142,17 +153,36 @@ function getNbApiConfig() {
 
 // Persist + apply new connection settings. Env-managed fields are immutable; an
 // empty/omitted token keeps the existing one.
-// Both values are saved first and then published together (publishNbApi), so a request that starts
-// during the save uses the old pair, and one that starts after it the new pair - never a mix.
-async function setNbApiConfig({ url, token }) {
+// Both values are saved in one transaction and published together (publishNbApi) only after the
+// commit, so a request that starts during the save uses the old pair, and one that starts after it
+// the new pair - never a mix, also after a reload. Saves run one at a time.
+function setNbApiConfig(cfg) { return inNbApiChain(() => saveNbApi(cfg)); }
+async function saveNbApi({ url, token }) {
     const next = { url: _nbApi.url, token: _nbApi.token };
+    const rows = [];
     if (url !== undefined && !_nbEnv.url) {
         next.url = String(url || '').trim();
-        await setSetting('netbird_api_url', next.url);
+        rows.push(['netbird_api_url', next.url]);
     }
     if (token !== undefined && String(token).trim() !== '' && !_nbEnv.token) {
         next.token = String(token).trim();
-        await setSetting('netbird_api_token', next.token);
+        rows.push(['netbird_api_token', next.token]);
+    }
+    if (rows.length) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            for (const [key, value] of rows) {
+                await client.query(`INSERT INTO app_settings (key, value) VALUES ($1, $2)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, value]);
+            }
+            await client.query('COMMIT');
+        } catch (e) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw e;
+        } finally {
+            client.release();
+        }
     }
     publishNbApi(next);
     // Force the caches that depend on the API to refresh on next use.
@@ -541,9 +571,7 @@ function emptyUsage() {
     return { policies: [], routes: [], nameservers: [], zones: [], setupKeys: [], resources: [], networks: [] };
 }
 
-// strict: the resources and the routes must both have been read, else it throws (a normal read
-// turns a failed list into []).
-async function fetchUsageData({ strict = false } = {}) {
+async function fetchUsageData() {
     const [policies, routes, nameservers, zones, setupKeys, resources, networks] = await Promise.all([
         netbirdGet('/api/policies'),
         netbirdGet('/api/routes'),
@@ -553,7 +581,6 @@ async function fetchUsageData({ strict = false } = {}) {
         netbirdGet('/api/networks/resources'),
         netbirdGet('/api/networks'),
     ]);
-    if (strict && (!Array.isArray(resources) || !Array.isArray(routes))) throw new Error("Couldn't read the resources and routes from NetBird");
     const arr = v => (Array.isArray(v) ? v : []);
     return {
         policies: arr(policies), routes: arr(routes), nameservers: arr(nameservers),
@@ -563,9 +590,9 @@ async function fetchUsageData({ strict = false } = {}) {
 
 // One read of the datasets for the account state `st`; it stores its result only while no
 // invalidation and no newer finished read came after it started.
-function readUsage(st, strict) {
+function readUsage(st) {
     const read = { gen: st.gen, seq: ++st.seq };
-    return fetchUsageData({ strict }).then(d => {
+    return fetchUsageData().then(d => {
         if (read.gen === st.gen && read.seq > st.storedSeq) {
             st.data = d; st.at = Date.now(); st.storedSeq = read.seq;
         }
@@ -575,16 +602,23 @@ function readUsage(st, strict) {
 
 // Cached usage datasets of the current account (main, or the tenant's own slot); coalesces
 // concurrent callers into one refresh.
-// { strict: true }: a fresh read that never joins a read already running and never answers from the
-// cache; it rejects when the resources or the routes could not be read.
+// { strict: true }: only { resources, routes }, read fresh for the current account. It never joins a
+// read already running, never answers from the cache and never stores anything in it; it rejects
+// unless both answers were a 2xx with a list (a failed status can carry a JSON body too).
+async function readInventoryStrict() {
+    const [resources, routes] = await Promise.all(['/api/networks/resources', '/api/routes'].map(p => netbirdReq('GET', p)));
+    const ok = (r) => !!r && r.status >= 200 && r.status < 300 && Array.isArray(r.body);
+    if (!ok(resources) || !ok(routes)) throw new Error("Couldn't read the resources and routes from NetBird");
+    return { resources: resources.body, routes: routes.body };
+}
 function getUsageData({ strict = false } = {}) {
     if (!netbirdApiConfigured()) return strict ? Promise.reject(new Error('The NetBird API is not connected')) : Promise.resolve(emptyUsage());
+    if (strict) return readInventoryStrict();
     const tenant = !!currentTenantAccount();
     const st = usageState();
-    if (strict) return readUsage(st, true);
     if (st.data && Date.now() - st.at < (tenant ? TENANT_TTL_MS : USAGE_TTL_MS)) return Promise.resolve(st.data);
     if (st.refreshing) return st.refreshing;
-    const p = readUsage(st, false)
+    const p = readUsage(st)
         .catch(e => { console.error(tenant ? '[Groups] tenant usage fetch error:' : '[Groups] usage fetch error:', e.message); return st.data || emptyUsage(); })
         .finally(() => { if (st.refreshing === p) st.refreshing = null; });
     st.refreshing = p;
