@@ -26,21 +26,51 @@ interface NavItem {
   remoteAccess?: boolean;
 }
 
-const NAV: NavItem[] = [
-  { to: '/', label: 'Home', icon: Home, end: true, tenantMode: true },
-  { to: '/activity', label: 'Activity', icon: Activity, tenantMode: true },
-  { to: '/admin', label: 'Admin', icon: ShieldCheck, adminOnly: true, perm: 'audit.view', tenantMode: true },
-  { to: '/users', label: 'Users & Groups', icon: Users, adminOnly: true, tenantMode: true },
-  { to: '/peers', label: 'Peers', icon: MonitorSmartphone, tenantMode: true },
-  { to: '/policies', label: 'Policies', icon: Shield, adminOnly: true, tenantMode: true },
-  { to: '/networks', label: 'Networks', icon: Network, tenantMode: true },
-  { to: '/reverse-proxy', label: 'Reverse Proxy', icon: Globe, adminOnly: true, perm: 'proxy.manage', tenantMode: true },
-  { to: '/remote-access', label: 'Remote Access', icon: MonitorPlay, remoteAccess: true, badge: 'remoteSessions' },
-  { to: '/request-access', label: 'Request Access', icon: KeyRound },
-  { to: '/access', label: 'Access Management', icon: ClipboardCheck, accessHub: true, badge: 'pendingRequests', tenantMode: true },
-  { to: '/tenants', label: 'Tenants', icon: Building2, adminOnly: true, mspOnly: true },
-  { to: '/operations', label: 'Operations', icon: Wrench, adminOnly: true, tenantMode: true },
-  { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true, tenantMode: true },
+/** A titled group of the sidebar. The first group has no title. */
+interface NavSection {
+  title?: string;
+  items: NavItem[];
+}
+
+const NAV: NavSection[] = [
+  {
+    items: [
+      { to: '/', label: 'Home', icon: Home, end: true, tenantMode: true },
+      { to: '/activity', label: 'Activity', icon: Activity, tenantMode: true },
+    ],
+  },
+  {
+    title: 'Identity',
+    items: [
+      { to: '/peers', label: 'Peers', icon: MonitorSmartphone, tenantMode: true },
+      { to: '/users', label: 'Users & Groups', icon: Users, adminOnly: true, tenantMode: true },
+    ],
+  },
+  {
+    title: 'Network',
+    items: [
+      { to: '/policies', label: 'Policies', icon: Shield, adminOnly: true, tenantMode: true },
+      { to: '/networks', label: 'Networks', icon: Network, tenantMode: true },
+      { to: '/reverse-proxy', label: 'Reverse Proxy', icon: Globe, adminOnly: true, perm: 'proxy.manage', tenantMode: true },
+    ],
+  },
+  {
+    title: 'Access',
+    items: [
+      { to: '/remote-access', label: 'Remote Access', icon: MonitorPlay, remoteAccess: true, badge: 'remoteSessions' },
+      { to: '/request-access', label: 'Request Access', icon: KeyRound },
+      { to: '/access', label: 'Access Management', icon: ClipboardCheck, accessHub: true, badge: 'pendingRequests', tenantMode: true },
+    ],
+  },
+  {
+    title: 'Administration',
+    items: [
+      { to: '/admin', label: 'Admin', icon: ShieldCheck, adminOnly: true, perm: 'audit.view', tenantMode: true },
+      { to: '/tenants', label: 'Tenants', icon: Building2, adminOnly: true, mspOnly: true },
+      { to: '/operations', label: 'Operations', icon: Wrench, adminOnly: true, tenantMode: true },
+      { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true, tenantMode: true },
+    ],
+  },
 ];
 
 function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: () => void }) {
@@ -48,7 +78,7 @@ function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: 
   // Tenants shows only for admins of an activated MSP account (checked once, cached long).
   const mspAvailable = !!useMspStatus(!restricted).data?.available;
   const inTenantMode = !!getTenantMode();
-  const items = NAV.filter((n) => {
+  const visible = (n: NavItem) => {
     // While MANAGING a tenant only the live-management pages stay - everything else
     // (history, app features, settings) belongs to the main account.
     if (inTenantMode && !n.tenantMode) return false;
@@ -62,43 +92,58 @@ function NavList({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: 
     if (n.adminOnly && !tenantAdmin && !(n.perm && can(n.perm))) return false;
     if (n.approverOnly && !canApprove) return false;
     return true;
-  });
+  };
+  // A group whose items are all hidden from this viewer is not shown at all.
+  const sections = NAV.map((s) => ({ ...s, items: s.items.filter(visible) })).filter((s) => s.items.length > 0);
   // Access requests are a main-account feature - don't poll pending-count in tenant mode (403).
   const pending = usePendingRequestCount(canApprove && !inTenantMode).data?.count || 0;
   const openSessions = useRemoteSessions().count;
   return (
     <>
-      <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-[3px]">
-        {items.map(({ to, label, icon: Icon, end, badge }) => {
-          const count = badge === 'pendingRequests' ? pending : badge === 'remoteSessions' ? openSessions : 0;
-          return (
-          <NavLink
-            key={to}
-            to={to}
-            end={end}
-            onClick={onNavigate}
-            title={collapsed ? label : undefined}
-            className={({ isActive }) =>
-              cn(
-                'flex items-center gap-3 rounded-lg text-[.87rem] font-normal py-[.5rem] px-3 transition-colors',
-                collapsed && 'justify-center px-0',
-                isActive
-                  ? 'bg-nb-gray-200 text-nb-gray-900 dark:bg-nb-gray-900 dark:text-white'
-                  : 'text-nb-gray-600 hover:bg-nb-gray-200 dark:text-nb-gray-400 dark:hover:bg-nb-gray-900/50 dark:hover:text-nb-gray-200',
-              )
-            }
+      <nav className="flex-1 overflow-y-auto px-3 py-3">
+        {sections.map((section, i) => (
+          <div
+            key={section.title ?? 'main'}
+            className={cn(i > 0 && (collapsed ? 'mt-3 pt-3 border-t border-nb-gray-200 dark:border-nb-gray-900' : 'mt-5'))}
           >
-            <span className="relative shrink-0">
-              <Icon size={18} />
-              {collapsed && count > 0 && <span className="absolute -top-1.5 -right-1.5 h-2 w-2 rounded-full bg-netbird" />}
-            </span>
-            {!collapsed && <span className="truncate">{label}</span>}
-            {!collapsed && count > 0 && (
-              <span className="ml-auto inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-netbird text-white text-[0.7rem] font-medium">{count}</span>
+            {/* Collapsed: the title gives way to the divider line above. */}
+            {section.title && !collapsed && (
+              <div className="px-3 pb-2 text-[0.7rem] font-medium uppercase tracking-wider text-nb-gray-500">{section.title}</div>
             )}
-          </NavLink>
-          );
-        })}
+            <div className="space-y-[3px]">
+              {section.items.map(({ to, label, icon: Icon, end, badge }) => {
+                const count = badge === 'pendingRequests' ? pending : badge === 'remoteSessions' ? openSessions : 0;
+                return (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={end}
+                  onClick={onNavigate}
+                  title={collapsed ? label : undefined}
+                  className={({ isActive }) =>
+                    cn(
+                      'flex items-center gap-3 rounded-lg text-[.87rem] font-normal py-[.5rem] px-3 transition-colors',
+                      collapsed && 'justify-center px-0',
+                      isActive
+                        ? 'bg-nb-gray-200 text-nb-gray-900 dark:bg-nb-gray-900 dark:text-white'
+                        : 'text-nb-gray-600 hover:bg-nb-gray-200 dark:text-nb-gray-400 dark:hover:bg-nb-gray-900/50 dark:hover:text-nb-gray-200',
+                    )
+                  }
+                >
+                  <span className="relative shrink-0">
+                    <Icon size={18} />
+                    {collapsed && count > 0 && <span className="absolute -top-1.5 -right-1.5 h-2 w-2 rounded-full bg-netbird" />}
+                  </span>
+                  {!collapsed && <span className="truncate">{label}</span>}
+                  {!collapsed && count > 0 && (
+                    <span className="ml-auto inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-netbird text-white text-[0.7rem] font-medium">{count}</span>
+                  )}
+                </NavLink>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </nav>
       {/* Pinned to the bottom, visually quieter than the main nav - a help tool, not a destination. */}
       <div className="shrink-0 px-3 py-2 border-t border-nb-gray-200 dark:border-nb-gray-900">
