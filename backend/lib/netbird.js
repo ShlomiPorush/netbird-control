@@ -11,7 +11,7 @@ const https = require('https');
 const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
 const { pool, setSetting } = require('./core');
-const { noteNetbirdOk } = require('./http');
+const { noteNetbirdOk, httpJson } = require('./http');
 
 // ─── MSP tenant context ───
 // The NetBird Cloud MSP portal manages child tenants with the SAME token plus an
@@ -103,14 +103,32 @@ function tenantSlot() {
 const _nbEnv = { url: process.env['NETBIRD_API_URL'] || '', token: process.env['NETBIRD_API_TOKEN'] || '' };
 const _nbApi = { url: _nbEnv.url, token: _nbEnv.token };
 
+// The URL and the token are published together, in one synchronous step: no request ever pairs a new
+// URL with the old token (or the reverse). getNbApiSnapshot() hands out one frozen pair with a
+// version that changes whenever either value changed.
+function publishNbApi(next) {
+    _nbApi.url = next.url;
+    _nbApi.token = next.token;
+}
+let _nbApiVersion = 0;
+let _nbApiSnap = null;
+function getNbApiSnapshot() {
+    if (!_nbApiSnap || _nbApiSnap.url !== _nbApi.url || _nbApiSnap.token !== _nbApi.token) {
+        _nbApiSnap = Object.freeze({ url: _nbApi.url, token: _nbApi.token, version: ++_nbApiVersion });
+    }
+    return _nbApiSnap;
+}
+
 async function loadNbApi({ strict = false } = {}) {
     try {
         const r = await pool.query("SELECT key, value FROM app_settings WHERE key IN ('netbird_api_url', 'netbird_api_token')");
         const m = {};
         for (const row of r.rows) m[row.key] = row.value;
         // A value cleared in the database clears it here too (a reload must match the stored state).
-        if (!_nbEnv.url) _nbApi.url = m.netbird_api_url || '';
-        if (!_nbEnv.token) _nbApi.token = m.netbird_api_token || '';
+        publishNbApi({
+            url: _nbEnv.url ? _nbApi.url : (m.netbird_api_url || ''),
+            token: _nbEnv.token ? _nbApi.token : (m.netbird_api_token || ''),
+        });
     } catch (e) {
         if (strict && !(e instanceof SyntaxError)) throw e;
         console.error('[NetBird API] config load error:', e.message);
@@ -124,15 +142,19 @@ function getNbApiConfig() {
 
 // Persist + apply new connection settings. Env-managed fields are immutable; an
 // empty/omitted token keeps the existing one.
+// Both values are saved first and then published together (publishNbApi), so a request that starts
+// during the save uses the old pair, and one that starts after it the new pair - never a mix.
 async function setNbApiConfig({ url, token }) {
+    const next = { url: _nbApi.url, token: _nbApi.token };
     if (url !== undefined && !_nbEnv.url) {
-        _nbApi.url = String(url || '').trim();
-        await setSetting('netbird_api_url', _nbApi.url);
+        next.url = String(url || '').trim();
+        await setSetting('netbird_api_url', next.url);
     }
     if (token !== undefined && String(token).trim() !== '' && !_nbEnv.token) {
-        _nbApi.token = String(token).trim();
-        await setSetting('netbird_api_token', _nbApi.token);
+        next.token = String(token).trim();
+        await setSetting('netbird_api_token', next.token);
     }
+    publishNbApi(next);
     // Force the caches that depend on the API to refresh on next use.
     resetNbCaches();
     return getNbApiConfig();
@@ -146,7 +168,7 @@ function bustNbCaches(...names) {
         if (n === 'groups') _groupsAt = 0;
         else if (n === 'policies') _policiesAt = 0;
         else if (n === 'gref') _grefAt = 0;
-        else if (n === 'usage') _usage.at = 0;
+        else if (n === 'usage') invalidateUsage();
     }
 }
 
@@ -493,14 +515,35 @@ function getGroupRefMap() {
 // NetBird has no per-group usage endpoint, so the dashboard cross-references the
 // global lists. We do the same and cache the datasets briefly (admin pages reload
 // often). Each list degrades to [] when its endpoint is missing/unavailable.
+// One cache per account (the main account, and each tenant in its slot). Each has a generation:
+// invalidateUsage() raises it, and a read that started before that never stores its result, so a
+// write is never hidden by an older read that finishes after it. Reads are also numbered: an older
+// read that finishes last never replaces a newer one.
 const USAGE_TTL_MS = 60 * 1000;
-let _usage = { at: 0, data: null, refreshing: null };
+const newUsageState = () => ({ at: 0, data: null, refreshing: null, gen: 0, seq: 0, storedSeq: 0 });
+const _usage = newUsageState();
+function usageState() {
+    if (!currentTenantAccount()) return _usage;
+    const s = tenantSlot();
+    if (!s.usageState) s.usageState = newUsageState();
+    return s.usageState;
+}
+// Drop the CURRENT account's usage datasets (after a write to that account): the next read fetches
+// anew, and no read that is already running can store its result or be joined.
+function invalidateUsage() {
+    const st = usageState();
+    st.gen++;
+    st.at = 0;
+    st.refreshing = null;
+}
 
 function emptyUsage() {
     return { policies: [], routes: [], nameservers: [], zones: [], setupKeys: [], resources: [], networks: [] };
 }
 
-async function fetchUsageData() {
+// strict: the resources and the routes must both have been read, else it throws (a normal read
+// turns a failed list into []).
+async function fetchUsageData({ strict = false } = {}) {
     const [policies, routes, nameservers, zones, setupKeys, resources, networks] = await Promise.all([
         netbirdGet('/api/policies'),
         netbirdGet('/api/routes'),
@@ -510,6 +553,7 @@ async function fetchUsageData() {
         netbirdGet('/api/networks/resources'),
         netbirdGet('/api/networks'),
     ]);
+    if (strict && (!Array.isArray(resources) || !Array.isArray(routes))) throw new Error("Couldn't read the resources and routes from NetBird");
     const arr = v => (Array.isArray(v) ? v : []);
     return {
         policies: arr(policies), routes: arr(routes), nameservers: arr(nameservers),
@@ -517,24 +561,47 @@ async function fetchUsageData() {
     };
 }
 
-// Cached usage datasets; coalesces concurrent callers into one refresh.
-function getUsageData() {
-    if (!netbirdApiConfigured()) return Promise.resolve(emptyUsage());
-    // Tenant context: per-tenant slot, never the main-account cache.
-    if (currentTenantAccount()) {
-        const s = tenantSlot();
-        if (s.usage && Date.now() - (s.usageAt || 0) < TENANT_TTL_MS) return Promise.resolve(s.usage);
-        return fetchUsageData()
-            .then(d => { s.usage = d; s.usageAt = Date.now(); return d; })
-            .catch(e => { console.error('[Groups] tenant usage fetch error:', e.message); return s.usage || emptyUsage(); });
-    }
-    if (_usage.data && Date.now() - _usage.at < USAGE_TTL_MS) return Promise.resolve(_usage.data);
-    if (_usage.refreshing) return _usage.refreshing;
-    _usage.refreshing = fetchUsageData()
-        .then(d => { _usage.data = d; _usage.at = Date.now(); return d; })
-        .catch(e => { console.error('[Groups] usage fetch error:', e.message); return _usage.data || emptyUsage(); })
-        .finally(() => { _usage.refreshing = null; });
-    return _usage.refreshing;
+// One read of the datasets for the account state `st`; it stores its result only while no
+// invalidation and no newer finished read came after it started.
+function readUsage(st, strict) {
+    const read = { gen: st.gen, seq: ++st.seq };
+    return fetchUsageData({ strict }).then(d => {
+        if (read.gen === st.gen && read.seq > st.storedSeq) {
+            st.data = d; st.at = Date.now(); st.storedSeq = read.seq;
+        }
+        return d;
+    });
+}
+
+// Cached usage datasets of the current account (main, or the tenant's own slot); coalesces
+// concurrent callers into one refresh.
+// { strict: true }: a fresh read that never joins a read already running and never answers from the
+// cache; it rejects when the resources or the routes could not be read.
+function getUsageData({ strict = false } = {}) {
+    if (!netbirdApiConfigured()) return strict ? Promise.reject(new Error('The NetBird API is not connected')) : Promise.resolve(emptyUsage());
+    const tenant = !!currentTenantAccount();
+    const st = usageState();
+    if (strict) return readUsage(st, true);
+    if (st.data && Date.now() - st.at < (tenant ? TENANT_TTL_MS : USAGE_TTL_MS)) return Promise.resolve(st.data);
+    if (st.refreshing) return st.refreshing;
+    const p = readUsage(st, false)
+        .catch(e => { console.error(tenant ? '[Groups] tenant usage fetch error:' : '[Groups] usage fetch error:', e.message); return st.data || emptyUsage(); })
+        .finally(() => { if (st.refreshing === p) st.refreshing = null; });
+    st.refreshing = p;
+    return p;
+}
+
+// One direct GET to the NetBird API with the given { url, token } pair (getNbApiSnapshot): no
+// retry, no shared rate-limit pause, no tenant switch, no cache, and it does not count as the
+// "last good NetBird answer". Used by the service status probe. → { status, body } or { status: 0 }.
+function nbDirectGet(api, apiPath, { timeoutMs = 4000 } = {}) {
+    if (!api || !api.url || !api.token) return Promise.resolve({ status: 0, error: 'The NetBird API is not connected' });
+    let url;
+    try { url = new URL(apiPath, api.url).toString(); } catch { return Promise.resolve({ status: 0, error: 'Invalid URL' }); }
+    return httpJson('GET', url, {
+        headers: { Authorization: `Token ${api.token}` },
+        timeoutMs, deadlineMs: timeoutMs, maxBytes: 1024 * 1024, noteOk: false,
+    });
 }
 
 // ─── Reverse proxy (NetBird Cloud ingress) status ───
@@ -692,13 +759,13 @@ function getBypassedPeerCount() { return _bypassedPeerIds.size; }
 
 module.exports = {
     _nbApi,
-    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured,
+    loadNbApi, getNbApiConfig, setNbApiConfig, netbirdApiConfigured, getNbApiSnapshot, nbDirectGet,
     NETBIRD_READONLY, readOnlyResp,
     netbirdGet, netbirdPost, netbirdPut, netbirdReq,
     _setNetbirdTimingForTests,
     bustNbCaches, resetNbCaches, setCacheResetHook,
     ensureGroupsFresh, ensurePoliciesFresh, getGroupsMap, getPoliciesMap,
-    getGroupRefMap, getUsageData, getReverseProxyStatus, bustReverseProxyCache,
+    getGroupRefMap, getUsageData, invalidateUsage, getReverseProxyStatus, bustReverseProxyCache,
     refreshBypassedPeers, peerIsBypassed, getBypassedPeerCount,
     runWithTenant, currentTenantAccount, getMspStatus, bustMspCache,
     loadTenantTokens, setTenantTokenInMemory, hasTenantToken,
