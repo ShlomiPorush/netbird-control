@@ -210,7 +210,6 @@ function TidyNamesModal({ onClose }: { onClose: () => void }) {
               {alreadyOk > 0 && <> {alreadyOk} already match.</>}
               {(data?.excluded || 0) > 0 && <> {data!.excluded} excluded (Access Profile / temporary / group-based policies).</>}
               {(data?.excludedCollisions || 0) > 0 && <> <span className="text-amber-600 dark:text-amber-400">{data!.excludedCollisions} excluded - they would get identical names on one resource (their current names distinguish the services).</span></>}
-              {(data?.skippedProtected?.length || 0) > 0 && <> {data!.skippedProtected!.length} skipped - they use servers that Remote Access links added, so they can only be deleted.</>}
             </FieldHint>
             <button type="button" className="text-[0.78rem] text-netbird hover:underline shrink-0"
               onClick={() => setSelected(allOn ? new Set() : new Set(changed.map((x) => x.id)))}>

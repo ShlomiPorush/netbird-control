@@ -369,8 +369,9 @@ function netbirdPost(apiPath, bodyObj, opts = {}) {
 // update call sites (notifications channels, etc.); same read-only guard + result shape.
 function netbirdPut(apiPath, bodyObj) { return netbirdReq('PUT', apiPath, bodyObj); }
 
-// Authenticated PUT / DELETE to the NetBird API
-function netbirdReq(method, apiPath, bodyObj) {
+// Authenticated PUT / DELETE to the NetBird API. opts ({ once, beforeSend }): see withNbRateLimitRetry.
+// Server-side code only.
+function netbirdReq(method, apiPath, bodyObj, opts = {}) {
     if (NETBIRD_READONLY && String(method).toUpperCase() !== 'GET') return Promise.resolve(readOnlyResp());
     if (!netbirdApiConfigured()) return Promise.resolve({ status: 0, error: 'NetBird API not configured' });
     const url = new URL(apiPath, _nbApi.url);
@@ -379,7 +380,8 @@ function netbirdReq(method, apiPath, bodyObj) {
     const transport = url.protocol === 'https:' ? https : http;
     const headers = { 'Authorization': `Token ${auth}`, 'Accept': 'application/json' };
     if (body !== null) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(body); }
-    return withNbRateLimitRetry(`${method} ${apiPath}`, nbWaitFor(method), () => netbirdWriteOnce(transport, url, method, headers, body), writeFrom429);
+    return withNbRateLimitRetry(`${method} ${apiPath}`, nbWaitFor(method), () => netbirdWriteOnce(transport, url, method, headers, body), writeFrom429,
+        { once: !!(opts && opts.once), beforeSend: opts && typeof opts.beforeSend === 'function' ? opts.beforeSend : null });
 }
 
 // In-memory caches for groups (id→name) and policies (id→{name,enabled})

@@ -340,8 +340,7 @@ export interface SystemHealth {
     netbird: { configured: boolean; lastOkAt: string | null; readonly: boolean };
     telegram: { enabled: boolean; hasToken: boolean; queue: TelegramQueueStats };
     smtp: { enabled: boolean };
-    // createPaused: why adding servers from launch links is paused ('' when it isn't).
-    remoteAccess?: { enabled: boolean; activeSessions: number; createPaused?: string };
+    remoteAccess?: { enabled: boolean; activeSessions: number };
   };
   db: {
     events: { rows: number; bytes: number; oldest: string | null };
@@ -1413,8 +1412,6 @@ export interface TidyNamesPlan {
   excluded: number;
   /** Dropped because two policies of one resource would get the same name. */
   excludedCollisions?: number;
-  /** Policies that name a resource of the network for launch-link resources: never renamed here. */
-  skippedProtected?: { id: string; name: string }[];
 }
 export interface TidyNamesResult { renamed: number; failed: number; errors: { id: string; name: string; error: string }[] }
 

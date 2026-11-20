@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
-import { useAccessProfiles, useGroups, useNetworks } from '@/lib/queries';
+import { useGroups, useNetworks } from '@/lib/queries';
 import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type CreatedResourceState, type CreateResourcesConfig, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
 import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
@@ -68,7 +68,6 @@ export function RemoteAccessSettings() {
   const statusQ = useQuery({ queryKey: ['remote-access-status'], queryFn: remoteApi.status, refetchInterval: 30000 });
   const networksQ = useNetworks();
   const groupsQ = useGroups();
-  const profilesQ = useAccessProfiles();
   const createdQ = useQuery({ queryKey: ['remote-access-created'], queryFn: remoteApi.createdResources, refetchInterval: 30000 });
   const [form, setForm] = useState<RemoteAccessConfig | null>(null);
   const [keys, setKeys] = useState<{ address: string; key: string }[]>([]);
@@ -102,8 +101,7 @@ export function RemoteAccessSettings() {
   const cr = form.createResources || CREATE_DEFAULTS;
   const setCr = (patch: Partial<CreateResourcesConfig>) => set('createResources', { ...cr, ...patch });
   const crKey = (c: CreateResourcesConfig) => JSON.stringify([!!c.enabled, c.networkId || '', c.groupId || '', Number(c.max)]);
-  // Also sent when the networks above no longer include its network, so the server's answer shows here.
-  const crChanged = crKey(cr) !== crKey(savedCr || CREATE_DEFAULTS) || (!!cr.networkId && !form.networks.includes(cr.networkId));
+  const crChanged = crKey(cr) !== crKey(savedCr || CREATE_DEFAULTS);
   const crDiff = (): Partial<CreateResourcesConfig> => {
     const base = savedCr || CREATE_DEFAULTS;
     const now = { enabled: cr.enabled, networkId: cr.networkId, groupId: cr.groupId, max: Number(cr.max) };
@@ -173,9 +171,7 @@ export function RemoteAccessSettings() {
   const netName = (id: string) => (networksQ.data || []).find((n) => n.id === id)?.name || id;
   const crNetworks = form.networks.map((id) => ({ id, name: netName(id) }));
   const managedIds = new Set(Object.values(form.managed || {}).filter(Boolean));
-  // Never a group an Access Profile uses (its group or a source): the server refuses those too.
-  const profileGroupIds = new Set((profilesQ.data || []).flatMap((p) => [p.groupId, ...(p.sources || []).map((s) => s.id)]).filter(Boolean));
-  const crGroups = (groupsQ.data || []).filter((g) => g.name !== 'All' && !managedIds.has(g.id) && !profileGroupIds.has(g.id)).sort((a, b) => a.name.localeCompare(b.name));
+  const crGroups = (groupsQ.data || []).filter((g) => g.name !== 'All' && !managedIds.has(g.id)).sort((a, b) => a.name.localeCompare(b.name));
   const groupName = (id: string) => (groupsQ.data || []).find((g) => g.id === id)?.name || id;
 
   return (
@@ -398,10 +394,6 @@ export function RemoteAccessSettings() {
           </div>
         </div>
         {crReadonly && <div className="text-[0.8rem] text-nb-gray-500">This instance is read-only, so these settings can't be changed here.</div>}
-        {created?.paused && (
-          <StatusLine ok={false} warn label="Adding Servers From Links Is Paused"
-            detail={`${created.paused.reason}${created.paused.at ? ` (since ${formatTimestamp(created.paused.at)})` : ''}`} />
-        )}
 
         <label className={`${toggleCard} ${crReadonly ? 'cursor-default! opacity-70' : ''}`}>
           <input type="checkbox" className="mt-1 accent-netbird" checked={cr.enabled} disabled={crReadonly} onChange={(e) => setCr({ enabled: e.target.checked })} />

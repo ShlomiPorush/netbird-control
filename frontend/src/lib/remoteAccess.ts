@@ -134,8 +134,6 @@ export interface CreatedResource {
 }
 
 export interface CreatedResources {
-  /** Adding servers from links is paused, and why. */
-  paused: { reason: string; at: string | null } | null;
   readonly: boolean;
   /** Every active one, then the latest finished ones (failed, deleted, gone). */
   items: CreatedResource[];

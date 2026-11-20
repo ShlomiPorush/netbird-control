@@ -1933,11 +1933,7 @@ app.get('/api/system-health', requireAdmin, async (req, res) => {
                 netbird: stats.netbird,
                 telegram: { enabled: !!getTelegramConfig().enabled, hasToken: !!getTelegramConfig().hasToken, queue: getTelegramQueueStats() },
                 smtp: { enabled: !!getSmtpConfig().enabled },
-                remoteAccess: {
-                    enabled: !!getRemoteAccessConfig().enabled, activeSessions: getRemoteAccessStatusLite().activeSessions,
-                    // Why adding servers from launch links is paused ('' when it isn't).
-                    createPaused: ((await remoteAccessLib.getCreatePause().catch(() => null)) || {}).reason || '',
-                },
+                remoteAccess: { enabled: !!getRemoteAccessConfig().enabled, activeSessions: getRemoteAccessStatusLite().activeSessions },
             },
             db: stats.db,
             activeGrants: stats.activeGrants,
@@ -3571,7 +3567,7 @@ app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
     try { res.json(await getRemoteAccessStatus()); }
     catch (e) { sendRemoteError(res, e); }
 });
-// The servers that launch links added (Settings > Remote Access), and why adding is paused, if it is.
+// The servers that launch links added (Settings > Remote Access).
 app.get('/api/remote-access/created-resources', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     res.set('Cache-Control', 'no-store');
@@ -4874,7 +4870,7 @@ app.post('/api/policies', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error creating policy:', err.message);
-        res.status([400, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to create policy', code: err.code });
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to create policy' });
     }
 });
 
@@ -4888,7 +4884,7 @@ app.put('/api/policies/:id', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error updating policy:', err.message);
-        res.status([400, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to update policy', code: err.code });
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to update policy' });
     }
 });
 
@@ -5150,7 +5146,7 @@ async function start() {
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
-            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource, listAccessProfiles,
+            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource,
             isLeader: leaderReady,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).
