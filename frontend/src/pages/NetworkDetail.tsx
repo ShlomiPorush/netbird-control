@@ -21,6 +21,7 @@ import { SearchInput, Badge, EmptyState, LoadingState, Button, IconButton, Copya
 import { ResourceModal } from '@/components/networks/ResourceModal';
 import { AddFromNetworkModal } from '@/components/settings/Blocklist';
 import { NetworkModal } from '@/components/networks/NetworkModal';
+import { ManagedByLinksBadge } from '@/components/networks/ManagedByLinksBadge';
 import { PolicyTable, type PolicyRow } from '@/components/networks/PolicyTable';
 
 type Tab = 'resources' | 'routers' | 'policies';
@@ -37,9 +38,13 @@ export default function NetworkDetail() {
   // Regular per-network editors still get per-row edit/delete via canEdit.
   const { isAdmin, can } = useViewer();
   const canManage = isAdmin || can('networks.manage');
-  const canBulk = canManage;
   const [editNet, setEditNet] = useState(false);
   const { data: detail, isLoading } = useNetworkDetail(id);
+  // The network Remote Access links add servers to: readable, but only the app itself changes its
+  // resources (the server refuses other writes). Routing peers and the name stay editable.
+  const linkManaged = !!(detail?.managedByLinks ?? net?.managedByLinks);
+  const canEditResources = canEdit && !linkManaged;
+  const canBulk = canManage && !linkManaged;
   const del = useDeleteResource(id);
   const bulkDel = useBulkDeleteResources(id);
   const toggleRes = useToggleResource(id);
@@ -86,8 +91,8 @@ export default function NetworkDetail() {
   useEffect(() => {
     if (!resourceParam || !resources.length || openedRef.current === resourceParam) return;
     const r = resources.find((x) => x.id === resourceParam);
-    if (r) { setModal({ resource: r, tab: 'resource' }); openedRef.current = resourceParam; }
-  }, [resourceParam, resources]);
+    if (r && !linkManaged) { setModal({ resource: r, tab: 'resource' }); openedRef.current = resourceParam; }
+  }, [resourceParam, resources, linkManaged]);
 
   // Distinct groups present across the network's resources (drives the Groups filter).
   const availableGroups = useMemo(() => {
@@ -198,12 +203,13 @@ export default function NetworkDetail() {
             {canManage && (
               <IconButton onClick={() => setEditNet(true)} title="Edit network"><Pencil size={15} /></IconButton>
             )}
-            {!canEdit && !canBulk && (
+            {!canEdit && !canManage && (
               <span title="You have view-only access to this network" className="inline-flex items-center gap-1.5 rounded-md border border-nb-gray-200 dark:border-nb-gray-700 bg-nb-gray-100 dark:bg-nb-gray-900 px-2.5 py-1 text-[0.72rem] font-medium text-nb-gray-500 dark:text-nb-gray-400">
                 <Eye size={12} /> Read-only
               </span>
             )}
           </div>
+          {linkManaged && <div className="mt-1"><ManagedByLinksBadge /></div>}
           {(detail?.description || net?.description) && (
             <p className="mt-0.5 text-sm text-nb-gray-500 dark:text-nb-gray-400 truncate">{detail?.description || net?.description}</p>
           )}
@@ -259,7 +265,9 @@ export default function NetworkDetail() {
           {tab === 'resources' && (
             <div>
               <p className="text-[0.95rem] text-nb-gray-500 dark:text-nb-gray-400 mb-5">
-                Add resources to this network to control what peers can access.
+                {linkManaged
+                  ? "Remote Access links add and remove the resources in this network, so they can't be changed here."
+                  : 'Add resources to this network to control what peers can access.'}
               </p>
 
               {canManage && conflicts.map((c, i) => {
@@ -280,11 +288,13 @@ export default function NetworkDetail() {
                           : <>Address Conflict: {shown} all point at <span className="font-mono">{c.address}</span></>;
                       })()}
                     </span>
-                    <Button variant="primary" size="sm" className="ml-auto"
-                      title={c.crossNetwork ? 'Merges across the networks - after it, all traffic to this address routes via the surviving network' : undefined}
-                      onClick={() => setMergeRows(rowsOf())}>
-                      <Combine size={13} /> Merge Into One
-                    </Button>
+                    {!linkManaged && (
+                      <Button variant="primary" size="sm" className="ml-auto"
+                        title={c.crossNetwork ? 'Merges across the networks - after it, all traffic to this address routes via the surviving network' : undefined}
+                        onClick={() => setMergeRows(rowsOf())}>
+                        <Combine size={13} /> Merge Into One
+                      </Button>
+                    )}
                   </div>
                   <div className="px-4 py-3 flex flex-col gap-3 text-[0.84rem]">
                     <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
@@ -343,7 +353,7 @@ export default function NetworkDetail() {
                   active={!!search || anyFilter}
                   onClear={() => { setSearch(''); setStatusFilter('all'); setPolicyFilter('all'); setGroupFilter([]); }}
                 />
-                {canEdit && (
+                {canEditResources && (
                   <Button variant="primary" className="ml-auto" onClick={() => setModal({ resource: null, tab: 'resource' })}>
                     <Plus size={15} /> Add
                   </Button>
@@ -411,7 +421,7 @@ export default function NetworkDetail() {
                     {sortedResources.length === 0 ? (
                       <tr><td colSpan={canBulk ? 6 : 5} className="px-6 py-8"><EmptyState title={search || anyFilter ? 'No Resources Match' : 'No Resources Yet'} /></td></tr>
                     ) : pageResources.map((r) => (
-                      <ResourceRow key={r.id} r={r} canEdit={canEdit} canSelect={canBulk}
+                      <ResourceRow key={r.id} r={r} canEdit={canEditResources} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}
@@ -429,7 +439,7 @@ export default function NetworkDetail() {
                 ) : (
                   <div className="flex flex-col gap-2.5">
                     {pageResources.map((r) => (
-                      <ResourceCard key={r.id} r={r} canEdit={canEdit} canSelect={canBulk}
+                      <ResourceCard key={r.id} r={r} canEdit={canEditResources} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}

@@ -99,10 +99,45 @@ export interface RemoteAccessConfig {
   ssh: SshTerminal;
   /** What guacd accepts, for the settings form. */
   options?: { rdpLayouts: string[]; rdpColorDepths: number[]; sshColorSchemes: string[] };
-  managed?: { gatewayGroupId: string; targetGroupId: string; policyId: string };
+  managed?: { gatewayGroupId: string; targetGroupId: string; policyId: string; namesGroupId?: string; namesTargetGroupId?: string; namesPolicyId?: string };
+  /** Launch links may add a missing public server as a temporary resource in this network and group. */
+  createResources?: CreateResourcesConfig;
   lastApply?: { at: string | null; error: string };
   ssoEnabled?: boolean;
   readonly?: boolean;
+}
+
+export interface CreateResourcesConfig {
+  enabled: boolean;
+  networkId: string;
+  groupId: string;
+  /** The most created resources that may exist at once (1-500). */
+  max: number;
+}
+
+export type CreatedResourceState = 'creating' | 'unknown' | 'created' | 'deleting' | 'kept';
+
+/** A server a launch link added as a temporary NetBird resource. */
+export interface CreatedResource {
+  id: string;
+  /** The IPv4 address. */
+  address: string;
+  /** The host name the other system sent ('' when it sent an IP). */
+  name: string;
+  resourceName: string;
+  resourceId: string;
+  state: CreatedResourceState;
+  /** Why it is 'kept' or 'unknown'. */
+  reason: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface CreatedResources {
+  /** Adding servers from links is paused, and why. */
+  paused: { reason: string; at: string | null } | null;
+  readonly: boolean;
+  items: CreatedResource[];
 }
 
 export interface RemoteAccessStatus {
@@ -172,6 +207,7 @@ export const remoteApi = {
   config: () => api.get<RemoteAccessConfig>('/api/remote-access/config'),
   saveConfig: (cfg: Partial<RemoteAccessConfig>) => api.put<{ config: RemoteAccessConfig; sync: { removed: number } | null }>('/api/remote-access/config', cfg),
   status: () => api.get<RemoteAccessStatus>('/api/remote-access/status'),
+  createdResources: () => api.get<CreatedResources>('/api/remote-access/created-resources'),
   setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
   /** Open a launch link from another system. Only the ticket and the screen size are sent. */
   redeemLaunch: (body: { ticket: string; width: number; height: number; dpi: number; timezone: string }) =>

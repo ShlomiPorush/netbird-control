@@ -109,6 +109,26 @@ function TelegramCard({ tg }: { tg: SystemHealth['integrations']['telegram'] }) 
   );
 }
 
+// Remote Access card: on/off and open sessions, plus a warning while adding servers from launch
+// links is paused (the reason is the second line, in full on hover).
+function RemoteAccessCard({ ra }: { ra: NonNullable<SystemHealth['integrations']['remoteAccess']> }) {
+  const paused = ra.createPaused || '';
+  return (
+    <HealthCard label="Remote Access" value={ra.enabled ? 'Enabled' : 'Off'} warn={!!paused}
+      sub={(ra.enabled || paused) ? (
+        <>
+          {ra.enabled && `${ra.activeSessions} active session(s)`}
+          {paused && (
+            <>
+              <span className="block text-amber-600 dark:text-amber-400">Adding servers from links is paused</span>
+              <span className="block truncate" title={paused}>{paused}</span>
+            </>
+          )}
+        </>
+      ) : undefined} />
+  );
+}
+
 export function SystemHealthTab() {
   const { data, isLoading } = useSystemHealth();
   // Compute + sort the jobs before any early return so the hook runs on every render.
@@ -236,8 +256,7 @@ export function SystemHealthTab() {
           <TelegramCard tg={data.integrations.telegram} />
           <HealthCard label="Email (SMTP)" value={data.integrations.smtp.enabled ? 'Enabled' : 'Off'} />
           {data.integrations.remoteAccess && (
-            <HealthCard label="Remote Access" value={data.integrations.remoteAccess.enabled ? 'Enabled' : 'Off'}
-              sub={data.integrations.remoteAccess.enabled ? `${data.integrations.remoteAccess.activeSessions} active session(s)` : undefined} />
+            <RemoteAccessCard ra={data.integrations.remoteAccess} />
           )}
           <HealthCard label="Scheduled Bypass Expiries" value={String(data.scheduledBypasses)} sub="devices with a timed bypass" />
         </div>

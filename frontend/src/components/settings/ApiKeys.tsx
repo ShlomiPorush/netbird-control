@@ -10,7 +10,9 @@ import { Badge, Button, Checkbox, CopyButton, EmptyState, Field, Input, LoadingS
 // Settings -> API Keys: keys other systems use to call the public API (/api/v1). A key is shown
 // once when it is created; only its first characters are kept for telling keys apart.
 
-const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remote Sessions' };
+const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remote Sessions', 'remote-access:create-resource': 'Add Missing Servers' };
+// A new key starts with these permissions only; the others are chosen on purpose.
+const DEFAULT_SCOPES = ['remote-access:launch'];
 
 // Replace = a new key with the old key's settings. keepExpiry: the old key's exact expiry, sent as
 // it is unless the admin changes the date (the server refuses it if it has passed meanwhile).
@@ -63,7 +65,7 @@ export function ApiKeys() {
   if (!list.data) return <p className="text-sm text-red-500">The API keys could not be loaded.</p>;
   const { keys, scopes, trustProxy } = list.data;
 
-  const open = (d?: Partial<Draft>) => { setError(''); setDraft({ name: '', scopes: scopes.map((s) => s.id), allowedIps: '', expiresAt: '', ...d }); };
+  const open = (d?: Partial<Draft>) => { setError(''); setDraft({ name: '', scopes: scopes.map((s) => s.id).filter((id) => DEFAULT_SCOPES.includes(id)), allowedIps: '', expiresAt: '', ...d }); };
   // The expiry's day is worked out once, so the field and the exact value always agree.
   const replace = (k: ApiKey) => {
     const day = dateOf(k.expiresAt);
