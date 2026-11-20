@@ -59,7 +59,7 @@ export default function RemoteAccess() {
   // The service status line: asked when the page loads, when a check starts, and on its refresh
   // button. Never on a timer, on focus or on reconnect: every request is the user's own action.
   const health = useQuery({
-    queryKey: ['remote-access-health'], queryFn: ({ signal }) => remoteApi.health(signal), enabled: canUse,
+    queryKey: ['remote-access-health'], queryFn: ({ signal }) => remoteApi.health(signal), enabled: canUse, networkMode: 'always',
     staleTime: Infinity, refetchOnMount: 'always', refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false,
   });
   const healthHidden = health.error instanceof ApiError && health.error.status === 403;

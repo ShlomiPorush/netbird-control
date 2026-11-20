@@ -334,7 +334,7 @@ export default function Troubleshoot() {
   // One plain-language conclusion for non-technical users: what is wrong, whose fault
   // it is, and the single next step. First matching rule wins (most fundamental first);
   // the technical rows stay below as "Details".
-  const verdict = useMemo((): { tone: 'ok' | 'warn' | 'bad'; headline: string; todo: string; button?: { label: string; to: string } } | null => {
+  const verdict = useMemo((): { tone: 'ok' | 'warn' | 'bad'; headline: string; todo: string; button?: { label: string; to: string }; coverage?: boolean } | null => {
     if (!ran) return null;
     const fail = (key: string) => allChecks.some((c) => c.key === key && c.status === 'FAIL');
     if (fail('compliance')) return {
@@ -356,7 +356,7 @@ export default function Troubleshoot() {
       todo: 'An admin disabled or removed it. If you still need it, contact your admin.',
     };
     if (fail('coverage')) return {
-      tone: 'bad', headline: 'This address is not part of the NetBird network.',
+      tone: 'bad', headline: 'This address is not part of the NetBird network.', coverage: true,
       todo: addShown
         ? 'NetBird is not involved when you connect to it. If it should be reachable through NetBird, you can add it as a resource below.'
         : 'NetBird is not involved when you connect to it, so whatever fails there is not a NetBird problem. If it SHOULD be reachable through NetBird, ask your admin to add it as a resource.',
@@ -528,7 +528,7 @@ export default function Troubleshoot() {
                 <Link to={verdict.button.to}><Button variant="primary">{verdict.button.label}</Button></Link>
               </div>
             )}
-            {addShown && (
+            {addShown && verdict.coverage && (
               <div className="mt-3">
                 <p className="text-sm text-nb-gray-700 dark:text-nb-gray-200">You can add this address to a network you manage, so it goes through NetBird.</p>
                 {picking ? (

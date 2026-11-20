@@ -28,6 +28,9 @@ export function useToggleResource(networkId: string) {
 export function useSaveResource(networkId: string) {
   const qc = useQueryClient();
   return useMutation({
+    // Never paused offline: an offline save fails at once, and the form treats it as an answer that
+    // never arrived (it can't tell whether the server got it).
+    networkMode: 'always',
     mutationFn: ({ rid, payload }: { rid?: string; payload: ResourcePayload }) =>
       rid
         ? api.put(`/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(rid)}`, payload)
