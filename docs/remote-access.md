@@ -620,22 +620,25 @@ matter). When a resource or an enabled legacy route already covers the target, n
 
 **Each create is recorded** in the `ra_created_resources` table before NetBird is called, together
 with a `resource.create_intent` audit record, in one transaction under a database lock. Two requests
-can't take the last place below the maximum, or create the same address, at the same time. Right
-before the write, after the writer's own checks and under the same lock as every resource write, the
-key and these settings are checked again: when the key was revoked or adding servers was turned off
-meanwhile, nothing is sent. The resource's description holds the request's id
+can't take the last place below the maximum, or create the same address, at the same time. The create is
+sent once: NetBird's "too many requests" (429) is a refusal, never sent again. Right before that
+send, after the writer's own checks, under the same lock as every resource write and after any
+wait for NetBird's rate limit, the key, these settings and the pause are checked again: when the
+key was revoked, adding servers was turned off or paused meanwhile, nothing is sent. The resource's description holds the request's id
 (`Created by a Remote Access link (<id>)`). When NetBird doesn't answer clearly, the row is
 *unconfirmed*: the next sync adopts a resource that carries that id only when it is exactly as asked
 (name, address, description, enabled, group), and marks one that isn't *kept*. An administrator's
 resource at the same address is never adopted. With no such resource after 10 minutes, the row is
 marked failed. Each change of a row is written first and then audited; an audit record that couldn't
-be written is written by the next sync, once.
+be written is written by the next sync. Known limit: when the audit record was written but the
+note that it was can't be cleared, the next sync writes it a second time.
 
 **Created resources are temporary.** The target sync on the leader instance deletes a created
 resource when all of these hold:
 
-- its hold has ended (or it never had one) and no session row uses it, checked again under the
-  target lock right before the delete;
+- its hold has ended (or it never had one), no session row uses it, and no session of this
+  instance (also one still opening) uses it, checked again under the target lock right before the
+  delete;
 - it was created more than **Keep Opened Servers Available For** ago (10 hours by default);
 - a fresh read shows it exactly as it was created (the marker in the description, the name, the
   address, enabled, and its group; the Browser Gateway target group doesn't count), and no policy
@@ -655,15 +658,20 @@ editing, enabling or disabling, deleting, moving or merging its resources, delet
 using its resources as a Reverse Proxy target, adding them to temporary grants or access requests,
 and policies that name one of its resources as source or destination (creating, editing, enabling
 or duplicating one; deleting such a policy stays possible). This includes automations and the
-blocklist's enforcement. Routing peers of the network stay editable. Reading stays possible, and the
+blocklist's enforcement. A Reverse Proxy change that keeps a service's targets is refused when one
+of them is such a resource. Tidy Names skips policies that name one (they are listed as skipped).
+Routing peers of the network stay editable. Reading stays possible, and the
 Networks page shows the network as **Managed By Remote Access Links**.
 
 One exception: an administrator may delete (never change) a resource there that the app no longer
 manages, a *kept* or *gone* one or one the app never created, with the delete button on the
 network's page. Only that resource is deleted: no policy that names it and no group. When NetBird
 refuses because a policy still uses it, the page shows NetBird's answer; delete or change that
-policy first. Choose a network that holds nothing else. The network can't be changed while servers
-added by links still exist in it.
+policy first. While a create for that address is still unresolved (or the resource carries the
+marker of a row that isn't finished), the delete waits until the next sync has resolved it. Choose a
+network that holds nothing else. Neither the network nor the group can be changed while servers
+added by links still exist; that check and the save run under the same database lock as a
+launch's reservation, so a launch can't reserve in the old network during the change.
 
 **The group.** The Browser Gateway must never reach the group through a policy of its own: then the
 gateway could reach every server that links added, not only the ones a session opened.
@@ -671,22 +679,34 @@ gateway could reach every server that links added, not only the ones a session o
 - Saving with **Turn On** is refused when an enabled accept rule whose source carries gateway traffic
   (a group a gateway peer is in, *All*, or a gateway peer itself) has the group as a destination, or
   when such a rule's source can't be read.
-- The app's policy editor refuses such a policy too (creating, editing, enabling or duplicating),
-  and a temporary grant of an Access Profile whose group is this group.
+- The app's policy editor refuses such a policy too (creating, editing, enabling or duplicating;
+  a disabled policy gives no reach, so turning one off is always allowed), an Access Profile change
+  that would give a gateway source reach to the group, and a temporary grant of an Access Profile
+  whose group is this group.
+- The group can't be one that an Access Profile uses (its group or a source): the picker leaves
+  those out and the save refuses them.
 - The sync runs the same check. When it fails, or when NetBird can't be read for it, adding servers
   is paused (`CREATE_PAUSED`), and Settings > Remote Access and System Health show why. A later sync
-  that passes, or a save that passes, resumes it.
+  that passes, or a save of this section that passes the check, resumes it. A save of other fields
+leaves the pause as it is.
 
 **The settings are read from the database** each time, not from the instance's memory: by the
-create path, the sync and the guard. Turning **Turn On** off on one instance stops adding servers on
-every instance at once (the deletion of servers already added goes on), and every instance guards
-the same network. A read-only instance never changes these settings when it saves the page.
+create path, the sync, the guard and this page. Turning **Turn On** off on one instance stops adding
+servers on every instance at once (the deletion of servers already added goes on), and every
+instance guards the same network. The guard compares ids only: a stored network that doesn't exist
+in NetBird protects nothing and blocks nothing. When the settings can't be read (a short time
+limit), the guard uses the last network and group it knew, so other writes go on. The page sends
+this section only when it changed; a save of other fields, and any save on a read-only instance,
+leaves the stored section as it is.
 
 **Settings import and backups.** A settings import or a backup restore never turns adding servers
 on: the imported `createResources.enabled` is set to off, and while servers added by links still
 exist, the stored network stays. The other fields are kept. Turn it on with a save on this page,
 which runs the gateway check. The internal (encrypted) backup carries the `ra_created_resources`
-table, so a restore keeps tracking the servers it lists; the plaintext settings export doesn't.
+table, so a restore keeps tracking the servers it lists; the plaintext settings export doesn't. A
+restore always turns adding servers off, also when the backup has no Remote Access settings, and
+sets the stored network and group to those of the restored rows. When those rows are in more than
+one network or group, that table is not restored (the current list stays) and the restore says so.
 
 **The list.** Settings > Remote Access lists every server added by links that still exists (or may),
 and the latest 50 finished entries (failed, removed, gone), with a note when older ones were left
