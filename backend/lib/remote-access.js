@@ -1980,13 +1980,16 @@ async function getRemoteAccessStatus() {
 // URL. One probe at a time, kept for 15 s; a settings change (another URL or token, other gateway
 // groups or guacd addresses) starts a new probe and a probe from the old settings is never used.
 const HEALTH_TTL_MS = 15_000;
-const HEALTH_DEADLINE_MS = 9_000;
+let healthDeadlineMs = 9_000; // per part of the probe (tests shorten it)
 const HEALTH_GET_MS = 4_000;
 const HEALTH_PEERS_MAX = 50;      // peers read per gateway group
 const HEALTH_PEERS_PARALLEL = 5; // at a time
 let _health = null;    // { key, value, at }
 let _healthRun = null; // { key, promise }
-let _namesSeen = false; // the last read of the names group showed a gateway peer
+// What the last read of the names group showed, for one NetBird connection (its version) and one
+// names group: { key, seen }. Only a probe whose settings are still current updates it.
+let _namesSeen = null;
+const namesSeenKey = (api) => JSON.stringify([api.version, _nb.namesGroupId]);
 const healthKey = (api) => JSON.stringify([api.version, _nb.gatewayGroupId, _nb.namesGroupId, _cfg.guacdHost, _cfg.guacdPort, _cfg.namesGuacdHost, _cfg.namesGuacdPort]);
 const okStatus = (r) => !!r && r.status >= 200 && r.status < 300;
 
@@ -1998,7 +2001,8 @@ function netbirdState(r) {
 // The peers of a gateway group: { read: true, peers, connected }, or { read: false } when NetBird
 // couldn't be read (with `peers` when the group itself was read). NetBird answers an empty list as
 // null.
-async function gatewayPeers(api, groupId) {
+// No peer read starts after `stopAt`: what is left counts as not read.
+async function gatewayPeers(api, groupId, stopAt = Infinity) {
     if (!groupId) return { read: true, peers: 0, connected: false };
     const g = await nbDirectGet(api, '/api/groups/' + encodeURIComponent(groupId), { timeoutMs: HEALTH_GET_MS });
     if (g && g.status === 404) return { read: true, peers: 0, connected: false };
@@ -2010,6 +2014,7 @@ async function gatewayPeers(api, groupId) {
     let allRead = ids.length <= HEALTH_PEERS_MAX;
     const todo = ids.slice(0, HEALTH_PEERS_MAX);
     for (let i = 0; i < todo.length; i += HEALTH_PEERS_PARALLEL) {
+        if (Date.now() >= stopAt) return { read: false, peers: ids.length };
         const peers = await Promise.all(todo.slice(i, i + HEALTH_PEERS_PARALLEL).map(id => nbDirectGet(api, '/api/peers/' + encodeURIComponent(id), { timeoutMs: HEALTH_GET_MS })));
         if (peers.some(r => okStatus(r) && r.body && r.body.connected === true)) return { read: true, peers: ids.length, connected: true };
         if (!peers.every(r => okStatus(r) && r.body && typeof r.body.connected === 'boolean')) allRead = false;
@@ -2021,20 +2026,28 @@ function gatewayState(peers, guacdUp) {
     if (!guacdUp || (peers.read && !peers.connected)) return 'down';
     return 'unknown';
 }
-async function probeHealth(api) {
-    const [nb, ipPeers, namesPeers, ipGuacd, namesGuacd] = await Promise.all([
-        nbDirectGet(api, '/api/accounts', { timeoutMs: HEALTH_GET_MS }),
-        gatewayPeers(api, _nb.gatewayGroupId),
-        _nb.namesGroupId ? gatewayPeers(api, _nb.namesGroupId) : Promise.resolve(null),
-        probeGuacd(_cfg.guacdHost, _cfg.guacdPort),
-        _nb.namesGroupId ? probeGuacd(_cfg.namesGuacdHost, _cfg.namesGuacdPort) : Promise.resolve(false),
+// Each part (NetBird, the IP gateway, the names gateway) has its own time limit; a part that runs
+// out of time is unknown, and the others keep what they measured.
+const PART_TIMED_OUT = Symbol('timed out');
+async function probeHealth(api, key) {
+    const stopAt = Date.now() + healthDeadlineMs;
+    const part = (promise) => withDeadline(promise, healthDeadlineMs, 'A status check').catch(() => PART_TIMED_OUT);
+    const gatewayPart = (groupId, host, port) => Promise.all([gatewayPeers(api, groupId, stopAt), probeGuacd(host, port)]);
+    const seenKey = namesSeenKey(api);
+    const [nb, ip, names] = await Promise.all([
+        part(nbDirectGet(api, '/api/accounts', { timeoutMs: HEALTH_GET_MS }).then(netbirdState)),
+        part(gatewayPart(_nb.gatewayGroupId, _cfg.guacdHost, _cfg.guacdPort).then(([peers, up]) => gatewayState(peers, up))),
+        _nb.namesGroupId ? part(gatewayPart(_nb.namesGroupId, _cfg.namesGuacdHost, _cfg.namesGuacdPort)) : Promise.resolve(null),
     ]);
-    const out = { netbird: netbirdState(nb), gateway: gatewayState(ipPeers, ipGuacd) };
+    const out = { netbird: nb === PART_TIMED_OUT ? 'unknown' : nb, gateway: ip === PART_TIMED_OUT ? 'unknown' : ip };
+    if (!names) return out;
     // The names gateway only when it is set up: a read of its group showed a peer. When the group
-    // couldn't be read, it stays in as unknown if the last read had shown one.
-    if (namesPeers && namesPeers.peers !== undefined) _namesSeen = namesPeers.peers > 0;
-    if (namesPeers && namesPeers.peers > 0) out.namesGateway = gatewayState(namesPeers, namesGuacd);
-    else if (namesPeers && namesPeers.peers === undefined && _namesSeen) out.namesGateway = 'unknown';
+    // couldn't be read (or the part ran out of time), it stays in as unknown if the last read, for
+    // these settings, had shown one.
+    const [peers, up] = names === PART_TIMED_OUT ? [{ read: false }, false] : names;
+    if (peers.peers !== undefined && healthKey(getNbApiSnapshot()) === key) _namesSeen = { key: seenKey, seen: peers.peers > 0 };
+    if (peers.peers > 0 && names !== PART_TIMED_OUT) out.namesGateway = gatewayState(peers, up);
+    else if (peers.peers === undefined && _namesSeen && _namesSeen.key === seenKey && _namesSeen.seen) out.namesGateway = 'unknown';
     return out;
 }
 async function getServiceHealth() {
@@ -2045,7 +2058,7 @@ async function getServiceHealth() {
         let run = _healthRun && _healthRun.key === key ? _healthRun : null;
         if (!run) {
             const mine = { key, promise: null };
-            mine.promise = withDeadline(probeHealth(api), HEALTH_DEADLINE_MS, 'Checking the services')
+            mine.promise = probeHealth(api, key)
                 .catch(() => ({ netbird: 'unknown', gateway: 'unknown' }))
                 .then(value => {
                     if (healthKey(getNbApiSnapshot()) === key) _health = { key, value, at: Date.now() };
@@ -2280,7 +2293,8 @@ module.exports = {
         settleTimerPendingForTest: () => !!_settleTimer,
         clearSettleTimerForTest: () => { clearTimeout(_settleTimer); _settleTimer = null; },
         freshSnapshot, invalidateSnapshot,
-        resetHealthForTest: () => { _health = null; _healthRun = null; _namesSeen = false; },
+        resetHealthForTest: () => { _health = null; _healthRun = null; _namesSeen = null; },
+        setHealthDeadlineForTest: (ms) => { healthDeadlineMs = ms || 9_000; },
         membershipIdleForTest: async () => { while (_membershipRun) await _membershipRun; },
         resetMembershipForTest: () => { _membershipFailed.clear(); _lastMembership = { at: null, removed: [], error: '' }; _membershipPending = null; },
         passMembershipRetryForTest: () => { for (const f of _membershipFailed.values()) f.at -= MEMBERSHIP_RETRY_MS; },

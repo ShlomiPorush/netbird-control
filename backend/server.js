@@ -874,7 +874,9 @@ app.use('/api', async (req, res, next) => {
 
 // Resolve the current viewer (logged-in user) → identity + role.
 // Without SSO configured, everyone is treated as an admin (open access, legacy behavior).
-async function getViewer(req) {
+// opts.refresh: false resolves from the users and peers mirror as it is, without refreshing it first
+// (a passive read, such as the Remote Access status line). That viewer is not kept on the request.
+async function getViewer(req, { refresh = true } = {}) {
     // Support elevation: req.tenantSupportAdmin is set by the tenant middleware ONLY on an
     // allowlisted in-context request by a non-admin tenants.support holder. It grants admin
     // rights WITHIN that request without polluting the cached real viewer - identity fields
@@ -889,7 +891,7 @@ async function getViewer(req) {
     const claims = (req.oidc && req.oidc.user) || {};
     const oid = claims.oid || claims.sub || '';
     const email = claims.email || claims.preferred_username || claims.upn || '';
-    await Promise.all([ensureUsersFresh().catch(() => { }), ensurePeersFresh().catch(() => { })]);
+    if (refresh) await Promise.all([ensureUsersFresh().catch(() => { }), ensurePeersFresh().catch(() => { })]);
     const v = await resolveViewer(oid, email);
     // A user blocked in NetBird holds no role, groups or permissions here. Direct per-user grants
     // and delegations count only for an existing, unblocked NetBird user (`live`).
@@ -923,7 +925,7 @@ async function getViewer(req) {
     const canApprove = isAdmin || getApproverGroupIds().some(g => groups.includes(g))
         || (!!live && await isActiveDelegate({ oid, userId: live.user_id, email }));
 
-    req._viewer = {
+    const viewer = {
         authEnabled: true,
         isAdmin,
         canApprove,
@@ -941,7 +943,8 @@ async function getViewer(req) {
         // Fine-grained feature permissions (admins get everything).
         perms: resolveFeaturePerms({ isAdmin, userId: live ? live.user_id : null, oid: live ? oid : '', email: live ? (live.email || email) : '', groups }),
     };
-    return elevate(req._viewer);
+    if (refresh) req._viewer = viewer;
+    return elevate(viewer);
 }
 
 // Middleware: admins, or holders of the given feature permission (Settings → Permissions).
@@ -3396,12 +3399,13 @@ function remoteAccessViewerOk(v) {
     const cfg = getRemoteAccessConfig();
     return !!(v && v.authEnabled && v.user_id && (cfg.allowAll || v.isAdmin || (v.perms && v.perms['remote.connect'])));
 }
-async function requireRemoteUser(req, res, next) {
+// opts.refresh: false for a passive read (the status line): it never refreshes the users and peers.
+const remoteUserGate = ({ refresh = true } = {}) => async (req, res, next) => {
     try {
         if (currentTenantAccount()) return res.status(404).json({ error: 'Browser remote access is not available while managing a tenant.' });
         if (!AUTH_ENABLED) return res.status(403).json({ error: 'Browser remote access needs SSO sign-in.', code: 'NO_SSO' });
         if (!remoteAccessAvailable()) return res.status(403).json({ error: 'Browser remote access is turned off.', code: 'DISABLED' });
-        const v = await getViewer(req);
+        const v = await getViewer(req, { refresh });
         if (!remoteAccessViewerOk(v)) return res.status(403).json({ error: "You don't have permission to use browser remote access.", code: 'FORBIDDEN' });
         req.remoteViewer = v;
         next();
@@ -3409,7 +3413,8 @@ async function requireRemoteUser(req, res, next) {
         console.error('[remote-access] viewer:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
-}
+};
+const requireRemoteUser = remoteUserGate();
 function sendRemoteError(res, e) {
     const status = e.status || 500;
     if (status >= 500 && !e.code) console.error('[remote-access]', e.message);
@@ -3457,7 +3462,7 @@ app.get('/api/remote-access/add-networks', requireRemoteUser, async (req, res) =
 });
 // The service status line on the connect page: { netbird, gateway, namesGateway? }, each 'up',
 // 'down' or 'unknown', and nothing else. Asked only on a user action (the page polls nothing).
-app.get('/api/remote-access/health', requireRemoteUser, async (req, res) => {
+app.get('/api/remote-access/health', remoteUserGate({ refresh: false }), async (req, res) => {
     res.set('Cache-Control', 'no-store');
     if (req.remoteViewer.blocked) return res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
     try { res.json(await remoteAccessLib.getServiceHealth()); }

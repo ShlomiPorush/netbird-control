@@ -294,10 +294,13 @@ set up, **Host Name Gateway**, each **Online**, **Offline** or **Unknown**, with
   read shows as unknown when the last read had shown a gateway peer, and is left out otherwise.
 
 The probe is direct (no retry, no cache, independent of the session checks), runs once at a time and
-is kept for 15 seconds. A change of the NetBird connection or the gateway settings starts a new
-probe. The URL and token are always used as one pair, so a token is never sent to another URL. The
-page asks only when it opens, when a check starts and when the user presses refresh, so the line
-never keeps an idle sign-in alive.
+is kept for 15 seconds. Each part (NetBird, each gateway) has its own time limit of 9 seconds: a part
+that runs out of time is unknown, the others keep their answers, and no peer read starts after the
+limit. A change of the NetBird connection or the gateway settings starts a new probe. The URL and
+token are always used as one pair, so a token is never sent to another URL. The page asks only when
+it opens, when a check starts and when the user presses refresh, so the line never keeps an idle
+sign-in alive, and the status request never refreshes the app's copy of the NetBird users and
+peers: it uses the copy as it is.
 
 ## Known limits and accepted risks
 

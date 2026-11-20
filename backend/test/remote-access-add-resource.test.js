@@ -209,10 +209,11 @@ const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1'
 const TOKEN_A = crypto.randomBytes(16).toString('hex');
 const TOKEN_B = crypto.randomBytes(16).toString('hex');
 function fakeNetbird() {
-    const st = { status: {}, body: {}, seen: [], hold: null };
+    const st = { status: {}, body: {}, seen: [], hold: null, slow: {} };
     st.server = http.createServer(async (req, res) => {
         st.seen.push({ path: req.url, auth: req.headers.authorization });
         if (st.hold && req.url === '/api/accounts') await st.hold;
+        if (st.slow[req.url]) await new Promise((r) => setTimeout(r, st.slow[req.url]));
         res.statusCode = st.status[req.url] || 200;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify(st.body[req.url] ?? {}));
@@ -238,7 +239,7 @@ function healthSetup({ namesPort = guacdPort, ipPort = guacdPort } = {}) {
     ra._internal.resetHealthForTest();
     nb._nbApi.url = urlA; nb._nbApi.token = TOKEN_A;
     for (const f of [nbA, nbB]) {
-        f.status = {}; f.seen = []; f.hold = null;
+        f.status = {}; f.seen = []; f.hold = null; f.slow = {};
         f.body = {
             '/api/accounts': [{ id: 'acc' }],
             '/api/groups/g-gw': { id: 'g-gw', name: 'Browser Gateway', peers: [{ id: 'p-gw', name: 'gw' }] },
@@ -349,6 +350,32 @@ test('status: a settings change starts a new probe, and the old probe is never u
     const again = await ra.getServiceHealth();
     assert.equal(nbB.seen.filter(s => s.path === '/api/accounts').length, before + 1);
     assert.equal('namesGateway' in again, false);
+});
+
+test('status: a part that runs out of time is unknown, and the other parts keep their answers', async () => {
+    healthSetup();
+    ra._internal.setHealthDeadlineForTest(300);
+    try {
+        nbA.slow['/api/groups/g-gw'] = 1000;
+        assert.deepEqual(await ra.getServiceHealth(), { netbird: 'up', gateway: 'unknown', namesGateway: 'up' });
+        // No peer read starts after the time limit.
+        healthSetup();
+        const ids = Array.from({ length: 12 }, (_, i) => `p-${i}`);
+        nbA.body['/api/groups/g-gw'] = { id: 'g-gw', name: 'Browser Gateway', peers: ids.map(id => ({ id })) };
+        for (const id of ids) { nbA.body[`/api/peers/${id}`] = { id, connected: false }; nbA.slow[`/api/peers/${id}`] = 200; }
+        assert.equal((await ra.getServiceHealth()).gateway, 'unknown');
+        await new Promise((r) => setTimeout(r, 800));
+        const sent = nbA.seen.filter(x => x.path.startsWith('/api/peers/p-') && x.path !== '/api/peers/p-ngw').length;
+        assert.ok(sent < 12, `${sent} of 12 peer reads were sent`);
+    } finally { ra._internal.setHealthDeadlineForTest(0); }
+});
+
+test('status: what was seen of the names gateway counts only for the same NetBird connection', async () => {
+    healthSetup();
+    assert.equal((await ra.getServiceHealth()).namesGateway, 'up');
+    nb._nbApi.token = TOKEN_B; // another connection version
+    nbA.status['/api/groups/g-ngw'] = 500;
+    assert.equal('namesGateway' in (await ra.getServiceHealth()), false);
 });
 
 test('status: clean up', async () => {

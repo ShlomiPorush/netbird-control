@@ -26,14 +26,16 @@ const audits = [];
 let createImpl = null;
 let createCalls = 0;
 let healthCalls = 0;
+// The users and peers refreshes are counted, not hidden: the status line must call neither.
+const refreshes = { users: 0, peers: 0 };
 let ra;
 
 before(async () => {
     await h.start({
         beforeRequire(db) {
             Object.assign(db, {
-                ensureUsersFresh: async () => { },
-                ensurePeersFresh: async () => { },
+                ensureUsersFresh: async () => { refreshes.users++; },
+                ensurePeersFresh: async () => { refreshes.peers++; },
                 resolveViewer: async (oid) => (USERS[oid] ? {
                     user_id: oid, role: USERS[oid].role || 'user', name: oid, email: `${oid}@example.com`,
                     auto_groups: USERS[oid].groups || [], blocked: !!USERS[oid].blocked,
@@ -83,6 +85,22 @@ test('add-networks and health need Remote Access permission', async () => {
         assert.equal(r.json.code, 'FORBIDDEN', path);
     }
     assert.equal((await h.call('remote', 'GET', '/api/remote-access/add-networks')).status, 200);
+});
+
+test('health never refreshes the users or the peers; other Remote Access calls still do', async () => {
+    remoteConfig({ allowAll: true });
+    // Both sign in first (the sign-in itself is not under test).
+    await h.call('remote', 'GET', '/api/remote-access/add-networks');
+    await h.call('blocked', 'GET', '/api/remote-access/add-networks');
+    const before = { ...refreshes };
+    const r = await h.call('remote', 'GET', '/api/remote-access/health');
+    assert.equal(r.status, 200);
+    assert.deepEqual(refreshes, before, 'neither refresh ran for the status line');
+    const blocked = await h.call('blocked', 'GET', '/api/remote-access/health');
+    assert.equal(blocked.status, 403, 'a user blocked in the mirror is refused without a refresh');
+    assert.equal(refreshes.users, before.users);
+    await h.call('remote', 'GET', '/api/remote-access/add-networks');
+    assert.ok(refreshes.users > before.users && refreshes.peers > before.peers, 'a normal call refreshes them');
 });
 
 test('health: the probe answer as is, and refused to a user blocked in NetBird even with allowAll', async () => {

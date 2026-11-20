@@ -7734,14 +7734,15 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
     // read as "not routed through NetBird at all". Resolution is best-effort from the
     // app server (1.5s cap per lookup, all in parallel) - a miss just falls through.
     const dnsp = require('dns').promises;
-    const resolveA = async (name) => {
-        try {
-            return await Promise.race([
-                dnsp.resolve4(String(name)),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500)),
-            ]);
-        } catch { return []; }
+    // One lookup, capped at 1.5 s: { ips }, or { code } of why it failed (ETIMEOUT at the cap).
+    const lookupA = (name) => {
+        let timer;
+        const cap = new Promise((_, rej) => { timer = setTimeout(() => rej(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' })), 1500); });
+        return Promise.race([dnsp.resolve4(String(name)), cap])
+            .then((found) => ({ ips: (Array.isArray(found) ? found : []).map(String) }), (e) => ({ code: (e && e.code) || 'ERROR' }))
+            .finally(() => clearTimeout(timer));
     };
+    const resolveA = async (name) => (await lookupA(name)).ips || [];
     const isSingleIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
     if (isSingleIp) {
         // Does any DOMAIN resource resolve to this IP right now?
@@ -7766,13 +7767,7 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
     } else if (/[a-z]/.test(host) && !host.includes('*') && !host.includes('/')) {
         // A name with NO matching domain resource - maybe it resolves into a covered range.
         // Looked up once, keeping why a lookup failed (only a name the DNS found may be offered).
-        try {
-            const found = await Promise.race([
-                dnsp.resolve4(String(host)),
-                new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' })), 1500)),
-            ]);
-            nameLookup = { ips: (Array.isArray(found) ? found : []).map(String) };
-        } catch (e) { nameLookup = { code: (e && e.code) || 'ERROR' }; }
+        nameLookup = await lookupA(host);
         const ips = nameLookup.ips || [];
         for (const ip of ips) {
             const cov = (usage.resources || []).filter(r => {
