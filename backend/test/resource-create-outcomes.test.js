@@ -79,6 +79,14 @@ test('a policy answer without a policy in it counts as not saved; so does no ans
     await assert.rejects(create({ policies: [policy('A')] }), (e) => e.code === 'RESOURCE_CREATED_POLICY_FAILED');
 });
 
+test('a 2xx policy answer without an id ({} or []) counts as not saved', async () => {
+    for (const body of [{}, []]) {
+        reset();
+        answers = [{ status: 200, body: { id: 'res-5', type: 'host' } }, { status: 200, body }];
+        await assert.rejects(create({ policies: [policy('A')] }), (e) => e.code === 'RESOURCE_CREATED_POLICY_FAILED' && e.resource.id === 'res-5', JSON.stringify(body));
+    }
+});
+
 test('no answer to the resource write, or a 2xx without an id: RESOURCE_UNCONFIRMED, and no policy is sent', async () => {
     reset();
     answers = [{ status: 200, body: {} }];

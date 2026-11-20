@@ -47,4 +47,4 @@ function nameUncovered(inv, name, ips) {
     return !!name && list.length > 0 && !nameCovered(inv, name) && list.every(ip => ipUncovered(inv, ip));
 }
 
-module.exports = { ipCovered, nameCovered, ipUncovered, nameUncovered };
+module.exports = { nameCovered, ipUncovered, nameUncovered };

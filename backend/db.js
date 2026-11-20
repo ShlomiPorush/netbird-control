@@ -28,10 +28,10 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 // writes, grants and routers never add, remove or reuse the groups (helpers below).
 const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
-    loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot,
+    loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
 } = require('./lib/remote-access');
 // "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
-const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered } = require('./lib/coverage');
+const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered, nameCovered: coverageNameCovered } = require('./lib/coverage');
 const { normalizeTarget: normalizeRemoteTarget } = require('./lib/remote-access-auth');
 // SMTP transport layer lives in lib/mail.js (one-way dependency: db.js -> lib/mail.js). It pulls
 // getSetting/setSetting straight from lib/core.js, so there is nothing to inject. The domain
@@ -6855,7 +6855,7 @@ async function createClientResource(networkId, { name, address, description, gro
             let pol;
             try { pol = await createOneResourcePolicy(name, { id: resourceId, type: resType }, p); }
             catch (e) { throw createOutcomeError('RESOURCE_CREATED_POLICY_FAILED', CREATE_POLICY_FAILED, e.message, resp.body); }
-            if (!pol || typeof pol !== 'object') throw createOutcomeError('RESOURCE_CREATED_POLICY_FAILED', CREATE_POLICY_FAILED, 'a policy answer without a policy', resp.body);
+            if (!pol || typeof pol !== 'object' || !pol.id) throw createOutcomeError('RESOURCE_CREATED_POLICY_FAILED', CREATE_POLICY_FAILED, 'a policy answer without a policy id', resp.body);
         }
         return { resource: resp.body };
     } finally {
@@ -7662,7 +7662,8 @@ async function diagnoseTarget(peerId, { type, id, port, probeHost, probePort } =
 // Every answer also carries `coverage: { addable }`: true only when the address is valid as typed
 // (opts.clipped: the route cut it to its length limit), the resources and the routes were both read
 // (a strict read), nothing in NetBird covers it (lib/coverage.js) and the instance may write. A
-// host name must also be found in the DNS, with every IPv4 address uncovered.
+// host name must also be found in the DNS, with every IPv4 address uncovered - or, as in Remote
+// Access, be unknown to the DNS while the names gateway is set up (main account only).
 async function diagnoseAddress(peerId, addressRaw, opts = {}) {
     const input = String(addressRaw || '').trim();
     const peer = await getPeerDetail(peerId);
@@ -7695,10 +7696,15 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
     const typed = normalizeRemoteTarget(host);
     const mayAdd = inventoryRead && !NETBIRD_READONLY && !opts.clipped && portValid && !typed.error;
     let nameLookup = null; // { ips } or { code } for a host name that no domain resource matches
-    const coverageNow = () => {
+    const coverageNow = async () => {
         if (!mayAdd) return covered;
         if (typed.kind === 'ip') return { addable: coverageIpUncovered(usage, typed.ip) };
-        return { addable: !!(nameLookup && nameLookup.ips && coverageNameUncovered(usage, typed.name, nameLookup.ips)) };
+        if (nameLookup && nameLookup.ips) return { addable: coverageNameUncovered(usage, typed.name, nameLookup.ips) };
+        if (!nameLookup || nameLookup.code !== 'ENOTFOUND' || !raMain() || coverageNameCovered(usage, typed.name)) return covered;
+        // The names gateway is set up: its group has a gateway peer (an unreadable group: no).
+        const namesGroupId = (getRemoteAccessConfig().managed || {}).namesGroupId;
+        const g = namesGroupId ? await netbirdGet('/api/groups/' + encodeURIComponent(namesGroupId)).catch(() => null) : null;
+        return { addable: !!(g && Array.isArray(g.peers) && g.peers.length) };
     };
 
     // Which resource covers this host? Most specific wins: exact match, then the
@@ -7851,11 +7857,11 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
                 }
             }
         }
-        return { target: null, findings, coverage: coverageNow() };
+        return { target: null, findings, coverage: await coverageNow() };
     }
 
     add('coverage', 'NetBird Routing', 'FAIL', `${host} is not covered by any NetBird resource or network route - traffic to it does NOT go through NetBird at all (it takes the regular network/internet path). If it should be reachable via NetBird, an admin needs to add it as a resource`);
-    return { target: null, findings, coverage: coverageNow() };
+    return { target: null, findings, coverage: await coverageNow() };
 }
 
 // ── Access Check (Access Management → Access Check) ──

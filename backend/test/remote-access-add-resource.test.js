@@ -23,6 +23,15 @@ nb.netbirdApiConfigured = () => true;
 let live = null; // the snapshot answers, by path (null: every read fails)
 nb.netbirdGet = async (p) => JSON.parse(JSON.stringify((live && live[p]) ?? null));
 nb.netbirdReq = async () => ({ status: 200, body: {} });
+// The strict inventory read that confirms an offer: from the same answers, or failing.
+let inventoryFails = false;
+let inventory = null; // a test's own answer to the strict read
+nb.getUsageData = async ({ strict } = {}) => {
+    if (!strict) throw new Error('only the strict read is used here');
+    if (inventoryFails || !live) throw new Error("Couldn't read the resources and routes from NetBird");
+    if (inventory) return JSON.parse(JSON.stringify(inventory));
+    return { resources: JSON.parse(JSON.stringify(live['/api/networks/resources'] || [])), routes: JSON.parse(JSON.stringify(live['/api/routes'] || [])) };
+};
 const events = require('../lib/events');
 events.addEvent = async () => { };
 
@@ -105,9 +114,9 @@ test('a host name: every address uncovered is offered, as the name with the name
     const both = async () => ['192.0.2.50', '192.0.2.51'];
     let r = await resolve(base(), 'new.example.net', { resolve4: both });
     assert.equal(r.verdict.code, 'UNKNOWN_ADDRESS');
-    assert.deepEqual(r.add, { suggest: 'new.example.net' });
+    assert.equal(r.add.suggest, 'new.example.net');
     r = await resolve(base(), 'new.example.net', { resolve4: both, namesCfg: NO_NAMES });
-    assert.deepEqual(r.add, { suggest: '192.0.2.50' });
+    assert.equal(r.add.suggest, '192.0.2.50');
 });
 
 test('a host name with one covered address, a matching domain route, or a wildcard resource is not offered', async () => {
@@ -125,7 +134,7 @@ test('a host name with one covered address, a matching domain route, or a wildca
 test('a name the DNS does not know is offered only with the names gateway set up; a temporary failure never', async () => {
     let r = await resolve(base(), 'unknown.example.net');
     assert.equal(r.verdict.code, 'NAME_NOT_FOUND');
-    assert.deepEqual(r.add, { suggest: 'unknown.example.net' });
+    assert.equal(r.add.suggest, 'unknown.example.net');
     r = await resolve(base(), 'unknown.example.net', { namesCfg: NO_NAMES });
     assert.equal(r.add, undefined);
     for (const code of ['ETIMEOUT', 'ESERVFAIL', 'ECONNREFUSED']) {
@@ -164,6 +173,26 @@ test('the check: the failed access step carries addable and the suggested addres
     assert.deepEqual(access.suggest, { address: '192.0.2.50' });
     const covered = await ra.checkAccess(viewer, { protocol: 'rdp', address: '192.0.2.7', port: 3389 });
     assert.equal(covered.steps.find(st => st.key === 'access').addable, undefined);
+});
+
+test('the check: the offer needs the strict read of the resources and routes to agree', async () => {
+    readyCheck();
+    live = liveFrom(base());
+    inventoryFails = true; // for example a 503 for the resources or the routes
+    try {
+        const r = await ra.checkAccess(viewer, { protocol: 'rdp', address: '192.0.2.50', port: 3389 });
+        const access = r.steps.find(st => st.key === 'access');
+        assert.equal(access.code, 'UNKNOWN_ADDRESS');
+        assert.equal(access.addable, undefined);
+    } finally { inventoryFails = false; }
+    // The fresh read shows a route that covers it (the snapshot didn't have it yet).
+    readyCheck();
+    live = liveFrom(base());
+    inventory = { resources: base().resources, routes: [{ id: 'l1', network: '192.0.2.0/24', enabled: true, groups: [] }] };
+    try {
+        const r = await ra.checkAccess(viewer, { protocol: 'rdp', address: '192.0.2.50', port: 3389 });
+        assert.equal(r.steps.find(st => st.key === 'access').addable, undefined);
+    } finally { inventory = null; }
 });
 
 test('the check: an inventory that could not be read offers nothing', async () => {
@@ -263,6 +292,33 @@ test('status: a gateway is down when its peer is offline or guacd is closed, unk
     assert.equal((await ra.getServiceHealth()).gateway, 'down', 'guacd is known bad');
     healthSetup({ namesPort: closedPort });
     assert.equal((await ra.getServiceHealth()).namesGateway, 'down');
+});
+
+test('status: every peer of the gateway group is read, a few at a time; one connected peer is enough', async () => {
+    healthSetup();
+    const ids = Array.from({ length: 12 }, (_, i) => `p-${i}`);
+    nbA.body['/api/groups/g-gw'] = { id: 'g-gw', name: 'Browser Gateway', peers: ids.map(id => ({ id })) };
+    for (const id of ids) nbA.body[`/api/peers/${id}`] = { id, connected: false };
+    nbA.body['/api/peers/p-11'] = { id: 'p-11', connected: true };
+    assert.equal((await ra.getServiceHealth()).gateway, 'up', 'the twelfth peer is connected');
+    healthSetup();
+    nbA.body['/api/groups/g-gw'] = { id: 'g-gw', name: 'Browser Gateway', peers: ids.map(id => ({ id })) };
+    for (const id of ids) nbA.body[`/api/peers/${id}`] = { id, connected: false };
+    assert.equal((await ra.getServiceHealth()).gateway, 'down');
+    assert.equal(nbA.seen.filter(s => s.path.startsWith('/api/peers/p-') && s.path !== '/api/peers/p-ngw').length, 12);
+});
+
+test('status: a names gateway known to be set up stays in as unknown when its group cannot be read', async () => {
+    healthSetup();
+    assert.equal((await ra.getServiceHealth()).namesGateway, 'up');
+    // Another guacd port is another settings key, so a new probe runs (and its guacd is closed).
+    ra._internal.setConfigForTest({ enabled: true, guacdHost: '127.0.0.1', guacdPort, namesGuacdHost: '127.0.0.1', namesGuacdPort: closedPort });
+    nbA.status['/api/groups/g-ngw'] = 500;
+    assert.equal((await ra.getServiceHealth()).namesGateway, 'unknown');
+    // Never seen set up: a group that can't be read leaves it out.
+    healthSetup();
+    nbA.status['/api/groups/g-ngw'] = 500;
+    assert.equal('namesGateway' in (await ra.getServiceHealth()), false);
 });
 
 test('status: one probe at a time, kept for 15 seconds', async () => {

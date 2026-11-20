@@ -15,15 +15,29 @@ core.pool.query = async (sql) => (/FROM peers p/.test(sql)
 core.getSetting = async () => null;
 
 const nb = require('../lib/netbird');
-const st = { routes: [], resources: [], failRoutes: false };
+const st = { routes: [], resources: [], failRoutes: false, fail503: null, namesPeers: [] };
 const server = http.createServer((req, res) => {
     const path = req.url.split('?')[0];
     const send = (status, body) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(body)); };
+    if (st.fail503 === path) return send(503, []);
+    if (path === '/api/groups/g-ngw') return send(200, { id: 'g-ngw', name: 'Browser Gateway Names', peers: st.namesPeers });
     if (path === '/api/routes') return st.failRoutes ? send(500, { message: 'unavailable' }) : send(200, st.routes);
     if (path === '/api/networks/resources') return send(200, st.resources);
     send(200, []);
 });
 const db = require('../db');
+const ra = require('../lib/remote-access');
+// Host name lookups: a name in `dnsAnswers` resolves (or fails with the code given); others go to
+// the real resolver.
+const dns = require('dns');
+const realResolve4 = dns.promises.resolve4;
+const dnsAnswers = {};
+dns.promises.resolve4 = async (name) => {
+    const a = dnsAnswers[name];
+    if (a === undefined) return realResolve4.call(dns.promises, name);
+    if (typeof a === 'string') throw Object.assign(new Error(a), { code: a });
+    return a;
+};
 
 test.before(async () => {
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -37,7 +51,7 @@ test.after(async () => {
 });
 
 const check = (address, opts) => db.diagnoseAddress('p1', address, opts);
-const reset = (over = {}) => { st.routes = []; st.resources = []; st.failRoutes = false; Object.assign(st, over); };
+const reset = (over = {}) => { st.routes = []; st.resources = []; st.failRoutes = false; st.fail503 = null; st.namesPeers = []; Object.assign(st, over); };
 
 test('an uncovered IP address is addable, with or without a port', async () => {
     reset();
@@ -60,6 +74,12 @@ test('an enabled legacy route covers it; an exit node or a disabled route does n
 });
 
 test('a failed resources or routes read never offers, and the diagnosis still answers', async () => {
+    for (const path of ['/api/networks/resources', '/api/routes']) {
+        reset({ fail503: path }); // a failed status whose body is an empty list
+        const r = await check('192.0.2.44');
+        assert.ok(r.findings.length > 0, path);
+        assert.deepEqual(r.coverage, { addable: false }, path);
+    }
     reset({ failRoutes: true });
     const r = await check('192.0.2.44');
     assert.ok(r.findings.length > 0);
@@ -78,4 +98,22 @@ test('a host name the DNS does not find is not offered', async () => {
     reset();
     const r = await check('no-such-host.invalid');
     assert.deepEqual(r.coverage, { addable: false });
+});
+
+test('a host name the DNS does not know is offered only on the main account with the names gateway set up', async () => {
+    dnsAnswers['new-host.example.net'] = 'ENOTFOUND';
+    dnsAnswers['flaky-host.example.net'] = 'ETIMEOUT';
+    ra._internal.setManagedForTest({ namesGroupId: 'g-ngw' });
+    try {
+        reset({ namesPeers: [{ id: 'p-ngw', name: 'ngw' }] });
+        assert.deepEqual((await check('new-host.example.net')).coverage, { addable: true });
+        assert.deepEqual((await check('flaky-host.example.net')).coverage, { addable: false }, 'a temporary failure');
+        assert.deepEqual((await nb.runWithTenant('t1', () => check('new-host.example.net'))).coverage, { addable: false }, 'never in a tenant');
+        reset({ namesPeers: [{ id: 'p-ngw', name: 'ngw' }], routes: [{ id: 'l2', domains: ['*.example.net'], enabled: true, groups: [] }] });
+        assert.deepEqual((await check('new-host.example.net')).coverage, { addable: false }, 'a domain route lists it');
+        reset({ namesPeers: [] });
+        assert.deepEqual((await check('new-host.example.net')).coverage, { addable: false }, 'no names gateway peer');
+        dnsAnswers['found-host.example.net'] = ['192.0.2.60'];
+        assert.deepEqual((await check('found-host.example.net')).coverage, { addable: true }, 'found, and its address is uncovered');
+    } finally { ra._internal.setManagedForTest({}); }
 });

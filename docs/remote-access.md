@@ -241,7 +241,9 @@ means:
   the DNS doesn't know is offered only when the names gateway is set up (its group has a gateway
   peer), since NetBird DNS answers it there. A temporary DNS failure is never offered.
 
-The button needs a fresh, complete read of NetBird; it never shows on a read-only instance
+The button needs a fresh, complete read of NetBird, confirmed by a read of the resources and the
+routes that both answered with success (a failed answer is never read as an empty list); it never
+shows on a read-only instance
 (`NETBIRD_READONLY`), and it belongs to the address and port that were checked, so changing either
 hides it. The suggested address is the IP address, or the host name when the names gateway is set
 up (otherwise the first address it resolved to).
@@ -268,7 +270,9 @@ The first case is audited as `resource.create` with the resource id, the account
 check finds nothing in NetBird, by the same rule, for the networks the user may edit. The address
 check (`GET /api/diagnostics/address`) answers `coverage: { addable }`, true only when the
 resources and routes were read fresh, the address is valid as typed (a port from 1 to 65535, not
-cut to the length limit) and the instance is not read-only. A host name must be found in the DNS.
+cut to the length limit) and the instance is not read-only. A host name follows the same rule as
+above: found in the DNS with every address uncovered, or unknown to the DNS while the names gateway
+is set up (main account only; never while managing a tenant).
 After the save, only the address check runs again.
 
 After any create that may have added a resource, the app drops the cached NetBird lists of the
@@ -284,9 +288,10 @@ set up, **Host Name Gateway**, each **Online**, **Offline** or **Unknown**, with
 
 - **NetBird**: one light read with the main account's NetBird URL and token. A success is up; no
   answer, a timeout, a server error, 401 or 403 is down; any other answer is unknown.
-- **Each gateway**: its group's peers are read from NetBird and its guacd is probed over TCP. Up when
-  a gateway peer is connected and guacd answers; down when either is known to be bad; unknown when
-  NetBird couldn't be read.
+- **Each gateway**: every peer of its group is read from NetBird (up to 50, a few at a time) and its
+  guacd is probed over TCP. Up when a gateway peer is connected and guacd answers; down when either
+  is known to be bad; unknown when NetBird couldn't be read. A names gateway whose group can't be
+  read shows as unknown when the last read had shown a gateway peer, and is left out otherwise.
 
 The probe is direct (no retry, no cache, independent of the session checks), runs once at a time and
 is kept for 15 seconds. A change of the NetBird connection or the gateway settings starts a new
