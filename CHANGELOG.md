@@ -11,6 +11,8 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Changed
+- **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
+  **Network**, **Access** and **Administration**. A group with no page you may open is not shown.
 - **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**
   and **Connecting To Server**.
 - **Clearer error messages when a connection fails.** Remote Access says in plain words what went
