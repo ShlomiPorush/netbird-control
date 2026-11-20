@@ -11381,6 +11381,8 @@ const SETTINGS_EXPORT_EXCLUDE = new Set([
     'backup_private_key_enc', 'backup_public_key',
     // NetBird object ids of this account's Browser Gateway, and a one-time migration marker.
     'remote_access_nb', 'migration_grant_revoke_marker',
+    // Why adding servers from launch links is paused: state of this account's sync, not a setting.
+    'remote_access_create_pause',
 ]);
 // Prefixed/MSP keys - excluded by prefix (tokens are secrets; service-user metadata is
 // install-specific and meaningless in another deployment). Plus the provisioning token.
