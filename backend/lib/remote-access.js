@@ -2619,7 +2619,7 @@ async function createForLaunch(key, address, email) {
     }
     if (!valid) {
         await settleCreated(attemptId, 'failed', { reason: 'The API key was revoked or lost a permission.', from: 'creating' });
-        throw httpError(403, 'KEY_REVOKED', 'This API key was revoked or lost a permission, so no server was added.');
+        throw httpError(401, 'KEY_REVOKED', 'This API key was revoked, expired or lost a permission, so no server was added.');
     }
     if (typeof _deps.createClientResource !== 'function') {
         await settleCreated(attemptId, 'failed', { reason: 'Not available.', from: 'creating' });
