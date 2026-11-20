@@ -50,6 +50,8 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   resources. Wildcard
   domain resources, loopback, link-local, NetBird peer and the gateways' own addresses are never
   targets ([setup and security model](docs/remote-access.md)).
+  A server that isn't in NetBird yet can be added from the failed check by a user who may edit a
+  network Remote Access uses, and a status line shows whether NetBird and the gateways are online.
   Another system, such as a customer file, can open a session with stored credentials through the
   public API ([API reference](docs/api.md), [integration guide](docs/remote-launch-integration.md)).
 - **Public API and API keys** - admins create keys in **Settings → API Keys**, each limited to the
@@ -57,7 +59,8 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   every connection link a key makes or that is opened, and link requests it refuses. Repeated
   failed attempts block an address, but never a valid key, webhook token or Telegram secret.
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and
-  what to do next, plus a downloadable Windows diagnostics script.
+  what to do next, plus a downloadable Windows diagnostics script. An address that isn't in NetBird
+  can be added as a resource from the result by a user who may edit a network.
 - **Access Check** - see whether a user is authorized for a resource or network, or everyone who
   is, by the same rules Remote Access uses, with the policy, group and ports behind each answer and
   the per-device details underneath.

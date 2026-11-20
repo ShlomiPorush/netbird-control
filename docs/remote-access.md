@@ -227,6 +227,73 @@ else access, and only the user who opened a session can keep it alive or end it.
 refuses a user because no policy opens the server or its port, **Request Access** opens with that
 server's resource already chosen.
 
+## Adding a missing server
+
+When the check refuses an address because **nothing in NetBird covers it**, a user who may edit a
+network that Remote Access uses sees **Add As Resource** on the failed check. "Nothing covers it"
+means:
+
+- for an IPv4 address: no host or subnet resource in any network contains it, and no enabled legacy
+  network route does. A default route (`0.0.0.0/0`, such as an exit node) and a disabled route
+  don't count;
+- for a host name: no domain resource matches it (exact or wildcard), no enabled legacy domain
+  route lists it, and every IPv4 address the DNS returned is uncovered by the rule above. A name
+  the DNS doesn't know is offered only when the names gateway is set up (its group has a gateway
+  peer), since NetBird DNS answers it there. A temporary DNS failure is never offered.
+
+The button needs a fresh, complete read of NetBird; it never shows on a read-only instance
+(`NETBIRD_READONLY`), and it belongs to the address and port that were checked, so changing either
+hides it. The suggested address is the IP address, or the host name when the names gateway is set
+up (otherwise the first address it resolved to).
+
+The button opens the Networks page's own **Add Resource** form for a network the user chooses: only
+networks open to Remote Access (Settings → Remote Access) that the user may edit
+(`GET /api/remote-access/add-networks`). The save is the ordinary `POST /api/networks/:id/resources`,
+with its permission, blocklist, duplicate and policy source checks. After the save, the page runs
+the checks again and stops after **Checking Path**: it shows **Ready To Connect**, and the user
+presses **Connect** to open the session.
+
+When NetBird's answer is only partly known, the form keeps **Create** off and links to the network:
+
+| What happened | The server answers | The form says |
+|---|---|---|
+| The resource was added, but an access rule was refused or answered without a rule | `RESOURCE_CREATED_POLICY_FAILED`, with the resource id | The resource was added, but its access rules weren't all saved. Open the network to finish them. |
+| NetBird gave no answer, or a success without an id | `RESOURCE_UNCONFIRMED` | NetBird didn't confirm the resource was saved. Check the network before you try again. |
+| The browser lost the answer (a network error, or a proxy error page) | - | The same as the row above. |
+
+The first case is audited as `resource.create` with the resource id, the account and
+`policiesSaved: false`. The page offers nothing more for that address until a new check.
+
+**Troubleshoot** offers the same button for a free-typed address (with or without `:port`) whose
+check finds nothing in NetBird, by the same rule, for the networks the user may edit. The address
+check (`GET /api/diagnostics/address`) answers `coverage: { addable }`, true only when the
+resources and routes were read fresh, the address is valid as typed (a port from 1 to 65535, not
+cut to the length limit) and the instance is not read-only. A host name must be found in the DNS.
+After the save, only the address check runs again.
+
+After any create that may have added a resource, the app drops the cached NetBird lists of the
+account that was written, and for the main account the Remote Access snapshot too, so the next
+check reads the new resource.
+
+## Service status
+
+The connect card ends with one line: **NetBird**, **Browser Gateway** and, when the names gateway is
+set up, **Host Name Gateway**, each **Online**, **Offline** or **Unknown**, with a refresh button.
+`GET /api/remote-access/health` answers `{ netbird, gateway, namesGateway? }` (each `up`, `down` or
+`unknown`) and nothing else. It is refused to a user blocked in NetBird.
+
+- **NetBird**: one light read with the main account's NetBird URL and token. A success is up; no
+  answer, a timeout, a server error, 401 or 403 is down; any other answer is unknown.
+- **Each gateway**: its group's peers are read from NetBird and its guacd is probed over TCP. Up when
+  a gateway peer is connected and guacd answers; down when either is known to be bad; unknown when
+  NetBird couldn't be read.
+
+The probe is direct (no retry, no cache, independent of the session checks), runs once at a time and
+is kept for 15 seconds. A change of the NetBird connection or the gateway settings starts a new
+probe. The URL and token are always used as one pair, so a token is never sent to another URL. The
+page asks only when it opens, when a check starts and when the user presses refresh, so the line
+never keeps an idle sign-in alive.
+
 ## Known limits and accepted risks
 
 - **Overlapping resources right after a server is opened.** The session waits 2 seconds after its
