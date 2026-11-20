@@ -172,31 +172,37 @@ and chooses the network and the group the new resources go into. The app never c
 policy: an admin's policy to that group (for example *CRM users -> that group*) decides who reaches
 the new servers.
 
-The app checks, in this order, and stops at the first refusal:
+The key must have the scope first (`403 SCOPE_MISSING`, before any other check). Then the app
+checks, in this order, and stops at the first refusal:
 
-1. The key has the scope (`403 SCOPE_MISSING`, before any other check), and adding servers is on,
-   not paused, and the instance is not read-only (`CREATE_DISABLED`, `CREATE_PAUSED`).
-2. The target is public. An IPv4 address must not be in any IANA special-purpose range (private,
+1. **Does NetBird cover the target already?** For an IPv4 address: a resource or an enabled legacy
+   route covers it. For a host name: a domain resource or an enabled domain route covers the name;
+   otherwise the name is looked up and any of its addresses is covered. Then nothing is created and
+   the request goes on exactly as without `createResource`, whatever the settings below say and
+   whether or not the address is public. An integration can send `createResource: true` on every
+   launch: private servers that already have a resource keep working. When NetBird or the DNS can't
+   be read and adding servers is off, the request also goes on as without `createResource`.
+2. Adding servers is on, not paused, and the instance is not read-only (`CREATE_DISABLED`,
+   `CREATE_PAUSED`). The app reads these settings from the database on every request, so turning
+   the feature off stops it on every instance at once.
+3. The target is public. An IPv4 address must not be in any IANA special-purpose range (private,
    shared, loopback, link-local, documentation, benchmarking, multicast, reserved, broadcast) or be
-   a Browser Gateway's own address (`ADDRESS_NOT_PUBLIC`). A host name is looked up: every IPv4
-   answer must be public (`NAME_NOT_PUBLIC`), and the app uses the first one. Neither the address
-   nor the name may be on the blocklist (`ADDRESS_BLOCKED`).
-3. With `user`: the user exists, only once, and is not blocked.
-4. NetBird has no resource for it. When a resource or an enabled legacy route already covers the
-   address (or a domain resource covers the name), nothing is created and the request goes on as
-   without `createResource`.
+   a Browser Gateway's own address (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
+   public (`NAME_NOT_PUBLIC`), and the app uses the first one. A name with no IPv4 answer is
+   `NAME_NOT_FOUND`. Neither the address nor the name may be on the blocklist (`ADDRESS_BLOCKED`).
+4. With `user`: the user exists, only once, and is not blocked.
 5. Fewer than the maximum servers added by links exist (`CREATE_LIMIT`), and no other request is
    adding the same address.
-6. The key is checked again right before the write (`401 KEY_REVOKED`).
+6. Right before the write, the key is checked again (`401 KEY_REVOKED`), and so are the settings
+   (`CREATE_DISABLED` when adding was turned off meanwhile).
+
+Addresses that are never a Remote Access target (loopback, NetBird peers, multicast, reserved) go
+on as without `createResource`, and the usual checks refuse them.
 
 The new resource is a host resource (`x.x.x.x/32`) named after the address (or `name (address)`
 for a host name), in the chosen network and group, with no policy. Then the usual checks follow:
 with `user`, that user's access to the address. The link connects to the address, also when the
 request sent a host name.
-
-Because step 2 comes first, `createResource: true` for an address that is not public is refused
-even when NetBird already has a resource for it. Send `createResource: false` (or leave it out) for
-private addresses.
 
 The `201` answer then has:
 

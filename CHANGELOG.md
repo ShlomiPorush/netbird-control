@@ -20,10 +20,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   configured number at a time (50 by default). The answer says whether the request made the
   resource (`resource.created`), and a refusal after the resource was made says so
   (`resourceCreated`). The leader removes such a resource once its hold time has passed and no
-  session uses it, and keeps one that someone changed. The app changes that network no other way,
+  session uses it, and keeps one that someone changed. An admin can delete a kept one from the network's page. The app changes that network no other way,
   and the Networks page labels it **Managed By Remote Access Links**. Adding pauses, with the reason
   in Settings and System Health, when the Browser Gateway can reach the group. Off by default: turn
-  it on only after every instance runs this version.
+  it on only after every instance runs this version. A settings import never turns it on.
 - **Add a missing server as a resource.** When the Remote Access check finds that nothing in
   NetBird covers the address, and the user may edit a network that Remote Access uses, the page
   offers **Add As Resource** on the failed step. It opens a modal: the network (when there is more

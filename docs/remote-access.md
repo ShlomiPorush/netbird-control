@@ -636,8 +636,8 @@ Only the resource is deleted (`DELETE /api/networks/{network}/resources/{id}`): 
 policies to the group stay. The audit log records `resource.delete` by *Remote Access*, with the
 reason *created by a launch link, hold ended*. A delete without a clear answer is read again by the
 next sync. A resource that someone changed, that a policy names, or that NetBird refused to delete
-is marked *kept* (recorded once as `resource.kept`) and never deleted by the app: remove it in
-NetBird when it isn't needed. At most 20 resources are deleted per sync. A read-only instance and a
+is marked *kept* (recorded once as `resource.kept`) and never deleted by the app: an admin deletes
+it on the network's page (or in NetBird) when it isn't needed. At most 20 resources are deleted per sync. A read-only instance and a
 standby instance never create or delete one.
 
 **The network is managed by the app.** Every other write of the app to that network is refused with
@@ -646,7 +646,9 @@ editing, enabling or disabling, deleting, moving or merging its resources, delet
 using its resources as a Reverse Proxy target, adding them to temporary grants or access requests,
 and policies whose destination is one of its resources. This includes automations and the blocklist's
 enforcement. Reading stays possible, and the Networks page shows the network
-as **Managed By Remote Access Links**. Choose a network that holds nothing else. The network can't be
+as **Managed By Remote Access Links**. One exception: an admin may delete (never change) a resource
+there that the app no longer manages: a *kept* or *gone* one, or one the app never created. Only
+that resource is deleted; the group for created resources and the policies to it stay. Choose a network that holds nothing else. The network can't be
 changed while servers added by links still exist in it.
 
 **The gateway check.** The Browser Gateway must never reach the group through a policy of its own:
@@ -659,6 +661,12 @@ that passes, or a save that passes, resumes it.
 
 **Turn it on only after every instance runs this version.** An older instance doesn't know the
 network is managed and would let its pages change it.
+
+The create path and the sync read these settings from the database each time, not from the
+instance's memory: turning **Turn On** off on one instance stops adding servers on every instance at
+once (the deletion of servers already added goes on). A settings import never turns it on: an
+imported `createResources.enabled` is set to off, and the other fields are kept. Turn it on with a
+save on this page, which runs the gateway check.
 
 ### Accepted risks
 
