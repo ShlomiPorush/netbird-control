@@ -162,6 +162,7 @@ export default function Troubleshoot() {
     queryKey: ['networks'], queryFn: () => api.get<Network[]>('/api/networks'), enabled: addable,
   });
   const addNets = (editable.data || []).filter((n) => n.canEdit);
+  const addShown = addable && addNets.length > 0;
   // The address that was checked, without its :port.
   const addAddress = (() => {
     const a = addr.trim();
@@ -356,7 +357,9 @@ export default function Troubleshoot() {
     };
     if (fail('coverage')) return {
       tone: 'bad', headline: 'This address is not part of the NetBird network.',
-      todo: 'NetBird is not involved when you connect to it, so whatever fails there is not a NetBird problem. If it SHOULD be reachable through NetBird, ask your admin to add it as a resource.',
+      todo: addShown
+        ? 'NetBird is not involved when you connect to it. If it should be reachable through NetBird, you can add it as a resource below.'
+        : 'NetBird is not involved when you connect to it, so whatever fails there is not a NetBird problem. If it SHOULD be reachable through NetBird, ask your admin to add it as a resource.',
     };
     if (fail('routers')) return {
       tone: 'bad', headline: 'The problem is on the server side - not your device.',
@@ -393,7 +396,7 @@ export default function Troubleshoot() {
       tone: 'ok', headline: 'Everything looks good.',
       todo: 'All checks passed. If something still does not work, run the downloadable script on the device itself - it checks what a browser cannot.',
     };
-  }, [ran, allChecks, warns, device, requestLink]);
+  }, [ran, allChecks, warns, device, requestLink, addShown]);
 
   const matchNote = info && info.matches.length > 0 && (
     <span className="text-[0.8rem] text-nb-gray-500">
@@ -525,7 +528,7 @@ export default function Troubleshoot() {
                 <Link to={verdict.button.to}><Button variant="primary">{verdict.button.label}</Button></Link>
               </div>
             )}
-            {addable && addNets.length > 0 && (
+            {addShown && (
               <div className="mt-3">
                 <p className="text-sm text-nb-gray-700 dark:text-nb-gray-200">You can add this address to a network you manage, so it goes through NetBird.</p>
                 {picking ? (

@@ -471,7 +471,7 @@ export default function RemoteAccess() {
                   'has-disabled:cursor-not-allowed has-disabled:opacity-60',
                 )}>
                   <input type="radio" name="protocol" value={p} className="sr-only"
-                    checked={on} onChange={() => setProtocol(p)} />
+                    checked={on} onChange={() => { setProtocol(p); setAddOffer(null); }} />
                   <Icon size={16} className={on ? 'text-netbird-600 dark:text-netbird forced-colors:text-current!' : undefined} />
                   {p.toUpperCase()}
                 </label>
@@ -483,7 +483,8 @@ export default function RemoteAccess() {
             <Field label="Server Address">
               <Input
                 value={address}
-                onChange={(e) => setAddress(e.target.value)}
+                // An edit drops the offer: it comes back only from a new check.
+                onChange={(e) => { setAddress(e.target.value); setAddOffer(null); }}
                 onPaste={(e) => {
                   const text = e.clipboardData.getData('text');
                   if (!text) return;
@@ -491,6 +492,7 @@ export default function RemoteAccess() {
                   const el = e.currentTarget;
                   const merged = el.value.slice(0, el.selectionStart ?? el.value.length) + text + el.value.slice(el.selectionEnd ?? el.value.length);
                   applyAddress(merged);
+                  setAddOffer(null);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === ':' && !address.startsWith('[')) { e.preventDefault(); setPortTouched(true); portRef.current?.focus(); portRef.current?.select(); }
@@ -503,7 +505,7 @@ export default function RemoteAccess() {
               />
             </Field>
             <Field label="Port">
-              <Input ref={portRef} value={port} onChange={(e) => { setPort(e.target.value.replace(/[^0-9]/g, '')); setPortTouched(true); }}
+              <Input ref={portRef} value={port} onChange={(e) => { setPort(e.target.value.replace(/[^0-9]/g, '')); setPortTouched(true); setAddOffer(null); }}
                 inputMode="numeric" className={cn(FLOW_INPUT, 'aria-invalid:border-red-500! aria-invalid:ring-red-500/30')} required disabled={locked}
                 aria-invalid={(port !== '' && !validPort(portNum)) || undefined} title="A port from 1 to 65535" />
             </Field>
