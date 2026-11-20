@@ -29,7 +29,7 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
-    linkGuardNetworkId, linkGroupId, linkResourceTracked, linkResourcePending, linkPolicyProblem, importedCreateSettings, restoredRowsProblem, alignCreateSettingsAfterRestore,
+    linkGuardNetworkId, linkGroupId, linkResourceTracked, linkResourcePending, linkPolicyProblem, underCreateConfig, writeImportedRemoteAccessConfig, mergeRestoredCreatedRows, alignCreateSettingsAfterRestore,
     protectedResourceIds, LINK_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted,
 } = require('./lib/remote-access');
 // "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
@@ -6209,19 +6209,26 @@ function buildPolicyRule({ name, description, enabled, protocol, ports, bidirect
 }
 
 // The resources a policy's rules name as their destination.
-// A policy save that would touch the resources launch links create (as source or destination), or
-// let a Browser Gateway reach their group, is refused (lib/remote-access.js linkPolicyProblem).
-// `resourceRules`: the rules whose resources count (an edit counts the stored ones too: a policy
-// that names such a resource can only be deleted); `groupRules`: the rules being saved. Main
-// account only; a failed read refuses. `enabled`: false for a disabled policy (it gives no reach, so
-// turning one off is always allowed).
-async function refuseLinkPolicy(resourceRules, groupRules, enabled = true) {
-    if (!raMain()) return;
-    let problem;
-    try { problem = await linkPolicyProblem({ resourceRules, groupRules, enabled }); } catch {
+// A policy or Access Profile save that would touch the resources launch links create (as source or
+// destination), let a Browser Gateway reach their group, or (an Access Profile) use that group, is
+// refused (lib/remote-access.js linkPolicyProblem). When the check concerned the stored section,
+// the write runs under the created-resources configuration lock, after a re-read that the section
+// is still the one checked (a 409 to try again otherwise). `resourceRules`: the rules whose
+// resources count (an edit counts the stored ones too: a policy that names such a resource can only
+// be deleted); `groupRules`: the rules being saved; `enabled`: false for a disabled policy (it gives
+// no reach, so turning one off is always allowed). Main account only; a failed read refuses.
+async function linkGuardedPolicyWrite(resourceRules, groupRules, write, { enabled = true, profile = false } = {}) {
+    if (!raMain()) return write();
+    let r;
+    try { r = await linkPolicyProblem({ resourceRules, groupRules, enabled, profile }); } catch {
         const e = new Error("Couldn't check this policy against the resources Remote Access links create - nothing was changed. Try again."); e.status = 502; throw e;
     }
-    if (problem) { const e = new Error(problem); e.status = 409; e.code = 'NETWORK_MANAGED'; throw e; }
+    if (r.problem) { const e = new Error(r.problem); e.status = 409; e.code = 'NETWORK_MANAGED'; throw e; }
+    if (!r.seen) return write();
+    try { return await underCreateConfig(r.seen, write); } catch (e) {
+        if (e && e.status) throw e;
+        const err = new Error("Couldn't check the Remote Access settings - nothing was changed. Try again."); err.status = 503; throw err;
+    }
 }
 
 function policyBody(cfg) {
@@ -6254,8 +6261,7 @@ async function createPolicy(cfg) {
     } else {
         body = policyBody(cfg);
     }
-    await refuseLinkPolicy(body.rules, body.rules, body.enabled !== false);
-    const resp = await netbirdPost('/api/policies', body);
+    const resp = await linkGuardedPolicyWrite(body.rules, body.rules, () => netbirdPost('/api/policies', body), { enabled: body.enabled !== false });
     if (!resp || resp.status >= 300 || !resp.body || !resp.body.id) {
         throw new Error('Failed to create policy: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
@@ -6353,8 +6359,8 @@ async function updatePolicy(id, cfg) {
         body = policyBody(cfg);
         body.rules = [carryRuleExtras(r0, body.rules[0])];
     }
-    await refuseLinkPolicy([...existing.rules, ...body.rules], body.rules, body.enabled !== false);
-    const resp = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(id), body);
+    const resp = await linkGuardedPolicyWrite([...existing.rules, ...body.rules], body.rules,
+        () => netbirdReq('PUT', '/api/policies/' + encodeURIComponent(id), body), { enabled: body.enabled !== false });
     if (!resp || resp.status >= 300) {
         throw new Error('Failed to update policy: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
@@ -6390,11 +6396,13 @@ async function policyRenamePlan() {
     const usage = await getUsageData();
     const resName = new Map((usage.resources || []).map(r => [r.id, r.name || '']));
     // Policies that name a resource of the network for launch-link resources are never renamed here
-    // (they can only be deleted): reported as skipped.
+    // (they can only be deleted): reported as skipped. When NetBird's network list can't be read,
+    // every policy that names any resource is skipped.
     const linkNet = raMain() ? await guardedLinkNetwork() : '';
-    const linkNetRow = linkNet ? (usage.networks || []).find(n => n && n.id === linkNet) : null;
-    const protectedRids = new Set((linkNetRow && Array.isArray(linkNetRow.resources) ? linkNetRow.resources : []).map(gid).map(String));
-    const namesProtected = (p) => (Array.isArray(p.rules) ? p.rules : []).some(r => r && [r.destinationResource, r.sourceResource].some(x => x && protectedRids.has(String(gid(x)))));
+    let protectedRids = new Set();
+    let unreadable = false;
+    if (linkNet) { try { protectedRids = await protectedResourceIds(linkNet); } catch { unreadable = true; } }
+    const namesProtected = (p) => (Array.isArray(p.rules) ? p.rules : []).some(r => r && [r.destinationResource, r.sourceResource].some(x => x && (unreadable || protectedRids.has(String(gid(x))))));
     const skippedProtected = [];
     const profilePolicyIds = new Set();
     await pool.query(`SELECT policy_id FROM access_profiles WHERE policy_id IS NOT NULL AND tenant = $1`, [tnt()])
@@ -6416,7 +6424,7 @@ async function policyRenamePlan() {
     for (const p of arr) {
         if (!p || !p.id) continue;
         if (profilePolicyIds.has(p.id) || /^Temporary access #\d+/.test(p.name || '')) { excluded++; continue; }
-        if (protectedRids.size && namesProtected(p)) { skippedProtected.push({ id: p.id, name: p.name || p.id }); continue; }
+        if ((unreadable || protectedRids.size) && namesProtected(p)) { skippedProtected.push({ id: p.id, name: p.name || p.id }); continue; }
         const rules = Array.isArray(p.rules) ? p.rules : [];
         const dr = rules.length === 1 && rules[0] && rules[0].destinationResource;
         const rid = dr && ((dr.id) || dr);
@@ -6476,7 +6484,8 @@ async function applyPolicyRenames(ids) {
                     .map(c => (typeof c === 'string' ? c : (c && c.id))).filter(Boolean),
                 rules: existing.rules.map(ruleForPut),
             };
-            const resp = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(it.id), body);
+            // The same guard as every policy write (a policy that names a launch-link resource is refused).
+            const resp = await linkGuardedPolicyWrite(existing.rules, [], () => netbirdReq('PUT', '/api/policies/' + encodeURIComponent(it.id), body));
             if (!resp || resp.status >= 300) throw new Error((resp && (resp.raw || resp.error || String(resp.status))) || 'update failed');
             renamed++;
         } catch (e) {
@@ -6688,24 +6697,28 @@ async function createAccessProfile({ name, shared = true, sources, protocol, por
         return { id: row.rows[0].id, groupId: '' };
     }
     // Shared profile = group + policy (sources → group), optionally gated by posture checks.
-    const grp = await netbirdPost('/api/groups', { name });
-    if (!grp || grp.status >= 300 || !grp.body || !grp.body.id) {
-        throw new Error('Failed to create group: ' + (grp && (grp.raw || grp.error || grp.status)));
-    }
-    const groupId = grp.body.id;
-    const rule = buildProfileRule(name, groupId, sources, protocol, ports);
-    const pol = await netbirdPost('/api/policies', { name: `${name} Access`, description: '', enabled: true, source_posture_checks: pc, rules: [rule] });
-    if (!pol || pol.status >= 300 || !pol.body || !pol.body.id) {
-        await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(groupId)).catch(() => { });
-        throw new Error('Failed to create policy: ' + (pol && (pol.raw || pol.error || pol.status)));
-    }
-    const row = await pool.query(
-        `INSERT INTO access_profiles (name, group_id, policy_id, sources, protocol, ports, shared, posture_checks, tenant)
-         VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8) RETURNING id`,
-        [name, groupId, pol.body.id, JSON.stringify((sources || []).filter(Boolean)), protocol || 'all', portsStr, JSON.stringify(pc), tnt()]
-    );
-    bustNbCaches('policies', 'gref', 'usage');
-    return { id: row.rows[0].id, groupId };
+    // Never with the group for launch-link resources as a source (checked, and created, under the
+    // created-resources configuration lock when that group is set).
+    return linkGuardedPolicyWrite([], [{ sources: (sources || []).filter(Boolean), destinations: [] }], async () => {
+        const grp = await netbirdPost('/api/groups', { name });
+        if (!grp || grp.status >= 300 || !grp.body || !grp.body.id) {
+            throw new Error('Failed to create group: ' + (grp && (grp.raw || grp.error || grp.status)));
+        }
+        const groupId = grp.body.id;
+        const rule = buildProfileRule(name, groupId, sources, protocol, ports);
+        const pol = await netbirdPost('/api/policies', { name: `${name} Access`, description: '', enabled: true, source_posture_checks: pc, rules: [rule] });
+        if (!pol || pol.status >= 300 || !pol.body || !pol.body.id) {
+            await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(groupId)).catch(() => { });
+            throw new Error('Failed to create policy: ' + (pol && (pol.raw || pol.error || pol.status)));
+        }
+        const row = await pool.query(
+            `INSERT INTO access_profiles (name, group_id, policy_id, sources, protocol, ports, shared, posture_checks, tenant)
+             VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8) RETURNING id`,
+            [name, groupId, pol.body.id, JSON.stringify((sources || []).filter(Boolean)), protocol || 'all', portsStr, JSON.stringify(pc), tnt()]
+        );
+        bustNbCaches('policies', 'gref', 'usage');
+        return { id: row.rows[0].id, groupId };
+    }, { profile: true });
 }
 
 async function updateAccessProfile(id, { name, sources, protocol, ports, postureChecks }) {
@@ -6716,9 +6729,8 @@ async function updateAccessProfile(id, { name, sources, protocol, ports, posture
     // Shared profiles push the change to their NetBird policy; Direct presets are local.
     if (shared !== false) {
         const rule = buildProfileRule(name, group_id, sources, protocol, ports);
-        // Never one that lets a Browser Gateway source reach the group for launch-link resources.
-        await refuseLinkPolicy([], [rule], true);
-        const resp = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(policy_id), { name: `${name} Access`, description: '', enabled: true, source_posture_checks: pc, rules: [rule] });
+        // Never one that uses the group for launch-link resources, or lets a gateway source reach it.
+        const resp = await linkGuardedPolicyWrite([], [rule], () => netbirdReq('PUT', '/api/policies/' + encodeURIComponent(policy_id), { name: `${name} Access`, description: '', enabled: true, source_posture_checks: pc, rules: [rule] }), { profile: true });
         if (!resp || resp.status >= 300) throw new Error('Failed to update policy: ' + (resp && (resp.raw || resp.error || resp.status)));
     }
     await pool.query(
@@ -11532,7 +11544,7 @@ const EXPORT_TABLES = [
     { name: 'cleanup_ignores', idCol: 'id', strip: [], required: ['category', 'object_id'] },
     // Internal (encrypted) backup only: the resources launch links created, so a restore keeps
     // tracking (and deleting) them. Runtime state, never in the plaintext export.
-    { name: 'ra_created_resources', idCol: null, strip: [], required: ['attempt_id', 'ip', 'state'], internalOnly: true },
+    { name: 'ra_created_resources', idCol: null, strip: [], required: ['attempt_id', 'ip', 'state'], internalOnly: true, mergedOnRestore: true },
 ];
 const EXPORT_TABLES_VERSION = 1;
 const EXPORT_TABLE_ROW_CAP = 50000; // bomb guard - config tables are tiny; a giant section means a bad file
@@ -11564,19 +11576,10 @@ async function tableColumnTypes(table) {
 // REPLACE each section PRESENT in the file, one transaction per section: DELETE the whole table then
 // re-INSERT the file's rows WITH their original ids; a section ABSENT from the file leaves its live
 // table untouched. results/skipped are filled in place (per-section kept vs dropped counts).
-// remote_access_config from a settings file or a backup: createResources goes through
-// lib/remote-access.js importedCreateSettings (never on; the stored network while servers added by
-// links exist). Returns the value to write, or null for a value that isn't a settings object.
-async function importedRemoteAccessConfig(v) {
-    let imp = null;
-    try { imp = JSON.parse(v); } catch { return null; }
-    if (!imp || typeof imp !== 'object' || Array.isArray(imp)) return null;
-    imp.createResources = await importedCreateSettings(imp.createResources);
-    return JSON.stringify(imp);
-}
 async function importConfigTables(tables, results, skipped, full = false) {
     for (const t of EXPORT_TABLES) {
         if (t.internalOnly && !full) continue; // never from a plaintext file
+        if (t.mergedOnRestore) continue; // added by its own owner, never replaced (restore below)
         const rows = tables[t.name];
         if (!Array.isArray(rows)) continue; // section absent → do not touch the live table
         if (rows.length > EXPORT_TABLE_ROW_CAP) throw new Error(`section "${t.name}" has too many rows (${rows.length} > ${EXPORT_TABLE_ROW_CAP})`);
@@ -11674,11 +11677,12 @@ async function importAppSettings(payload, actor) {
         }
         if (k === 'remote_access_config') {
             // An import never turns on adding servers from launch links (that needs the gateway check of
-            // a save in Settings > Remote Access), and keeps the stored network while servers added by
-            // links still exist. The other fields are kept.
-            const out = await importedRemoteAccessConfig(v);
-            if (out === null) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
-            val = out;
+            // a save in Settings > Remote Access), and keeps the stored network and group while servers
+            // added by links still exist. The other fields are kept. Written under the created-resources
+            // configuration lock (lib/remote-access.js).
+            if (!(await writeImportedRemoteAccessConfig(v))) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            importedKeys.push(k);
+            continue;
         }
         if (isTelegramConfigKey(k)) {
             const imp = parseObject(v);
@@ -11923,10 +11927,7 @@ async function importInternalBackupPayload(payload) {
         if (BACKUP_KEY_SETTINGS.has(k)) continue; // keep this server's own backup keypair (see BACKUP_KEY_SETTINGS)
         if (k === 'remote_access_config') {
             // A restore never turns on adding servers from launch links either (see importAppSettings).
-            const out = await importedRemoteAccessConfig(v);
-            if (out === null) continue;
-            await setSetting(k, out);
-            settingsCount++;
+            if (await writeImportedRemoteAccessConfig(v)) settingsCount++;
             continue;
         }
         await setSetting(k, v);
@@ -11938,10 +11939,14 @@ async function importInternalBackupPayload(payload) {
     const tableResults = {}, tableSkipped = {}, tableMessages = {};
     if (payload.tables && typeof payload.tables === 'object' && !Array.isArray(payload.tables)) {
         const tables = { ...payload.tables };
-        // The servers added by launch links come back only when they are in one network and group.
-        const problem = Array.isArray(tables.ra_created_resources) ? restoredRowsProblem(tables.ra_created_resources) : '';
-        if (problem) { delete tables.ra_created_resources; tableMessages.ra_created_resources = problem; }
         await importConfigTables(tables, tableResults, tableSkipped, true); // full: secrets + runtime restored
+        // The servers added by launch links: the backup's rows are added to the ones tracked now (by
+        // attempt id), never replacing them, and only when all of them are in one network and group.
+        if (Array.isArray(tables.ra_created_resources)) {
+            const m = await mergeRestoredCreatedRows(tables.ra_created_resources);
+            tableResults.ra_created_resources = m.added;
+            if (m.message) tableMessages.ra_created_resources = m.message;
+        }
         invalidateFilterCache();
     }
     // Adding servers from launch links is always off after a restore (whatever the backup holds), and

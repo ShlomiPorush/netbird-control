@@ -28,6 +28,7 @@ let created = [];      // ra_created_resources
 let sessionRows = [];  // remote_sessions
 let blockRows = [];    // address_blocklist
 let profileRows = [];  // access_profiles (id, group_id, policy_id, shared)
+let onSessionsQuery = null; // (resourceId) => runs when the delete asks for session rows
 const holdTable = require('./helpers/hold-table').holdTable();
 const clone = (v) => JSON.parse(JSON.stringify(v ?? null));
 const rowOut = (r) => ({ ...r, created_at: new Date(r.created_at), updated_at: new Date(r.updated_at) });
@@ -61,7 +62,10 @@ function dbQuery(sql, params = [], tx = null) {
     if (/FROM address_blocklist/.test(s)) return { rows: clone(blockRows) };
     if (s.startsWith('INSERT INTO remote_sessions')) { sessionRows.push({ id: params[0], resource_id: params[8] }); return { rows: [], rowCount: 1 }; }
     if (s.startsWith('DELETE FROM remote_sessions')) { sessionRows = sessionRows.filter(r => r.id !== params[0]); return { rows: [], rowCount: 1 }; }
-    if (/^SELECT 1 FROM remote_sessions WHERE resource_id = \$1/.test(s)) return { rows: sessionRows.filter(r => r.resource_id === params[0]).slice(0, 1) };
+    if (/^SELECT 1 FROM remote_sessions WHERE resource_id = \$1/.test(s)) {
+        if (onSessionsQuery) onSessionsQuery(params[0]);
+        return { rows: sessionRows.filter(r => r.resource_id === params[0]).slice(0, 1) };
+    }
     if (/^SELECT group_id, policy_id, shared FROM access_profiles/.test(s)) return { rows: clone(profileRows.filter(r => String(r.id) === String(params[0]))) };
     if (/remote_sessions/.test(s) && !/ra_created_resources/.test(s)) return { rows: [] };
     if (!/ra_created_resources/.test(s)) return { rows: [] };
@@ -73,6 +77,14 @@ function dbQuery(sql, params = [], tx = null) {
     }
     if (/WHERE ip = \$1 AND state = ANY\(\$2\)/.test(s)) {
         return { rows: all().filter(r => r.ip === params[0] && params[1].includes(r.state)).sort((a, b) => b.created_at - a.created_at).map(rowOut) };
+    }
+    if (/^SELECT attempt_id, state, network_id, group_id FROM ra_created_resources$/.test(s)) return { rows: all().map(rowOut) };
+    if (s.startsWith('INSERT INTO ra_created_resources') && /ON CONFLICT \(attempt_id\) DO NOTHING/.test(s)) {
+        const cols = /\(([^)]*)\) VALUES/.exec(s)[1].split(',').map(c => c.trim());
+        const row = Object.fromEntries(cols.map((c, i) => [c, params[i]]));
+        if (created.some(r => r.attempt_id === row.attempt_id)) return { rows: [], rowCount: 0 };
+        created.push({ ...row, created_at: row.created_at ? new Date(row.created_at).getTime() : Date.now(), updated_at: Date.now(), pending_audit: row.pending_audit ? JSON.parse(row.pending_audit) : null });
+        return { rows: [], rowCount: 1 };
     }
     if (s.startsWith('INSERT INTO ra_created_resources')) {
         const [attempt_id, ip, name, network_id, group_id, key_id, expected_name, expected_address, expected_description] = params;
@@ -288,7 +300,7 @@ const HOUR = 3_600_000;
 
 test.beforeEach(() => {
     w = world();
-    created = []; sessionRows = []; blockRows = []; profileRows = []; holdTable.rows.clear();
+    created = []; sessionRows = []; blockRows = []; profileRows = []; onSessionsQuery = null; holdTable.rows.clear();
     posts.length = 0; writes.length = 0; reads.length = 0; audits.length = 0;
     postAnswer = null; deleteAnswer = null; onGet = null; failGets = new Set(); postOpts = []; failAuditAction = null; inventoryFails = false; dnsAnswers = {};
     delete settings.remote_access_create_pause;
@@ -849,11 +861,13 @@ test('C3: the guard follows the stored settings, not this instance\'s copy', asy
     } finally { settingsFail = false; }
 });
 
-test('C3: an import or restore never turns creating on, and keeps the stored network while rows exist', async () => {
-    assert.deepEqual(await ra.importedCreateSettings({ enabled: true, networkId: 'n-office', groupId: 'g-x', max: 9 }), { enabled: false, networkId: 'n-office', groupId: 'g-x', max: 9 });
+test('C3: an import or restore never turns creating on, and keeps the stored network and group while rows exist', async () => {
+    const imported = async (cr) => { assert.equal(await ra.writeImportedRemoteAccessConfig(JSON.stringify({ enabled: true, networks: ['n-office'], createResources: cr })), true); return JSON.parse(settings.remote_access_config).createResources; };
+    assert.deepEqual(await imported({ enabled: true, networkId: 'n-office', groupId: 'g-x', max: 9 }), { enabled: false, networkId: 'n-office', groupId: 'g-x', max: 9 });
+    setConfig();
     seed('9.9.3.1');
-    assert.deepEqual(await ra.importedCreateSettings({ enabled: true, networkId: 'n-office', groupId: 'g-x', max: 9 }), { enabled: false, networkId: 'n-links', groupId: 'g-x', max: 9 });
-    assert.deepEqual(await ra.importedCreateSettings(undefined), { enabled: false, networkId: 'n-links' });
+    assert.deepEqual(await imported({ enabled: true, networkId: 'n-office', groupId: 'g-x', max: 9 }), { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 9 });
+    assert.equal(await ra.writeImportedRemoteAccessConfig('not json'), false);
     // The plaintext settings export never carries the table.
     const exp = await db.exportAppSettings();
     assert.equal((exp.tables || {}).ra_created_resources, undefined);
@@ -1043,7 +1057,7 @@ test('C20: an Access Profile group is refused for the section; a profile change 
         await rejects(ra.setRemoteAccessConfig({ createResources: { ...CFG.createResources } }), 'INVALID_SETTINGS', (e) => /Linked Profile/.test(e.message));
     } finally { ra.setRemoteAccessDeps({ listAccessProfiles: async () => [] }); }
     profileRows = [{ id: 4, group_id: 'g-links', policy_id: 'pol-prof', shared: true }];
-    await assert.rejects(db.updateAccessProfile(4, { name: 'P', sources: ['g-gw'], protocol: 'tcp', ports: ['22'] }), (e) => e.status === 409 && /Browser Gateway reach/.test(e.message));
+    await assert.rejects(db.updateAccessProfile(4, { name: 'P', sources: ['g-gw'], protocol: 'tcp', ports: ['22'] }), (e) => e.status === 409 && /Access Profile/.test(e.message));
     assert.ok(!writes.some(([m, p]) => m === 'PUT' && p === '/api/policies/pol-prof'));
 });
 
@@ -1079,7 +1093,7 @@ test('C26: the admin delete waits while a create for that address or marker is u
 });
 
 test('C27: a restore keeps the feature off and follows the restored rows; rows in two networks are refused', async () => {
-    assert.match(ra.restoredRowsProblem([{ state: 'created', network_id: 'a', group_id: 'g' }, { state: 'kept', network_id: 'b', group_id: 'g' }]), /more than one network/);
+    assert.match(ra.restoredRowsProblem([{ state: 'created', network_id: 'a', group_id: 'g' }, { state: 'kept', network_id: 'b', group_id: 'g' }]), /another network or group/);
     assert.equal(ra.restoredRowsProblem([{ state: 'created', network_id: 'a', group_id: 'g' }, { state: 'deleted', network_id: 'b', group_id: 'h' }]), '');
     seed('9.9.14.1');
     settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: true, networkId: 'n-office', groupId: 'g-srv' } }));
@@ -1093,4 +1107,94 @@ test('C28: Tidy Names skips policies that name a protected resource', async () =
     const plan = await db.policyRenamePlan();
     assert.deepEqual(plan.skippedProtected, [{ id: 'pol-t', name: 'old name' }]);
     assert.ok(!plan.items.some(i => i.id === 'pol-t'));
+});
+
+// ─── Review round 3 ───
+test('C29: a save whose stored section changed during its checks is refused, to try again', async () => {
+    // Another instance changes the section while this save reads NetBird for the gateway check.
+    onGet = (p) => { if (p === '/api/policies') settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { max: 70 } })); };
+    await rejects(ra.setRemoteAccessConfig({ createResources: { enabled: true } }), 'SETTINGS_CHANGED', (e) => e.status === 409 && e.notSaved);
+    assert.equal(JSON.parse(settings.remote_access_config).createResources.max, 70, 'the other change stays');
+    // Only the fields a save sends change; the others stay as stored.
+    onGet = null;
+    await ra.setRemoteAccessConfig({ createResources: { max: 12 } }).catch(e => { if (e.notSaved) throw e; });
+    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, { enabled: true, networkId: 'n-links', groupId: 'g-links', max: 12 });
+});
+
+test('C29/C31: a policy write that the group concerns runs under the lock, and refuses when the section changed', async () => {
+    onGet = (p) => { if (p === '/api/peers') settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { groupId: 'g-srv' } })); };
+    await assert.rejects(db.createPolicy({ name: 'CRM', protocol: 'tcp', ports: ['22'], sources: ['g-crm'], destinations: ['g-links'] }), (e) => e.status === 409 && e.code === 'SETTINGS_CHANGED');
+    assert.equal(posts.filter(([p]) => p === '/api/policies').length, 0);
+    onGet = null;
+    setConfig();
+    await db.createPolicy({ name: 'CRM', protocol: 'tcp', ports: ['22'], sources: ['g-crm'], destinations: ['g-links'] });
+    assert.equal(posts.filter(([p]) => p === '/api/policies').length, 1);
+});
+
+test('C30: a session that starts while the delete reads the database keeps its resource', async () => {
+    const row = seed('9.9.16.1');
+    onSessionsQuery = (rid) => { if (rid === row.resource_id) ra._internal.addSessionForTest({ id: 'sess-c30', resourceId: rid, state: 'preparing' }); };
+    try {
+        await ra.maintainCreatedResources();
+        assert.equal(deletesSent().length, 0);
+        assert.equal(row.state, 'created');
+    } finally { ra._internal.removeSessionForTest('sess-c30'); }
+});
+
+test('C32: an Access Profile may not use the group; turning adding servers off is always allowed', async () => {
+    await assert.rejects(db.createAccessProfile({ name: 'P', shared: true, sources: ['g-links'], protocol: 'tcp', ports: ['22'] }), (e) => e.status === 409 && /Access Profile/.test(e.message));
+    assert.equal(posts.length, 0);
+    ra.setRemoteAccessDeps({ listAccessProfiles: async () => [{ id: 3, name: 'Linked Profile', groupId: 'g-links', sources: [] }] });
+    try {
+        await ra.setRemoteAccessConfig({ createResources: { enabled: false } }).catch(e => { if (e.notSaved) throw e; });
+        assert.equal(JSON.parse(settings.remote_access_config).createResources.enabled, false);
+    } finally { ra.setRemoteAccessDeps({ listAccessProfiles: async () => [] }); }
+});
+
+test('C34: a restore adds the backup rows by attempt id and never removes the current ones', async () => {
+    const current = seed('9.9.17.1');
+    const restored = { attempt_id: crypto.randomUUID(), ip: '9.9.17.2', name: '', network_id: 'n-links', group_id: 'g-links', key_id: 7, state: 'created', resource_id: 'res-old',
+        expected_name: '9.9.17.2', expected_address: '9.9.17.2/32', expected_description: 'x', reason: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), pending_audit: null };
+    const out = await ra.mergeRestoredCreatedRows([{ ...current, created_at: new Date().toISOString(), state: 'deleted' }, restored]);
+    assert.deepEqual(out, { added: 1, message: '' });
+    assert.equal(rowFor('9.9.17.1').state, 'created', 'the current row is kept as it is');
+    assert.ok(rowFor('9.9.17.2'));
+    // Rows in another network than the tracked ones: nothing is added.
+    const other = await ra.mergeRestoredCreatedRows([{ ...restored, attempt_id: crypto.randomUUID(), ip: '9.9.17.3', network_id: 'n-office' }]);
+    assert.equal(other.added, 0);
+    assert.match(other.message, /another network or group/);
+    assert.equal(rowFor('9.9.17.3'), undefined);
+});
+
+test('C35: the reservation compares against the maximum stored now', async () => {
+    seed('9.9.18.1');
+    onGet = (p) => { if (p === '/api/peers') settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { max: 1 } })); };
+    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_LIMIT');
+    assert.equal(posts.length, 0);
+});
+
+test('C36: the networks keep the network for created resources while it is on or in use', async () => {
+    await rejects(ra.setRemoteAccessConfig({ networks: ['n-office'] }), 'NETWORK_IN_USE', (e) => e.status === 409 && e.notSaved);
+    // Off, with a server still there: still refused.
+    setConfig({ createResources: { enabled: false } });
+    seed('9.9.19.1');
+    await rejects(ra.setRemoteAccessConfig({ networks: ['n-office'] }), 'NETWORK_IN_USE');
+    // Off and nothing left: allowed.
+    created = [];
+    await ra.setRemoteAccessConfig({ networks: ['n-office'] }).catch(e => { if (e.notSaved) throw e; });
+    assert.deepEqual(JSON.parse(settings.remote_access_config).networks, ['n-office']);
+});
+
+test('C37: Tidy Names skips every policy that names a resource when the network list cannot be read', async () => {
+    w.policies.push({ id: 'pol-any', name: 'any', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-crm' }], destinationResource: { id: 'r-office', type: 'host' } }] });
+    failGets = new Set(['/api/networks']);
+    const plan = await db.policyRenamePlan();
+    assert.ok(plan.skippedProtected.some(x => x.id === 'pol-any'));
+    // The write path uses the same guard: a protected policy is refused there too.
+    failGets = new Set();
+    const rid = seed('9.9.20.1', { ageHours: 0 }).resource_id;
+    w.policies.push({ id: 'pol-prot', name: 'prot', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-crm' }], destinationResource: { id: rid, type: 'host' } }] });
+    const out = await db.applyPolicyRenames(['pol-prot']);
+    assert.equal(out.renamed, 0);
+    assert.ok(!writes.some(([m, p]) => m === 'PUT' && p === '/api/policies/pol-prot'));
 });

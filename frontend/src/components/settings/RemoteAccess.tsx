@@ -88,13 +88,27 @@ export function RemoteAccessSettings() {
     }
   }, [cfgQ.data, form]);
 
+  if (cfgQ.isError && !form) {
+    return (
+      <div className="max-w-2xl flex flex-col items-start gap-3">
+        <p className="text-sm text-red-500">{cfgQ.error instanceof ApiError && cfgQ.error.message ? cfgQ.error.message : 'The Remote Access settings could not be loaded. Try again.'}</p>
+        <Button variant="secondary" size="sm" onClick={() => cfgQ.refetch()} disabled={cfgQ.isFetching}>{cfgQ.isFetching ? 'Retrying…' : 'Retry'}</Button>
+      </div>
+    );
+  }
   if (cfgQ.isLoading || !form) return <LoadingState />;
   const set = <K extends keyof RemoteAccessConfig>(k: K, v: RemoteAccessConfig[K]) => { setForm({ ...form, [k]: v }); setSaved(''); };
   const st = statusQ.data;
   const cr = form.createResources || CREATE_DEFAULTS;
   const setCr = (patch: Partial<CreateResourcesConfig>) => set('createResources', { ...cr, ...patch });
   const crKey = (c: CreateResourcesConfig) => JSON.stringify([!!c.enabled, c.networkId || '', c.groupId || '', Number(c.max)]);
-  const crChanged = crKey(cr) !== crKey(savedCr || CREATE_DEFAULTS);
+  // Also sent when the networks above no longer include its network, so the server's answer shows here.
+  const crChanged = crKey(cr) !== crKey(savedCr || CREATE_DEFAULTS) || (!!cr.networkId && !form.networks.includes(cr.networkId));
+  const crDiff = (): Partial<CreateResourcesConfig> => {
+    const base = savedCr || CREATE_DEFAULTS;
+    const now = { enabled: cr.enabled, networkId: cr.networkId, groupId: cr.groupId, max: Number(cr.max) };
+    return Object.fromEntries(Object.entries(now).filter(([k, v]) => v !== base[k as keyof CreateResourcesConfig]));
+  };
   // The network that holds the servers links add follows these settings, and so does its badge.
   const refreshCreated = () => {
     qc.invalidateQueries({ queryKey: ['remote-access-created'] });
@@ -114,7 +128,8 @@ export function RemoteAccessSettings() {
         clipboard: form.clipboard, sshHostKeys,
         rdp: form.rdp, ssh: { ...form.ssh, fontSize: Number(form.ssh.fontSize) },
         // Only when that section changed: saving another field never changes it.
-        ...(crChanged ? { createResources: { enabled: cr.enabled, networkId: cr.networkId, groupId: cr.groupId, max: Number(cr.max) } } : {}),
+        // Only the fields that changed: the server keeps the others as stored.
+        ...(crChanged ? { createResources: crDiff() } : {}),
       });
       setForm(r.config);
       setSavedCr(r.config.createResources || CREATE_DEFAULTS);

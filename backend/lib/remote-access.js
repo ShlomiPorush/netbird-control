@@ -675,14 +675,37 @@ async function setRemoteAccessConfig(input) {
     try { stored = await readCreateSettings(); } catch (e) {
         throw Object.assign(httpError(503, 'UNAVAILABLE', "The stored settings couldn't be read, so nothing was saved. Try again."), { notSaved: true });
     }
-    if (!changesCreate) next.createResources = { ...stored.createResources };
-    // Refused before anything is saved (a 4xx with the reason).
-    else await validateCreateSettings(next, stored);
-    const cr = next.createResources;
     const sc = stored.createResources;
-    if (!changesCreate) next.createResources = await saveKeepingStoredCreate(next);
-    else if (cr.networkId !== sc.networkId || cr.groupId !== sc.groupId) await saveMovingCreate(next);
-    else await setSetting('remote_access_config', JSON.stringify(next));
+    next.createResources = { ...sc };
+    if (changesCreate) {
+        // Only the fields this save changed (against the stored section); the others stay as stored.
+        const sent = normCreate({ ...sc, ...body.createResources });
+        for (const k of Object.keys(sc)) if (body.createResources && body.createResources[k] !== undefined && sent[k] !== sc[k]) next.createResources[k] = sent[k];
+        // NetBird reads and the other checks first, outside the lock (a 4xx with the reason).
+        await validateCreateSettings(next);
+    }
+    const cr = next.createResources;
+    // Under the configuration lock: the stored section is still the one checked, the network or
+    // group changes only while no server added by links exists, and the networks open to the
+    // gateway keep the network for created resources while it is on or in use. Then the write.
+    try {
+        await withCreateConfigLock(async (client, now) => {
+            const nc = now.cfg.createResources;
+            if (!sameCreate(nc, sc)) throw changedMeanwhile();
+            const moves = cr.networkId !== nc.networkId || cr.groupId !== nc.groupId;
+            const active = (moves || (cr.networkId && !next.networks.includes(cr.networkId))) ? await countActiveVia(client) : 0;
+            if (moves && active) {
+                throw httpError(409, 'CREATED_RESOURCES_EXIST', `${active} server${active === 1 ? '' : 's'} added by links ${active === 1 ? 'is' : 'are'} still in the current network and group. Keep them until ${active === 1 ? 'it is' : 'they are'} removed.`);
+            }
+            if (cr.networkId && !next.networks.includes(cr.networkId) && (cr.enabled || active)) {
+                throw httpError(409, 'NETWORK_IN_USE', 'The network for servers added by links must stay open to the gateway while adding servers is on or such servers still exist. Turn adding servers off, or keep that network selected.');
+            }
+            await client.query(CONFIG_UPSERT, [JSON.stringify(next)]);
+        });
+    } catch (e) {
+        if (e && e.status) { e.notSaved = true; throw e; }
+        throw Object.assign(httpError(503, 'UNAVAILABLE', "The settings couldn't be saved. Try again."), { notSaved: true });
+    }
     const wasEnabled = _cfg.enabled;
     _cfg = next;
     noteKnownCreate(_cfg.createResources);
@@ -2469,19 +2492,41 @@ function restoredRowsProblem(rows) {
     const nets = new Set(active.map(x => String(x.network_id || '')));
     const groups = new Set(active.map(x => String(x.group_id || '')));
     return nets.size > 1 || groups.size > 1
-        ? 'The backup lists servers added by links in more than one network or group, so they were not restored. The current list was kept.' : '';
+        ? 'The backup lists servers added by links in another network or group than the ones tracked now, so they were not restored. The current list was kept.' : '';
+}
+// A backup restore never removes the rows this installation tracks now: the backup's rows are added
+// by attempt id when they aren't there yet, under the configuration lock. When the rows the table
+// would then list span more than one network or group, nothing is added and the message says why.
+const RESTORE_COLUMNS = ['attempt_id', 'ip', 'name', 'network_id', 'group_id', 'key_id', 'state', 'resource_id',
+    'expected_name', 'expected_address', 'expected_description', 'reason', 'created_at', 'updated_at', 'pending_audit'];
+async function mergeRestoredCreatedRows(rows) {
+    const list = (Array.isArray(rows) ? rows : []).filter(x => x && typeof x === 'object' && typeof x.attempt_id === 'string' && x.attempt_id
+        && typeof x.ip === 'string' && typeof x.state === 'string');
+    return withCreateConfigLock(async (client) => {
+        const cur = await client.query('SELECT attempt_id, state, network_id, group_id FROM ra_created_resources');
+        const have = new Set(((cur && cur.rows) || []).map(r => r.attempt_id));
+        const add = list.filter(x => !have.has(x.attempt_id));
+        const problem = restoredRowsProblem([...((cur && cur.rows) || []), ...add]);
+        if (problem) return { added: 0, message: problem };
+        for (const x of add) {
+            const vals = RESTORE_COLUMNS.map(c => (c === 'pending_audit' ? (x[c] == null ? null : JSON.stringify(x[c])) : (x[c] === undefined ? null : x[c])));
+            await client.query(`INSERT INTO ra_created_resources (${RESTORE_COLUMNS.join(', ')}) VALUES (${RESTORE_COLUMNS.map((_, i) => `$${i + 1}`).join(', ')})
+                ON CONFLICT (attempt_id) DO NOTHING`, vals);
+        }
+        return { added: add.length, message: '' };
+    });
 }
 // After a backup restore: adding servers is off, and while restored rows are active, the stored
 // network and group are theirs, so the guard and the tracking match.
 async function alignCreateSettingsAfterRestore() {
-    let raw = null;
-    try { raw = JSON.parse(await getSetting('remote_access_config') || 'null'); } catch (e) { if (!(e instanceof SyntaxError)) throw e; }
-    const cfg = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-    const cr = { ...normConfig(cfg).createResources, enabled: false };
-    const r = await pool.query('SELECT DISTINCT network_id, group_id FROM ra_created_resources WHERE state = ANY($1)', [CREATE_LISTED]);
-    const pairs = (r && r.rows) || [];
-    if (pairs.length === 1) { cr.networkId = String(pairs[0].network_id || ''); cr.groupId = String(pairs[0].group_id || ''); }
-    await setSetting('remote_access_config', JSON.stringify({ ...cfg, createResources: cr }));
+    const cr = await withCreateConfigLock(async (client, stored) => {
+        const next = { ...stored.cfg.createResources, enabled: false };
+        const r = await client.query('SELECT DISTINCT network_id, group_id FROM ra_created_resources WHERE state = ANY($1)', [CREATE_LISTED]);
+        const pairs = (r && r.rows) || [];
+        if (pairs.length === 1) { next.networkId = String(pairs[0].network_id || ''); next.groupId = String(pairs[0].group_id || ''); }
+        await client.query(CONFIG_UPSERT, [JSON.stringify({ ...stored.raw, createResources: next })]);
+        return next;
+    });
     noteKnownCreate(cr);
 }
 // The resource ids this code still tracks (their rows are active).
@@ -2598,30 +2643,39 @@ async function createGroupProblem(groupId) {
         ? `The NetBird policy "${name}" has a source NetBird Control can't read, so it can't tell whether the Browser Gateway reaches the group "${g.name}". Change that policy, or choose another group.`
         : `The NetBird policy "${name}" lets the Browser Gateway reach the group "${g.name}". Choose another group, or change that policy so the gateway doesn't reach it.`;
 }
-
-// A policy the app is about to save (db.js: create, update, enable, duplicate): '' when it may be
-// saved, else why not. Refused when one of `resourceRules` names a resource of the managed network
-// (as source or destination), or when one of `groupRules` lets Browser Gateway traffic reach the
-// group for created resources. Reads NetBird only when there is something to check; throws when a
-// read fails.
+// A policy or Access Profile the app is about to save (db.js): { problem, seen }. `problem` is ''
+// when it may be saved, else why not. Refused when one of `resourceRules` names a resource of the
+// managed network (as source or destination), when one of `groupRules` lets Browser Gateway
+// traffic reach the group for created resources, or (`profile: true`) when an Access Profile would
+// use that group at all. `seen` ({ networkId, groupId }) is set when the check concerned the
+// stored section: the write then runs under the configuration lock (underCreateConfig). Reads
+// NetBird only when there is something to check; throws when a read fails.
 // `enabled: false` (a disabled policy) gives no reach: turning such a policy off is always allowed.
-async function linkPolicyProblem({ resourceRules = [], groupRules = [], enabled = true } = {}) {
+async function linkPolicyProblem({ resourceRules = [], groupRules = [], enabled = true, profile = false } = {}) {
     const ids = resourceRules.flatMap(r => [r && r.destinationResource, r && r.sourceResource]).filter(x => !emptyRef(x)).map(refId).filter(Boolean);
     const dests = enabled ? groupRules.flatMap(r => (r && Array.isArray(r.destinations) ? r.destinations.map(refId) : [])).filter(Boolean) : [];
+    const used = profile ? groupRules.flatMap(r => [...(r && Array.isArray(r.sources) ? r.sources : []), ...(r && Array.isArray(r.destinations) ? r.destinations : [])].map(refId)).filter(Boolean) : [];
     // Nothing that could touch a protected object: no settings read at all.
-    if (!ids.length && !dests.length) return '';
+    if (!ids.length && !dests.length && !used.length) return { problem: '', seen: null };
     const cc = await protectedCreateIds();
+    const seen = { networkId: cc.networkId || '', groupId: cc.groupId || '' };
+    let concerned = false;
     if (cc.networkId && ids.length) {
+        concerned = true;
         const inNet = await protectedResourceIds(cc.networkId);
-        if (ids.some(id => inNet.has(id))) return LINK_NETWORK_MESSAGE;
+        if (ids.some(id => inNet.has(id))) return { problem: LINK_NETWORK_MESSAGE, seen };
     }
+    if (cc.groupId && used.includes(cc.groupId)) {
+        return { problem: 'The group for servers added by Remote Access links can\'t be used in an Access Profile. Choose another group.', seen };
+    }
+    if (cc.groupId && (used.length || dests.includes(cc.groupId))) concerned = true;
     if (cc.groupId && dests.includes(cc.groupId)) {
         const [groups, peers] = await Promise.all([readListStrict('/api/groups', 'groups'), readListStrict('/api/peers', 'peers')]);
         if (gatewayRuleTo([{ id: 'new', rules: groupRules }], cc.groupId, gatewaySources(groups, peers))) {
-            return 'This policy would let the Browser Gateway reach the group for servers added by Remote Access links. Choose other sources, or another destination.';
+            return { problem: 'This policy would let the Browser Gateway reach the group for servers added by Remote Access links. Choose other sources, or another destination.', seen };
         }
     }
-    return '';
+    return { problem: '', seen: concerned ? seen : null };
 }
 
 async function countActiveCreated(exceptNetworkId) {
@@ -2631,64 +2685,88 @@ async function countActiveCreated(exceptNetworkId) {
     return Number(r && r.rows && r.rows[0] && r.rows[0].n) || 0;
 }
 
-// The settings for created resources in a settings import or a backup restore: never turned on
-// there (that needs the gateway check of a save), and while servers added by links still exist,
-// the stored network stays. Returns the createResources object to write.
-async function importedCreateSettings(imported) {
-    const x = imported && typeof imported === 'object' && !Array.isArray(imported) ? imported : {};
-    const out = { ...x, enabled: false };
-    if (await countActiveCreated()) out.networkId = (await readCreateSettings()).createResources.networkId;
-    return out;
-}
-
-// The settings for created resources, checked before anything is saved.
-async function validateCreateSettings(next) {
-    try { await checkCreateSettings(next); } catch (e) { e.notSaved = true; throw e; }
-}
-
+// ─── The created-resources configuration lock ───
+// One transaction-level advisory lock (the reservation's key) serializes everything that reads the
+// stored section for created resources and acts on it: a settings save, a launch's reservation, a
+// policy or Access Profile write that the section's group or network concerns, a settings import
+// and a backup restore. It is short: NetBird is read before it is taken, and under it the stored
+// section is read again; when it changed meanwhile, the caller gets a 409 to try again.
 const CONFIG_UPSERT = `INSERT INTO app_settings (key, value) VALUES ('remote_access_config', $1)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-// Save the settings and keep createResources as the database has it, in one statement. Returns the
-// createResources that is stored now.
-async function saveKeepingStoredCreate(cfg) {
-    const r = await pool.query(
-        `INSERT INTO app_settings (key, value) VALUES ('remote_access_config', $1)
-         ON CONFLICT (key) DO UPDATE SET value = (EXCLUDED.value::jsonb || jsonb_build_object('createResources',
-             COALESCE(app_settings.value::jsonb -> 'createResources', EXCLUDED.value::jsonb -> 'createResources')))::text
-         RETURNING value`, [JSON.stringify(cfg)]);
-    const v = r && r.rows && r.rows[0] && r.rows[0].value;
-    let saved = null;
-    try { saved = v ? JSON.parse(v) : null; } catch { saved = null; }
-    return saved ? normConfig(saved).createResources : { ...cfg.createResources };
+async function storedConfigVia(client) {
+    const sv = await client.query('SELECT value FROM app_settings WHERE key = $1', ['remote_access_config']);
+    let raw = null;
+    try { raw = JSON.parse((sv && sv.rows && sv.rows[0] && sv.rows[0].value) || 'null'); } catch { raw = null; }
+    return { raw: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}, cfg: normConfig(raw) };
 }
-// A new network or group, under the reservation's lock, refused while servers added by links still
-// exist (in the old network and group): a launch can't reserve in the old one during the change.
-async function saveMovingCreate(cfg) {
+async function countActiveVia(client) {
+    const cnt = await client.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE]);
+    return Number(cnt && cnt.rows && cnt.rows[0] && cnt.rows[0].n) || 0;
+}
+// fn(client, stored) runs in the transaction, with the stored settings read under the lock
+// ({ raw, cfg }). Throws what fn throws; a database error is thrown as is.
+async function withCreateConfigLock(fn) {
     const client = await pool.connect();
     let open = false;
     try {
         await client.query('BEGIN');
         open = true;
         await client.query('SELECT pg_advisory_xact_lock($1)', [CREATE_LOCK_KEY]);
-        const cnt = await client.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE]);
-        const n = Number(cnt && cnt.rows && cnt.rows[0] && cnt.rows[0].n) || 0;
-        if (n) {
-            throw Object.assign(httpError(409, 'CREATED_RESOURCES_EXIST', `${n} server${n === 1 ? '' : 's'} added by links ${n === 1 ? 'is' : 'are'} still in the current network and group. Keep them until ${n === 1 ? 'it is' : 'they are'} removed.`), { notSaved: true });
-        }
-        await client.query(CONFIG_UPSERT, [JSON.stringify(cfg)]);
+        const out = await fn(client, await storedConfigVia(client));
         await client.query('COMMIT');
         open = false;
+        return out;
     } catch (e) {
         if (open) await client.query('ROLLBACK').catch(() => { });
-        if (e && e.status) throw e;
-        throw Object.assign(httpError(503, 'UNAVAILABLE', "The settings couldn't be saved. Try again."), { notSaved: true });
+        throw e;
     } finally {
         client.release();
     }
 }
+const sameCreate = (a, b) => JSON.stringify([a.enabled, a.networkId, a.groupId, a.max]) === JSON.stringify([b.enabled, b.networkId, b.groupId, b.max]);
+const changedMeanwhile = () => httpError(409, 'SETTINGS_CHANGED', 'The Remote Access settings changed a moment ago. Try again.');
+
+// A policy or Access Profile write that a check against the stored section allowed: under the lock,
+// the section's network and group are still the ones checked (`seen`), then the write runs. A
+// changed section refuses with a 409 to try again.
+async function underCreateConfig(seen, write) {
+    return withCreateConfigLock(async (client, stored) => {
+        const c = stored.cfg.createResources;
+        if (c.networkId !== seen.networkId || c.groupId !== seen.groupId) throw changedMeanwhile();
+        return write();
+    });
+}
+
+// remote_access_config from a settings import or a backup restore, written under the lock: adding
+// servers from links is never turned on there (that needs the gateway check of a save), and while
+// servers added by links still exist, the stored network and group stay. Returns false for a value
+// that isn't a settings object.
+async function writeImportedRemoteAccessConfig(value) {
+    let imp = null;
+    try { imp = JSON.parse(value); } catch { return false; }
+    if (!imp || typeof imp !== 'object' || Array.isArray(imp)) return false;
+    await withCreateConfigLock(async (client, stored) => {
+        const x = imp.createResources && typeof imp.createResources === 'object' && !Array.isArray(imp.createResources) ? imp.createResources : {};
+        const out = { ...x, enabled: false };
+        if (await countActiveVia(client)) {
+            out.networkId = stored.cfg.createResources.networkId;
+            out.groupId = stored.cfg.createResources.groupId;
+        }
+        await client.query(CONFIG_UPSERT, [JSON.stringify({ ...imp, createResources: out })]);
+    });
+    return true;
+}
+
+// The settings for created resources, checked before anything is saved (NetBird reads; outside the
+// lock).
+async function validateCreateSettings(next) {
+    try { await checkCreateSettings(next); } catch (e) { e.notSaved = true; throw e; }
+}
 async function checkCreateSettings(next) {
     const c = next.createResources;
     const refuse = (message) => { throw httpError(400, 'INVALID_SETTINGS', message); };
+    // Turning adding servers off is always allowed: none of the checks below apply then.
+    if (!c.enabled) return;
     // A group an Access Profile uses (its group or a source) would mix the profile's access with
     // the servers added by links.
     if (c.groupId && typeof _deps.listAccessProfiles === 'function') {
@@ -2697,7 +2775,6 @@ async function checkCreateSettings(next) {
         const used = (Array.isArray(profiles) ? profiles : []).find(p => p && (p.groupId === c.groupId || (Array.isArray(p.sources) ? p.sources : []).some(s => refId(s) === c.groupId)));
         if (used) refuse(`The Access Profile "${used.name || used.id}" uses this group. Choose a group no Access Profile uses.`);
     }
-    if (!c.enabled) return;
     if (!c.networkId) refuse('Choose the network for servers added by links.');
     if (!next.networks.includes(c.networkId)) refuse('The network for servers added by links must be one of the networks selected above.');
     if (!c.groupId) refuse('Choose the group for servers added by links.');
@@ -2765,7 +2842,7 @@ async function settleCreated(attemptId, state, { resourceId = '', reason = '', f
 
 // Reserve the create. One transaction under a transaction-level advisory lock: the same address in
 // progress, the limit, the row and its strict audit record. No NetBird call inside.
-async function reserveCreate(key, row, max) {
+async function reserveCreate(key, row) {
     const client = await pool.connect();
     let open = false;
     try {
@@ -2789,7 +2866,8 @@ async function reserveCreate(key, row, max) {
             return { existing };
         }
         const cnt = await client.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_ACTIVE]);
-        if ((Number(cnt && cnt.rows && cnt.rows[0] && cnt.rows[0].n) || 0) >= max) throw httpError(409, 'CREATE_LIMIT');
+        // The maximum as stored now (read under the lock), not as this request read it before.
+        if ((Number(cnt && cnt.rows && cnt.rows[0] && cnt.rows[0].n) || 0) >= nowCfg.createResources.max) throw httpError(409, 'CREATE_LIMIT');
         await client.query(
             `INSERT INTO ra_created_resources (attempt_id, ip, name, network_id, group_id, key_id, state, expected_name, expected_address, expected_description)
              VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7, $8, $9)`,
@@ -2894,7 +2972,7 @@ async function createForLaunch(key, address, email) {
     // 5. Reserve it.
     const attemptId = crypto.randomUUID();
     const expected = { name: name ? `${name} (${ip})` : ip, address: `${ip}/32`, description: `Created by a Remote Access link (${attemptId})` };
-    const reserved = await reserveCreate(key, { attemptId, ip, name, networkId: cc.networkId, groupId: cc.groupId, expected }, cc.max);
+    const reserved = await reserveCreate(key, { attemptId, ip, name, networkId: cc.networkId, groupId: cc.groupId, expected });
     if (reserved.existing) {
         // Another request added it a moment ago: connect to it.
         return { address: ip, name, resource: { created: false, ...(reserved.existing.resource_id ? { id: reserved.existing.resource_id } : {}), address: ip } };
@@ -3096,6 +3174,12 @@ async function deleteCreatedLocked(row, policies) {
         await settleCreated(row.attempt_id, 'created', { from: 'deleting' });
         return 'retry';
     }
+    // The last step before the send, with no await between them: a session of this instance (also
+    // one still opening) that started meanwhile keeps the resource.
+    if ([..._sessions.values()].some(s => s.resourceId === row.resource_id)) {
+        await settleCreated(row.attempt_id, 'created', { from: 'deleting' });
+        return 'retry';
+    }
     noteTargetsChanged();
     const d = await netbirdReq('DELETE', path);
     bustNbCaches('policies', 'gref', 'usage');
@@ -3135,7 +3219,7 @@ async function listCreatedResources() {
 
 module.exports = {
     issueLaunch, redeemLaunch,
-    linkGuardNetworkId, linkGroupId, linkResourceTracked, linkResourcePending, linkPolicyProblem, importedCreateSettings, restoredRowsProblem, alignCreateSettingsAfterRestore, protectedResourceIds, getStoredCreateSettings: readCreateSettings, LINK_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted, listCreatedResources, getCreatePause: readCreatePause, maintainCreatedResources, CREATE_SCOPE,
+    linkGuardNetworkId, linkGroupId, linkResourceTracked, linkResourcePending, linkPolicyProblem, underCreateConfig, writeImportedRemoteAccessConfig, restoredRowsProblem, mergeRestoredCreatedRows, alignCreateSettingsAfterRestore, protectedResourceIds, getStoredCreateSettings: readCreateSettings, LINK_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted, listCreatedResources, getCreatePause: readCreatePause, maintainCreatedResources, CREATE_SCOPE,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
     withTargetLock, noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,

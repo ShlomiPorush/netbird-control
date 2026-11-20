@@ -22,6 +22,19 @@ const holds = require('./helpers/hold-table').holdTable((sql, params) => {
     return { rows: [] };
 });
 core.pool.query = holds.query;
+// The created-resources configuration lock's transaction (lib/remote-access.js), on the same
+// settings; no servers added by links exist here.
+core.pool.connect = async () => ({
+    query: async (sql, params = []) => {
+        const s = String(sql).trim();
+        if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(s) || s.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] };
+        if (s.startsWith('SELECT value FROM app_settings')) return { rows: settings[params[0]] ? [{ value: settings[params[0]] }] : [] };
+        if (/FROM ra_created_resources/.test(s)) return { rows: [{ n: 0 }] };
+        if (s.startsWith('INSERT INTO app_settings')) { settings.remote_access_config = params[0]; return { rows: [] }; }
+        return holds.query(sql, params);
+    },
+    release: () => { },
+});
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
 nb.bustNbCaches = () => { };

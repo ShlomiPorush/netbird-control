@@ -208,7 +208,8 @@ export const remoteApi = {
   lease: (id: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, {}),
   end: (id: string) => api.del<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
   config: () => api.get<RemoteAccessConfig>('/api/remote-access/config'),
-  saveConfig: (cfg: Partial<RemoteAccessConfig>) => api.put<{ config: RemoteAccessConfig; sync: { removed: number } | null }>('/api/remote-access/config', cfg),
+  // createResources: only the fields that changed (the server keeps the others as stored).
+  saveConfig: (cfg: Omit<Partial<RemoteAccessConfig>, 'createResources'> & { createResources?: Partial<CreateResourcesConfig> }) => api.put<{ config: RemoteAccessConfig; sync: { removed: number } | null }>('/api/remote-access/config', cfg),
   status: () => api.get<RemoteAccessStatus>('/api/remote-access/status'),
   createdResources: () => api.get<CreatedResources>('/api/remote-access/created-resources'),
   setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
