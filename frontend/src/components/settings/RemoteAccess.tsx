@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
-import { useGroups, useNetworks } from '@/lib/queries';
+import { useAccessProfiles, useGroups, useNetworks } from '@/lib/queries';
 import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type CreatedResourceState, type CreateResourcesConfig, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
 import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
@@ -68,6 +68,7 @@ export function RemoteAccessSettings() {
   const statusQ = useQuery({ queryKey: ['remote-access-status'], queryFn: remoteApi.status, refetchInterval: 30000 });
   const networksQ = useNetworks();
   const groupsQ = useGroups();
+  const profilesQ = useAccessProfiles();
   const createdQ = useQuery({ queryKey: ['remote-access-created'], queryFn: remoteApi.createdResources, refetchInterval: 30000 });
   const [form, setForm] = useState<RemoteAccessConfig | null>(null);
   const [keys, setKeys] = useState<{ address: string; key: string }[]>([]);
@@ -76,10 +77,13 @@ export function RemoteAccessSettings() {
   const [error, setError] = useState('');
   const [setupKey, setSetupKey] = useState<{ kind: 'ip' | 'names'; key: string; expires: string } | null>(null);
   const [keyBusy, setKeyBusy] = useState<'' | 'ip' | 'names'>('');
+  // The section for servers added by links as last loaded or saved: it is sent only when it changed.
+  const [savedCr, setSavedCr] = useState<CreateResourcesConfig | null>(null);
 
   useEffect(() => {
     if (cfgQ.data && !form) {
       setForm(cfgQ.data);
+      setSavedCr(cfgQ.data.createResources || CREATE_DEFAULTS);
       setKeys(Object.entries(cfgQ.data.sshHostKeys || {}).map(([address, key]) => ({ address, key })));
     }
   }, [cfgQ.data, form]);
@@ -89,6 +93,8 @@ export function RemoteAccessSettings() {
   const st = statusQ.data;
   const cr = form.createResources || CREATE_DEFAULTS;
   const setCr = (patch: Partial<CreateResourcesConfig>) => set('createResources', { ...cr, ...patch });
+  const crKey = (c: CreateResourcesConfig) => JSON.stringify([!!c.enabled, c.networkId || '', c.groupId || '', Number(c.max)]);
+  const crChanged = crKey(cr) !== crKey(savedCr || CREATE_DEFAULTS);
   // The network that holds the servers links add follows these settings, and so does its badge.
   const refreshCreated = () => {
     qc.invalidateQueries({ queryKey: ['remote-access-created'] });
@@ -107,9 +113,11 @@ export function RemoteAccessSettings() {
         idleTimeoutMin: Number(form.idleTimeoutMin), maxDurationHours: Number(form.maxDurationHours), holdHours: Number(form.holdHours),
         clipboard: form.clipboard, sshHostKeys,
         rdp: form.rdp, ssh: { ...form.ssh, fontSize: Number(form.ssh.fontSize) },
-        createResources: { enabled: cr.enabled, networkId: cr.networkId, groupId: cr.groupId, max: Number(cr.max) },
+        // Only when that section changed: saving another field never changes it.
+        ...(crChanged ? { createResources: { enabled: cr.enabled, networkId: cr.networkId, groupId: cr.groupId, max: Number(cr.max) } } : {}),
       });
       setForm(r.config);
+      setSavedCr(r.config.createResources || CREATE_DEFAULTS);
       setSaved(r.sync?.removed ? `Saved. NetBird updated: ${r.sync.removed} server(s) taken off the gateways.` : 'Saved.');
       qc.invalidateQueries({ queryKey: ['remote-access-status'] });
       qc.invalidateQueries({ queryKey: ['me'] });
@@ -150,7 +158,9 @@ export function RemoteAccessSettings() {
   const netName = (id: string) => (networksQ.data || []).find((n) => n.id === id)?.name || id;
   const crNetworks = form.networks.map((id) => ({ id, name: netName(id) }));
   const managedIds = new Set(Object.values(form.managed || {}).filter(Boolean));
-  const crGroups = (groupsQ.data || []).filter((g) => g.name !== 'All' && !managedIds.has(g.id)).sort((a, b) => a.name.localeCompare(b.name));
+  // Never a group an Access Profile uses (its group or a source): the server refuses those too.
+  const profileGroupIds = new Set((profilesQ.data || []).flatMap((p) => [p.groupId, ...(p.sources || []).map((s) => s.id)]).filter(Boolean));
+  const crGroups = (groupsQ.data || []).filter((g) => g.name !== 'All' && !managedIds.has(g.id) && !profileGroupIds.has(g.id)).sort((a, b) => a.name.localeCompare(b.name));
   const groupName = (id: string) => (groupsQ.data || []).find((g) => g.id === id)?.name || id;
 
   return (

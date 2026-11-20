@@ -3531,9 +3531,14 @@ app.post('/api/api-keys/:id/revoke', requireAdmin, async (req, res) => {
 });
 
 // Admin: settings, managed NetBird objects, gateway enrollment, status.
-app.get('/api/remote-access/config', requireAdmin, (req, res) => {
+app.get('/api/remote-access/config', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
-    res.json({ ...getRemoteAccessConfig(), ssoEnabled: AUTH_ENABLED, readonly: NETBIRD_READONLY });
+    // The settings for servers added by links as stored (another instance may have changed them).
+    let createResources;
+    try { createResources = (await remoteAccessLib.getStoredCreateSettings()).createResources; } catch {
+        return res.status(503).json({ error: "The Remote Access settings couldn't be read. Try again." });
+    }
+    res.json({ ...getRemoteAccessConfig(), createResources, ssoEnabled: AUTH_ENABLED, readonly: NETBIRD_READONLY });
 });
 app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
@@ -5145,7 +5150,7 @@ async function start() {
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
-            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource,
+            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource, listAccessProfiles,
             isLeader: leaderReady,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).

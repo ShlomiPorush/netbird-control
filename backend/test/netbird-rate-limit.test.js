@@ -292,3 +292,38 @@ test('5xx answers and network errors are not retried', async () => {
     assert.equal(requests.length, 4);
     assert.deepEqual(waits, []);
 });
+
+test('once: a POST answered 429 is not sent again; the 429 is the result and still pauses other calls', async () => {
+    replies = [limited(4), ok({ id: 'p1' }, 201)];
+    const r = await nb.netbirdPost('/api/networks/n1/resources', { name: 'x' }, { once: true });
+    assert.equal(r.status, 429);
+    assert.equal(requests.length, 1, 'sent once');
+    // The shared pause it set holds the next call back.
+    replies = [ok([{ id: 'g1' }])];
+    await nb.netbirdGet('/api/groups');
+    assert.ok(waits.some(ms => ms >= 4000), 'the next call waited out the pause');
+});
+
+test('beforeSend runs after the shared pause is waited out, right before the one send; a throw sends nothing', async () => {
+    // Another call sets a pause first.
+    replies = [limited(3), ok({ id: 'a' })];
+    manual = [];
+    const other = nb.netbirdPost('/api/policies', { name: 'other' });
+    await until(() => manual.length === 1);
+    const order = [];
+    const hooked = nb.netbirdPost('/api/networks/n1/resources', { name: 'x' }, { once: true, beforeSend: async () => { order.push(['hook', clock]); } });
+    // While paused, the hook hasn't run.
+    await new Promise(r => setTimeout(r, 20));
+    assert.deepEqual(order, []);
+    for (let i = 0; i < 10 && manual.length; i++) { manual.shift()(); await new Promise(r => setTimeout(r, 5)); }
+    await other;
+    await hooked;
+    assert.equal(order.length, 1);
+    assert.ok(order[0][1] >= 3000, 'after the pause');
+    const sent = requests.filter(q => q.path === '/api/networks/n1/resources');
+    assert.equal(sent.length, 1);
+    // A hook that throws: nothing is sent.
+    requests = [];
+    await assert.rejects(nb.netbirdPost('/api/networks/n1/resources', { name: 'y' }, { once: true, beforeSend: async () => { throw new Error('revoked'); } }), /revoked/);
+    assert.equal(requests.length, 0);
+});

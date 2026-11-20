@@ -1413,6 +1413,8 @@ export interface TidyNamesPlan {
   excluded: number;
   /** Dropped because two policies of one resource would get the same name. */
   excludedCollisions?: number;
+  /** Policies that name a resource of the network for launch-link resources: never renamed here. */
+  skippedProtected?: { id: string; name: string }[];
 }
 export interface TidyNamesResult { renamed: number; failed: number; errors: { id: string; name: string; error: string }[] }
 

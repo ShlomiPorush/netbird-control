@@ -10,7 +10,17 @@ const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] || null;
 core.setSetting = async (k, v) => { settings[k] = v; };
-const holds = require('./helpers/hold-table').holdTable();
+// The settings write that keeps the stored createResources (a read-only save), on the same settings.
+const holds = require('./helpers/hold-table').holdTable((sql, params) => {
+    if (typeof sql === 'string' && sql.trim().startsWith('INSERT INTO app_settings')) {
+        const next = JSON.parse(params[0]);
+        const cur = settings.remote_access_config ? JSON.parse(settings.remote_access_config) : null;
+        if (cur && cur.createResources !== undefined) next.createResources = cur.createResources;
+        settings.remote_access_config = JSON.stringify(next);
+        return { rows: [{ value: settings.remote_access_config }] };
+    }
+    return { rows: [] };
+});
 core.pool.query = holds.query;
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
@@ -147,7 +157,7 @@ test('a read-only instance never adds or deletes a server for a launch link', as
     assert.deepEqual(writes, []);
 });
 
-test('a save on a read-only instance writes the stored createResources back unchanged', async () => {
+test('a save on a read-only instance never changes the stored createResources', async () => {
     await reset();
     const stored = { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 7 };
     settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], createResources: stored });

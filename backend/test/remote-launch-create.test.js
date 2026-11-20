@@ -27,6 +27,7 @@ const keyRows = new Map();
 let created = [];      // ra_created_resources
 let sessionRows = [];  // remote_sessions
 let blockRows = [];    // address_blocklist
+let profileRows = [];  // access_profiles (id, group_id, policy_id, shared)
 const holdTable = require('./helpers/hold-table').holdTable();
 const clone = (v) => JSON.parse(JSON.stringify(v ?? null));
 const rowOut = (r) => ({ ...r, created_at: new Date(r.created_at), updated_at: new Date(r.updated_at) });
@@ -41,6 +42,17 @@ function dbQuery(sql, params = [], tx = null) {
         return { rows: [], rowCount: 1 };
     }
     if (s.startsWith('SELECT * FROM api_keys WHERE id')) return { rows: keyRows.has(params[0]) ? [clone(keyRows.get(params[0]))] : [] };
+    // app_settings, as the settings stub keeps them.
+    if (/^SELECT value FROM app_settings WHERE key = \$1/.test(s)) return { rows: settings[params[0]] != null ? [{ value: settings[params[0]] }] : [] };
+    if (s.startsWith('INSERT INTO app_settings')) {
+        let value = params[0];
+        if (/jsonb_build_object\('createResources'/.test(s) && settings.remote_access_config) {
+            const cur = JSON.parse(settings.remote_access_config);
+            value = JSON.stringify({ ...JSON.parse(params[0]), createResources: cur.createResources ?? JSON.parse(params[0]).createResources });
+        }
+        settings.remote_access_config = value;
+        return { rows: [{ value }], rowCount: 1 };
+    }
     if (/^SELECT 1 FROM remote_access_targets WHERE resource_id = \$1 AND expires_at > NOW\(\)/.test(s)) {
         const h = holdTable.rows.get(params[0]);
         return { rows: h && new Date(h.expires_at).getTime() > Date.now() ? [{ x: 1 }] : [] };
@@ -50,6 +62,7 @@ function dbQuery(sql, params = [], tx = null) {
     if (s.startsWith('INSERT INTO remote_sessions')) { sessionRows.push({ id: params[0], resource_id: params[8] }); return { rows: [], rowCount: 1 }; }
     if (s.startsWith('DELETE FROM remote_sessions')) { sessionRows = sessionRows.filter(r => r.id !== params[0]); return { rows: [], rowCount: 1 }; }
     if (/^SELECT 1 FROM remote_sessions WHERE resource_id = \$1/.test(s)) return { rows: sessionRows.filter(r => r.resource_id === params[0]).slice(0, 1) };
+    if (/^SELECT group_id, policy_id, shared FROM access_profiles/.test(s)) return { rows: clone(profileRows.filter(r => String(r.id) === String(params[0]))) };
     if (/remote_sessions/.test(s) && !/ra_created_resources/.test(s)) return { rows: [] };
     if (!/ra_created_resources/.test(s)) return { rows: [] };
     // ra_created_resources
@@ -68,6 +81,12 @@ function dbQuery(sql, params = [], tx = null) {
         return { rows: [], rowCount: 1 };
     }
     if (/^SELECT 1 FROM ra_created_resources WHERE resource_id = \$1/.test(s)) return { rows: created.filter(r => r.resource_id === params[0] && params[1].includes(r.state)).slice(0, 1).map(() => ({ '?column?': 1 })) };
+    if (/^SELECT attempt_id, state, expected_address FROM ra_created_resources WHERE network_id = \$1/.test(s)) return { rows: created.filter(r => r.network_id === params[0] && params[1].includes(r.state)).map(rowOut) };
+    if (/^SELECT DISTINCT network_id, group_id FROM ra_created_resources/.test(s)) {
+        const seen = new Map();
+        for (const r of created.filter(x => params[0].includes(x.state))) seen.set(`${r.network_id}|${r.group_id}`, { network_id: r.network_id, group_id: r.group_id });
+        return { rows: [...seen.values()] };
+    }
     if (/^SELECT resource_id FROM ra_created_resources/.test(s)) return { rows: created.filter(r => params[0].includes(r.state) && r.resource_id).map(r => ({ resource_id: r.resource_id })) };
     if (/^SELECT pending_audit FROM ra_created_resources WHERE attempt_id = \$1/.test(s)) return { rows: created.filter(r => r.attempt_id === params[0]).map(r => ({ pending_audit: clone(r.pending_audit) })) };
     if (/^SELECT attempt_id FROM ra_created_resources WHERE pending_audit IS NOT NULL/.test(s)) return { rows: created.filter(r => r.pending_audit).map(r => ({ attempt_id: r.attempt_id })) };
@@ -197,6 +216,7 @@ function get(p) {
     if ((m = /^\/api\/networks\/([^/]+)$/.exec(p))) return clone(w.networks.find(n => n.id === m[1]) || null);
     if ((m = /^\/api\/policies\/([^/]+)$/.exec(p))) return clone(w.policies.find(x => x.id === m[1]) || null);
     if ((m = /^\/api\/groups\/([^/]+)$/.exec(p))) return clone(w.groups.find(x => x.id === m[1]) || null);
+    if ((m = /^\/api\/reverse-proxies\/services\/([^/]+)$/.exec(p))) return clone((w.services || []).find(x => x.id === m[1]) || null);
     return null;
 }
 nb.netbirdGet = async (p) => get(p);
@@ -225,7 +245,11 @@ nb.netbirdReq = async (method, p, body) => {
     }
     return { status: 200, body: {} };
 };
-nb.netbirdPost = async (p, body) => {
+let postOpts = []; // the options each POST got ({ once, beforeSend })
+nb.netbirdPost = async (p, body, opts = {}) => {
+    postOpts.push({ once: !!opts.once, hook: typeof opts.beforeSend === 'function' });
+    // The real helper runs beforeSend right before its one send; a throw sends nothing.
+    if (opts.beforeSend) await opts.beforeSend();
     posts.push([p, clone(body)]);
     const a = postAnswer && postAnswer(body);
     if (a) return a;
@@ -264,9 +288,9 @@ const HOUR = 3_600_000;
 
 test.beforeEach(() => {
     w = world();
-    created = []; sessionRows = []; blockRows = []; holdTable.rows.clear();
+    created = []; sessionRows = []; blockRows = []; profileRows = []; holdTable.rows.clear();
     posts.length = 0; writes.length = 0; reads.length = 0; audits.length = 0;
-    postAnswer = null; deleteAnswer = null; onGet = null; failGets = new Set(); failAuditAction = null; inventoryFails = false; dnsAnswers = {};
+    postAnswer = null; deleteAnswer = null; onGet = null; failGets = new Set(); postOpts = []; failAuditAction = null; inventoryFails = false; dnsAnswers = {};
     delete settings.remote_access_create_pause;
     keyRows.set(7, { id: 7, name: 'Customer File', scopes: SCOPES, revoked_at: null, expires_at: null });
     setConfig();
@@ -816,10 +840,13 @@ test('C3: the guard follows the stored settings, not this instance\'s copy', asy
     await db.createClientResource('n-links', { name: 'x', address: '9.9.3.9', groups: [], policies: [] });
     assert.ok(w.resources.some(r => r.address === '9.9.3.9'));
     assert.equal((await db.getNetworks()).find(n => n.id === 'n-office').managedByLinks, true);
-    // A settings read that fails refuses the write.
-
     settingsFail = true;
-    try { await assert.rejects(db.setResourceEnabled('n-office', 'r-office', false), (e) => e.status === 503); } finally { settingsFail = false; }
+    try {
+        // A settings read that fails: the last known network is still protected, others are not blocked.
+        await assert.rejects(db.setResourceEnabled('n-office', 'r-office', false), managedError);
+        await db.createClientResource('n-links', { name: 'y', address: '9.9.3.8', groups: [], policies: [] });
+        assert.ok(w.resources.some(r => r.address === '9.9.3.8'));
+    } finally { settingsFail = false; }
 });
 
 test('C3: an import or restore never turns creating on, and keeps the stored network while rows exist', async () => {
@@ -888,7 +915,8 @@ test('C8: the key and the settings are checked inside the writer, after the wait
         let release;
         const held = ra.withTargetLock(() => new Promise(r => { release = r; }));
         const p = ra.issueLaunch(KEY, rdp());
-        while (!rowFor(PUBLIC)) await new Promise(r => setImmediate(r));
+        for (let i = 0; i < 2000 && !rowFor(PUBLIC); i++) await new Promise(r => setImmediate(r));
+        assert.ok(rowFor(PUBLIC), 'reserved');
         for (let i = 0; i < 50; i++) await new Promise(r => setImmediate(r)); // the writer is waiting for the lock now
         change();
         release();
@@ -948,4 +976,121 @@ test('C14: the list shows every active row and the latest 50 finished ones', asy
     assert.equal(list.items.filter(i => i.state === 'created').length, 60);
     assert.equal(list.items.filter(i => i.state === 'failed').length, 50);
     assert.equal(list.finishedMore, true);
+});
+
+// ─── Review round 2 ───
+test('C15: a session of this instance (also one still opening) keeps its resource from the delete', async () => {
+    const row = seed('9.9.10.1');
+    ra._internal.addSessionForTest({ id: 'sess-c15', resourceId: row.resource_id, state: 'preparing' });
+    try {
+        await ra.maintainCreatedResources();
+        assert.equal(deletesSent().length, 0);
+        assert.equal(row.state, 'created');
+    } finally { ra._internal.removeSessionForTest('sess-c15'); }
+});
+
+test('C16/C17: the create is sent once with the hook; a 429 is a refusal', async () => {
+    assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true);
+    assert.deepEqual(postOpts[0], { once: true, hook: true });
+    postAnswer = () => ({ status: 429, body: { message: 'too many requests' }, raw: 'too many requests' });
+    await rejects(ra.issueLaunch(KEY, rdp({ address: '9.9.10.2' })), 'RESOURCE_CREATE_FAILED', (e) => e.resourceCreated === undefined);
+    assert.equal(rowFor('9.9.10.2').state, 'failed');
+});
+
+test('C18: the pause is checked right before the send; only a writer save that ran the check clears it', async () => {
+    let release;
+    const held = ra.withTargetLock(() => new Promise(r => { release = r; }));
+    const p = ra.issueLaunch(KEY, rdp());
+    for (let i = 0; i < 2000 && !rowFor(PUBLIC); i++) await new Promise(r => setImmediate(r));
+    for (let i = 0; i < 50; i++) await new Promise(r => setImmediate(r));
+    settings.remote_access_create_pause = JSON.stringify({ reason: 'paused for the test', at: null });
+    release();
+    await held;
+    await rejects(p, 'CREATE_PAUSED');
+    assert.equal(posts.length, 0);
+    assert.equal(rowFor(PUBLIC).state, 'failed');
+    // A save of other fields keeps the pause; a save of the section (the check passes) clears it.
+    await ra.setRemoteAccessConfig({ idleTimeoutMin: 40 }).catch(() => { });
+    assert.ok(await ra.getCreatePause());
+    await ra.setRemoteAccessConfig({ createResources: { ...CFG.createResources } }).catch(() => { });
+    assert.equal(await ra.getCreatePause(), null);
+});
+
+test('open point: a save of other fields keeps the stored section as it is', async () => {
+    const stored = { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 9 };
+    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: stored }));
+    await ra.setRemoteAccessConfig({ idleTimeoutMin: 41 }).catch(() => { });
+    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, stored);
+    assert.equal(JSON.parse(settings.remote_access_config).idleTimeoutMin, 41);
+    assert.deepEqual(ra.getRemoteAccessConfig().createResources, stored);
+});
+
+test('C19/C24: the network or group cannot change while rows are active (counted under the lock)', async () => {
+    seed('9.9.11.1');
+    const before = settings.remote_access_config;
+    await rejects(ra.setRemoteAccessConfig({ createResources: { ...CFG.createResources, groupId: 'g-srv' } }), 'CREATED_RESOURCES_EXIST', (e) => e.status === 409 && e.notSaved);
+    assert.equal(settings.remote_access_config, before);
+    // A launch whose settings changed before its reservation: refused inside the lock, no row.
+    created = [];
+    onGet = (p) => { if (p === '/api/peers') settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { groupId: 'g-srv' } })); };
+    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
+    assert.equal(created.length, 0);
+});
+
+test('C20: an Access Profile group is refused for the section; a profile change may not give a gateway reach to it', async () => {
+    ra.setRemoteAccessDeps({ listAccessProfiles: async () => [{ id: 3, name: 'Linked Profile', groupId: 'g-links', sources: [] }] });
+    try {
+        await rejects(ra.setRemoteAccessConfig({ createResources: { ...CFG.createResources } }), 'INVALID_SETTINGS', (e) => /Linked Profile/.test(e.message));
+    } finally { ra.setRemoteAccessDeps({ listAccessProfiles: async () => [] }); }
+    profileRows = [{ id: 4, group_id: 'g-links', policy_id: 'pol-prof', shared: true }];
+    await assert.rejects(db.updateAccessProfile(4, { name: 'P', sources: ['g-gw'], protocol: 'tcp', ports: ['22'] }), (e) => e.status === 409 && /Browser Gateway reach/.test(e.message));
+    assert.ok(!writes.some(([m, p]) => m === 'PUT' && p === '/api/policies/pol-prof'));
+});
+
+test('C21: a disabled policy gives no reach, so turning one off is allowed', async () => {
+    await db.createPolicy({ name: 'Gateway To Linked', enabled: false, protocol: 'tcp', ports: ['22'], sources: ['g-gw'], destinations: ['g-links'] });
+    w.policies.push({ id: 'pol-on', name: 'On', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-links' }] }] });
+    await db.updatePolicy('pol-on', { name: 'On', enabled: false, preserveRules: true });
+    assert.ok(writes.some(([m, p]) => m === 'PUT' && p === '/api/policies/pol-on'));
+});
+
+test('C23: a stored network that does not exist protects nothing and blocks nothing', async () => {
+    setConfig({ createResources: { networkId: 'n-gone' } });
+    await db.setResourceEnabled('n-office', 'r-office', false);
+    await db.createPolicy({ name: 'p', protocol: 'tcp', ports: ['22'], sources: ['g-crm'], destinationResource: { id: 'r-office', type: 'host' } });
+    assert.ok(!reads.includes('/api/networks/n-gone'), 'the network is never looked up by id');
+});
+
+test('C25: a Reverse Proxy change without targets still checks the targets the service has', async () => {
+    const rid = seed('9.9.12.1', { ageHours: 0 }).resource_id;
+    w.services = [{ id: 'svc1', name: 'App', domain: 'app.example.com', enabled: true, targets: [{ target_type: 'host', target_id: rid, port: 80, protocol: 'http', enabled: true }] }];
+    await assert.rejects(db.updateProxyService('svc1', { name: 'Renamed' }), managedError);
+    assert.ok(!writes.some(([m]) => m === 'PUT'));
+});
+
+test('C26: the admin delete waits while a create for that address or marker is unresolved', async () => {
+    const pending = seed('9.9.13.1', { state: 'unknown', ageHours: 0 });
+    const res = resourceAt('9.9.13.1');
+    // An untracked resource at the same address (no row has its id).
+    await assert.rejects(db.deleteResource('n-links', res.id, { linkAdminDelete: true }), (e) => e.status === 409 && /still finishing/.test(e.message));
+    pending.state = 'failed';
+    await db.deleteResource('n-links', res.id, { linkAdminDelete: true });
+    assert.ok(deletesSent().includes(`/api/networks/n-links/resources/${res.id}`));
+});
+
+test('C27: a restore keeps the feature off and follows the restored rows; rows in two networks are refused', async () => {
+    assert.match(ra.restoredRowsProblem([{ state: 'created', network_id: 'a', group_id: 'g' }, { state: 'kept', network_id: 'b', group_id: 'g' }]), /more than one network/);
+    assert.equal(ra.restoredRowsProblem([{ state: 'created', network_id: 'a', group_id: 'g' }, { state: 'deleted', network_id: 'b', group_id: 'h' }]), '');
+    seed('9.9.14.1');
+    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: true, networkId: 'n-office', groupId: 'g-srv' } }));
+    await ra.alignCreateSettingsAfterRestore();
+    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 50 });
+});
+
+test('C28: Tidy Names skips policies that name a protected resource', async () => {
+    const rid = seed('9.9.15.1', { ageHours: 0 }).resource_id;
+    w.policies.push({ id: 'pol-t', name: 'old name', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-crm' }], destinationResource: { id: rid, type: 'host' } }] });
+    const plan = await db.policyRenamePlan();
+    assert.deepEqual(plan.skippedProtected, [{ id: 'pol-t', name: 'old name' }]);
+    assert.ok(!plan.items.some(i => i.id === 'pol-t'));
 });
