@@ -6839,7 +6839,8 @@ async function createClientResource(networkId, { name, address, description, gro
             sent = netbirdApiConfigured() && !NETBIRD_READONLY;
             return noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body));
         });
-        if (sent && resp && resp.status === 0) throw createOutcomeError('RESOURCE_UNCONFIRMED', CREATE_UNCONFIRMED, resp.error || 'no answer');
+        // No answer, or a 5xx: NetBird can save the resource and then fail building its answer.
+        if (sent && resp && (resp.status === 0 || resp.status >= 500)) throw createOutcomeError('RESOURCE_UNCONFIRMED', CREATE_UNCONFIRMED, resp.error || resp.raw || String(resp.status || 'no answer'));
         if (!nbWriteOk(resp)) {
             throw new Error('Failed to create resource: ' + (resp && (resp.raw || resp.error || resp.status)));
         }
@@ -7855,8 +7856,12 @@ async function diagnoseAddress(peerId, addressRaw, opts = {}) {
         return { target: null, findings, coverage: await coverageNow() };
     }
 
-    add('coverage', 'NetBird Routing', 'FAIL', `${host} is not covered by any NetBird resource or network route - traffic to it does NOT go through NetBird at all (it takes the regular network/internet path). If it should be reachable via NetBird, an admin needs to add it as a resource`);
-    return { target: null, findings, coverage: await coverageNow() };
+    // When the user can add it (coverage.addable), the page offers that; the text doesn't send them to an admin.
+    const coverage = await coverageNow();
+    add('coverage', 'NetBird Routing', 'FAIL', coverage.addable
+        ? `${host} is not covered by any NetBird resource or network route`
+        : `${host} is not covered by any NetBird resource or network route - traffic to it does NOT go through NetBird at all (it takes the regular network/internet path). If it should be reachable via NetBird, an admin needs to add it as a resource`);
+    return { target: null, findings, coverage };
 }
 
 // ── Access Check (Access Management → Access Check) ──

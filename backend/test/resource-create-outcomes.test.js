@@ -102,6 +102,20 @@ test('no answer to the resource write, or a 2xx without an id: RESOURCE_UNCONFIR
     ra._internal.clearSettleTimerForTest();
 });
 
+test('a 5xx answer to the resource write is unconfirmed (it may have been saved); a 4xx is a refusal', async () => {
+    for (const status of [500, 502, 503]) {
+        reset();
+        answers = [{ status, body: { message: 'failed to get groups' }, raw: 'failed to get groups' }];
+        await assert.rejects(create({ policies: [policy('A')] }), (e) => e.code === 'RESOURCE_UNCONFIRMED', String(status));
+        assert.equal(posts.length, 1, 'no policy is sent');
+    }
+    for (const status of [400, 409, 422]) {
+        reset();
+        answers = [{ status, body: { message: 'invalid' }, raw: 'invalid' }];
+        await assert.rejects(create(), (e) => !e.code && /Failed to create resource/.test(e.message), String(status));
+    }
+});
+
 test('a refused resource write is a plain failure, not an unconfirmed one', async () => {
     reset();
     answers = [{ status: 422, body: { message: 'invalid address' }, raw: 'invalid address' }];

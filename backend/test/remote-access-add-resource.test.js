@@ -16,7 +16,8 @@ const crypto = require('crypto');
 const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] || null;
-core.setSetting = async (k, v) => { settings[k] = v; };
+let settingHold = null; // a settings save waits on this while it is set
+core.setSetting = async (k, v) => { if (settingHold) await settingHold; settings[k] = v; };
 core.pool.query = async () => ({ rows: [] });
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
@@ -376,6 +377,52 @@ test('status: what was seen of the names gateway counts only for the same NetBir
     nb._nbApi.token = TOKEN_B; // another connection version
     nbA.status['/api/groups/g-ngw'] = 500;
     assert.equal('namesGateway' in (await ra.getServiceHealth()), false);
+});
+
+test('status: while the NetBird settings are being saved the probe sends nothing, and NetBird is unknown', async () => {
+    healthSetup();
+    let release;
+    settingHold = new Promise((r) => { release = r; });
+    const saving = nb.setNbApiConfig({ url: urlB, token: TOKEN_B });
+    try {
+        const out = await ra.getServiceHealth();
+        assert.equal(out.netbird, 'unknown');
+        assert.equal(nbA.seen.length + nbB.seen.length, 0, 'no request was sent to either URL');
+    } finally { settingHold = null; release(); await saving; }
+    // After the save, a probe runs normally against the new connection.
+    nbB.seen = [];
+    assert.equal((await ra.getServiceHealth()).netbird, 'up');
+    assert.ok(nbB.seen.length > 0 && nbB.seen.every(x => x.auth === `Token ${TOKEN_B}`));
+});
+
+test('status: peer reads that run out of time: a known names gateway is unknown, a gateway with guacd down is down', async () => {
+    healthSetup({ ipPort: closedPort });
+    ra._internal.setHealthDeadlineForTest(300);
+    try {
+        nbA.slow['/api/peers/p-gw'] = 1000;
+        nbA.slow['/api/peers/p-ngw'] = 1000;
+        const out = await ra.getServiceHealth();
+        assert.equal(out.gateway, 'down', 'its guacd is closed, so its slow peers do not matter');
+        assert.equal(out.namesGateway, 'unknown', 'its group showed a peer, so it stays in');
+    } finally { ra._internal.setHealthDeadlineForTest(0); }
+});
+
+test('status: only the latest probe stores its answer (A, B, A)', async () => {
+    healthSetup();
+    let release;
+    nbA.hold = new Promise((r) => { release = r; });
+    const first = ra.getServiceHealth(); // settings A, held
+    while (!nbA.seen.some(x => x.path === '/api/accounts')) await new Promise((r) => setTimeout(r, 5));
+    const cfgA = { enabled: true, guacdHost: '127.0.0.1', guacdPort, namesGuacdHost: '127.0.0.1', namesGuacdPort: guacdPort };
+    ra._internal.setConfigForTest({ ...cfgA, namesGuacdPort: closedPort }); // settings B
+    nbA.hold = null;
+    await ra.getServiceHealth(); // a newer probe, stored for B
+    ra._internal.setConfigForTest(cfgA); // back to A: the same key as the first probe
+    release();
+    await first;
+    const before = nbA.seen.filter(x => x.path === '/api/accounts').length;
+    await ra.getServiceHealth();
+    assert.equal(nbA.seen.filter(x => x.path === '/api/accounts').length, before + 1, 'the older probe did not store its answer');
 });
 
 test('status: clean up', async () => {

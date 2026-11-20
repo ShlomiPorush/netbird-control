@@ -260,7 +260,7 @@ When NetBird's answer is only partly known, the form keeps **Create** off and li
 | What happened | The server answers | The form says |
 |---|---|---|
 | The resource was added, but an access rule was refused or answered without a rule | `RESOURCE_CREATED_POLICY_FAILED`, with the resource id | The resource was added, but its access rules weren't all saved. Open the network to finish them. |
-| NetBird gave no answer, or a success without an id | `RESOURCE_UNCONFIRMED` | NetBird didn't confirm the resource was saved. Check the network before you try again. |
+| NetBird gave no answer, a server error (5xx), or a success without an id | `RESOURCE_UNCONFIRMED` | NetBird didn't confirm the resource was saved. Check the network before you try again. |
 | The browser lost the answer (a network error, or a proxy error page) | - | The same as the row above. |
 
 The first case is audited as `resource.create` with the resource id, the account and
@@ -295,9 +295,11 @@ set up, **Host Name Gateway**, each **Online**, **Offline** or **Unknown**, with
 
 The probe is direct (no retry, no cache, independent of the session checks), runs once at a time and
 is kept for 15 seconds. Each part (NetBird, each gateway) has its own time limit of 9 seconds: a part
-that runs out of time is unknown, the others keep their answers, and no peer read starts after the
-limit. A change of the NetBird connection or the gateway settings starts a new probe. The URL and
-token are always used as one pair, so a token is never sent to another URL. The page asks only when
+that runs out of time is unknown (a gateway whose guacd is known to be down is down), the others keep
+their answers, and no peer read starts after the limit. A change of the NetBird connection or the
+gateway settings starts a new probe, and only the latest probe keeps its answer. The probe reads the
+URL and token in one step and sends nothing while the NetBird connection settings are being saved
+(NetBird then shows as unknown), so it never sends a token to another URL. The page asks only when
 it opens, when a check starts and when the user presses refresh, so the line never keeps an idle
 sign-in alive, and the status request never refreshes the app's copy of the NetBird users and
 peers: it uses the copy as it is.
