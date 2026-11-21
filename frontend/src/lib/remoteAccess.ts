@@ -100,7 +100,7 @@ export interface RemoteAccessConfig {
   /** What guacd accepts, for the settings form. */
   options?: { rdpLayouts: string[]; rdpColorDepths: number[]; sshColorSchemes: string[] };
   managed?: { gatewayGroupId: string; targetGroupId: string; policyId: string; namesGroupId?: string; namesTargetGroupId?: string; namesPolicyId?: string };
-  /** Launch links may add a missing public server as a temporary resource in this network and group. */
+  /** The launch API may create a temporary resource for a missing public server in this network and group. */
   createResources?: CreateResourcesConfig;
   lastApply?: { at: string | null; error: string };
   ssoEnabled?: boolean;
@@ -117,7 +117,7 @@ export interface CreateResourcesConfig {
 
 export type CreatedResourceState = 'creating' | 'unknown' | 'created' | 'deleting' | 'kept' | 'failed' | 'deleted' | 'gone';
 
-/** A server a launch link added as a temporary NetBird resource. */
+/** A temporary NetBird resource the launch API created for a server. */
 export interface CreatedResource {
   id: string;
   /** The IPv4 address. */

@@ -30,7 +30,7 @@ const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
     linkGuardNetworkId, linkResourceTracked, linkResourcePending, writeImportedRemoteAccessConfig, restoreCreatedRowsForcingOff,
-    protectedResourceIds, LINK_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted,
+    protectedResourceIds, API_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted,
 } = require('./lib/remote-access');
 // "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
 const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered, nameCovered: coverageNameCovered } = require('./lib/coverage');
@@ -203,7 +203,7 @@ function resourcePost(apiPath, body, opts) {
 // stays allowed, and so do routing peers. The network is read from the database (the
 // same settings the create path reads), so every instance guards the same network. Main account
 // only. A failed read uses the last-known network (lib/remote-access.js).
-function linkNetworkError() { const e = new Error(LINK_NETWORK_MESSAGE); e.status = 409; e.code = 'NETWORK_MANAGED'; return e; }
+function linkNetworkError() { const e = new Error(API_NETWORK_MESSAGE); e.status = 409; e.code = 'NETWORK_MANAGED'; return e; }
 function linkSettingsError() { const e = new Error("Couldn't read the Remote Access settings - nothing was changed. Try again."); e.status = 503; return e; }
 async function guardedLinkNetwork() {
     if (!raMain()) return '';
@@ -5967,7 +5967,7 @@ async function getNetworks() {
         policies: Array.isArray(n.policies) ? n.policies.length : 0,
         allowDuplicates: dupOk.has(String(n.id)),
         // Holds the resources Remote Access launch links create; the app doesn't change it otherwise.
-        managedByLinks: !!linkNet && linkNet === String(n.id),
+        managedByApi: !!linkNet && linkNet === String(n.id),
     })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -6100,7 +6100,7 @@ async function getNetworkDetail(id) {
         routers: routerList,
         policies: policyList,
         allowDuplicates: (await getDupAllowedNetworkIds()).includes(String(id)),
-        managedByLinks: linkNet,
+        managedByApi: linkNet,
     };
 }
 
@@ -11630,9 +11630,9 @@ async function importAppSettings(payload, actor) {
             }
         }
         if (k === 'remote_access_config') {
-            // An import never turns on adding servers from launch links (that needs a save in
+            // An import never turns on creating resources from the launch API (that needs a save in
             // Settings > Remote Access), and keeps the stored network and group, and that network among the
-            // networks, while servers added by links still exist. The other fields are kept. Written under
+            // networks, while resources created by the API still exist. The other fields are kept. Written under
             // the created-resources configuration lock (lib/remote-access.js).
             if (!(await writeImportedRemoteAccessConfig(v))) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
             importedKeys.push(k);
@@ -11880,7 +11880,7 @@ async function importInternalBackupPayload(payload) {
         if (typeof k !== 'string' || k.length > 100 || typeof v !== 'string') continue;
         if (BACKUP_KEY_SETTINGS.has(k)) continue; // keep this server's own backup keypair (see BACKUP_KEY_SETTINGS)
         if (k === 'remote_access_config') {
-            // A restore never turns on adding servers from launch links either (see importAppSettings).
+            // A restore never turns on creating resources from the launch API either (see importAppSettings).
             if (await writeImportedRemoteAccessConfig(v)) settingsCount++;
             continue;
         }
@@ -11898,7 +11898,7 @@ async function importInternalBackupPayload(payload) {
     }
     // The servers added by launch links, in one transaction under the reservation's lock: the backup's
     // rows are added to the ones tracked now (by attempt id, never replacing them, and only when all
-    // of them are in one network and group), adding servers is turned off (whatever the backup holds),
+    // of them are in one network and group), creating resources is turned off (whatever the backup holds),
     // and the stored network and group follow the rows.
     const m = await restoreCreatedRowsForcingOff(tables && Array.isArray(tables.ra_created_resources) ? tables.ra_created_resources : null);
     if (tables && Array.isArray(tables.ra_created_resources)) tableResults.ra_created_resources = m.added;

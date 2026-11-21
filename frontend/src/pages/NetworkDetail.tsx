@@ -21,7 +21,7 @@ import { SearchInput, Badge, EmptyState, LoadingState, Button, IconButton, Copya
 import { ResourceModal } from '@/components/networks/ResourceModal';
 import { AddFromNetworkModal } from '@/components/settings/Blocklist';
 import { NetworkModal } from '@/components/networks/NetworkModal';
-import { ManagedByLinksBadge } from '@/components/networks/ManagedByLinksBadge';
+import { ManagedByApiBadge } from '@/components/networks/ManagedByApiBadge';
 import { PolicyTable, type PolicyRow } from '@/components/networks/PolicyTable';
 
 type Tab = 'resources' | 'routers' | 'policies';
@@ -40,9 +40,9 @@ export default function NetworkDetail() {
   const canManage = isAdmin || can('networks.manage');
   const [editNet, setEditNet] = useState(false);
   const { data: detail, isLoading } = useNetworkDetail(id);
-  // The network Remote Access links add servers to: readable, but only the app itself changes its
+  // The network the Remote Access API creates resources in: readable, but only the app itself changes its
   // resources (the server refuses other writes). Routing peers and the name stay editable.
-  const linkManaged = !!(detail?.managedByLinks ?? net?.managedByLinks);
+  const linkManaged = !!(detail?.managedByApi ?? net?.managedByApi);
   const canEditResources = canEdit && !linkManaged;
   const canBulk = canManage && !linkManaged;
   const del = useDeleteResource(id);
@@ -209,7 +209,7 @@ export default function NetworkDetail() {
               </span>
             )}
           </div>
-          {linkManaged && <div className="mt-1"><ManagedByLinksBadge /></div>}
+          {linkManaged && <div className="mt-1"><ManagedByApiBadge /></div>}
           {(detail?.description || net?.description) && (
             <p className="mt-0.5 text-sm text-nb-gray-500 dark:text-nb-gray-400 truncate">{detail?.description || net?.description}</p>
           )}
@@ -266,7 +266,7 @@ export default function NetworkDetail() {
             <div>
               <p className="text-[0.95rem] text-nb-gray-500 dark:text-nb-gray-400 mb-5">
                 {linkManaged
-                  ? "Remote Access links add and remove the resources in this network. Only a resource it no longer manages can be deleted here."
+                  ? "The Remote Access API creates and removes the resources in this network. Only a resource it no longer manages can be deleted here."
                   : 'Add resources to this network to control what peers can access.'}
               </p>
 
@@ -855,7 +855,7 @@ function ResourceRow({ r, canEdit, canDelete, canSelect, selected, onToggle, onE
             <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
           </div>
         )}
-        {/* A server links added that Remote Access no longer manages: delete only. */}
+        {/* A resource the API created that Remote Access no longer manages: delete only. */}
         {!canEdit && canDelete && (
           <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
         )}

@@ -1,16 +1,18 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { KeyRound, Plus, TriangleAlert } from 'lucide-react';
+import { BookOpen, ExternalLink, KeyRound, Plus, TriangleAlert } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { apiKeysApi, type ApiKey } from '@/lib/remoteAccess';
 import { formatTimestamp } from '@/lib/logfmt';
+import { docsUrl } from '@/lib/docs';
+import { useVersion } from '@/lib/queries';
 import { useConfirm } from '@/contexts/ConfirmContext';
 import { Badge, Button, Checkbox, CopyButton, EmptyState, Field, Input, LoadingState, Modal, Textarea } from '@/components/ui';
 
 // Settings -> API Keys: keys other systems use to call the public API (/api/v1). A key is shown
 // once when it is created; only its first characters are kept for telling keys apart.
 
-const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remote Sessions', 'remote-access:create-resource': 'Add Missing Servers' };
+const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remote Sessions', 'remote-access:create-resource': 'Create Missing Resources' };
 // A new key starts with these permissions only; the others are chosen on purpose.
 const DEFAULT_SCOPES = ['remote-access:launch'];
 
@@ -49,6 +51,7 @@ export function ApiKeys() {
   // A sign-in that ends while the new key is on screen takes the page to the sign-in like
   // anywhere else: the key is then lost (create another, and revoke the lost one in the list).
   const list = useQuery({ queryKey: ['api-keys'], queryFn: apiKeysApi.list });
+  const version = useVersion().data;
 
   const create = useMutation({
     mutationFn: (d: Draft) => apiKeysApi.create({ name: d.name.trim(), scopes: d.scopes, allowedIps: d.allowedIps, expiresAt: expiryToSend(d) }),
@@ -84,6 +87,10 @@ export function ApiKeys() {
 
   return (
     <div className="max-w-3xl">
+      <a href={docsUrl(version, 'docs/api.md')} target="_blank" rel="noopener noreferrer"
+        className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-netbird hover:underline">
+        <BookOpen size={15} /> API Documentation <ExternalLink size={13} />
+      </a>
       <p className="text-nb-gray-500 text-sm mb-5">
         Keys let another system, such as the customer file, call the NetBird Control API. Each key can do only what its permissions allow.
         Creating and revoking a key, and every connection link a key makes or that is opened, are recorded in the audit log.

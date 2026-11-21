@@ -506,7 +506,7 @@ function seed(ip, { state = 'created', ageHours = 11, resource = true, extra = {
     const attempt = crypto.randomUUID();
     const row = {
         attempt_id: attempt, account: '', ip, name: '', network_id: 'n-links', group_id: 'g-links', key_id: 7, state, resource_id: '',
-        expected_name: ip, expected_address: `${ip}/32`, expected_description: `Created by a Remote Access link (${attempt})`, reason: '',
+        expected_name: ip, expected_address: `${ip}/32`, expected_description: `Created by the Remote Access API (${attempt})`, reason: '',
         created_at: Date.now() - ageHours * HOUR, updated_at: Date.now() - ageHours * HOUR,
     };
     if (resource) {
@@ -565,7 +565,7 @@ test('deletion: only once the hold has ended, no session uses it, and it is olde
     assert.ok(w.policies.some(p => p.id === 'pol-crm'));
     const del = audits.find(a => a.action === 'resource.delete' && a.meta.resourceId === rid);
     assert.equal(del.actor, 'Remote Access');
-    assert.equal(del.meta.reason, 'created by a launch link, hold ended');
+    assert.equal(del.meta.reason, 'created by the launch API, hold ended');
 });
 
 test('a created resource that changed, or that a policy uses, is kept; one already gone is marked gone', async () => {
@@ -630,7 +630,7 @@ test('only the leader deletes; a read-only instance or a tenant context never ru
 });
 
 // ─── The gateway check ───
-test('the network for created resources cannot change while servers added by links are still in it', async () => {
+test('the network for created resources cannot change while resources created by the API are still in it', async () => {
     seed('9.9.3.1');
     await rejects(ra.setRemoteAccessConfig({ ...CFG, createResources: { ...CFG.createResources, networkId: 'n-office' } }), 'CREATED_RESOURCES_EXIST', (e) => e.notSaved && e.status === 409);
     assert.equal(ra.getRemoteAccessConfig().createResources.networkId, 'n-links');
@@ -663,8 +663,8 @@ test('every app write to the network for created resources is refused, before an
     for (const [i, call] of calls.entries()) await assert.rejects(call(), managedError, `call ${i}`);
     assert.equal(sent(), 0, 'nothing was written');
     // Reading stays allowed, and the network is labelled.
-    assert.equal((await db.getNetworks()).find(n => n.id === 'n-links').managedByLinks, true);
-    assert.equal((await db.getNetworks()).find(n => n.id === 'n-office').managedByLinks, false);
+    assert.equal((await db.getNetworks()).find(n => n.id === 'n-links').managedByApi, true);
+    assert.equal((await db.getNetworks()).find(n => n.id === 'n-office').managedByApi, false);
     // A policy to another resource is fine.
     await db.createPolicy({ name: 'p', protocol: 'tcp', ports: ['22'], sources: ['g-crm'], destinationResource: { id: 'r-office', type: 'host' } });
     assert.equal(posts.length, 1);
@@ -785,7 +785,7 @@ test('C3: the guard follows the stored settings, not this instance\'s copy', asy
     await assert.rejects(db.setResourceEnabled('n-office', 'r-office', false), managedError);
     await db.createClientResource('n-links', { name: 'x', address: '9.9.3.9', groups: [], policies: [] });
     assert.ok(w.resources.some(r => r.address === '9.9.3.9'));
-    assert.equal((await db.getNetworks()).find(n => n.id === 'n-office').managedByLinks, true);
+    assert.equal((await db.getNetworks()).find(n => n.id === 'n-office').managedByApi, true);
     settingsFail = true;
     try {
         // A settings read that fails: the last known network is still protected, others are not blocked.
@@ -1010,7 +1010,7 @@ test('C34: a restore adds the backup rows by attempt id and never removes the cu
     settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: true } }));
     const out = await ra.restoreCreatedRowsForcingOff([{ ...current, created_at: new Date().toISOString(), state: 'deleted' }, restored]);
     assert.deepEqual(out, { added: 1, message: '' });
-    // In the same transaction: adding servers is off, and the network and group are the rows'.
+    // In the same transaction: creating resources is off, and the network and group are the rows'.
     assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 50 });
     assert.equal(rowFor('9.9.17.1').state, 'created', 'the current row is kept as it is');
     assert.ok(rowFor('9.9.17.2'));

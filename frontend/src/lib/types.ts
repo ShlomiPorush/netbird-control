@@ -1323,7 +1323,7 @@ export interface Network {
   /** Per-network opt-out of the duplicate/overlapping-address guard. */
   allowDuplicates?: boolean;
   /** Holds the resources Remote Access launch links create; only the app itself changes its resources. */
-  managedByLinks?: boolean;
+  managedByApi?: boolean;
 }
 
 export interface ResourcePolicy {
@@ -1439,7 +1439,7 @@ export interface NetworkDetail {
   routers: Router[];
   policies: Policy[];
   allowDuplicates?: boolean;
-  managedByLinks?: boolean;
+  managedByApi?: boolean;
 }
 
 export interface PolicyOptions {

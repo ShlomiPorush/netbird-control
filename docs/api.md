@@ -86,10 +86,10 @@ Every error is JSON with a message for people and a stable code for programs:
 | 413 | `TOO_LARGE` | The body is over 64 KB. |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | The body is not sent as JSON. |
 | 429 | `TOO_MANY_FAILURES`, or no code | Too many failed attempts from this address (only a failed attempt gets this), or too many calls with this key. |
-| 403 | `CREATE_DISABLED` | `createResource: true`, but adding servers is turned off (or this instance is read-only). |
+| 403 | `CREATE_DISABLED` | `createResource: true`, but creating resources is turned off (or this instance is read-only). |
 | 403 | `ADDRESS_NOT_PUBLIC`, `NAME_NOT_PUBLIC`, `ADDRESS_BLOCKED` | `createResource: true` for an address that isn't public, a name with an answer that isn't public, or an address or name on the blocklist. Nothing was created. |
 | 403 | `NAME_NOT_FOUND` | The host name has no IPv4 address in the DNS. |
-| 409 | `CREATE_LIMIT` | Too many servers added by links still exist (Settings > Remote Access sets the maximum). |
+| 409 | `CREATE_LIMIT` | Too many resources created by the API still exist (Settings > Remote Access sets the maximum). |
 | 409 | `CREATE_IN_PROGRESS` | Another request is adding or removing this server right now. Try again in a minute. |
 | 502 | `RESOURCE_CREATE_FAILED` | NetBird refused the new resource (also when it answered "too many requests"; the create is sent once). Nothing was created. |
 | 502, 503 | `CREATE_UNCONFIRMED` | NetBird didn't confirm the new resource (502, with `resourceCreated`), or an earlier request for this server is still unconfirmed (503). Try again in a few minutes. |
@@ -117,7 +117,7 @@ browser.
 | `domain` | string | no | RDP only. Up to 256 characters. A domain inside `username` (`CORP\admin`) works too. |
 | `privateKey` | string | no | SSH only. An OpenSSH or PEM private key, up to 16384 characters. |
 | `passphrase` | string | no | SSH only. The private key's passphrase. |
-| `createResource` | boolean | no | `true`: add the server as a temporary NetBird resource when NetBird has none for it. Needs the `remote-access:create-resource` scope. Default `false`. Any other type is refused with `400 INVALID_FIELD`. See [Adding a missing server](#adding-a-missing-server-createresource). |
+| `createResource` | boolean | no | `true`: add the server as a temporary NetBird resource when NetBird has none for it. Needs the `remote-access:create-resource` scope. Default `false`. Any other type is refused with `400 INVALID_FIELD`. See [Adding a missing server](#creating-a-missing-resource-createresource). |
 
 **With `user`:** the app finds the one NetBird user with that email address (letter case doesn't
 matter) and checks now that this user may reach the target, with the same rules as the **Remote
@@ -162,11 +162,11 @@ curl -sS https://control.example.com/api/v1/remote-access/launch \
 	-d '{"user":"tech@example.com","protocol":"rdp","address":"10.0.0.5","port":3389,"username":"admin","password":"..."}'
 ```
 
-### Adding a missing server (`createResource`)
+### Creating a missing resource (`createResource`)
 
 With `"createResource": true`, and a key with the `remote-access:create-resource` scope, the app adds
 a server that NetBird has no resource for, so the person can connect without waiting for an
-administrator. An admin turns this on in **Settings > Remote Access > Resources Created By Links**
+administrator. An admin turns this on in **Settings > Remote Access > Resources Created By The API**
 and chooses the network and the group the new resources go into. The app never creates or changes a
 policy: an admin's policy to that group (for example *CRM users -> that group*) decides who reaches
 the new servers.
@@ -180,8 +180,8 @@ checks, in this order, and stops at the first refusal:
    the request goes on exactly as without `createResource`, whatever the settings below say and
    whether or not the address is public. An integration can send `createResource: true` on every
    launch: private servers that already have a resource keep working. When NetBird or the DNS can't
-   be read and adding servers is off, the request also goes on as without `createResource`.
-2. Adding servers is on and the instance is not read-only (`CREATE_DISABLED`). The app reads these settings from the database on every request, so turning
+   be read and creating resources is off, the request also goes on as without `createResource`.
+2. Creating resources is on and the instance is not read-only (`CREATE_DISABLED`). The app reads these settings from the database on every request, so turning
    the feature off stops it on every instance at once.
 3. The target is public. An IPv4 address must not be in the IANA IPv4 Special-Purpose Address
    Registry (every entry), multicast, or be a Browser Gateway's own address (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
@@ -189,7 +189,7 @@ checks, in this order, and stops at the first refusal:
    `NAME_NOT_FOUND`. Neither the address nor the name may be on the blocklist (`ADDRESS_BLOCKED`;
    names compare without regard to letter case, a trailing dot or international spelling).
 4. With `user`: the user exists, only once, and is not blocked.
-5. Fewer than the maximum servers added by links exist (`CREATE_LIMIT`), and no other request is
+5. Fewer than the maximum resources created by the API exist (`CREATE_LIMIT`), and no other request is
    adding the same address.
 6. Right before the one send (inside the resource writer, after its own checks, its wait for the
    lock and any wait for NetBird's rate limit), the key is checked again (`401 KEY_REVOKED`), and so
@@ -231,7 +231,7 @@ The new resources are temporary. Once their **Keep Opened Servers Available For*
 by default) has passed since they were created and no session holds them, the app deletes them (the
 resource only; the group and its policies stay). A resource that someone changed, or that a policy
 names directly, is kept and left to an admin. See
-[Browser remote access](remote-access.md#servers-added-by-launch-links).
+[Browser remote access](remote-access.md#resources-created-by-the-launch-api).
 
 The audit log records `resource.create_intent` before the write, then `resource.create`,
 `resource.create_unconfirmed` or `resource.create_failed`, and later `resource.delete` or

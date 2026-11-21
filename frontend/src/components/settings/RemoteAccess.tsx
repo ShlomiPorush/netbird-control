@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ExternalLink, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
-import { useGroups, useNetworks } from '@/lib/queries';
+import { docsUrl } from '@/lib/docs';
+import { useGroups, useNetworks, useVersion } from '@/lib/queries';
 import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type CreatedResourceState, type CreateResourcesConfig, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
 import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
@@ -28,7 +29,7 @@ const RDP_EFFECTS: { key: 'fontSmoothing' | 'wallpaper' | 'theming' | 'fullWindo
   { key: 'menuAnimations', label: 'Menu Animations', hint: 'Menus fade and slide.' },
 ];
 
-// Servers added by launch links: each state in plain words, and its text color.
+// Resources created by the launch API: each state in plain words, and its text color.
 const CREATED_STATES: Record<CreatedResourceState, { label: string; tone: string }> = {
   creating: { label: 'Creating', tone: 'text-nb-gray-500' },
   unknown: { label: 'Unconfirmed', tone: 'text-amber-600 dark:text-amber-400' },
@@ -68,6 +69,7 @@ export function RemoteAccessSettings() {
   const statusQ = useQuery({ queryKey: ['remote-access-status'], queryFn: remoteApi.status, refetchInterval: 30000 });
   const networksQ = useNetworks();
   const groupsQ = useGroups();
+  const version = useVersion().data;
   const createdQ = useQuery({ queryKey: ['remote-access-created'], queryFn: remoteApi.createdResources, refetchInterval: 30000 });
   const [form, setForm] = useState<RemoteAccessConfig | null>(null);
   const [keys, setKeys] = useState<{ address: string; key: string }[]>([]);
@@ -76,7 +78,7 @@ export function RemoteAccessSettings() {
   const [error, setError] = useState('');
   const [setupKey, setSetupKey] = useState<{ kind: 'ip' | 'names'; key: string; expires: string } | null>(null);
   const [keyBusy, setKeyBusy] = useState<'' | 'ip' | 'names'>('');
-  // The section for servers added by links as last loaded or saved: it is sent only when it changed.
+  // The section for resources created by the API as last loaded or saved: it is sent only when it changed.
   const [savedCr, setSavedCr] = useState<CreateResourcesConfig | null>(null);
 
   useEffect(() => {
@@ -107,7 +109,7 @@ export function RemoteAccessSettings() {
     const now = { enabled: cr.enabled, networkId: cr.networkId, groupId: cr.groupId, max: Number(cr.max) };
     return Object.fromEntries(Object.entries(now).filter(([k, v]) => v !== base[k as keyof CreateResourcesConfig]));
   };
-  // The network that holds the servers links add follows these settings, and so does its badge.
+  // The network that holds the resources the API creates follows these settings, and so does its badge.
   const refreshCreated = () => {
     qc.invalidateQueries({ queryKey: ['remote-access-created'] });
     qc.invalidateQueries({ queryKey: ['networks'] });
@@ -163,7 +165,7 @@ export function RemoteAccessSettings() {
 
   const toggleNetwork = (id: string) => set('networks', form.networks.includes(id) ? form.networks.filter((n) => n !== id) : [...form.networks, id]);
 
-  // Servers added by links: the network is one of those open to the gateway; the group is any
+  // Resources created by the API: the network is one of those open to the gateway; the group is any
   // group but All and the groups this page manages. A saved choice that no longer fits stays
   // visible in its select, so the server's refusal explains it instead of a silent change.
   const created = createdQ.data;
@@ -179,7 +181,7 @@ export function RemoteAccessSettings() {
       <p className="text-nb-gray-500 text-sm">
         Let users open RDP and SSH sessions from the browser through the Browser Gateway - NetBird peers next to this app.
         Each session is checked against the user's own NetBird access. The gateways reach only servers in the networks you pick here,
-        once someone has opened a session to them, unless one of your NetBird policies lets them reach more. Servers added by links are
+        once someone has opened a session to them, unless one of your NetBird policies lets them reach more. Resources created by the API are
         public, so the app doesn't check that for their group.
         The IP gateway serves IPv4 addresses. The names gateway, which is optional, serves host names of NetBird domain resources.
       </p>
@@ -385,22 +387,26 @@ export function RemoteAccessSettings() {
         </div>
       </Field>
 
-      {/* Servers added by launch links */}
+      {/* Resources created by the launch API */}
       <div className={`${box} flex flex-col gap-4`}>
         <div>
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Resources Created By Links</div>
+          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Resources Created By The API</div>
           <div className="text-[0.8rem] text-nb-gray-500">
-            A link from another system can add a public server that NetBird has no resource for. It joins the group below, where an admin
+            A launch request through the API can create a resource for a public server that NetBird has none for. It joins the group below, where an admin
             policy decides who can reach it, and it is removed after the hold time once nobody uses it.
           </div>
+          <a href={docsUrl(version, 'docs/api.md#creating-a-missing-resource-createresource')} target="_blank" rel="noopener noreferrer"
+            className="mt-1 inline-flex items-center gap-1 text-[0.8rem] font-medium text-netbird hover:underline">
+            API Documentation <ExternalLink size={12} />
+          </a>
         </div>
         {crReadonly && <div className="text-[0.8rem] text-nb-gray-500">This instance is read-only, so these settings can't be changed here.</div>}
 
         <label className={`${toggleCard} ${crReadonly ? 'cursor-default! opacity-70' : ''}`}>
           <input type="checkbox" className="mt-1 accent-netbird" checked={cr.enabled} disabled={crReadonly} onChange={(e) => setCr({ enabled: e.target.checked })} />
           <div>
-            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Add Missing Servers From Links</div>
-            <div className="text-[0.8rem] text-nb-gray-500">Off by default. The link's API key also needs the Add Missing Servers permission (Settings → API Keys).</div>
+            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Create Missing Resources From The API</div>
+            <div className="text-[0.8rem] text-nb-gray-500">Off by default. The API key also needs the Create Missing Resources permission (Settings → API Keys).</div>
           </div>
         </label>
 
@@ -414,7 +420,7 @@ export function RemoteAccessSettings() {
               )}
             </Select>
           </Field>
-          <Field label="Group" hint="Added servers join this group. Give it an admin policy in NetBird to decide who can reach them.">
+          <Field label="Group" hint="Created resources join this group. Give it an admin policy in NetBird to decide who can reach them.">
             <Select value={cr.groupId} disabled={crReadonly} onChange={(e) => setCr({ groupId: e.target.value })}>
               <option value="">{groupsQ.isLoading ? 'Loading Groups…' : 'Choose A Group'}</option>
               {crGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
@@ -423,13 +429,13 @@ export function RemoteAccessSettings() {
               )}
             </Select>
           </Field>
-          <Field label="Maximum Active Created Resources" hint="1 to 500. Links add no more servers while this many exist.">
+          <Field label="Maximum Active Created Resources" hint="1 to 500. The API creates no more resources while this many exist.">
             <Input inputMode="numeric" value={String(cr.max)} disabled={crReadonly} onChange={(e) => setCr({ max: Number(e.target.value.replace(/\D/g, '')) || 0 })} />
           </Field>
         </div>
 
         <div className="border-t border-nb-gray-200 dark:border-nb-gray-800 pt-3">
-          <div className="text-[0.75rem] font-semibold uppercase tracking-wide text-nb-gray-500 mb-1">Servers Added By Links</div>
+          <div className="text-[0.75rem] font-semibold uppercase tracking-wide text-nb-gray-500 mb-1">Created Resources</div>
           {createdQ.isLoading ? <div className="text-[0.8rem] text-nb-gray-500 py-1.5">Loading…</div>
             : !created ? <div className="text-sm text-red-500 py-1.5">The list could not be loaded.</div>
               : created.items.length === 0 ? <div className="text-[0.8rem] text-nb-gray-500 py-1.5">None right now.</div>

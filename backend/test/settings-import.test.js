@@ -28,7 +28,7 @@ core.pool.query = async (sql, params = []) => {
     return { rows: [] };
 };
 // The created-resources configuration lock's transaction (lib/remote-access.js): its statements on
-// the same store; no servers added by links exist here.
+// the same store; no resources created by the API exist here.
 core.pool.connect = async () => ({
     query: async (sql, params = []) => {
         const s = String(sql).trim();
@@ -145,7 +145,7 @@ test('a tenant Telegram config drops the file secret and must be an object', asy
     assert.deepEqual(skippedKeys(r), ['telegram_config:t1']);
 });
 
-test('an import never turns on adding servers from launch links; the other fields are kept', async () => {
+test('an import never turns on creating resources from the launch API; the other fields are kept', async () => {
     await seed();
     const cfg = { enabled: false, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g1', max: 20 } };
     const r = await importAppSettings({ settings: { remote_access_config: JSON.stringify(cfg) } });

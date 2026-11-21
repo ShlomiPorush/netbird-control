@@ -574,10 +574,10 @@ that the real end time is unknown.
 | guacd Address / Port | `remote-gateway` / 4822 | The IP gateway's guacd as the app reaches it. |
 | Names guacd Address / Port | `remote-names-gateway` / 4822 | The names gateway's guacd as the app reaches it. |
 | SSH Host Keys | None | Per IPv4 address or host name; enforced when present. |
-| Resources Created By Links: Turn On | Off | Lets launch links add a missing public server (see [Servers added by launch links](#servers-added-by-launch-links)). Turn it on only after every instance runs this version. |
-| Resources Created By Links: Network | None | One of the networks selected above. It holds only the servers that links add, and the app changes it no other way. |
-| Resources Created By Links: Group | None | An existing group, not *All* and not a Browser Gateway group. Your policy to this group decides who reaches the servers. |
-| Maximum Active Created Resources | 50 | 1 to 500. Servers added by links that still exist (or may). |
+| Resources Created By The API: Turn On | Off | Lets the launch API create a resource for a missing public server (see [Resources created by the launch API](#resources-created-by-the-launch-api)). Turn it on only after every instance runs this version. |
+| Resources Created By The API: Network | None | One of the networks selected above. It holds only the resources the API creates, and the app changes it no other way. |
+| Resources Created By The API: Group | None | An existing group, not *All* and not a Browser Gateway group. Your policy to this group decides who reaches the servers. |
+| Maximum Active Created Resources | 50 | 1 to 500. Resources created by the API that still exist (or may). |
 
 The gateways' NetBird object ids are account-specific, so they are not part of the settings
 export.
@@ -592,16 +592,16 @@ for a manual connection. When the request names a user by email, only that user 
 When it names nobody, the first signed-in user whose access allows the target gets the session.
 See the [public API reference](api.md) and the [integration guide](remote-launch-integration.md).
 
-## Servers added by launch links
+## Resources created by the launch API
 
 A launch request may ask the app to add a server that NetBird has no resource for
 (`"createResource": true`, with the API key scope `remote-access:create-resource`), so the person
 can connect without waiting for an administrator. The
-[public API reference](api.md#adding-a-missing-server-createresource) describes the request and the
+[public API reference](api.md#creating-a-missing-resource-createresource) describes the request and the
 answers.
 
 **Access stays with NetBird.** The new resources go into one group that you choose in
-**Settings > Remote Access > Resources Created By Links**, in one network that you choose there.
+**Settings > Remote Access > Resources Created By The API**, in one network that you choose there.
 You make one policy for that group, for example *CRM users -> Linked Servers*, and it decides who
 reaches the servers. The app never creates a policy or grants access. A resource that a request
 added stays when the link is then refused (for example, the user has no access); the answer says so
@@ -626,8 +626,8 @@ can't take the last place below the maximum, or create the same address, at the 
 create is sent once: NetBird's "too many requests" (429) is a refusal, never sent again. Right
 before that send, after the writer's own checks, under the same lock as every resource write and
 after any wait for NetBird's rate limit, the key and these settings are checked again: when the key
-was revoked or adding servers was turned off meanwhile, nothing is sent. The resource's description
-holds the request's id (`Created by a Remote Access link (<id>)`). When NetBird doesn't answer
+was revoked or creating resources was turned off meanwhile, nothing is sent. The resource's description
+holds the request's id (`Created by the Remote Access API (<id>)`). When NetBird doesn't answer
 clearly, the row is *unconfirmed*: the next sync adopts a resource that carries that id only when it
 is exactly as asked (name, address, description, enabled, group), and marks one that isn't *kept*.
 An administrator's resource at the same address is never adopted. With no such resource after 10
@@ -649,21 +649,21 @@ resource when all of these hold:
 Only the resource is deleted (`DELETE /api/networks/{network}/resources/{id}`), with one request
 that is never sent again after a 429 (the next sync tries again): its group and the policies to the
 group stay. The audit log records `resource.delete` by *Remote Access*, with the reason *created by
-a launch link, hold ended*. A delete without a clear answer is read again by the next sync. A
+the launch API, hold ended*. A delete without a clear answer is read again by the next sync. A
 resource that someone changed, that a policy names, or that NetBird refused to delete is marked
 *kept* (recorded once as `resource.kept`) and never deleted by the app. At most 20 resources are
-deleted per sync. Any instance may add servers for a launch link; only the leader recovers and
+deleted per sync. Any instance may create resources for a launch link; only the leader recovers and
 deletes them. A read-only instance does neither.
 
 **The network is managed by the app.** Every other write of the app to the resources of that
-network is refused with "This network holds resources created by Remote Access links; it is managed
+network is refused with "This network holds resources created by the Remote Access API; it is managed
 automatically.": adding, editing, enabling or disabling, deleting, moving or merging them, deleting
 the network, using them as a Reverse Proxy target (also when a service change keeps its targets),
 and adding them, or the network, to temporary grants or access requests. This includes automations
 and the blocklist's enforcement. Policies, Access Profiles and Tidy Names work as everywhere else;
 a resource that a policy names is kept instead of deleted. Routing peers of the network stay
-editable. Reading stays possible, and the Networks page shows the network as **Managed By Remote
-Access Links**.
+editable. Reading stays possible, and the Networks page shows the network as **Managed By The Remote
+Access API**.
 
 One exception: an administrator may delete (never change) a resource there that the app no longer
 manages, a *kept* or *gone* one or one the app never created, with the delete button on the
@@ -672,9 +672,9 @@ refuses because a policy still uses it, the page shows NetBird's answer; delete 
 policy first. When NetBird doesn't confirm the delete (no answer or a server error), the
 resource counts as still there and the page says so. While a create for that address is still unresolved (or the resource carries the
 marker of a row that isn't finished), the delete waits until the next sync has resolved it. Choose a
-network that holds nothing else. Neither the network nor the group can be changed while servers
-added by links still exist, and the networks open to the gateway must keep that network while
-adding servers is on or such servers exist (`409 NETWORK_IN_USE`).
+network that holds nothing else. Neither the network nor the group can be changed while resources
+created by the API still exist, and the networks open to the gateway must keep that network while
+creating resources is on or such resources exist (`409 NETWORK_IN_USE`).
 
 **One lock for the configuration.** A database lock (the one a launch's reservation takes) is held,
 briefly and never across a NetBird call, by every save of these settings, a launch's reservation
@@ -684,26 +684,26 @@ refused with `409 SETTINGS_CHANGED` (try again). A save of this section changes 
 sends; the others stay as stored.
 
 **The settings are read from the database** each time, not from the instance's memory: by the
-create path, the sync, the guard and this page. Turning **Turn On** off on one instance stops adding
-servers on every instance at once (the deletion of servers already added goes on), and every
+create path, the sync, the guard and this page. Turning **Turn On** off on one instance stops creating
+resources on every instance at once (the deletion of servers already added goes on), and every
 instance guards the same network. The guard compares ids only: a stored network that doesn't exist
 in NetBird protects nothing and blocks nothing. When the settings can't be read (a short time
 limit), the guard uses the last network it knew, so other writes go on. The page sends this section
 only when it changed; a save of other fields, and any save on a read-only instance, leaves the
 stored section as it is.
 
-**Settings import and backups.** A settings import or a backup restore never turns adding servers
-on: the imported `createResources.enabled` is set to off, and while servers added by links still
+**Settings import and backups.** A settings import or a backup restore never turns creating resources
+on: the imported `createResources.enabled` is set to off, and while resources created by the API still
 exist, the stored network and group stay, and so does that network among the networks open to the
 gateway. The other fields are kept. Turn it on with a save on this page. The internal (encrypted)
 backup carries the `ra_created_resources` table; the plaintext settings export doesn't. A restore
 never removes the rows tracked now: in one transaction under the lock, it adds the backup's rows
-that aren't there yet, turns adding servers off (also when the backup has no Remote Access
+that aren't there yet, turns creating resources off (also when the backup has no Remote Access
 settings), and sets the stored network and group to those of the rows, opening that network to the
 gateway when it isn't yet. When the rows would then be
 in more than one network or group, nothing is added and the restore says so.
 
-**The list.** Settings > Remote Access lists every server added by links that still exists (or may),
+**The list.** Settings > Remote Access lists every resource created by the API that still exists (or may),
 and the latest 50 finished entries (failed, removed, gone), with a note when older ones were left
 out.
 
@@ -716,6 +716,6 @@ network is managed and would let its pages change it.
   by that create or delete. The next sync reads the resource again and keeps one that changed.
 - **A delete and a session start on two instances at the same moment.** The session fails and the
   user connects again.
-- **A Browser Gateway that reaches the group** through a policy of its own reaches every server added
-  by links, not only the ones a session opened. They are public servers, so this exposes nothing
+- **A Browser Gateway that reaches the group** through a policy of its own reaches every resource created
+  by the API, not only the ones a session opened. They are public servers, so this exposes nothing
   that isn't public already; the app doesn't check for it.

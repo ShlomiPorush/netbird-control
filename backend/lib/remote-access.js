@@ -686,7 +686,7 @@ async function setRemoteAccessConfig(input) {
     }
     const cr = next.createResources;
     // Under the configuration lock: the stored section is still the one checked, the network or
-    // group changes only while no server added by links exists, and the networks open to the
+    // group changes only while no resource created by the API exists, and the networks open to the
     // gateway keep the network for created resources while it is on or in use. Then the write.
     try {
         await withCreateConfigLock(async (client, now) => {
@@ -698,7 +698,7 @@ async function setRemoteAccessConfig(input) {
                 throw httpError(409, 'CREATED_RESOURCES_EXIST', `${inUse} server${inUse === 1 ? '' : 's'} added by links ${inUse === 1 ? 'is' : 'are'} still in the current network and group. Keep them until ${inUse === 1 ? 'it is' : 'they are'} removed.`);
             }
             if (cr.networkId && !next.networks.includes(cr.networkId) && (cr.enabled || inUse)) {
-                throw httpError(409, 'NETWORK_IN_USE', 'The network for servers added by links must stay open to the gateway while adding servers is on or such servers still exist. Turn adding servers off, or keep that network selected.');
+                throw httpError(409, 'NETWORK_IN_USE', 'The network for resources created by the API must stay open to the gateway while creating resources is on or such resources still exist. Turn creating resources off, or keep that network selected.');
             }
             await client.query(CONFIG_UPSERT, [JSON.stringify(next)]);
         });
@@ -719,7 +719,7 @@ async function setRemoteAccessConfig(input) {
 // Background reconcile (the leader, every 10 minutes): the target groups keep only what the rule
 // allows, and expired holds go. It runs while browser access is off too (the policies stay
 // disabled), so the groups drain; with no managed objects at all there is nothing to do.
-// After it, the resources created by launch links are checked (see maintainCreatedResources).
+// After it, the resources created by the launch API are checked (see maintainCreatedResources).
 async function reconcileRemoteAccess() {
     if (!netbirdApiConfigured() || NETBIRD_READONLY) return;
     let failed = null;
@@ -1009,7 +1009,7 @@ const MESSAGES = {
     ADDRESS_NOT_PUBLIC: "Only a public IPv4 address can be added from a link. Ask an administrator to add this server as a resource.",
     NAME_NOT_PUBLIC: "This host name points to an address that isn't public, so it can't be added from a link. Ask an administrator to add this server as a resource.",
     ADDRESS_BLOCKED: "This address is on the blocklist, so it can't be added from a link.",
-    CREATE_LIMIT: 'Too many servers added from links are still in place. Try again later, or ask an administrator to raise the limit.',
+    CREATE_LIMIT: 'Too many resources created by the API are still in place. Try again later, or ask an administrator to raise the limit.',
     CREATE_UNCONFIRMED: "NetBird didn't confirm that the server was added. Try again in a few minutes.",
     CREATE_IN_PROGRESS: 'This server is being added or removed right now. Try again in a minute.',
     RESOURCE_CREATE_FAILED: "NetBird didn't add the server, so no link was made. Try again later.",
@@ -2266,7 +2266,7 @@ async function issueLaunchChecked(key, body) {
     // createResource: a strict boolean, and only with its own scope (checked before anything else).
     const wantCreate = body ? body.createResource : undefined;
     if (wantCreate !== undefined && typeof wantCreate !== 'boolean') throw httpError(400, 'INVALID_FIELD', '"createResource" must be true or false.');
-    if (wantCreate && !keyHasScope(key, CREATE_SCOPE)) throw httpError(403, 'SCOPE_MISSING', 'This API key has no permission to add servers.');
+    if (wantCreate && !keyHasScope(key, CREATE_SCOPE)) throw httpError(403, 'SCOPE_MISSING', 'This API key has no permission to create resources.');
     if (!remoteAccessAvailable()) throw httpError(403, 'DISABLED', 'Browser remote access is turned off.');
     // The port exactly as sent: an integer, or a string of digits ("3389.5" or "3389x" is refused).
     const rawPort = body && body.port;
@@ -2386,7 +2386,7 @@ async function redeemLaunch(viewer, body, clientIp) {
     return { ...out, protocol: entry.protocol, port: entry.port, serverCredentials: true };
 }
 
-// ─── Resources created by launch links ───
+// ─── Resources created by the launch API ───
 // A launch request with createResource: true (and the key scope for it) adds a server that NetBird
 // has no resource for, so the user can connect without an administrator. Only public IPv4
 // addresses: a host name is looked up here and used only when every answer is public, and the
@@ -2415,8 +2415,8 @@ const CREATE_RECOVER_MS = 10 * 60_000;
 const CREATE_DELETE_BATCH = 20;
 const REMOTE_ACCESS_ACTOR = { actorId: '', actorEmail: '', actorName: 'Remote Access' };
 const SYSTEM_ACTOR = { actorId: '', actorEmail: '', actorName: 'System' };
-const DELETE_REASON = 'created by a launch link, hold ended';
-const LINK_NETWORK_MESSAGE = 'This network holds resources created by Remote Access links; it is managed automatically.';
+const DELETE_REASON = 'created by the launch API, hold ended';
+const API_NETWORK_MESSAGE = 'This network holds resources created by the Remote Access API; it is managed automatically.';
 // Set while this code itself writes to the managed network (never from a request body).
 const _createCtx = new AsyncLocalStorage();
 
@@ -2486,12 +2486,12 @@ function restoredRowsProblem(rows) {
     const nets = new Set(listed.map(x => String(x.network_id || '')));
     const groups = new Set(listed.map(x => String(x.group_id || '')));
     return nets.size > 1 || groups.size > 1
-        ? 'The backup lists servers added by links in another network or group than the ones tracked now, so they were not restored. The current list was kept.' : '';
+        ? 'The backup lists resources created by the API in another network or group than the ones tracked now, so they were not restored. The current list was kept.' : '';
 }
 // A backup restore, in one transaction under the configuration lock: the backup's rows (`rows`, or
 // null for none) are added to the ones tracked now by attempt id, never replacing them, and only
 // when all of them would be in one network and group (else nothing is added and the message says
-// why); adding servers from links is turned off, and the stored network and group become those of
+// why); creating resources from the API is turned off, and the stored network and group become those of
 // the rows.
 const RESTORE_COLUMNS = ['attempt_id', 'ip', 'name', 'network_id', 'group_id', 'key_id', 'state', 'resource_id',
     'expected_name', 'expected_address', 'expected_description', 'reason', 'created_at', 'updated_at', 'pending_audit'];
@@ -2605,7 +2605,7 @@ async function storedConfigVia(client) {
     try { raw = JSON.parse((sv && sv.rows && sv.rows[0] && sv.rows[0].value) || 'null'); } catch { raw = null; }
     return { raw: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}, cfg: normConfig(raw) };
 }
-// The servers added by links that still exist in NetBird (or may): active and kept rows. What keeps
+// The resources created by the API that still exist in NetBird (or may): active and kept rows. What keeps
 // the network and group in use (the creation limit counts active rows only).
 async function countInUseVia(client) {
     const cnt = await client.query('SELECT COUNT(*)::int AS n FROM ra_created_resources WHERE state = ANY($1)', [CREATE_LISTED]);
@@ -2635,7 +2635,7 @@ const sameCreate = (a, b) => JSON.stringify([a.enabled, a.networkId, a.groupId, 
 const changedMeanwhile = () => httpError(409, 'SETTINGS_CHANGED', 'The Remote Access settings changed a moment ago. Try again.');
 
 // remote_access_config from a settings import or a backup restore, written under the lock: adding
-// servers from links is never turned on there, and while servers added by links still exist, the
+// resources from the API is never turned on there, and while resources created by the API still exist, the
 // stored network and group stay, and so does that network among the networks open to the gateway.
 // Returns false for a value that isn't a settings object.
 async function writeImportedRemoteAccessConfig(value) {
@@ -2664,10 +2664,10 @@ async function validateCreateSettings(next) {
 function checkCreateSettings(next) {
     const c = next.createResources;
     const refuse = (message) => { throw httpError(400, 'INVALID_SETTINGS', message); };
-    // Turning adding servers off is always allowed: none of the checks below apply then.
+    // Turning creating resources off is always allowed: none of the checks below apply then.
     if (!c.enabled) return;
-    if (!c.networkId) refuse('Choose the network for servers added by links.');
-    if (!c.groupId) refuse('Choose the group for servers added by links.');
+    if (!c.networkId) refuse('Choose the network for resources created by the API.');
+    if (!c.groupId) refuse('Choose the group for resources created by the API.');
     if (isRemoteAccessManagedGroup(c.groupId, '')) refuse('This group is managed by Browser Remote Access. Choose another group.');
     if (!netbirdApiConfigured()) refuse('Connect the NetBird API first (Settings > NetBird API).');
     // A network that isn't open to the gateway is refused under the lock (409 NETWORK_IN_USE).
@@ -2855,7 +2855,7 @@ async function createForLaunch(key, address, email) {
 
     // 5. Reserve it.
     const attemptId = crypto.randomUUID();
-    const expected = { name: name ? `${name} (${ip})` : ip, address: `${ip}/32`, description: `Created by a Remote Access link (${attemptId})` };
+    const expected = { name: name ? `${name} (${ip})` : ip, address: `${ip}/32`, description: `Created by the Remote Access API (${attemptId})` };
     const reserved = await reserveCreate(key, { attemptId, ip, name, networkId: cc.networkId, groupId: cc.groupId, expected });
     if (reserved.existing) {
         // Another request added it a moment ago: connect to it.
@@ -2863,7 +2863,7 @@ async function createForLaunch(key, address, email) {
     }
     if (typeof _deps.createClientResource !== 'function') {
         await settleCreated(attemptId, 'failed', { reason: 'Not available.', from: 'creating' });
-        throw httpError(503, 'UNAVAILABLE', "Remote Access can't add servers right now. Try again.");
+        throw httpError(503, 'UNAVAILABLE', "Remote Access can't create resources right now. Try again.");
     }
 
     // 6. Right before the write, inside the writer (after its reads, under the target lock): the
@@ -2881,7 +2881,7 @@ async function createForLaunch(key, address, email) {
         }
         if (!valid) throw refusal(httpError(401, 'KEY_REVOKED', 'This API key was revoked, expired or lost a permission, so no server was added.'), 'The API key was revoked or lost a permission.');
         if (!createUsable(still) || still.createResources.networkId !== cc.networkId || still.createResources.groupId !== cc.groupId) {
-            throw refusal(httpError(403, 'CREATE_DISABLED'), 'Adding servers from links was turned off or changed.');
+            throw refusal(httpError(403, 'CREATE_DISABLED'), 'Creating resources from the API was turned off or changed.');
         }
     };
 
@@ -3065,7 +3065,7 @@ async function deleteCreatedLocked(row, policies) {
     return 'kept';
 }
 
-// Settings > Remote Access: every server added by links that still exists (or may), the latest
+// Settings > Remote Access: every resource created by the API that still exists (or may), the latest
 // finished ones (finishedMore: older finished ones were left out).
 async function listCreatedResources() {
     const cols = 'attempt_id, ip, name, resource_id, state, reason, expected_name, created_at, updated_at';
@@ -3088,7 +3088,7 @@ async function listCreatedResources() {
 
 module.exports = {
     issueLaunch, redeemLaunch,
-    linkGuardNetworkId, linkResourceTracked, linkResourcePending, writeImportedRemoteAccessConfig, restoredRowsProblem, restoreCreatedRowsForcingOff, protectedResourceIds, getStoredCreateSettings: readCreateSettings, LINK_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted, listCreatedResources, maintainCreatedResources, CREATE_SCOPE,
+    linkGuardNetworkId, linkResourceTracked, linkResourcePending, writeImportedRemoteAccessConfig, restoredRowsProblem, restoreCreatedRowsForcingOff, protectedResourceIds, getStoredCreateSettings: readCreateSettings, API_NETWORK_MESSAGE, trackedCreatedResourceIds, noteCreatedResourceDeleted, listCreatedResources, maintainCreatedResources, CREATE_SCOPE,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
     withTargetLock, noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, beginStartupSettling, enforceManagedMembership,

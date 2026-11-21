@@ -23,7 +23,7 @@ const holds = require('./helpers/hold-table').holdTable((sql, params) => {
 });
 core.pool.query = holds.query;
 // The created-resources configuration lock's transaction (lib/remote-access.js), on the same
-// settings; no servers added by links exist here.
+// settings; no resources created by the API exist here.
 core.pool.connect = async () => ({
     query: async (sql, params = []) => {
         const s = String(sql).trim();

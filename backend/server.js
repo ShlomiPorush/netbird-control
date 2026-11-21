@@ -3529,7 +3529,7 @@ app.post('/api/api-keys/:id/revoke', requireAdmin, async (req, res) => {
 // Admin: settings, managed NetBird objects, gateway enrollment, status.
 app.get('/api/remote-access/config', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
-    // The settings for servers added by links as stored (another instance may have changed them).
+    // The settings for resources created by the API as stored (another instance may have changed them).
     let createResources;
     try { createResources = (await remoteAccessLib.getStoredCreateSettings()).createResources; } catch {
         return res.status(503).json({ error: "The Remote Access settings couldn't be read. Try again." });
@@ -3548,7 +3548,7 @@ app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
         });
         res.json(out);
     } catch (e) {
-        // Refused before anything was saved (the settings for servers added by links): the reason.
+        // Refused before anything was saved (the settings for resources created by the API): the reason.
         if (e.notSaved) return res.status(e.status || 400).json({ error: e.message, code: e.code, notSaved: true });
         // The settings are saved even when NetBird could not be updated; the error says what failed.
         // A change that was saved is audited all the same, with the error.
@@ -3567,14 +3567,14 @@ app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
     try { res.json(await getRemoteAccessStatus()); }
     catch (e) { sendRemoteError(res, e); }
 });
-// The servers that launch links added (Settings > Remote Access).
+// The resources the launch API created (Settings > Remote Access).
 app.get('/api/remote-access/created-resources', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     res.set('Cache-Control', 'no-store');
     try { res.json(await remoteAccessLib.listCreatedResources()); }
     catch (e) {
         console.error('[remote-access] created resources:', e.message);
-        res.status(500).json({ error: "The servers added by links couldn't be listed. Try again." });
+        res.status(500).json({ error: "The resources created by the API couldn't be listed. Try again." });
     }
 });
 app.post('/api/remote-access/setup-key', requireAdmin, async (req, res) => {

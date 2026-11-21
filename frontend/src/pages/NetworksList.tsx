@@ -12,7 +12,7 @@ import {
   SearchInput, Badge, Button, EmptyState, LoadingState, Table, THead, Th, SortTh, TBody, Tr, Td, PageHeader, Pagination, RowMenu, MenuItem,
 } from '@/components/ui';
 import { NetworkModal } from '@/components/networks/NetworkModal';
-import { ManagedByLinksBadge } from '@/components/networks/ManagedByLinksBadge';
+import { ManagedByApiBadge } from '@/components/networks/ManagedByApiBadge';
 import { ToolbarMenu } from '@/components/logs/toolbar';
 import { ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
 import { Rows3 } from 'lucide-react';
@@ -143,7 +143,7 @@ export default function NetworksList() {
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="text-sm text-nb-gray-800 dark:text-nb-gray-200 truncate">{n.name || n.id}</span>
-                            {n.managedByLinks && <ManagedByLinksBadge className="shrink-0" />}
+                            {n.managedByApi && <ManagedByApiBadge className="shrink-0" />}
                             {(conflictsByNet.get(n.id) || 0) > 0 && (
                               <span title={`${conflictsByNet.get(n.id)} address conflict${conflictsByNet.get(n.id) === 1 ? '' : 's'} - duplicate resources with overlapping users. Open the network to fix.`}
                                 className="inline-flex items-center gap-1 rounded-md border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400 shrink-0">
@@ -158,8 +158,8 @@ export default function NetworksList() {
                     <Td onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-2">
                         {n.resources ? <Badge tone="gray" icon={<Layers size={12} />}>{n.resources}</Badge> : null}
-                        {n.canEdit && !n.managedByLinks && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
-                        {!n.resources && !(n.canEdit && !n.managedByLinks) && <span className="text-nb-gray-500 text-sm">-</span>}
+                        {n.canEdit && !n.managedByApi && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
+                        {!n.resources && !(n.canEdit && !n.managedByApi) && <span className="text-nb-gray-500 text-sm">-</span>}
                       </div>
                     </Td>
                     <Td>
@@ -178,7 +178,7 @@ export default function NetworksList() {
                       </div>
                     </Td>
                     <Td className="text-right" onClick={(e) => e.stopPropagation()}>
-                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage ? () => setEditingNet(n) : undefined} onDelete={canManage && !n.managedByLinks ? () => onDelete(n) : undefined} />
+                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage ? () => setEditingNet(n) : undefined} onDelete={canManage && !n.managedByApi ? () => onDelete(n) : undefined} />
                     </Td>
                   </Tr>
                 );
@@ -204,11 +204,11 @@ export default function NetworksList() {
                       {n.description && <div className="text-[0.8rem] text-nb-gray-500 line-clamp-2">{n.description}</div>}
                     </div>
                     <div className="shrink-0 -mt-1 -mr-1" onClick={(e) => e.stopPropagation()}>
-                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage ? () => setEditingNet(n) : undefined} onDelete={canManage && !n.managedByLinks ? () => onDelete(n) : undefined} />
+                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage ? () => setEditingNet(n) : undefined} onDelete={canManage && !n.managedByApi ? () => onDelete(n) : undefined} />
                     </div>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                    {n.managedByLinks && <ManagedByLinksBadge />}
+                    {n.managedByApi && <ManagedByApiBadge />}
                     {(conflictsByNet.get(n.id) || 0) > 0 && (
                       <span className="inline-flex items-center gap-1 rounded-md border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">
                         <AlertTriangle size={11} /> Address Conflict
@@ -222,8 +222,8 @@ export default function NetworksList() {
                         {n.canEdit && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-sm text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
                       </span>
                     )}
-                    {n.canEdit && !n.managedByLinks && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
-                    {!n.resources && !n.policies && !active && !n.canEdit && !n.managedByLinks && <span className="text-nb-gray-500 text-sm">-</span>}
+                    {n.canEdit && !n.managedByApi && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
+                    {!n.resources && !n.policies && !active && !n.canEdit && !n.managedByApi && <span className="text-nb-gray-500 text-sm">-</span>}
                   </div>
                 </div>
               );
