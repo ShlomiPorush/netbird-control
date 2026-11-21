@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { KeyRound, Plus, TriangleAlert } from 'lucide-react';
+import { BookOpen, ExternalLink, KeyRound, Plus, TriangleAlert } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { apiKeysApi, type ApiKey } from '@/lib/remoteAccess';
 import { formatTimestamp } from '@/lib/logfmt';
@@ -84,6 +84,11 @@ export function ApiKeys() {
 
   return (
     <div className="max-w-3xl">
+      {/* The app's own API reference (Swagger UI, admin only); its first section is the public API. */}
+      <a href="/api/docs" target="_blank" rel="noopener noreferrer"
+        className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-netbird hover:underline">
+        <BookOpen size={15} /> API Documentation <ExternalLink size={13} />
+      </a>
       <p className="text-nb-gray-500 text-sm mb-5">
         Keys let another system, such as the customer file, call the NetBird Control API. Each key can do only what its permissions allow.
         Creating and revoking a key, and every connection link a key makes or that is opened, are recorded in the audit log.

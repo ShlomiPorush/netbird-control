@@ -202,6 +202,105 @@ function tagFor(p) {
     return TAG_BY_SEGMENT[m[1]] || (m[1].charAt(0).toUpperCase() + m[1].slice(1));
 }
 
+// The public API (/api/v1) is a separate router, so the introspection above can't see it. It is
+// written out here, with its full contract, because other systems are built against it.
+const PUBLIC_TAG = 'Public API (v1)';
+const errorBody = (extra = {}) => ({
+    type: 'object', required: ['error'],
+    properties: {
+        error: { type: 'string', description: 'A message for people.' },
+        code: { type: 'string', description: 'A stable code for programs.' },
+        ...extra,
+    },
+});
+const errorResponse = (description, extra) => ({ description, content: { 'application/json': { schema: errorBody(extra) } } });
+const resourceCreatedField = {
+    resourceCreated: {
+        oneOf: [{ type: 'boolean', enum: [true] }, { type: 'string', enum: ['unknown'] }],
+        description: 'Only with `createResource: true`, on an error answered after the new resource was sent to NetBird: `true` when it was created, `"unknown"` when NetBird didn\'t answer clearly. The resource stays either way.',
+    },
+};
+
+const PUBLIC_PATHS = {
+    '/api/v1/remote-access/launch': {
+        post: {
+            tags: [PUBLIC_TAG],
+            summary: 'Make a one-time link that opens a browser RDP or SSH session',
+            description: [
+                'Scope: `remote-access:launch`. The credentials stay on this server: they are not in the link and never reach the browser.',
+                '',
+                '**With `user`:** the app finds the one NetBird user with that email address and checks now that this user may reach the target. Only that user can open the link. **Without `user`:** whoever opens the link first gets the session, if their own access allows the target.',
+                '',
+                'The person who opens the link signs in with SSO and needs the Browser Remote Access permission. The link works once, expires after five minutes, and stops working when the key is revoked or expires.',
+                '',
+                '**`createResource: true`** (also needs the `remote-access:create-resource` scope, and **Settings > Remote Access > Resources Created By The API** turned on): when NetBird has no resource for the target, the app creates a temporary host resource for it in the network and group chosen there. Only public IPv4 addresses, or a host name whose every IPv4 answer is public; never an address or name on the blocklist. When NetBird already covers the target, nothing is created and the request goes on as without `createResource`. The app never creates a policy: an admin policy to that group decides who reaches the resource. The resource is deleted after the hold time once no session uses it.',
+                '',
+                'Limits: 30 calls a minute per key, 300 a minute per client address. The body is JSON, up to 64 KB.',
+            ].join('\n'),
+            security: [{ bearerAuth: [] }],
+            requestBody: {
+                required: true,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            required: ['protocol', 'address', 'port'],
+                            properties: {
+                                protocol: { type: 'string', enum: ['rdp', 'ssh'] },
+                                address: { type: 'string', description: 'An IPv4 address or a host name, as on the Remote Access page.', example: '203.0.113.10' },
+                                port: { type: 'integer', minimum: 1, maximum: 65535, example: 3389 },
+                                user: { type: 'string', format: 'email', description: 'The email address of the person who will open the link.' },
+                                username: { type: 'string', maxLength: 256, description: 'The user name on the target server. Required for SSH.' },
+                                password: { type: 'string', maxLength: 1024 },
+                                domain: { type: 'string', maxLength: 256, description: 'RDP only. A domain inside `username` (`CORP\\admin`) works too.' },
+                                privateKey: { type: 'string', maxLength: 16384, description: 'SSH only. An OpenSSH or PEM private key.' },
+                                passphrase: { type: 'string', description: 'SSH only. The private key\'s passphrase.' },
+                                createResource: { type: 'boolean', default: false, description: 'Create a temporary NetBird resource when NetBird has none for the target. Needs the `remote-access:create-resource` scope. Any other type than a boolean is refused (`400 INVALID_FIELD`).' },
+                            },
+                        },
+                        example: { user: 'tech@example.com', protocol: 'rdp', address: '203.0.113.10', port: 3389, username: 'admin', password: '...', createResource: true },
+                    },
+                },
+            },
+            responses: {
+                201: {
+                    description: 'The link. Send the user\'s browser to `url`.',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object', required: ['url', 'expiresAt'],
+                                properties: {
+                                    url: { type: 'string', format: 'uri' },
+                                    expiresAt: { type: 'string', format: 'date-time' },
+                                    resource: {
+                                        type: 'object', description: 'Only with `createResource: true`.',
+                                        required: ['created', 'address'],
+                                        properties: {
+                                            created: { type: 'boolean', description: '`true` only when this request created the resource. `false`: NetBird already had one.' },
+                                            id: { type: 'string', description: 'The NetBird resource id, when the app knows it.' },
+                                            address: { type: 'string', description: 'The IPv4 address the session connects to.' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                400: errorResponse('A field is missing or wrong, or the body is not valid JSON: `BAD_JSON`, `INVALID_PROTOCOL`, `INVALID_ADDRESS`, `INVALID_PORT`, `INVALID_FIELD`, `INVALID_USER`, `USERNAME_REQUIRED`.'),
+                401: errorResponse('The key is missing or can\'t be used: `MISSING_KEY`, `INVALID_KEY`, `KEY_REVOKED`, `KEY_EXPIRED`.'),
+                403: errorResponse('Refused: `IP_NOT_ALLOWED`, `SCOPE_MISSING`, `DISABLED`, `NO_SSO`, `USER_BLOCKED`, `NO_ACCESS` and the other access codes, or with `createResource`: `CREATE_DISABLED`, `ADDRESS_NOT_PUBLIC`, `NAME_NOT_PUBLIC`, `ADDRESS_BLOCKED`, `NAME_NOT_FOUND`.', resourceCreatedField),
+                404: errorResponse('`USER_NOT_FOUND`: no NetBird user has this email address.'),
+                409: errorResponse('`USER_AMBIGUOUS`, or with `createResource`: `CREATE_LIMIT` (too many resources created by the API still exist), `CREATE_IN_PROGRESS` (another request is creating or removing a resource for this server; try again in a minute).'),
+                413: errorResponse('`TOO_LARGE`: the body is over 64 KB.'),
+                415: errorResponse('`UNSUPPORTED_MEDIA_TYPE`: the body is not sent as JSON.'),
+                429: errorResponse('Too many calls with this key or from this address (no code), or `TOO_MANY_FAILURES` after repeated failed attempts from this address.'),
+                502: errorResponse('With `createResource`: `RESOURCE_CREATE_FAILED` (NetBird refused the new resource; nothing was created) or `CREATE_UNCONFIRMED` (NetBird didn\'t confirm it).', resourceCreatedField),
+                503: errorResponse('Try again shortly: `BUSY`, `SNAPSHOT_FAILED`, `AUDIT_FAILED`, `UNAVAILABLE`, `NAME_LOOKUP_FAILED`, `TARGETS_SETTLING`, or `CREATE_UNCONFIRMED` (an earlier request for this server is still unconfirmed).', resourceCreatedField),
+            },
+        },
+    },
+};
+
 const toOapiPath = (p) => p.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
 const pathParams = (p) => (p.match(/:([A-Za-z0-9_]+)/g) || []).map((s) => s.slice(1));
 
@@ -248,6 +347,8 @@ function buildOpenApiSpec(app, { version = '' } = {}) {
         }
     }
 
+    Object.assign(paths, PUBLIC_PATHS);
+
     return {
         openapi: '3.0.3',
         info: {
@@ -259,12 +360,15 @@ function buildOpenApiSpec(app, { version = '' } = {}) {
                 '**Auth:** when SSO is enabled, every endpoint requires a logged-in session (the `appSession` cookie set by Azure AD / OIDC login). Endpoints marked 🔒 **Admin only** additionally require admin (NetBird owner/admin role, or membership in `ADMIN_GROUP_ID`). With SSO disabled the app is fully open.',
                 '',
                 'Since this UI runs on the same origin, **Try it out** reuses your current session automatically.',
+                '',
+                `**${PUBLIC_TAG}:** the versioned API for other systems, under \`/api/v1\`. It doesn't use the session: send an API key from **Settings > API Keys** as \`Authorization: Bearer nbc_...\` (the **Authorize** button). Every error is JSON with \`error\` (a message for people) and \`code\` (a stable code for programs). The other routes are the app's own and can change between releases.`,
             ].join('\n'),
         },
         servers: [{ url: '/', description: 'This server' }],
-        tags: [...tags].sort().map((name) => ({ name })),
+        tags: [PUBLIC_TAG, ...[...tags].sort()].map((name) => ({ name })),
         components: {
             securitySchemes: {
+                bearerAuth: { type: 'http', scheme: 'bearer', description: 'An API key from Settings > API Keys (nbc_...).' },
                 cookieAuth: { type: 'apiKey', in: 'cookie', name: 'appSession', description: 'Session cookie set by SSO login (express-openid-connect).' },
             },
         },

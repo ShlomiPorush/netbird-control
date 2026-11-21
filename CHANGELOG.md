@@ -11,6 +11,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Added
+- **The public API in the app's API reference.** The interactive reference at `/api/docs` (admins
+  only) now lists `POST /api/v1/remote-access/launch` first, with every field (`createResource`
+  included), the API key sign-in (**Authorize**) and the answers and error codes. **Settings > API
+  Keys** links to it (**API Documentation**).
 - **The launch API can create a missing resource.** A launch request with `"createResource": true` and the
   new API key permission **Create Missing Resources** (`remote-access:create-resource`) adds a public
   server that NetBird has no resource for, as a temporary host resource in the network and group

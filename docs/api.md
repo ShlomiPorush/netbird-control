@@ -4,6 +4,8 @@ NetBird Control has a versioned API for other systems under `/api/v1`. It is sep
 `/api` routes the app's own pages use, which can change between releases.
 
 For a step-by-step integration, see [Open remote sessions from another system](remote-launch-integration.md).
+Admins can also read this API in the app: **Settings → API Keys → API Documentation** opens the
+interactive reference (`/api/docs`), where **Public API (v1)** comes first and **Authorize** takes a key.
 
 ## API keys
 

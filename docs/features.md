@@ -110,7 +110,7 @@ The production backend serves the prebuilt single-page app from a single origin 
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/docs` | **Interactive API reference (Swagger UI)** - every endpoint, grouped by area, with “Try it out” |
+| `GET` | `/api/docs` | **Interactive API reference (Swagger UI)** - every endpoint, grouped by area, with “Try it out”; the public API (`/api/v1`) first, with its fields, API key sign-in and error codes. Linked from Settings → API Keys |
 | `GET` | `/api/docs/openapi.json` | The raw OpenAPI 3 spec (for Postman / codegen) |
 | `POST` | `/api/webhook` (or `/api/webhook/t/:tenantId`) | Receive a NetBird event; the optional `/t/<id>` path routes it into a managed tenant's account (per-account bearer-auth) |
 | `GET`/`PUT` | `/api/traffic-pull` | 🔒 The current account's Traffic Events API pull - opt-in flag plus last-run status |
