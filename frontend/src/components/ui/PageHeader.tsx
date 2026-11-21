@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import { IconTile } from './IconTile';
 
 /** Orange inline link with optional external-link icon (NetBird InlineLink). */
 export function InlineLink({ to, href, children }: { to?: string; href?: string; children: ReactNode }) {
@@ -34,17 +35,38 @@ export function Breadcrumbs({ items }: { items: Crumb[] }) {
   );
 }
 
-/** Consistent page header: breadcrumb + h1 title + description. */
-export function PageHeader({ breadcrumb, title, description, className }: {
-  breadcrumb?: Crumb[]; title: ReactNode; description?: ReactNode; className?: string;
+/** The one page title style (pages that draw their own h1 use the same classes). */
+const PAGE_TITLE = 'text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50';
+
+/** Consistent page header: breadcrumb + h1 title + description, with an optional icon tile
+ *  beside the title and optional actions (on the right; under the title on narrow screens). */
+export function PageHeader({ breadcrumb, title, description, icon, actions, className }: {
+  breadcrumb?: Crumb[]; title: ReactNode; description?: ReactNode; icon?: ReactNode; actions?: ReactNode; className?: string;
 }) {
-  return (
-    <div className={cn('mb-6', className)}>
-      {breadcrumb && <Breadcrumbs items={breadcrumb} />}
-      <h1 className="text-2xl font-medium text-nb-gray-800 dark:text-nb-gray-100">{title}</h1>
+  const text = (
+    <>
+      <h1 className={PAGE_TITLE}>{title}</h1>
       {description && (
         <p className="mt-1 text-base flex flex-wrap items-center gap-x-1.5 text-nb-gray-500 dark:text-nb-gray-400">{description}</p>
       )}
+    </>
+  );
+  // Without an icon or actions the title and description sit directly in the header, as before.
+  const heading = icon ? (
+    <div className="flex min-w-0 items-start gap-3.5">
+      <IconTile icon={icon} className="mt-0.5" />
+      <div className="min-w-0">{text}</div>
+    </div>
+  ) : actions ? <div className="min-w-0">{text}</div> : text;
+  return (
+    <div className={cn('mb-6', className)}>
+      {breadcrumb && <Breadcrumbs items={breadcrumb} />}
+      {actions ? (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          {heading}
+          <div className="flex flex-wrap gap-2 sm:max-w-[60%] sm:shrink-0 sm:justify-end sm:pt-1">{actions}</div>
+        </div>
+      ) : heading}
     </div>
   );
 }

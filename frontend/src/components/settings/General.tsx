@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppConfig, useProxyDomains } from '@/lib/queries';
 import { useSaveAppConfig } from '@/lib/mutations';
 import { formatTimeWith, DATE_FORMATS } from '@/lib/logfmt';
-import { Button, LoadingState, Input, SelectMenu, Field } from '@/components/ui';
+import { Button, Card, LoadingState, Input, SelectMenu, Field } from '@/components/ui';
 
 // Full IANA timezone list (modern browsers/Node 18+); falls back to a small curated
 // list on older engines. '' = the browser's local zone.
@@ -108,7 +108,7 @@ export function General() {
     <div className="max-w-xl">
       <p className="text-nb-gray-500 text-sm mb-5">The application name and how log times are displayed across the app.</p>
       {isLoading ? <LoadingState /> : (
-        <div className="flex flex-col gap-4">
+        <Card className="flex flex-col gap-4 p-5 sm:p-6">
           <Field label="Application Name">
             <Input
               value={name}
@@ -201,7 +201,7 @@ export function General() {
             {saved && <span className="text-sm text-green-600 dark:text-green-500">Saved</span>}
             {save.isError && <span className="text-sm text-red-500">Failed to save</span>}
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );

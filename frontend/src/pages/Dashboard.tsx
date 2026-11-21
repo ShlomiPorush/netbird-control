@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   MonitorSmartphone, Users as UsersIcon, Network as NetworkIcon, Shield, Inbox, Clock,
-  AlertTriangle, Workflow, KeyRound, CheckCircle2, ChevronRight, Layers3, Activity as ActivityIcon, X,
+  AlertTriangle, Workflow, KeyRound, CheckCircle2, ChevronRight, Layers3, Activity as ActivityIcon, X, Home,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useViewer } from '@/contexts/ViewerContext';
@@ -14,7 +14,7 @@ import { useDismissNbNotice } from '@/lib/mutations';
 import { getTenantMode } from '@/lib/api';
 import { formatTimestamp, formatMaybeDate } from '@/lib/logfmt';
 import { ucLabel } from '@/lib/str';
-import { Badge, Button, PageHeader } from '@/components/ui';
+import { Badge, Card, LinkButton, PageHeader } from '@/components/ui';
 import { TargetChips } from '@/components/access/targets';
 import { ACTION_LABELS } from '@/pages/Admin';
 
@@ -27,19 +27,23 @@ export default function Dashboard() {
 
 /* ─── Shared pieces ─── */
 
-const CARD = 'rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950';
+// A row inside a section card (Needs Attention); the caller adds its border tone.
+const ROW = 'flex items-center gap-3 rounded-lg border px-3 py-2 transition-colors';
+const ROW_NEUTRAL = 'border-nb-gray-100 dark:border-nb-gray-900 hover:border-netbird/40 dark:hover:border-netbird/40';
+const ROW_DANGER = 'border-red-500/30 bg-red-500/5 hover:border-red-500/60';
 
 function StatTile({ icon, label, value, sub, to }: {
   icon: React.ReactNode; label: string; value: React.ReactNode; sub?: string; to?: string;
 }) {
   const body = (
-    <div className={cn(CARD, 'p-3 md:p-4 h-full min-w-0', to && 'hover:border-netbird/40 transition-colors')}>
-      <div className="flex items-center gap-1.5 md:gap-2 text-[0.68rem] md:text-[0.72rem] font-medium uppercase tracking-wide text-nb-gray-500 dark:text-nb-gray-400 min-w-0">
-        <span className="text-nb-gray-400 shrink-0">{icon}</span><span className="truncate">{label}</span>
+    <Card hoverable={!!to} className="p-3 md:p-4 h-full">
+      {/* A long label wraps to a second line instead of being cut off. */}
+      <div className="flex items-start gap-1.5 md:gap-2 text-[0.76rem] md:text-[0.8rem] leading-4 font-medium text-nb-gray-500 dark:text-nb-gray-400 min-w-0">
+        <span className="text-netbird shrink-0 mt-px">{icon}</span><span className="min-w-0 break-words">{label}</span>
       </div>
-      <div className="mt-1.5 text-xl md:text-2xl font-semibold text-nb-gray-900 dark:text-nb-gray-100 tabular-nums">{value}</div>
+      <div className="mt-1.5 text-xl md:text-2xl font-semibold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 tabular-nums">{value}</div>
       {sub && <div className="mt-0.5 text-[0.74rem] text-nb-gray-500 truncate">{sub}</div>}
-    </div>
+    </Card>
   );
   return to ? <Link to={to} className="block h-full">{body}</Link> : body;
 }
@@ -48,13 +52,13 @@ function Section({ title, action, children, className }: {
   title: string; action?: React.ReactNode; children: React.ReactNode; className?: string;
 }) {
   return (
-    <div className={cn(CARD, 'p-4 md:p-5 min-w-0', className)}>
+    <Card className={cn('p-4 md:p-5', className)}>
       <div className="flex items-center justify-between gap-3 mb-3">
-        <h2 className="text-[0.95rem] font-semibold text-nb-gray-900 dark:text-nb-gray-50 min-w-0 truncate">{title}</h2>
+        <h2 className="text-base font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 min-w-0 truncate">{title}</h2>
         <span className="shrink-0">{action}</span>
       </div>
       {children}
-    </div>
+    </Card>
   );
 }
 
@@ -164,16 +168,15 @@ function AdminDashboard() {
   return (
     <div className="min-w-0">
       {/* Header + quick actions (top, where they're reachable - not buried at the bottom) */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <PageHeader title="Overview" description="A live snapshot of your NetBird network - what's healthy and what needs your attention." />
-        <div className="flex flex-wrap gap-2 pt-1">
+      <PageHeader title="Overview" icon={<Home size={19} />}
+        description="A live snapshot of your NetBird network - what's healthy and what needs your attention."
+        actions={<>
           {pending.length > 0 && (
-            <Link to="/access-requests"><Button variant="primary" size="sm"><Inbox size={14} /> Review {pending.length} Request{pending.length === 1 ? '' : 's'}</Button></Link>
+            <LinkButton to="/access-requests" variant="primary" size="sm"><Inbox size={14} /> Review {pending.length} Request{pending.length === 1 ? '' : 's'}</LinkButton>
           )}
-          <Link to="/temporary-access"><Button variant="secondary" size="sm"><Clock size={14} /> Grant Access</Button></Link>
-          <Link to="/networks"><Button variant="secondary" size="sm"><Layers3 size={14} /> Add Resource</Button></Link>
-        </div>
-      </div>
+          <LinkButton to="/temporary-access" variant="secondary" size="sm"><Clock size={14} /> Grant Access</LinkButton>
+          <LinkButton to="/networks" variant="secondary" size="sm"><Layers3 size={14} /> Add Resource</LinkButton>
+        </>} />
 
       {/* Stat tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 mb-6">
@@ -197,7 +200,7 @@ function AdminDashboard() {
           ) : (
             <div className="flex flex-col gap-2.5">
               {pending.slice(0, 4).map((r) => (
-                <Link key={r.id} to="/access-requests" className="flex items-center gap-3 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 px-3 py-2 hover:border-netbird/40 transition-colors">
+                <Link key={r.id} to="/access-requests" className={cn(ROW, ROW_NEUTRAL)}>
                   <Inbox size={15} className="shrink-0 text-netbird" />
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 truncate">{r.requesterName}</span>
@@ -207,7 +210,7 @@ function AdminDashboard() {
                 </Link>
               ))}
               {expiring.slice(0, 3).map((g) => (
-                <Link key={g.id} to="/temporary-access" className="flex items-center gap-3 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 px-3 py-2 hover:border-netbird/40 transition-colors">
+                <Link key={g.id} to="/temporary-access" className={cn(ROW, ROW_NEUTRAL)}>
                   <Clock size={15} className="shrink-0 text-amber-500" />
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 truncate">{g.userLabel}</span>
@@ -217,7 +220,7 @@ function AdminDashboard() {
                 </Link>
               ))}
               {nonCompliant.slice(0, 3).map((p) => (
-                <Link key={p.id} to={`/peers/${encodeURIComponent(p.id)}`} className="flex items-center gap-3 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 px-3 py-2 hover:border-netbird/40 transition-colors">
+                <Link key={p.id} to={`/peers/${encodeURIComponent(p.id)}`} className={cn(ROW, ROW_NEUTRAL)}>
                   <AlertTriangle size={15} className="shrink-0 text-amber-500" />
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 truncate">{p.name || p.dns_label || p.id}{p.owner_email ? ` · ${p.owner_email}` : ''}</span>
@@ -229,14 +232,14 @@ function AdminDashboard() {
                 </Link>
               ))}
               {nonCompliant.length > 3 && (
-                <Link to="/peers" className="flex items-center gap-3 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 px-3 py-2 hover:border-netbird/40 transition-colors">
+                <Link to="/peers" className={cn(ROW, ROW_NEUTRAL)}>
                   <AlertTriangle size={15} className="shrink-0 text-amber-500" />
                   <span className="flex-1 text-sm text-nb-gray-800 dark:text-nb-gray-100">+{nonCompliant.length - 3} more non-compliant device{nonCompliant.length - 3 === 1 ? '' : 's'}</span>
                   <ChevronRight size={14} className="text-nb-gray-400" />
                 </Link>
               )}
               {conflicts.slice(0, 3).map((c, i) => (
-                <Link key={`conf-${i}`} to={`/networks/${encodeURIComponent(c.networkId)}`} className="flex items-center gap-3 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 hover:border-red-500/60 transition-colors">
+                <Link key={`conf-${i}`} to={`/networks/${encodeURIComponent(c.networkId)}`} className={cn(ROW, ROW_DANGER)}>
                   <AlertTriangle size={15} className="shrink-0 text-red-500" />
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 truncate">
@@ -250,32 +253,37 @@ function AdminDashboard() {
                 </Link>
               ))}
               {conflicts.length > 3 && (
-                <Link to="/networks" className="flex items-center gap-3 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 hover:border-red-500/60 transition-colors">
+                <Link to="/networks" className={cn(ROW, ROW_DANGER)}>
                   <AlertTriangle size={15} className="shrink-0 text-red-500" />
                   <span className="flex-1 text-sm text-nb-gray-800 dark:text-nb-gray-100">+{conflicts.length - 3} more address conflict{conflicts.length - 3 === 1 ? '' : 's'}</span>
                   <ChevronRight size={14} className="text-nb-gray-400" />
                 </Link>
               )}
               {nbNotices.slice(0, 3).map((n, i) => (
-                <Link key={`nbn-${n.id || i}`} to="/troubleshoot" className="flex items-center gap-3 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 hover:border-red-500/60 transition-colors">
-                  <AlertTriangle size={15} className="shrink-0 text-red-500" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 truncate">{n.event}{n.peerName ? ` - ${n.peerName}` : ''}</span>
-                    <span className="block text-[0.74rem] text-red-500 truncate">{n.message || 'Reported by NetBird'}</span>
-                  </span>
-                  <Badge tone="red">{n.kind === 'routing' ? 'Routing' : 'Integration'}</Badge>
+                // The row link and the Ignore button are siblings (no button inside a link). The
+                // link's ::after covers the whole row, so a click anywhere but Ignore opens
+                // Troubleshoot; Ignore sits above that layer.
+                <div key={`nbn-${n.id || i}`} className={cn(ROW, ROW_DANGER, 'relative')}>
+                  <Link to="/troubleshoot" className="flex min-w-0 flex-1 items-center gap-3 after:absolute after:inset-0 after:rounded-lg">
+                    <AlertTriangle size={15} className="shrink-0 text-red-500" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 truncate">{n.event}{n.peerName ? ` - ${n.peerName}` : ''}</span>
+                      <span className="block text-[0.74rem] text-red-500 truncate">{n.message || 'Reported by NetBird'}</span>
+                    </span>
+                    <Badge tone="red">{n.kind === 'routing' ? 'Routing' : 'Integration'}</Badge>
+                  </Link>
                   {/* Admin-only Ignore: hides the notice for everyone. */}
                   {isAdmin && n.id && (
-                    <button type="button" title="Ignore - hide this notice for everyone"
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); dismissNotice.mutate(n.id); }}
-                      className="shrink-0 text-nb-gray-400 hover:text-red-500 transition-colors">
+                    <button type="button" title="Ignore - hide this notice for everyone" aria-label="Ignore this notice"
+                      onClick={() => dismissNotice.mutate(n.id)}
+                      className="relative z-10 shrink-0 text-nb-gray-400 hover:text-red-500 transition-colors">
                       <X size={14} />
                     </button>
                   )}
-                </Link>
+                </div>
               ))}
               {failedAutomations.map((a) => (
-                <Link key={a.id} to="/automation" className="flex items-center gap-3 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 hover:border-red-500/60 transition-colors">
+                <Link key={a.id} to="/automation" className={cn(ROW, ROW_DANGER)}>
                   <Workflow size={15} className="shrink-0 text-red-500" />
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm text-nb-gray-800 dark:text-nb-gray-100 truncate">Automation “{a.name}” failed</span>
@@ -314,7 +322,7 @@ function AdminDashboard() {
         <Section title="Reverse Proxy" className="mb-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {rproxy.clusters.filter((c) => c.type !== 'shared').map((c) => (
-              <div key={c.id} className="rounded-md border border-nb-gray-200 dark:border-nb-gray-800 px-3 py-2.5">
+              <div key={c.id} className="rounded-lg border border-nb-gray-100 dark:border-nb-gray-900 px-3 py-2.5">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className={cn('h-2 w-2 rounded-full shrink-0', c.online ? 'bg-green-500' : 'bg-red-500')} title={c.online ? 'Online' : 'Offline'} />
                   <span className="min-w-0 flex-1 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100 truncate">{c.address}</span>
@@ -355,10 +363,9 @@ function PersonalDashboard() {
 
   return (
     <div className="min-w-0">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <PageHeader title="My Overview" description="Your devices, your access requests, and your recent traffic." />
-        <Link to="/request-access" className="shrink-0 pt-1"><Button variant="primary" size="sm"><KeyRound size={14} /> Request Access</Button></Link>
-      </div>
+      <PageHeader title="My Overview" icon={<Home size={19} />}
+        description="Your devices, your access requests, and your recent traffic."
+        actions={<LinkButton to="/request-access" variant="primary" size="sm"><KeyRound size={14} /> Request Access</LinkButton>} />
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
         <StatTile icon={<MonitorSmartphone size={14} />} label="My Devices" value={<>{online}<span className="text-base font-normal text-nb-gray-400"> / {peers.length}</span></>} sub="online now" to="/peers" />

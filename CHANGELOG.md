@@ -28,6 +28,14 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   when you press refresh, never on a timer.
 
 ### Changed
+- **A more polished look across the app.** Dialogs, Home, the Settings tabs and the panels on
+  the other pages now use the finish of the Remote Access page: softer corners, soft shadows and
+  an orange icon tile. Page titles use one bold style, the side menus of Settings, Operations and
+  Access Management show the open section more clearly, and empty lists show their icon in a tile.
+  Tables and the page layout are unchanged. Links that look like buttons are now one control each,
+  so the keyboard stops on them once. A few narrow-screen overflows (the Network tabs, the Admin
+  audit cards on phones, the Blocklist header) and three secret fields that were too narrow are
+  fixed.
 - **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
   **Network**, **Access** and **Administration**. A group with no page you may open is not shown.
 - **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**

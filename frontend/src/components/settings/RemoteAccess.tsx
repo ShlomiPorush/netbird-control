@@ -6,7 +6,7 @@ import { ApiError } from '@/lib/api';
 import { useNetworks } from '@/lib/queries';
 import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
-import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
+import { Button, Card, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
 
 // guacd's keymaps, by name. An id missing here shows as is.
 const LAYOUT_NAMES: Record<string, string> = {
@@ -128,8 +128,8 @@ export function RemoteAccessSettings() {
       )}
 
       {/* Status */}
-      <div className={box}>
-        <div className="text-sm font-semibold mb-1 text-nb-gray-800 dark:text-nb-gray-100">Status</div>
+      <Card className="p-4">
+        <div className="text-sm font-bold tracking-tight mb-1 text-nb-gray-800 dark:text-nb-gray-100">Status</div>
         {statusQ.isLoading ? <div className="text-sm text-nb-gray-500">Checking…</div> : st ? (
           <>
             <div className="text-[0.75rem] font-semibold uppercase tracking-wide text-nb-gray-500 mt-1">IP Gateway</div>
@@ -194,7 +194,7 @@ export function RemoteAccessSettings() {
             <div className="text-[0.78rem] text-nb-gray-500 mt-1">{st.activeSessions} active session(s)</div>
           </>
         ) : <div className="text-sm text-red-500">The status could not be loaded.</div>}
-      </div>
+      </Card>
 
       {/* Main switches */}
       <label className={toggleCard}>
@@ -251,9 +251,9 @@ export function RemoteAccessSettings() {
       </label>
 
       {/* How sessions look. Applies to sessions opened after saving. */}
-      <div className={`${box} flex flex-col gap-4`}>
+      <Card className="flex flex-col gap-4 p-4">
         <div>
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">RDP Display</div>
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">RDP Display</div>
           <div className="text-[0.8rem] text-nb-gray-500">Applies to sessions opened after saving.</div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -293,7 +293,7 @@ export function RemoteAccessSettings() {
             </Select>
           </Field>
         </div>
-      </div>
+      </Card>
 
       <div className="grid grid-cols-[1fr_8rem] gap-3">
         <Field label="guacd Address" hint="The IP gateway's guacd, as this app reaches it."><Input value={form.guacdHost} onChange={(e) => set('guacdHost', e.target.value)} /></Field>
@@ -324,8 +324,8 @@ export function RemoteAccessSettings() {
       </div>
 
       {/* Enrollment */}
-      <div className={box}>
-        <div className="text-sm font-semibold mb-1 text-nb-gray-800 dark:text-nb-gray-100">Enroll The Gateways</div>
+      <Card className="p-4">
+        <div className="text-sm font-bold tracking-tight mb-1 text-nb-gray-800 dark:text-nb-gray-100">Enroll The Gateways</div>
         <p className="text-[0.82rem] text-nb-gray-500 mb-3">
           Each button creates a one-time NetBird setup key (valid for 1 day) for one gateway.
           Put it in <code>.env</code> as <code>REMOTE_GATEWAY_SETUP_KEY</code> or <code>REMOTE_NAMES_GATEWAY_SETUP_KEY</code> and keep it there:
@@ -345,7 +345,7 @@ export function RemoteAccessSettings() {
             </div>
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
