@@ -703,12 +703,9 @@ function userVerdict(ix, snap, user, t, query, now) {
 // and a temporary policy counts only while its grant is valid. Rules with a device as their
 // direct source are not a user's authorization and do not count. evaluatePolicies() answers
 // for one TCP port; this answers for the query's protocol and port, with the same outcome on a
-// TCP port (the agreement test pins it). One difference: a grant through a policy with posture
-// checks is 'conditional' here (the NetBird client runs them) and OK in evaluatePolicies() (a
-// browser session doesn't).
-// One deliberate difference: Remote Access refuses posture-gated policies, because a browser
-// session cannot pass device checks. Here such a policy makes the answer "conditional" - the
-// user is authorized if their device passes the checks.
+// TCP port (the agreement test pins it). One deliberate difference: a grant through a policy with
+// posture checks is "conditional" here (authorized if the device passes the checks, which the
+// NetBird client runs) and OK in evaluatePolicies() (a browser session runs none).
 function authorizeResource(ix, groups, res, query, now) {
     const rules = ix.rules.filter(r => r.dest.has(res.id) && r.exactAction
         && (r.action === 'drop' || (!r.infra && !r.managedName))

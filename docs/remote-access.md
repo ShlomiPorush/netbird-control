@@ -190,7 +190,7 @@ understand is refused.
 5. **Posture checks are not applied.** A policy with posture checks counts like any other policy,
    but its checks are not run: they run on the NetBird client, and a browser session has none. A
    policy that requires a country, an OS version or a network range therefore doesn't limit
-   browser sessions. Items 1 to 4 and 6 still apply.
+   browser sessions.
 6. A temporary grant counts only while it is active, not expired, and no revoke has started.
 7. The gateway reaches the target through that resource **only**:
    - on the IP gateway, no other route is as specific, and the gateway receives no domain-based
