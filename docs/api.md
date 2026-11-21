@@ -33,7 +33,7 @@ An admin creates keys in **Settings → API Keys**, in the main account.
 | Scope | Allows |
 | --- | --- |
 | `remote-access:launch` | `POST /api/v1/remote-access/launch` |
-| `remote-access:create-resource` | `"createResource": true` on `POST /api/v1/remote-access/launch`: add a missing server as a temporary resource. The key needs `remote-access:launch` too. New keys don't get it unless an admin ticks it. |
+| `remote-access:create-resource` | `"createResource": true` on `POST /api/v1/remote-access/launch`: create a temporary resource for a missing server. The key needs `remote-access:launch` too. New keys don't get it unless an admin ticks it. |
 
 ## Authentication
 
@@ -90,7 +90,7 @@ Every error is JSON with a message for people and a stable code for programs:
 | 403 | `ADDRESS_NOT_PUBLIC`, `NAME_NOT_PUBLIC`, `ADDRESS_BLOCKED` | `createResource: true` for an address that isn't public, a name with an answer that isn't public, or an address or name on the blocklist. Nothing was created. |
 | 403 | `NAME_NOT_FOUND` | The host name has no IPv4 address in the DNS. |
 | 409 | `CREATE_LIMIT` | Too many resources created by the API still exist (Settings > Remote Access sets the maximum). |
-| 409 | `CREATE_IN_PROGRESS` | Another request is adding or removing this server right now. Try again in a minute. |
+| 409 | `CREATE_IN_PROGRESS` | Another request is creating or removing a resource for this server right now. Try again in a minute. |
 | 502 | `RESOURCE_CREATE_FAILED` | NetBird refused the new resource (also when it answered "too many requests"; the create is sent once). Nothing was created. |
 | 502, 503 | `CREATE_UNCONFIRMED` | NetBird didn't confirm the new resource (502, with `resourceCreated`), or an earlier request for this server is still unconfirmed (503). Try again in a few minutes. |
 | 503 | `NAME_LOOKUP_FAILED`, `TARGETS_SETTLING` | The DNS didn't answer, or Remote Access is getting ready after a change. Try again shortly. |
@@ -117,7 +117,7 @@ browser.
 | `domain` | string | no | RDP only. Up to 256 characters. A domain inside `username` (`CORP\admin`) works too. |
 | `privateKey` | string | no | SSH only. An OpenSSH or PEM private key, up to 16384 characters. |
 | `passphrase` | string | no | SSH only. The private key's passphrase. |
-| `createResource` | boolean | no | `true`: add the server as a temporary NetBird resource when NetBird has none for it. Needs the `remote-access:create-resource` scope. Default `false`. Any other type is refused with `400 INVALID_FIELD`. See [Adding a missing server](#creating-a-missing-resource-createresource). |
+| `createResource` | boolean | no | `true`: add the server as a temporary NetBird resource when NetBird has none for it. Needs the `remote-access:create-resource` scope. Default `false`. Any other type is refused with `400 INVALID_FIELD`. See [Creating a missing resource](#creating-a-missing-resource-createresource). |
 
 **With `user`:** the app finds the one NetBird user with that email address (letter case doesn't
 matter) and checks now that this user may reach the target, with the same rules as the **Remote

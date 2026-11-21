@@ -11,8 +11,6 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Added
-- **A link to the API documentation** in **Settings > API Keys** and in **Settings > Remote Access >
-  Resources Created By The API**. It opens the documentation for the version that runs.
 - **The launch API can create a missing resource.** A launch request with `"createResource": true` and the
   new API key permission **Create Missing Resources** (`remote-access:create-resource`) adds a public
   server that NetBird has no resource for, as a temporary host resource in the network and group

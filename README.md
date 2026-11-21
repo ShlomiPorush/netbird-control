@@ -60,7 +60,6 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   actions, addresses and dates it needs. The audit log records keys being created and revoked,
   every connection link a key makes or that is opened, and link requests it refuses. Repeated
   failed attempts block an address, but never a valid key, webhook token or Telegram secret.
-  The page links to the [API reference](docs/api.md) for the running version.
 - **Troubleshooting** - device, network and access-path checks that tell a user what is wrong and
   what to do next, plus a downloadable Windows diagnostics script. An address that isn't in NetBird
   can be added as a resource from the result by a user who may edit a network.

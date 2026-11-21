@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, ExternalLink, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
-import { docsUrl } from '@/lib/docs';
-import { useGroups, useNetworks, useVersion } from '@/lib/queries';
+import { useGroups, useNetworks } from '@/lib/queries';
 import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type CreatedResourceState, type CreateResourcesConfig, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
 import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
@@ -69,7 +68,6 @@ export function RemoteAccessSettings() {
   const statusQ = useQuery({ queryKey: ['remote-access-status'], queryFn: remoteApi.status, refetchInterval: 30000 });
   const networksQ = useNetworks();
   const groupsQ = useGroups();
-  const version = useVersion().data;
   const createdQ = useQuery({ queryKey: ['remote-access-created'], queryFn: remoteApi.createdResources, refetchInterval: 30000 });
   const [form, setForm] = useState<RemoteAccessConfig | null>(null);
   const [keys, setKeys] = useState<{ address: string; key: string }[]>([]);
@@ -395,10 +393,6 @@ export function RemoteAccessSettings() {
             A launch request through the API can create a resource for a public server that NetBird has none for. It joins the group below, where an admin
             policy decides who can reach it, and it is removed after the hold time once nobody uses it.
           </div>
-          <a href={docsUrl(version, 'docs/api.md#creating-a-missing-resource-createresource')} target="_blank" rel="noopener noreferrer"
-            className="mt-1 inline-flex items-center gap-1 text-[0.8rem] font-medium text-netbird hover:underline">
-            API Documentation <ExternalLink size={12} />
-          </a>
         </div>
         {crReadonly && <div className="text-[0.8rem] text-nb-gray-500">This instance is read-only, so these settings can't be changed here.</div>}
 
