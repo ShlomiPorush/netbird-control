@@ -44,6 +44,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   when you press refresh, never on a timer.
 
 ### Changed
+- **Browser sessions count policies with posture checks.** Remote Access and the launch API now
+  accept a policy that has posture checks like any other policy. The checks themselves are not
+  applied to a browser session, because they run on the NetBird client and a browser session has
+  none. The `POSTURE_REQUIRED` refusal is gone. Sign-in, an unblocked user, a policy that opens the
+  port and drop rules still apply. Access Check still shows such access as **Authorized If Posture
+  Checks Pass**, which is what the NetBird client gets.
 - **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
   **Network**, **Access** and **Administration**. A group with no page you may open is not shown.
 - **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**

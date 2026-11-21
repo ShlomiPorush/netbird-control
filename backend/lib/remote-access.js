@@ -991,7 +991,6 @@ const MESSAGES = {
     TARGET_OPEN_FAILED: "Remote Access couldn't prepare the connection to this resource. Try again in a minute.",
     TARGET_CHANGED: "This resource changed in NetBird while the session was opening. Connect again.",
     BLOCKED_BY_POLICY: 'A NetBird policy blocks your access to this resource. Ask an administrator if you need access.',
-    POSTURE_REQUIRED: "Your access to this resource requires a device check that a browser can't pass. Connect with the NetBird app instead.",
     PORT_NOT_ALLOWED: "Your access doesn't include this port. Request access if you need it.",
     NO_ACCESS: "You don't have access to this resource. Request access if you need it.",
     GATEWAY_OFFLINE: "The Browser Gateway is offline, so this resource can't be reached right now. Try again later, or tell an administrator.",

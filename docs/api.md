@@ -123,7 +123,7 @@ browser.
 
 **With `user`:** the app finds the one NetBird user with that email address (letter case doesn't
 matter) and checks now that this user may reach the target, with the same rules as the **Remote
-Access** page. Only that user can open the link.
+Access** page (a policy's posture checks are not applied). Only that user can open the link.
 
 **Without `user`:** the app checks nothing at this point. Whoever opens the link first gets the
 session, if their own access allows the target when they open it. A link that reaches someone else

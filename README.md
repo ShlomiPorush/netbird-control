@@ -65,7 +65,9 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   can be added as a resource from the result by a user who may edit a network.
 - **Access Check** - see whether a user is authorized for a resource or network, or everyone who
   is, by the same rules Remote Access uses, with the policy, group and ports behind each answer and
-  the per-device details underneath.
+  the per-device details underneath. Access through a policy with posture checks shows as
+  **Authorized If Posture Checks Pass**; Remote Access allows it, since a browser session doesn't
+  run posture checks.
 - **Guardrails** - an address blocklist, overlap and conflict detection, a cleanup report and a
   read-only mode for the NetBird API.
 - **Notifications** - Telegram topics per category, email to people who request access, anomaly

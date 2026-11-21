@@ -7,7 +7,8 @@ NetBird client on their device, and the servers need no NetBird client either: s
 Network resources through their routing peers, like any other NetBird traffic.
 
 A user can connect only to a server that their own NetBird access already reaches, on a port
-their policies already open. Remote Access never grants new access.
+their policies already open. Remote Access never grants new access. The posture checks of those
+policies are not applied to browser sessions (see [Who may connect where](#who-may-connect-where), item 5).
 
 ## How it works
 
@@ -186,9 +187,10 @@ understand is refused.
    through a Browser Gateway target group (of this or another installation) never counts: a
    resource is in such a group only because some session opened it. A drop rule through one still
    refuses.
-5. **Policies with posture checks do not count.** A browser session cannot prove anything about
-   the user's device, and the portal is reachable from the internet. Those users connect with the
-   NetBird client instead.
+5. **Posture checks are not applied.** A policy with posture checks counts like any other policy,
+   but its checks are not run: they run on the NetBird client, and a browser session has none. A
+   policy that requires a country, an OS version or a network range therefore doesn't limit
+   browser sessions. Items 1 to 4 and 6 still apply.
 6. A temporary grant counts only while it is active, not expired, and no revoke has started.
 7. The gateway reaches the target through that resource **only**:
    - on the IP gateway, no other route is as specific, and the gateway receives no domain-based

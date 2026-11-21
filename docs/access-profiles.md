@@ -20,7 +20,7 @@ So a **Shared** profile is the interesting one: it is literally `{ group_id, pol
 
 A peer reaches the profile's resources **iff a policy connects a group it's in to the profile's group**. The profile's own policy uses its *source* groups for this; [Temporary Access](temporary-access.md) instead points an isolated temp group at the profile's group, so it grants *only* the profile's resources without touching the shared source groups.
 
-- **Posture checks** can be attached to a shared profile - they become the policy's `source_posture_checks`, so the access only applies to compliant devices.
+- **Posture checks** can be attached to a shared profile - they become the policy's `source_posture_checks`, so the access only applies to compliant devices. Browser sessions in Remote Access don't run posture checks, so the profile's policy opens them whatever the checks.
 - Editing a shared profile's sources/protocol/ports **rewrites its NetBird policy** in place, so all inheriting resources update together.
 
 ## Per-network default profiles

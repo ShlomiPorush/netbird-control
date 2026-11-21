@@ -1925,7 +1925,8 @@ export interface AccessTargetInfo {
 }
 export interface AccessRouterStatus { network: AccessNetRef; status: 'online' | 'offline' | 'none' | 'unknown'; online?: string[] }
 // Authorization: the Remote Access model (the user's groups, their devices' groups and All,
-// against the policies). The primary answer; the device fields below are the details.
+// against the policies). The primary answer; the device fields below are the details. A grant
+// through a policy with posture checks is 'conditional' here, but Remote Access allows it.
 export interface AccessAuthGrant { policy: string; policyId: string; via: string[]; ports: AccessPortsDesc; postureChecks?: string[]; temp?: AccessTempNote }
 export interface AccessAuthResource {
   resource: AccessResourceRef;
