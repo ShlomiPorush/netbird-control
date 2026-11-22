@@ -68,6 +68,10 @@ before(async () => {
     };
     nb.netbirdPost = async (path) => { writes.push(`POST ${path}`); return { status: 200, body: { id: 'new1' } }; };
     nb.bustNbCaches = () => { };
+    // Access Profile rows (a resource delete keeps their groups and policies): none.
+    const core = require('../lib/core');
+    const realQuery = core.pool.query.bind(core.pool);
+    core.pool.query = (sql, ...rest) => (/FROM access_profiles/.test(String(sql)) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
 
     const db = require('../db');
     ({ deleteResource, syncResourcePolicies, deleteNetwork } = db);

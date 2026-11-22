@@ -96,11 +96,13 @@ export function ResourceModal({ networkId, resource, duplicate = false, initialT
 }
 
 // Only direct (app-managed) policies are editable; inherited ones are shown read-only.
-// The full field set round-trips so editing via the shared policy modal loses nothing.
+// The full field set round-trips so editing via the shared policy modal loses nothing. An existing
+// policy keeps its id, so saving updates it in place (an Access Profile that owns it keeps it).
 // A duplicate never copies a policy the form can't reproduce exactly - it would be recreated as a
-// single Accept rule (a Drop rule would start allowing traffic).
+// single Accept rule (a Drop rule would start allowing traffic) - and never an id: its policies are new.
 function policiesFromResource(resource: Resource | null, forDuplicate = false): PolicyInput[] {
   return (resource?.policies || []).filter((p) => !p.inherited && !(forDuplicate && p.notReproducible)).map((p) => ({
+    ...(forDuplicate ? {} : { id: p.id }),
     sources: (p.sources || []).map((s) => s.id),
     protocol: p.protocol || 'all',
     ports: (p.ports || []).slice(),
@@ -202,9 +204,16 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
   }, { key: 'name', dir: 'asc' });
   const polPage = useClientPagination(polSorted, 25, [polSearch]);
 
+  // An edited policy keeps the id it had (the policy editor hands back the fields only).
   const savePolicy = (p: PolicyInput) => {
-    setPolicies((prev) => editing?.index != null ? prev.map((x, i) => (i === editing.index ? p : x)) : [...prev, p]);
+    setPolicies((prev) => editing?.index != null ? prev.map((x, i) => (i === editing.index ? { ...p, ...(x.id ? { id: x.id } : {}) } : x)) : [...prev, p]);
     setEditing(null);
+  };
+  // Direct policies that are also an Access Profile's policy: id → profile name.
+  const profileOfPolicy = useMemo(() => new Map((resource?.policies || []).filter((p) => !p.inherited && p.profileName).map((p) => [p.id, p.profileName as string])), [resource]);
+  const profileNote = (p: PolicyInput) => {
+    const name = p.id ? profileOfPolicy.get(p.id) : undefined;
+    return name ? `This policy is also the policy of Access Profile ${name}. Changes here apply to the profile.` : '';
   };
 
   // Copy a staged policy from the row menu / paste one straight into the list - same
@@ -257,6 +266,7 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
       enabled: isEdit ? resource?.enabled !== false : true,
       groups: [...new Set([...groups, ...profileGids])],
       policies: isEdit && !duplicate && JSON.stringify(policies) === initialPolicies ? undefined : policies.map((p) => ({
+        ...(isEdit && !duplicate && p.id ? { id: p.id } : {}),
         sources: p.sources.slice(),
         protocol: p.protocol,
         ports: p.protocol === 'tcp' || p.protocol === 'udp' ? p.ports.slice() : [],
@@ -438,6 +448,9 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
                               </span>
                             )}
                           </div>
+                          {profileNote(p) && (
+                            <div className="mt-0.5 ml-4 max-w-[280px] text-[0.7rem] leading-snug text-amber-700 dark:text-amber-400">{profileNote(p)}</div>
+                          )}
                         </td>
                         <td className="py-2.5 px-4 align-middle"><SourceChips ids={p.sources} name={groupName} /></td>
                         <td className="py-2.5 px-4 align-middle"><ProtoPortsCell protocol={p.protocol} ports={p.ports} /></td>
@@ -533,6 +546,7 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
             defaultSourceIds: opts.defaultIds,
             canChooseSources: opts.canChoose,
             presets: directProfiles,
+            note: editing.index != null ? profileNote(policies[editing.index]) : '',
             onSave: savePolicy,
           }}
         />

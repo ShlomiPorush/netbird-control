@@ -3,7 +3,7 @@ import type { CaCertInfo } from './types';
 import { api, getTenantMode } from './api';
 import type {
   Viewer, LogsResponse, AdminLogsResponse, AuditResponse, IpHistoryResponse, TrafficSummaryResponse, ReverseProxyStatus, ProxyLogsResponse, ProxyLogsSummaryResponse, ProxyServiceStats, ProxyDomain, EditableProxyService, ProxyTargetOptions, NbUser, Peer, PeerDetail, NbGroup, GroupDetail, UserDetail,
-  Network, NetworkDetail, Policy, PolicyOptions, TemplatesResponse, GroupRef, FilterRulesResponse, AppConfig, NetbirdApiConfig, WebhookConfig, NetbirdWebhookStatus, TelegramConfig, SmtpConfig, ApproverConfig, AutoApprovalConfig, FeaturePermsConfig, RecurringAccessRule, SecurityConfig, EdrAutoBypassConfig, RetentionStatus, SearchResult, AccessProfile, NetworkDefaultProfiles, PostureCheck, Country, CityRef, Automation, AutomationRun, AutomationManaged, BlocklistEntry, TemporaryAccessGrant, AccessRequest, RequestTargetResult, SystemHealth, Recertification, RecertRoundSummary, RecertRoundDetail, ResourceConflict, OutboundEntry, OutboundBody, CleanupReport, DiagnosticsInfo, NbNotice, MspStatus, MspTenant, MspBillingPlans, TenantOverview, MspSwitcherItem, TenantDrift, TenantDefaultsResponse, NetbirdSettingsResponse, FleetReport, MspDigestConfig, InternalBackupStatus, InviteDefaultGroups, TrafficPullStatus, AuditPullStatus,
+  Network, NetworkDetail, Policy, PolicyOptions, TemplatesResponse, GroupRef, FilterRulesResponse, AppConfig, NetbirdApiConfig, WebhookConfig, NetbirdWebhookStatus, TelegramConfig, SmtpConfig, ApproverConfig, AutoApprovalConfig, FeaturePermsConfig, RecurringAccessRule, SecurityConfig, EdrAutoBypassConfig, RetentionStatus, SearchResult, AccessProfile, AccessProfileUsage, NetworkDefaultProfiles, PostureCheck, Country, CityRef, Automation, AutomationRun, AutomationManaged, BlocklistEntry, TemporaryAccessGrant, AccessRequest, RequestTargetResult, SystemHealth, Recertification, RecertRoundSummary, RecertRoundDetail, ResourceConflict, OutboundEntry, OutboundBody, CleanupReport, DiagnosticsInfo, NbNotice, MspStatus, MspTenant, MspBillingPlans, TenantOverview, MspSwitcherItem, TenantDrift, TenantDefaultsResponse, NetbirdSettingsResponse, FleetReport, MspDigestConfig, InternalBackupStatus, InviteDefaultGroups, TrafficPullStatus, AuditPullStatus,
   AccessCheckOptions, UserAccessResult, WhoHasAccessResult,
 } from './types';
 
@@ -612,6 +612,12 @@ export function useAdGroups(enabled = true) {
 // Access Profiles (group + shared policy bundles).
 export function useAccessProfiles(enabled = true) {
   return useQuery({ queryKey: ['access-profiles'], queryFn: () => api.get<AccessProfile[]>('/api/access-profiles'), enabled });
+}
+
+// Where each Access Profile is used (admin only) - a profile in use can't be deleted. Under the
+// 'access-profiles' key, so whatever refreshes the profiles refreshes this too.
+export function useAccessProfileUsage(enabled = true) {
+  return useQuery({ queryKey: ['access-profiles', 'usage'], queryFn: () => api.get<AccessProfileUsage>('/api/access-profiles/usage'), enabled, staleTime: 0 });
 }
 
 // Per-network default Access Profiles (admin only).

@@ -60,6 +60,26 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   start the connection again from the system that sent you, since the link is used up.
 
 ### Fixed
+- **An Access Profile in use can no longer be deleted, and its NetBird group and policy are no
+  longer destroyed by other changes.** Delete used to remove the profile's group and policy
+  whatever used them. Now a profile that has resources or peers, is referenced in NetBird, or is
+  used by a grant, a recurring rule, a pending request, an auto-approval rule, a network default
+  or an automation can't be deleted: the Delete button is muted and **Can't Delete Profile** lists
+  the uses. An unused profile's row and its audit entry are saved first; if NetBird then doesn't
+  confirm removing its group or policy, the page says which one to delete in NetBird. Deleting a
+  profile's last resource no longer deletes the profile's group and policy. Saving a resource's
+  Access Control tab updates its existing policies in place instead of deleting and recreating
+  them, so a profile's policy keeps its id; removing a profile's policy there is refused. Saving a
+  network default, an automation, a recurring rule, an auto-approval rule, a grant or a request
+  with a profile that no longer exists is refused with `PROFILE_NOT_FOUND`. See
+  [Access Profiles](docs/access-profiles.md#deleting-a-profile).
+- **Deletes that NetBird doesn't answer are no longer counted as done.** A resource delete or a
+  policy save without an answer (or with a server error) says NetBird didn't confirm it, and a
+  resource or profile delete is sent only once, also when NetBird answers "too many requests". An
+  automation keeps tracking a resource until the delete succeeded or NetBird confirmed the
+  resource is gone in the network the automation recorded; Repair changes nothing when it can't
+  read a network. A move whose delete got no answer is never rolled back: it keeps the copy and
+  says to check whether the original is still there.
 - **A session limit reached at the last moment now shows a sentence, not a code.** The page showed
   `TOO_MANY`, and also used it when the limit for all users was full. It now says which limit was
   reached. A host name whose resource was removed while a session opened showed
