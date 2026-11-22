@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
-import type { PolicyInput, PolicyEditInput, Template, FilterRule, FilterRuleInput, AccessProfileInput, PostureCheckInput, AutomationInput, AutomationTestResult, AutomationRunResult, DryRunResult, TidyNamesPlan, TidyNamesResult, CreateProxyServiceInput, ExposeDockerInput, UpdateProxyServiceInput, BlocklistInput, BulkBlocklistInput, BulkBlocklistResult, BlockedMatchesResult, EnforceBlocklistResult, MatchingEventsResult, TelegramInput, SmtpConfigInput, ApproverConfigInput, AutoApprovalConfigInput, FeaturePermsConfig, RecurringAccessInput, EdrAutoBypassConfig, SecurityConfig, GrantTarget, TemporaryAccessGrantInput, ExtendGrantInput, CreateAccessRequestInput, CreateAccessRequestResult, ApplyTenantDefaultsResult, AutoConfigureNbResult, TenantDefaultsProfile, NetbirdNbSettings, NetbirdSettingsResponse, MspDigestConfig, MspDigestSendResult, InternalBackupConfig, InternalBackupRunResult, InternalBackupRestoreResult, InviteUserInput, InviteDefaultGroups, NbUser, SetupKeyResult, CreateSetupKeyInput, TrafficPullStatus, AuditPullStatus } from './types';
+import type { PolicyInput, PolicyEditInput, Template, FilterRule, FilterRuleInput, AccessProfileInput, DeleteAccessProfileResult, PostureCheckInput, AutomationInput, AutomationTestResult, AutomationRunResult, DryRunResult, TidyNamesPlan, TidyNamesResult, CreateProxyServiceInput, ExposeDockerInput, UpdateProxyServiceInput, BlocklistInput, BulkBlocklistInput, BulkBlocklistResult, BlockedMatchesResult, EnforceBlocklistResult, MatchingEventsResult, TelegramInput, SmtpConfigInput, ApproverConfigInput, AutoApprovalConfigInput, FeaturePermsConfig, RecurringAccessInput, EdrAutoBypassConfig, SecurityConfig, GrantTarget, TemporaryAccessGrantInput, ExtendGrantInput, CreateAccessRequestInput, CreateAccessRequestResult, ApplyTenantDefaultsResult, AutoConfigureNbResult, TenantDefaultsProfile, NetbirdNbSettings, NetbirdSettingsResponse, MspDigestConfig, MspDigestSendResult, InternalBackupConfig, InternalBackupRunResult, InternalBackupRestoreResult, InviteUserInput, InviteDefaultGroups, NbUser, SetupKeyResult, CreateSetupKeyInput, TrafficPullStatus, AuditPullStatus } from './types';
 
 export interface ResourcePayload {
   name: string;
@@ -11,6 +11,11 @@ export interface ResourcePayload {
   /** Preserved on edit so saving a disabled resource doesn't silently re-enable it. */
   enabled?: boolean;
 }
+
+// Where each Access Profile is used (its Delete stays muted while it is): refreshed after every
+// change that can add or remove a use. The resource and profile mutations refresh it through their
+// ['access-profiles'] invalidation (the usage query sits under that key).
+const invalidateProfileUsage = (qc: ReturnType<typeof useQueryClient>) => qc.invalidateQueries({ queryKey: ['access-profiles', 'usage'] });
 
 // Enable / disable a resource (the dashboard's Disable action).
 export function useToggleResource(networkId: string) {
@@ -125,6 +130,7 @@ export function useUpdateNetwork() {
     mutationFn: ({ id, ...payload }: { id: string; name?: string; description?: string; allowDuplicates?: boolean }) =>
       api.put(`/api/networks/${encodeURIComponent(id)}`, payload),
     onSuccess: (_r, v) => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['networks'] });
       qc.invalidateQueries({ queryKey: ['network-detail', v.id] });
     },
@@ -136,6 +142,7 @@ export function useDeleteNetwork() {
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/networks/${encodeURIComponent(id)}`),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['networks'] });
       qc.invalidateQueries({ queryKey: ['network-detail'] });
     },
@@ -148,6 +155,7 @@ export function useCreateRouter(networkId: string) {
     mutationFn: (payload: { peer?: string; peerGroups?: string[]; metric: number; masquerade: boolean; enabled: boolean }) =>
       api.post(`/api/networks/${encodeURIComponent(networkId)}/routers`, payload),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['network-detail', networkId] });
       qc.invalidateQueries({ queryKey: ['networks'] });
     },
@@ -159,6 +167,7 @@ export function useDeleteRouter(networkId: string) {
   return useMutation({
     mutationFn: (rid: string) => api.del(`/api/networks/${encodeURIComponent(networkId)}/routers/${encodeURIComponent(rid)}`),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['network-detail', networkId] });
       qc.invalidateQueries({ queryKey: ['networks'] });
     },
@@ -181,6 +190,7 @@ export function useSaveNetworkDefaultProfiles() {
     mutationFn: ({ networkId, profileIds }: { networkId: string; profileIds: number[] }) =>
       api.put(`/api/networks/${encodeURIComponent(networkId)}/default-profiles`, { profileIds }),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['network-default-profiles'] });
       qc.invalidateQueries({ queryKey: ['policy-options'] });
     },
@@ -216,11 +226,13 @@ export function useSaveAccessProfile() {
   });
 }
 
+// A profile in use answers 409 with its reasons; a delete NetBird didn't fully confirm answers 200
+// with `leftover`. Either way the list and its usage are read again.
 export function useDeleteAccessProfile() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => api.del(`/api/access-profiles/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['access-profiles'] }),
+    mutationFn: (id: number) => api.del<DeleteAccessProfileResult>(`/api/access-profiles/${id}`),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['access-profiles'] }),
   });
 }
 
@@ -248,7 +260,7 @@ export function useSaveAutomation() {
   return useMutation({
     mutationFn: ({ id, payload }: { id?: number; payload: AutomationInput }) =>
       id ? api.put(`/api/automations/${id}`, payload) : api.post('/api/automations', payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['automations'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['automations'] }); invalidateProfileUsage(qc); },
   });
 }
 
@@ -256,7 +268,7 @@ export function useDeleteAutomation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del(`/api/automations/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['automations'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['automations'] }); invalidateProfileUsage(qc); },
   });
 }
 
@@ -265,6 +277,7 @@ export function useRunAutomation() {
   return useMutation({
     mutationFn: (id: number) => api.post<AutomationRunResult>(`/api/automations/${id}/run`),
     onSuccess: (_d, id) => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['automations'] });
       qc.invalidateQueries({ queryKey: ['automation-runs', id] });
       qc.invalidateQueries({ queryKey: ['network-detail'] });
@@ -335,7 +348,7 @@ export function useCreateProxyService() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: CreateProxyServiceInput) => api.post<{ id: string; domain: string }>('/api/reverse-proxy-services', payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }); invalidateProfileUsage(qc); },
   });
 }
 export function useUpdateProxyService() {
@@ -344,6 +357,7 @@ export function useUpdateProxyService() {
     mutationFn: ({ id, patch }: { id: string; patch: UpdateProxyServiceInput }) =>
       api.put(`/api/reverse-proxy-services/${encodeURIComponent(id)}`, patch),
     onSuccess: (_d, v) => {
+      invalidateProfileUsage(qc); // a service's access groups can hold a profile group
       qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] });
       qc.invalidateQueries({ queryKey: ['reverse-proxy-service', v.id] });
     },
@@ -353,7 +367,7 @@ export function useDeleteProxyService() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/reverse-proxy-services/${encodeURIComponent(id)}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }); invalidateProfileUsage(qc); },
   });
 }
 export function useExposeDocker() {
@@ -361,6 +375,7 @@ export function useExposeDocker() {
   return useMutation({
     mutationFn: (payload: ExposeDockerInput) => api.post<{ service: { id: string; domain: string } }>('/api/reverse-proxy-services/expose-docker', payload),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] });
       qc.invalidateQueries({ queryKey: ['networks'] });
       qc.invalidateQueries({ queryKey: ['network-detail'] });
@@ -437,7 +452,7 @@ export function useCreateGrant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: TemporaryAccessGrantInput) => api.post<{ id: number; devices: number }>('/api/temporary-access', payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
   });
 }
 export function useExtendGrant() {
@@ -451,14 +466,14 @@ export function useRevokeGrant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.post(`/api/temporary-access/${id}/revoke`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
   });
 }
 export function useDeleteGrant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del(`/api/temporary-access/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
   });
 }
 
@@ -467,14 +482,14 @@ export function useCreateAccessRequest() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: CreateAccessRequestInput) => api.post<CreateAccessRequestResult>('/api/access-requests', payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['my-access-requests'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['my-access-requests'] }); invalidateProfileUsage(qc); },
   });
 }
 export function useSaveAutoApproval() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: AutoApprovalConfigInput) => api.put('/api/auto-approval-config', payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['auto-approval-config'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['auto-approval-config'] }); invalidateProfileUsage(qc); },
   });
 }
 // ── Recurring access rules ──
@@ -484,6 +499,7 @@ export function useSaveRecurring() {
     mutationFn: ({ id, payload }: { id?: number; payload: RecurringAccessInput }) =>
       id ? api.put(`/api/recurring-access/${id}`, payload) : api.post('/api/recurring-access', payload),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['recurring-access'] });
       qc.invalidateQueries({ queryKey: ['temporary-access-grants'] });
     },
@@ -494,6 +510,7 @@ export function useDeleteRecurring() {
   return useMutation({
     mutationFn: (id: number) => api.del(`/api/recurring-access/${id}`),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['recurring-access'] });
       qc.invalidateQueries({ queryKey: ['temporary-access-grants'] });
     },
@@ -615,6 +632,7 @@ export function useCancelAccessRequest() {
   return useMutation({
     mutationFn: (id: number) => api.post(`/api/access-requests/${id}/cancel`),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['my-access-requests'] });
       qc.invalidateQueries({ queryKey: ['access-requests'] });
     },
@@ -629,14 +647,14 @@ export function useApproveRequest() {
   return useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: { durationMinutes?: number; expiresAt?: string; targets?: GrantTarget[] } }) =>
       api.post(`/api/access-requests/${id}/approve`, payload),
-    onSuccess: () => { invalidateRequestViews(qc); qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); },
+    onSuccess: () => { invalidateRequestViews(qc); qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
   });
 }
 export function useDenyRequest() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, reason }: { id: number; reason?: string }) => api.post(`/api/access-requests/${id}/deny`, { reason }),
-    onSuccess: () => invalidateRequestViews(qc),
+    onSuccess: () => { invalidateRequestViews(qc); invalidateProfileUsage(qc); },
   });
 }
 
@@ -647,6 +665,7 @@ export function useSavePolicy() {
     mutationFn: ({ id, payload }: { id?: string; payload: PolicyEditInput }) =>
       id ? api.put(`/api/policies/${encodeURIComponent(id)}`, payload) : api.post('/api/policies', payload),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['policies'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
       // A policy sourced from a group changes that group's policy count / list (group detail).
@@ -660,6 +679,7 @@ export function useDeletePolicy() {
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/policies/${encodeURIComponent(id)}`),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['policies'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
     },
@@ -671,7 +691,7 @@ export function useDeletePeer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/peers/${encodeURIComponent(id)}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['peers'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['peers'] }); invalidateProfileUsage(qc); },
   });
 }
 
@@ -691,7 +711,7 @@ export function useBulkDeletePeers() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (ids: string[]) => api.post<BulkDeleteResult>('/api/peers/bulk-delete', { ids }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['peers'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['peers'] }); invalidateProfileUsage(qc); },
   });
 }
 
@@ -701,6 +721,7 @@ export function useDeleteGroup() {
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/groups/${encodeURIComponent(id)}`),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['group-detail'] });
     },
@@ -713,6 +734,7 @@ export function useBulkDeleteGroups() {
     mutationFn: (ids: string[]) =>
       api.post<BulkDeleteResult>('/api/groups/bulk-delete', { ids }),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['group-detail'] });
     },
@@ -728,6 +750,7 @@ export function useSetGroupPeers() {
     mutationFn: ({ id, peers }: { id: string; peers: string[] }) =>
       api.post<{ ok: boolean; name: string; count: number }>(`/api/groups/${encodeURIComponent(id)}/peers`, { peers }),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['group-detail'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['peers'] });
@@ -749,6 +772,7 @@ export function useAssignGroupUsers() {
     mutationFn: ({ id, add, remove }: { id: string; add?: string[]; remove?: string[] }) =>
       api.post<AssignGroupUsersResult>(`/api/groups/${encodeURIComponent(id)}/users`, { add: add || [], remove: remove || [] }),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['group-detail'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['users'] });
@@ -790,6 +814,7 @@ export function useInviteUser() {
   return useMutation({
     mutationFn: (input: InviteUserInput) => api.post<NbUser>('/api/users/invite', input),
     onSuccess: () => {
+      invalidateProfileUsage(qc); // the new user's auto groups
       qc.invalidateQueries({ queryKey: ['users'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
     },
@@ -826,6 +851,7 @@ export function useDeleteUser() {
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/users/${encodeURIComponent(id)}`),
     onSuccess: () => {
+      invalidateProfileUsage(qc); // the user's auto groups
       qc.invalidateQueries({ queryKey: ['users'] });
       qc.invalidateQueries({ queryKey: ['peers'] });
     },
@@ -869,6 +895,7 @@ export function useCreateSetupKey() {
   return useMutation({
     mutationFn: (input: CreateSetupKeyInput = {}) => api.post<SetupKeyResult>('/api/setup-keys', input),
     onSuccess: () => {
+      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['group-detail'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
     },

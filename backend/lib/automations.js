@@ -12,8 +12,9 @@
 
 const { pool } = require('./core');
 const { httpJson } = require('./http');
-const { netbirdApiConfigured, currentTenantAccount } = require('./netbird');
+const { netbirdApiConfigured, currentTenantAccount, netbirdReq } = require('./netbird');
 const { getBlocklist, addressBlockedForNetwork, addressesOverlap, addressesEquivalent } = require('./blocklist');
+const { nbListBody } = require('./pure');
 
 // DB scope of the current context: '' = main account, else the active tenant. Every automations
 // table carries a `tenant` column; each query filters on tnt() so a tenant's automations, their
@@ -23,9 +24,9 @@ const tnt = () => currentTenantAccount() || '';
 // Domain functions that stay in db.js (they call setResourceEnabled/deleteResource/getNetworkDetail
 // /createClientResource/addResourceGroups/listAccessProfiles/recordAudit, which are domain-coupled).
 // db.js injects them once via initAutomations; the sync engine references them by these bindings.
-let listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds;
+let listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds, assertProfilesExist, resourceGoneConfirmed;
 function initAutomations(deps) {
-    ({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds } = deps);
+    ({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds, assertProfilesExist, resourceGoneConfirmed } = deps);
 }
 
 // Find an existing UNMANAGED resource this source item should ADOPT: exact address hit
@@ -130,6 +131,7 @@ async function listAutomations() {
 
 async function createAutomation(cfg) {
     const c = normalizeAutomationCfg(cfg);
+    await assertProfilesExist(c.profileIds);
     const r = await pool.query(
         `INSERT INTO automations (name, enabled, endpoint_url, auth_type, auth_header, auth_secret, items_path, address_field, name_field, description_field, key_field, network_id, profile_ids, interval_minutes, removal_mode, min_items, source_format, name_prefix, tenant)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id`,
@@ -140,6 +142,7 @@ async function createAutomation(cfg) {
 
 async function updateAutomation(id, cfg) {
     const c = normalizeAutomationCfg(cfg);
+    await assertProfilesExist(c.profileIds);
     // Secret is write-only: overwrite only when a non-empty value is provided.
     const setSecret = c.secret !== undefined && String(c.secret).trim() !== '';
     const base = [id, c.name, c.enabled, c.endpointUrl, c.authType, c.authHeader, c.itemsPath, c.addressField, c.nameField, c.descriptionField, c.keyField, c.networkId, JSON.stringify(c.profileIds), c.intervalMinutes, c.removalMode, c.minItems, c.sourceFormat, c.namePrefix];
@@ -306,17 +309,18 @@ async function getAutomationManaged(id) {
     const row = await getAutomationRow(id);
     if (!row) return { resources: [] };
     const rows = await pool.query('SELECT * FROM automation_resources WHERE automation_id=$1 AND tenant=$2 ORDER BY address', [id, tnt()]);
-    const detail = row.network_id ? await getNetworkDetail(row.network_id).catch(() => null) : null;
-    const live = new Map(((detail && detail.resources) || []).map(r => [r.id, r]));
+    // Each row in the network it recorded, as Repair checks it - not the automation's current target.
+    const lists = await liveResourcesOfRows(rows.rows);
     return {
-        networkKnown: !!detail,
+        networkKnown: [...lists.values()].every(Boolean),
         resources: rows.rows.map(x => {
-            const r = live.get(x.resource_id);
+            const live = lists.get(x.network_id || '');
+            const r = live ? live.get(x.resource_id) : null;
             return {
                 key: x.external_key, address: x.address, resourceId: x.resource_id,
                 status: x.status === 'adopted-disabled' ? 'disabled' : (x.status || 'active'),
                 lastSeenAt: x.last_seen_at,
-                orphan: detail ? !r : false,
+                orphan: live ? !r : false, // unreadable: unknown, not an orphan
                 liveEnabled: r ? r.enabled !== false : null,
                 name: r ? r.name : '',
             };
@@ -325,23 +329,71 @@ async function getAutomationManaged(id) {
 }
 
 // Reconcile the ledger: drop rows whose NetBird resource no longer exists (orphans),
-// so the next sync re-creates/re-evaluates them.
+// so the next sync re-creates/re-evaluates them. Each row is checked in the network it recorded,
+// with a read that tells an empty list from a failure; a failed read changes nothing.
 async function repairAutomation(id) {
     const row = await getAutomationRow(id);
     if (!row) throw new Error('not found');
-    if (!row.network_id) throw new Error('no target network configured');
-    const detail = await getNetworkDetail(row.network_id).catch(() => null);
-    if (!detail) throw new Error('could not read network resources');
-    const live = new Set((detail.resources || []).map(r => r.id));
-    const rows = await pool.query('SELECT external_key, resource_id FROM automation_resources WHERE automation_id=$1 AND tenant=$2', [id, tnt()]);
+    const rows = await pool.query('SELECT external_key, resource_id, network_id FROM automation_resources WHERE automation_id=$1 AND tenant=$2', [id, tnt()]);
+    const live = await liveResourcesOfRows(rows.rows);
+    if ([...live.values()].some(l => !l)) throw new Error('could not read network resources');
     let removed = 0;
     for (const r of rows.rows) {
-        if (!live.has(r.resource_id)) {
+        if (!live.get(r.network_id || '').has(r.resource_id)) {
             await pool.query('DELETE FROM automation_resources WHERE automation_id=$1 AND external_key=$2 AND tenant=$3', [id, r.external_key, tnt()]);
             removed++;
         }
     }
     return { removed };
+}
+
+// The resources each tracking row is checked against, by the network the row recorded ('' = a row
+// from before rows recorded it: every network's resources): Map(network id → Map(resource id →
+// resource), or null when that list can't be read). A network that answers 404 for its resources
+// and for itself was deleted: its rows are orphans (an empty list).
+async function liveResourcesOfRows(rows) {
+    const out = new Map();
+    for (const nid of new Set(rows.map(r => r.network_id || ''))) {
+        if (!nid) { out.set('', await allResourceIds()); continue; }
+        const got = await netbirdReq('GET', `/api/networks/${encodeURIComponent(nid)}/resources`);
+        let list = nbListBody(got); // an empty network may answer a JSON null
+        if (!list && got && got.status === 404) {
+            const net = await netbirdReq('GET', `/api/networks/${encodeURIComponent(nid)}`);
+            if (net && net.status === 404) list = [];
+        }
+        out.set(nid, list ? new Map(list.filter(r => r && r.id).map(r => [r.id, r])) : null);
+    }
+    return out;
+}
+
+// Every resource in the account (id → its list entry), from one strict list read; null when it can't
+// be read.
+async function allResourceIds() {
+    const list = nbListBody(await netbirdReq('GET', '/api/networks/resources'));
+    return list ? new Map(list.filter(r => r && r.id).map(r => [r.id, r])) : null;
+}
+
+// The network that holds a resource, with the fewest strict reads: the account-wide list entry when
+// it carries its network; else the networks list (each network's resource ids); else, for networks
+// that don't list them, their own resource lists. null when it can't be determined.
+async function networkOfResource(resourceId, entry) {
+    const carried = entry && (entry.network_id || (entry.network && (entry.network.id || entry.network)));
+    if (carried && typeof carried === 'string') return carried;
+    const nets = nbListBody(await netbirdReq('GET', '/api/networks'));
+    if (!nets) return null;
+    const unlisted = [];
+    for (const n of nets) {
+        if (!n || !n.id) continue;
+        if (Array.isArray(n.resources)) {
+            if (n.resources.some(x => ((x && x.id) || x) === resourceId)) return n.id;
+        } else if (n.resources !== null) unlisted.push(n.id); // null: NetBird's empty list
+    }
+    for (const nid of unlisted) {
+        const list = nbListBody(await netbirdReq('GET', `/api/networks/${encodeURIComponent(nid)}/resources`));
+        if (!list) return null;
+        if (list.some(r => r && r.id === resourceId)) return nid;
+    }
+    return null;
 }
 
 // Stop managing everything (clears the ownership ledger). Resources stay in NetBird as-is.
@@ -610,12 +662,34 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
         }
 
             // Rows that disappeared from the source → apply the removal mode.
+            let allIds; // lazy: every resource id, for rows without a recorded network
             for (const own of ours.rows) {
                 if (seen.has(own.external_key)) continue;
                 try {
                     if (row.removal_mode === 'delete') {
-                        // Keep tracking the resource (retried on the next run) unless NetBird confirms it is gone.
-                        await deleteResource(networkId, own.resource_id).catch((e) => { if (e.unconfirmed) throw e; });
+                        // Keep tracking the resource (retried on the next run) unless it was deleted or
+                        // NetBird confirms it is gone - in the network the row recorded, which is
+                        // where the resource lives even when the automation's target changed since.
+                        // After any failed delete, only NetBird's HTTP 404 on the resource's own path
+                        // confirms it is gone.
+                        let net = own.network_id;
+                        if (!net) {
+                            // A row from before rows recorded their network: never assume the automation's
+                            // current one. Gone from every network = done; otherwise it is deleted in the
+                            // network that holds it, or stays tracked when that can't be determined.
+                            if (allIds === undefined) allIds = await allResourceIds();
+                            if (!allIds) throw new Error('could not read the resources from NetBird');
+                            if (allIds.has(own.resource_id)) {
+                                net = await networkOfResource(own.resource_id, allIds.get(own.resource_id));
+                                if (!net) throw new Error("this resource's network isn't recorded - delete it in NetBird, then run Repair");
+                            }
+                        }
+                        if (net) {
+                            await deleteResource(net, own.resource_id).catch(async (e) => {
+                                if (await resourceGoneConfirmed(net, own.resource_id)) return;
+                                throw e;
+                            });
+                        }
                         await pool.query('DELETE FROM automation_resources WHERE automation_id=$1 AND external_key=$2 AND tenant=$3', [id, own.external_key, tnt()]);
                         counts.disabled++;
                     } else if (row.removal_mode === 'disable' && !ledgerRowOff(own, existingById.get(own.resource_id))) {

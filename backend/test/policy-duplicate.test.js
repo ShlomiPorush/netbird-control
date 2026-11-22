@@ -19,6 +19,10 @@ const failNext = { post: [], req: [] };
 nb.netbirdPost = async (path, body) => { sent.push({ method: 'POST', path, body }); const f = failNext.post.shift(); const st = f === -1 ? 0 : (f || 200); return { status: st, body: { id: 'new1' } }; };
 nb.netbirdReq = async (method, path, body) => { sent.push({ method, path, body }); const f = failNext.req.shift(); const st = f === -1 ? 0 : (f || 200); return { status: st, body: {} }; };
 nb.bustNbCaches = () => { };
+// Access Profile rows (the resource editor never deletes a profile's policy): none.
+const core = require('../lib/core');
+const realQuery = core.pool.query.bind(core.pool);
+core.pool.query = (sql, ...rest) => (/FROM access_profiles/.test(String(sql)) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
 const { createPolicy, updatePolicy, _internal } = require('../db');
 const { carryRuleExtras, ruleHasUnmodeled } = _internal;
 

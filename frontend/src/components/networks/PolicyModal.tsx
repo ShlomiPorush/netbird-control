@@ -35,6 +35,8 @@ export interface StagedPolicyCtx {
   /** false = sources come from Network Access config and are read-only here. */
   canChooseSources: boolean;
   presets: AccessProfile[];
+  /** A warning shown above the form (e.g. the policy is also an Access Profile's policy). */
+  note?: string;
   onSave: (p: PolicyInput) => void;
 }
 
@@ -245,6 +247,11 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
     >
       {tab === 'policy' && (
         <div className="flex flex-col gap-6">
+          {staged?.note && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[0.78rem] text-amber-700 dark:text-amber-400">
+              {staged.note}
+            </div>
+          )}
           {rulesLocked && (
             <div className="rounded-md border border-nb-blue-400/30 bg-nb-blue-400/10 px-3 py-2.5 text-[0.78rem] text-nb-blue-600 dark:text-nb-blue-400">
               This policy has rules this editor can't reproduce exactly (several rules, a disabled or Drop rule, an SSH rule, or source-resource settings).{' '}

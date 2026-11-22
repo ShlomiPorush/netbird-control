@@ -1338,6 +1338,8 @@ export interface ResourcePolicy {
   /** Direct policy the resource editor can't reproduce exactly (several rules, SSH, Drop, ...). */
   notReproducible?: boolean;
   viaGroup?: string;
+  /** Also the policy of this Access Profile - changes made from the resource apply to the profile. */
+  profileName?: string;
 }
 
 export interface Resource {
@@ -1477,6 +1479,13 @@ export interface AccessProfileInput {
   ports: string[];
   postureChecks: string[];
 }
+
+/** Why a profile can't be deleted (GET /api/access-profiles/usage, or a 409 on delete). */
+export interface AccessProfileUsageReason { kind: string; label: string }
+export type AccessProfileUsage = Record<string, { reasons: AccessProfileUsageReason[] }>;
+/** A NetBird object an Access Profile delete couldn't confirm removing. */
+export interface AccessProfileLeftover { kind: 'group' | 'policy'; id: string; name: string; outcome: 'refused' | 'unconfirmed' }
+export interface DeleteAccessProfileResult { status: string; leftover?: AccessProfileLeftover[] }
 
 // ─── Posture Checks (mirror the NetBird Management API) ───
 export interface OsVersionCheck {
@@ -1808,6 +1817,8 @@ export interface TemplatesResponse {
 
 // Policy entry as edited in the resource modal and POSTed to the backend.
 export interface PolicyInput {
+  /** An existing direct policy of the resource: saved in place (same id) instead of replaced. */
+  id?: string;
   sources: string[];
   protocol: string;
   ports: string[];

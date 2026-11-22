@@ -355,8 +355,17 @@ function routingPeerName(message) {
     return '';
 }
 
+// The list in a NetBird GET answer (from netbirdReq): a 2xx with an array, or with a JSON null
+// (NetBird answers an empty per-network list that way); anything else (another status, no answer,
+// a body that is not a list) is null.
+function nbListBody(r) {
+    if (!r || !(r.status >= 200 && r.status < 300)) return null;
+    if (Array.isArray(r.body)) return r.body;
+    return r.body === null && String(r.raw || '').trim() === 'null' ? [] : null;
+}
+
 module.exports = {
-    inspectCaCertificates,
+    inspectCaCertificates, nbListBody,
     splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration,
     normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses,
     safeReturnTo, tgFirstLine, isPlausibleEmail, routingPeerName,
