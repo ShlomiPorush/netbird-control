@@ -6777,7 +6777,10 @@ async function updateAccessProfile(id, { name, sources, protocol, ports, posture
     if (shared !== false) {
         const rule = buildProfileRule(name, group_id, sources, protocol, ports);
         const resp = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(policy_id), { name: `${name} Access`, description: '', enabled: true, source_posture_checks: pc, rules: [rule] });
-        if (!nbWriteOk(resp)) throw new Error('Failed to update policy: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no answer'));
+        if (!nbWriteOk(resp)) {
+            if (!nbUnclear(resp)) throw new Error('Failed to update policy: ' + (resp.raw || resp.error || resp.status));
+            throw new Error("NetBird didn't confirm the policy update, so the profile wasn't saved. Save it again.");
+        }
     }
     await pool.query(
         `UPDATE access_profiles SET name = $2, sources = $3, protocol = $4, ports = $5, posture_checks = $6 WHERE id = $1 AND tenant = $7`,

@@ -642,13 +642,17 @@ test('a failed profile row write after a confirmed PUT is unconfirmed; saving ag
     assert.equal(payrollRow().ports, '8443');
 });
 
+const UNANSWERED = [{ status: 0, error: 'timeout' }, { status: 503, body: null }, { status: 429, body: null }];
+
 test('an unanswered PUT of a profile policy leaves the row as it was; saving again brings it up to date', async () => {
-    editorFixture();
     const save = () => db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'] }));
-    NB.answers[`PUT /api/policies/${PID}`] = [{ status: 0, error: 'timeout' }];
-    await assert.rejects(save(), (e) => e.code === 'POLICY_UPDATE_UNCONFIRMED' && e.unconfirmed === true && e.partial === true);
-    assert.equal(payrollRow().ports, '443', 'untouched');
-    assert.ok(!log.some(l => /^UPDATE access_profiles/.test(l.sql)));
+    for (const answer of UNANSWERED) {
+        editorFixture();
+        NB.answers[`PUT /api/policies/${PID}`] = [answer];
+        await assert.rejects(save(), (e) => e.code === 'POLICY_UPDATE_UNCONFIRMED' && e.unconfirmed === true && e.partial === true);
+        assert.equal(payrollRow().ports, '443', 'untouched');
+        assert.ok(!log.some(l => /^UPDATE access_profiles/.test(l.sql)));
+    }
     // The PUT landed after all.
     delete NB.answers[`PUT /api/policies/${PID}`];
     NB.policies[PID].rules[0].ports = ['8443'];
@@ -942,11 +946,11 @@ const payroll = () => { baseline(); T.profiles = [profile({ protocol: 'tcp', por
 
 test('an Access Profiles save that NetBird did not confirm leaves the row as it was; a confirmed one updates it', async () => {
     const save = () => db.updateAccessProfile(12, { name: 'Payroll 2', sources: ['ops'], protocol: 'tcp', ports: ['8443'], postureChecks: ['pc-1'] });
-    for (const answer of [{ status: 0, error: 'timeout' }, { status: 503, body: null }, { status: 422, raw: 'invalid' }, notFound]) {
+    for (const answer of [...UNANSWERED, { status: 422, raw: 'invalid' }, notFound]) {
         payroll();
         const before = clone(T.profiles);
         NB.answers[`PUT /api/policies/${PID}`] = [answer];
-        await assert.rejects(save(), /Failed to update policy/);
+        await assert.rejects(save(), UNANSWERED.includes(answer) ? /the profile wasn't saved. Save it again/ : /Failed to update policy/);
         assert.deepEqual(writes(), [`PUT /api/policies/${PID}`]);
         assert.deepEqual(T.profiles, before);
     }
@@ -965,11 +969,11 @@ test('the Policies page save of a profile policy updates the row after the confi
     assert.deepEqual(payrollRow(), profile({ protocol: 'tcp', ports: '8443', sources: ['ops'], posture_checks: ['pc-1'] }));
     const put = calls.find(c => c.method === 'PUT');
     assert.ok(log.filter(l => /^UPDATE access_profiles/.test(l.sql)).every(l => l.seq > put.seq));
-    for (const answer of [{ status: 0, error: 'timeout' }, { status: 422, raw: 'invalid' }]) {
+    for (const answer of [...UNANSWERED, { status: 422, raw: 'invalid' }]) {
         payroll();
         const before = clone(T.profiles);
         NB.answers[`PUT /api/policies/${PID}`] = [answer];
-        await assert.rejects(db.updatePolicy(PID, form()), (e) => (answer.status ? !e.unconfirmed : e.code === 'POLICY_UPDATE_UNCONFIRMED'));
+        await assert.rejects(db.updatePolicy(PID, form()), (e) => (UNANSWERED.includes(answer) ? e.code === 'POLICY_UPDATE_UNCONFIRMED' && /didn't confirm/.test(e.message) : !e.unconfirmed));
         assert.deepEqual(T.profiles, before);
     }
     payroll();
