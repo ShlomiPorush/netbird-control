@@ -110,10 +110,8 @@ async function withCancelOnClose(res, fn, { db = pool, cancel = cancelBackend } 
     }
 }
 
-// opts.timeoutMs: a statement timeout for this read (pg's query_timeout).
-async function getSetting(key, { timeoutMs = 0 } = {}) {
-    const text = 'SELECT value FROM app_settings WHERE key = $1';
-    const r = await (timeoutMs ? pool.query({ text, values: [key], query_timeout: timeoutMs }) : pool.query(text, [key]));
+async function getSetting(key) {
+    const r = await pool.query('SELECT value FROM app_settings WHERE key = $1', [key]);
     return r.rows[0] ? r.rows[0].value : null;
 }
 

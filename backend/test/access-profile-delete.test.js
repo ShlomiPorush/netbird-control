@@ -1,20 +1,17 @@
-// Deleting an Access Profile never deletes one that is in use, nor its NetBird objects as a side
-// effect (db.deleteAccessProfile, profile usage), and the writes around profiles keep them alive:
+// An Access Profile is never deleted while it is in use, its NetBird objects never go as a side
+// effect of another write, and its row follows its policy:
 //   - every "in use" reason refuses the delete (409 PROFILE_IN_USE with its label); a failed read
-//     refuses it too (502), and nothing is deleted;
-//   - an unused profile's row, stale network defaults and audit row are one transaction, committed
-//     before its NetBird policy and group are deleted, once each; a lost answer is reported as a
-//     leftover, an object another profile row shares is kept;
+//     refuses it too, and nothing is deleted;
+//   - an unused profile's rows go first, then its NetBird policy and group; one that NetBird didn't
+//     confirm removing is reported as a leftover;
 //   - deleting a resource keeps every profile group and policy, and reports a delete NetBird didn't
-//     answer as unconfirmed; a move whose delete went unanswered checks the source again;
-//   - the resource editor updates a kept policy in place (same id), refuses to drop a profile's;
-//   - an automation keeps tracking a resource until it is deleted or confirmed gone in its own network.
-// The database and the NetBird client are in-memory stubs; one test drives the real NetBird client
-// against a local HTTP server to check that `once` sends a DELETE a single time.
+//     answer as unconfirmed; a move whose delete went unanswered keeps the copy;
+//   - the resource editor updates a kept policy in place (same id) and refuses to drop a profile's;
+//     a confirmed change of a profile's policy updates the profile's row;
+//   - an automation keeps tracking a resource until it is deleted or confirmed gone in its network.
+// The database and the NetBird client are in-memory stubs.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('http');
-const crypto = require('crypto');
 
 const clone = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
 let seq = 0;
@@ -24,41 +21,43 @@ let T;
 function resetDb() {
     T = {
         profiles: [], defaults: [], automations: [], recurring: [], grants: [], requests: [], settings: {},
-        audit: [], automationRow: null, automationRes: [],
+        automationRow: null, automationRes: [],
     };
 }
 resetDb();
-const log = [];          // every statement: { seq, where: 'pool' | 'client', sql, params }
+const log = [];          // every statement: { seq, sql, params }
 let failSql = null;      // RegExp: a matching statement throws
-let snapshot = null;     // the transaction's starting state (ROLLBACK restores it)
 const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
-function run(where, text, params = []) {
+const sameTenant = (r, t) => (r.tenant || '') === (t || '');
+const ofPolicy = (id, t) => T.profiles.filter(r => r.policy_id === id && r.shared !== false && sameTenant(r, t));
+function run(text, params = []) {
     const s = norm(text);
-    log.push({ seq: ++seq, where, sql: s, params });
+    log.push({ seq: ++seq, sql: s, params });
     if (failSql && failSql.test(s)) throw new Error('database unavailable');
-    if (s === 'BEGIN') { snapshot = clone({ profiles: T.profiles, defaults: T.defaults, audit: T.audit }); return { rows: [] }; }
-    if (s === 'COMMIT') { snapshot = null; return { rows: [] }; }
-    if (s === 'ROLLBACK') { if (snapshot) Object.assign(T, snapshot); snapshot = null; return { rows: [] }; }
     if (s.startsWith('SELECT id, name, group_id, policy_id, shared FROM access_profiles WHERE id = $1')) return { rows: clone(T.profiles.filter(p => p.id === params[0] && (p.tenant || '') === params[1])) };
     if (s.startsWith('SELECT id, name, group_id, policy_id, shared FROM access_profiles WHERE tenant = $1')) return { rows: clone(T.profiles.filter(p => (p.tenant || '') === params[0])) };
-    if (s.startsWith('SELECT id FROM access_profiles')) {
-        return { rows: T.profiles.filter(p => (p.tenant || '') === params[0] && params[1].includes(p.id) && (!/shared IS NOT FALSE/.test(s) || p.shared !== false)).map(p => ({ id: p.id })) };
+    if (s.startsWith('SELECT id FROM access_profiles WHERE tenant = $1')) {
+        return { rows: T.profiles.filter(p => sameTenant(p, params[0]) && (!/shared IS NOT FALSE/.test(s) || p.shared !== false)).map(p => ({ id: p.id })) };
     }
     if (s.startsWith('SELECT name, group_id, policy_id FROM access_profiles')) return { rows: clone(T.profiles.filter(p => p.shared !== false)) };
     if (s.startsWith('SELECT name, policy_id FROM access_profiles')) return { rows: clone(T.profiles.filter(p => p.shared !== false && (p.tenant || '') === params[0])) };
     if (s.startsWith('SELECT id, name, group_id, policy_id, sources')) return { rows: clone(T.profiles.filter(p => (p.tenant || '') === params[0])) };
-    if (s.startsWith('SELECT group_id, policy_id FROM access_profiles WHERE (group_id')) {
-        return { rows: clone(T.profiles.filter(p => (p.group_id && p.group_id === params[0]) || (p.policy_id && p.policy_id === params[1]))) };
-    }
     if (s.startsWith('DELETE FROM network_default_profiles WHERE profile_id')) { T.defaults = T.defaults.filter(d => d.profile_id !== params[0]); return { rows: [] }; }
     if (s.startsWith('DELETE FROM access_profiles')) { T.profiles = T.profiles.filter(p => !(p.id === params[0] && (p.tenant || '') === params[1])); return { rows: [] }; }
-    if (s.startsWith('SELECT policy_id, protocol, ports, sources, posture_checks FROM access_profiles')) return { rows: clone(T.profiles.filter(r => r.shared !== false && params[0].includes(r.policy_id))) };
-    if (s.startsWith('UPDATE access_profiles SET protocol = $2, ports = $3, sources = $4, posture_checks = $5 WHERE policy_id = $1')) {
-        for (const r of T.profiles) if (r.policy_id === params[0] && r.shared !== false) Object.assign(r, { protocol: params[1], ports: params[2], sources: JSON.parse(params[3]), posture_checks: JSON.parse(params[4]) });
+    if (s.startsWith('UPDATE access_profiles SET posture_checks = $2, protocol = CASE WHEN (group_id = ANY($6::text[]) OR $7::boolean) THEN $3')) {
+        const [pid, posture, protocol, ports, sources, destinations, direct, tenant] = params;
+        for (const r of ofPolicy(pid, tenant)) {
+            r.posture_checks = JSON.parse(posture);
+            if (destinations.includes(r.group_id) || direct) Object.assign(r, { protocol, ports, sources: JSON.parse(sources) });
+        }
         return { rows: [] };
     }
+    if (s === 'UPDATE access_profiles SET name = $2, sources = $3, protocol = $4, ports = $5, posture_checks = $6 WHERE id = $1 AND tenant = $7') {
+        for (const r of T.profiles) if (r.id === params[0] && sameTenant(r, params[6])) Object.assign(r, { name: params[1], sources: JSON.parse(params[2]), protocol: params[3], ports: params[4], posture_checks: JSON.parse(params[5]) });
+        return { rows: [], rowCount: 1 };
+    }
+    if (s.startsWith('SELECT group_id, policy_id, shared FROM access_profiles WHERE id = $1 AND tenant = $2')) return { rows: clone(T.profiles.filter(p => p.id === params[0] && (p.tenant || '') === params[1])) };
     if (/nextval\(pg_get_serial_sequence\('temporary_access_grants'/.test(s) || s.startsWith('UPDATE temporary_access_grants')) return { rows: [{ id: 501 }] };
-    if (s.startsWith('INSERT INTO app_audit')) { T.audit.push({ where, action: params[3], target: params[4], meta: params[5] ? JSON.parse(params[5]) : null }); return { rows: [] }; }
     if (s.startsWith('SELECT network_id, profile_id FROM network_default_profiles')) return { rows: clone(T.defaults.filter(d => params[1].includes(d.profile_id))) };
     if (s.startsWith('SELECT name, profile_ids FROM automations')) return { rows: clone(T.automations) };
     if (s.startsWith('SELECT user_id, user_label, targets FROM recurring_access')) return { rows: clone(T.recurring) };
@@ -75,27 +74,7 @@ function run(where, text, params = []) {
     return { rows: [], rowCount: 0 };
 }
 const core = require('../lib/core');
-core.pool.query = async (q, params) => run('pool', typeof q === 'string' ? q : q.text, params || (q && q.values) || []);
-const { EventEmitter } = require('events');
-let dropOnCommit = false; // COMMIT: the connection drops - 'error' on the client, then the query fails
-let lastClient = null;
-core.pool.connect = async () => {
-    const c = new EventEmitter();
-    c.query = (q, params) => {
-        const text = typeof q === 'string' ? q : q.text;
-        if (dropOnCommit && norm(text) === 'COMMIT') {
-            // As pg does: the socket error reaches the client as an 'error' event, outside the query.
-            return new Promise((resolve, reject) => setImmediate(() => {
-                c.emit('error', new Error('Connection terminated unexpectedly'));
-                reject(new Error('Connection terminated'));
-            }));
-        }
-        return Promise.resolve().then(() => run('client', text, params || []));
-    };
-    c.release = () => { c.released = true; };
-    lastClient = c;
-    return c;
-};
+core.pool.query = async (q, params) => run(typeof q === 'string' ? q : q.text, params || (q && q.values) || []);
 
 // ─── In-memory NetBird ───
 let NB;
@@ -103,11 +82,11 @@ function resetNb() {
     NB = { groups: {}, policies: {}, lists: {}, resources: {}, networks: {}, answers: {} };
 }
 resetNb();
-const calls = []; // { seq, method, path, body, opts }
+const calls = []; // { seq, method, path, body }
 const notFound = { status: 404, body: { message: 'not found', code: 404 } };
 let postN = 0;
-function nbAnswer(method, path, body, opts) {
-    calls.push({ seq: ++seq, method, path, body: clone(body), opts });
+function nbAnswer(method, path, body) {
+    calls.push({ seq: ++seq, method, path, body: clone(body) });
     const key = `${method} ${path}`;
     const q = NB.answers[key];
     if (q && q.length) return clone(q.length > 1 ? q.shift() : q[0]); // the last answer stays
@@ -148,12 +127,11 @@ function nbAnswer(method, path, body, opts) {
 }
 
 const nb = require('../lib/netbird');
-const realNetbirdReq = nb.netbirdReq;
 nb.netbirdApiConfigured = () => true;
 nb.bustNbCaches = () => { };
-nb.netbirdReq = async (method, path, body, opts) => nbAnswer(method, path, body, opts);
+nb.netbirdReq = async (method, path, body) => nbAnswer(method, path, body);
 nb.netbirdGet = async (path) => { const r = nbAnswer('GET', path); return r.status === 0 ? null : r.body; };
-nb.netbirdPost = async (path, body, opts) => nbAnswer('POST', path, body, opts);
+nb.netbirdPost = async (path, body) => nbAnswer('POST', path, body);
 
 // The automation source (lib/automations.js reads it through lib/http).
 let sourceText = '';
@@ -161,22 +139,30 @@ require('../lib/http').httpJson = async () => ({ status: 200, raw: sourceText })
 
 const origError = console.error;
 console.error = () => { };
+test.after(() => { console.error = origError; });
 const db = require('../db');
 const automations = require('../lib/automations');
+const remoteAccess = require('../lib/remote-access');
 
 // ─── Fixtures ───
 const GID = 'grp-prof';
 const PID = 'pol-prof';
 const profile = (extra = {}) => ({ id: 12, name: 'Payroll', group_id: GID, policy_id: PID, shared: true, tenant: '', ...extra });
+const directProfile = { id: 12, name: 'Ports', group_id: '', policy_id: '', shared: false, tenant: '' };
 const g = (id) => ({ id, name: id.toUpperCase() });
 function baseline() {
-    resetDb(); resetNb(); log.length = 0; calls.length = 0; failSql = null; snapshot = null;
+    resetDb(); resetNb(); log.length = 0; calls.length = 0; failSql = null;
+    remoteAccess._internal.setConfigForTest({});
     T.profiles = [profile()];
     NB.groups[GID] = { id: GID, name: 'Payroll', resources_count: 0, peers_count: 0, resources: [], peers: [] };
     NB.policies[PID] = { id: PID, name: 'Payroll Access', enabled: true, rules: [{ name: 'Payroll', enabled: true, action: 'accept', protocol: 'tcp', ports: ['443'], sources: [g('staff')], destinations: [g(GID)] }] };
-    for (const p of ['/api/setup-keys', '/api/networks/routers', '/api/routes', '/api/dns/nameservers', '/api/users', '/api/networks/resources', '/api/reverse-proxies/services']) NB.lists[p] = [];
+    for (const p of ['/api/setup-keys', '/api/networks/routers', '/api/routes', '/api/dns/nameservers', '/api/users', '/api/reverse-proxies/services']) NB.lists[p] = [];
 }
+// The auto-approval config is the one loaded in memory, so it outlives a test.
+const autoApproval = (cfg) => { T.settings.auto_approval_config = JSON.stringify(cfg); return db._internal.loadAutoApproval(); };
+test.afterEach(() => autoApproval({ trusted: [], rules: [] }));
 const admin = { user_id: 'u-admin', email: 'admin@example.test', name: 'Admin' };
+const DELETED = { name: 'Payroll', leftover: [] };
 const writes = () => calls.filter(c => c.method !== 'GET').map(c => `${c.method} ${c.path}`);
 const inUse = (re) => (e) => {
     assert.equal(e.status, 409);
@@ -186,7 +172,7 @@ const inUse = (re) => (e) => {
     return true;
 };
 async function refused(re) {
-    await assert.rejects(db.deleteAccessProfile(12, admin), inUse(re));
+    await assert.rejects(db.deleteAccessProfile(12), inUse(re));
     assert.deepEqual(writes(), [], 'nothing sent to NetBird');
     assert.ok(!log.some(l => /^DELETE FROM access_profiles/.test(l.sql)), 'the row is not deleted');
     assert.equal(T.profiles.length >= 1, true);
@@ -199,9 +185,8 @@ test('resources in the profile group refuse the delete, read fresh - not from th
     const listed = (await db.listAccessProfiles()).find(p => p.id === 12);
     assert.equal(listed.resourceCount, 0, 'the cached count says unused');
     await refused(/in use by 12 resources\./);
-    // Fresh read says empty → deleted.
     NB.groups[GID].resources_count = 0;
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
 });
 
 test('peers in the profile group refuse the delete', async () => {
@@ -216,19 +201,7 @@ test('a profile policy edited to grant another destination refuses the delete', 
     await refused(/its policy "Payroll Access", which also grants other destinations/);
     baseline();
     NB.policies[PID].rules.push({ name: 'x', enabled: true, action: 'accept', protocol: 'all', sources: [g('staff')], destinationResource: { id: 'res-live', type: 'host' } });
-    NB.lists['/api/networks/resources'] = [{ id: 'res-live' }];
     await refused(/which also grants other destinations/);
-});
-
-test('a resource target that no longer exists does not count; an unreadable resource list refuses (502)', async () => {
-    baseline();
-    NB.policies[PID].rules.push({ name: 'x', enabled: true, action: 'accept', protocol: 'all', sources: [g('staff')], destinationResource: { id: 'res-gone', type: 'host' } });
-    NB.answers['GET /api/networks/resources'] = [{ status: 500, body: { message: 'boom' } }];
-    await assert.rejects(db.deleteAccessProfile(12, admin), (e) => e.status === 502 && e.code === 'PROFILE_USAGE_UNREADABLE');
-    assert.deepEqual(writes(), []);
-    delete NB.answers['GET /api/networks/resources'];
-    NB.lists['/api/networks/resources'] = [{ id: 'res-other' }];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
 });
 
 test('a temporary grant to the profile group refuses the delete; an ended one does not', async () => {
@@ -237,15 +210,15 @@ test('a temporary grant to the profile group refuses the delete; an ended one do
     await refused(/temporary access for Dana/);
     baseline();
     T.grants = [{ user_id: 'u1', user_label: 'Dana', status: 'revoked', targets: [{ type: 'group', id: GID }] }];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
 });
 
-test('a grant to the profile (by id, or by its group) refuses the delete, also while creating', async () => {
+test('a grant to the profile refuses the delete, also while creating', async () => {
     baseline();
     T.grants = [{ user_id: 'u1', user_label: 'Dana', status: 'creating', targets: [{ type: 'profile', id: '12' }] }];
     await refused(/temporary access for Dana/);
     baseline();
-    T.grants = [{ user_id: 'u2', user_label: 'Avi', status: 'active', targets: [{ type: 'profile', id: '99', groupId: GID }] }];
+    T.grants = [{ user_id: 'u2', user_label: 'Avi', status: 'active', targets: [{ type: 'profile', id: 12, groupId: GID }] }];
     await refused(/temporary access for Avi/);
 });
 
@@ -267,41 +240,41 @@ test('a pending request refuses the delete (targets or approved targets); a deni
     await refused(/a pending access request from Dana/);
     baseline();
     T.requests = [{ requester_id: 'u1', requester_name: 'Dana', status: 'denied', targets: [{ type: 'profile', id: '12' }] }];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
 });
 
 test('requests and auto-approval are main-account data: a tenant profile with the same id is not held by them', async () => {
     baseline();
     T.profiles = [profile({ tenant: 't1' })];
     T.requests = [{ requester_id: 'u1', requester_name: 'Dana', status: 'pending', targets: [{ type: 'profile', id: '12' }] }];
-    T.settings.auto_approval_config = JSON.stringify({ trusted: [], rules: [{ targets: [{ type: 'profile', id: '12', name: 'Payroll' }], groupIds: ['g1'] }] });
-    assert.deepEqual(await nb.runWithTenant('t1', () => db.deleteAccessProfile(12, admin)), { leftover: [] });
+    await autoApproval({ trusted: [], rules: [{ targets: [{ type: 'profile', id: '12', name: 'Payroll' }], groupIds: ['g1'] }] });
+    assert.deepEqual(await nb.runWithTenant('t1', () => db.deleteAccessProfile(12)), DELETED);
 });
 
 test('auto-approval rules refuse the delete - legacy targetType rules and paused rules; excluded targets do not', async () => {
     baseline();
-    T.settings.auto_approval_config = JSON.stringify({ maxMinutes: 60, trustedGroupIds: [], rules: [{ targetType: 'profile', targetId: '12', targetName: 'Payroll', groupIds: ['g1'] }] });
+    await autoApproval({ maxMinutes: 60, trustedGroupIds: [], rules: [{ targetType: 'profile', targetId: '12', targetName: 'Payroll', groupIds: ['g1'] }] });
     await refused(/an auto-approval rule/);
     baseline();
-    T.settings.auto_approval_config = JSON.stringify({ trusted: [], rules: [{ enabled: false, targets: [{ type: 'profile', id: '12', name: 'Payroll' }], groupIds: ['g1'] }] });
+    await autoApproval({ trusted: [], rules: [{ enabled: false, targets: [{ type: 'profile', id: '12', name: 'Payroll' }], groupIds: ['g1'] }] });
     await refused(/an auto-approval rule/);
     baseline();
-    T.settings.auto_approval_config = JSON.stringify({ trusted: [{ groupIds: ['g1'], excludedTargets: [{ type: 'profile', id: '12', name: 'Payroll' }] }], rules: [] });
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    await autoApproval({ trusted: [{ groupIds: ['g1'], excludedTargets: [{ type: 'profile', id: '12', name: 'Payroll' }] }], rules: [] });
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
 });
 
 test('an auto-approval rule does not hold a Direct profile', async () => {
     baseline();
-    T.profiles = [{ id: 12, name: 'Ports', group_id: '', policy_id: '', shared: false, tenant: '' }];
-    T.settings.auto_approval_config = JSON.stringify({ trusted: [], rules: [{ targets: [{ type: 'profile', id: '12', name: 'Ports' }], groupIds: ['g1'] }] });
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    T.profiles = [directProfile];
+    await autoApproval({ trusted: [], rules: [{ targets: [{ type: 'profile', id: '12', name: 'Ports' }], groupIds: ['g1'] }] });
+    assert.deepEqual(await db.deleteAccessProfile(12), { name: 'Ports', leftover: [] });
 });
 
 test('a recurring rule naming a Direct preset does not hold it', async () => {
     baseline();
-    T.profiles = [{ id: 12, name: 'Ports', group_id: '', policy_id: '', shared: false, tenant: '' }];
+    T.profiles = [directProfile];
     T.recurring = [{ user_id: 'u1', user_label: 'Dana', targets: [{ type: 'profile', id: '12', name: 'Ports' }] }];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    assert.deepEqual(await db.deleteAccessProfile(12), { name: 'Ports', leftover: [] });
 });
 
 test('an automation refuses the delete, also with the id stored as a string', async () => {
@@ -317,9 +290,8 @@ test('a network default refuses the delete only while the network exists; a miss
     await refused(/the default profiles of network Office/);
     baseline();
     T.defaults = [{ network_id: 'net-gone', profile_id: 12 }];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
     assert.equal(T.defaults.length, 0, 'the stale default row went with the profile');
-    assert.ok(log.some(l => l.where === 'client' && /^DELETE FROM network_default_profiles/.test(l.sql)));
 });
 
 test('NetBird objects that reference the profile group refuse the delete', async () => {
@@ -341,7 +313,7 @@ test('NetBird objects that reference the profile group refuse the delete', async
 });
 
 const unreadable = async (label) => {
-    await assert.rejects(db.deleteAccessProfile(12, admin), (e) => e.status === 502 && e.code === 'PROFILE_USAGE_UNREADABLE', label);
+    await assert.rejects(db.deleteAccessProfile(12), (e) => e.status === 502 && e.code === 'PROFILE_USAGE_UNREADABLE', label);
     assert.deepEqual(writes(), [], label);
     assert.equal(T.profiles.length, 1, `${label}: not deleted`);
 };
@@ -350,38 +322,22 @@ test('a 404 from /api/routes or the reverse-proxy services is none; a 500 on the
     for (const path of ['/api/routes', '/api/reverse-proxies/services']) {
         baseline();
         NB.answers['GET ' + path] = [notFound];
-        assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] }, `${path} 404`);
+        assert.deepEqual(await db.deleteAccessProfile(12), DELETED, `${path} 404`);
         baseline();
         NB.answers['GET ' + path] = [{ status: 500, body: { message: 'boom' } }];
         await unreadable(`${path} 500`);
     }
-    for (const path of ['/api/setup-keys', '/api/users', '/api/dns/nameservers', '/api/groups', '/api/policies']) {
+    for (const path of ['/api/setup-keys', '/api/users', '/api/dns/nameservers', '/api/groups', '/api/policies', '/api/networks/routers']) {
         baseline();
         NB.answers['GET ' + path] = [notFound];
         await unreadable(`${path} 404`);
     }
 });
 
-test('without the account-wide router list (404), each network\'s routers are read; any failure refuses', async () => {
-    const setup = () => {
-        baseline();
-        NB.answers['GET /api/networks/routers'] = [notFound];
-        NB.networks = { n1: { id: 'n1', name: 'Office' }, n2: { id: 'n2', name: 'Lab' } };
-        NB.lists['/api/networks/n1/routers'] = [];
-    };
-    setup();
-    NB.lists['/api/networks/n2/routers'] = [{ id: 'r1', peer_groups: [GID] }];
-    await refused(/a network router/);
-    // An empty network's list may come back as a JSON null.
-    setup();
-    NB.answers['GET /api/networks/n2/routers'] = [{ status: 200, body: null, raw: 'null' }];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
-    setup();
-    NB.answers['GET /api/networks/n2/routers'] = [{ status: 500, body: { message: 'boom' } }];
-    await unreadable('a network\'s routers 500');
-    setup();
-    NB.answers['GET /api/networks'] = [{ status: 0, error: 'timeout' }];
-    await unreadable('networks unanswered');
+test('a JSON null router list is an empty one', async () => {
+    baseline();
+    NB.answers['GET /api/networks/routers'] = [{ status: 200, body: null, raw: 'null' }];
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
 });
 
 test('a reverse-proxy service whose access or SSO groups include the profile group refuses the delete', async () => {
@@ -400,7 +356,7 @@ test('a profile group or policy missing from the lists counts as gone', async ()
     baseline();
     delete NB.groups[GID];
     delete NB.policies[PID];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
 });
 
 test('several reasons are listed together', async () => {
@@ -410,23 +366,29 @@ test('several reasons are listed together', async () => {
     await refused(/^This profile is in use by 12 resources and recurring access for Dana\. Remove it from them first\.$/);
 });
 
-test('any failed read refuses the delete with 502, and nothing is deleted', async () => {
+test('any failed read refuses the delete, and nothing is deleted', async () => {
+    const nbUnreadable = (e) => e.status === 502 && e.code === 'PROFILE_USAGE_UNREADABLE' && /nothing was deleted/.test(e.message);
     const failures = [
-        () => { NB.answers['GET /api/groups'] = [{ status: 500, body: { message: 'boom' } }]; },
-        () => { NB.answers['GET /api/groups'] = [notFound]; },
-        () => { NB.answers['GET /api/policies'] = [{ status: 0, error: 'timeout' }]; },
-        () => { NB.answers['GET /api/routes'] = [{ status: 500, body: { message: 'boom' } }]; },
-        () => { NB.answers['GET /api/setup-keys'] = [{ status: 0, error: 'timeout' }]; },
-        () => { NB.answers['GET /api/users'] = [{ status: 200, body: { message: 'not a list' } }]; },
-        () => { T.defaults = [{ network_id: 'net-1', profile_id: 12 }]; NB.answers['GET /api/networks'] = [{ status: 502, body: null }]; },
-        () => { failSql = /FROM recurring_access/; },
-        () => { failSql = /FROM access_requests/; },
+        [() => { NB.answers['GET /api/groups'] = [{ status: 500, body: { message: 'boom' } }]; }, nbUnreadable],
+        [() => { NB.answers['GET /api/groups'] = [notFound]; }, nbUnreadable],
+        [() => { NB.answers['GET /api/policies'] = [{ status: 0, error: 'timeout' }]; }, nbUnreadable],
+        [() => { NB.answers['GET /api/routes'] = [{ status: 500, body: { message: 'boom' } }]; }, nbUnreadable],
+        [() => { NB.answers['GET /api/setup-keys'] = [{ status: 0, error: 'timeout' }]; }, nbUnreadable],
+        [() => { NB.answers['GET /api/networks/routers'] = [{ status: 500, body: { message: 'boom' } }]; }, nbUnreadable],
+        [() => { NB.answers['GET /api/users'] = [{ status: 200, body: { message: 'not a list' } }]; }, nbUnreadable],
+        [() => { T.defaults = [{ network_id: 'net-1', profile_id: 12 }]; NB.answers['GET /api/networks'] = [{ status: 502, body: null }]; }, nbUnreadable],
+        [() => { failSql = /FROM network_default_profiles/; }, /database unavailable/],
+        [() => { failSql = /FROM automations/; }, /database unavailable/],
+        [() => { failSql = /FROM recurring_access/; }, /database unavailable/],
+        [() => { failSql = /FROM temporary_access_grants/; }, /database unavailable/],
+        [() => { failSql = /FROM access_requests/; }, /database unavailable/],
     ];
-    for (const fail of failures) {
+    for (const [fail, expected] of failures) {
         baseline();
         fail();
-        await assert.rejects(db.deleteAccessProfile(12, admin), (e) => e.status === 502 && e.code === 'PROFILE_USAGE_UNREADABLE' && /nothing was deleted/.test(e.message));
+        await assert.rejects(db.deleteAccessProfile(12), expected);
         assert.deepEqual(writes(), []);
+        assert.equal(T.profiles.length, 1);
         assert.ok(!log.some(l => /^DELETE FROM/.test(l.sql)), 'nothing deleted');
     }
 });
@@ -442,124 +404,47 @@ test('the usage list answers every profile with its reasons', async () => {
 });
 
 // ─── Delete order and NetBird leftovers ───
-test('an unused profile: rows and audit in one committed transaction, then the policy and group, each sent once', async () => {
+test('an unused profile: its rows go first, then its policy and its group', async () => {
     baseline();
-    T.defaults = [{ network_id: 'net-gone', profile_id: 12 }];
-    const out = await db.deleteAccessProfile(12, admin);
-    assert.deepEqual(out, { leftover: [] });
+    T.defaults = [{ network_id: 'net-gone', profile_id: 12 }, { network_id: 'net-1', profile_id: 99 }];
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
     const dels = calls.filter(c => c.method === 'DELETE');
     assert.deepEqual(dels.map(c => c.path), [`/api/policies/${PID}`, `/api/groups/${GID}`], 'policy first, then group');
-    assert.ok(dels.every(c => c.opts && c.opts.once === true), 'sent once');
-    const tx = log.filter(l => l.where === 'client').map(l => l.sql.split(' ').slice(0, 3).join(' '));
-    assert.equal(tx[0], 'BEGIN');
-    assert.equal(tx[tx.length - 1], 'COMMIT');
-    assert.ok(tx.includes('DELETE FROM access_profiles') && tx.includes('INSERT INTO app_audit') && tx.includes('DELETE FROM network_default_profiles'));
-    const commit = log.find(l => l.where === 'client' && l.sql === 'COMMIT');
-    assert.ok(commit.seq < dels[0].seq, 'committed before the first NetBird delete');
-    assert.equal(T.audit.length, 1);
-    assert.equal(T.audit[0].where, 'client');
-    assert.equal(T.audit[0].action, 'profile.delete');
-    assert.deepEqual(T.audit[0].meta, { id: 12, name: 'Payroll', policyId: PID, groupId: GID });
+    const row = log.find(l => /^DELETE FROM access_profiles/.test(l.sql));
+    assert.ok(row.seq < dels[0].seq, 'the row is deleted before the first NetBird delete');
     assert.equal(T.profiles.length, 0);
+    assert.deepEqual(T.defaults, [{ network_id: 'net-1', profile_id: 99 }], "only this profile's defaults");
 });
 
-test('a COMMIT that fails at the connection is "may have been saved", and nothing is sent to NetBird', async () => {
+test('a failed row delete keeps the row and sends nothing to NetBird', async () => {
     baseline();
-    failSql = /^COMMIT$/;
-    await assert.rejects(db.deleteAccessProfile(12, admin), (e) => e.status === 502 && e.code === 'PROFILE_DELETE_UNCONFIRMED'
-        && e.message === 'The delete may have been saved. Reload the page to check.');
-    assert.deepEqual(writes(), []);
-    assert.ok(!log.some(l => l.sql === 'ROLLBACK'), 'no ROLLBACK after an unknown COMMIT');
-});
-
-test('a connection that drops during COMMIT emits a client error that is heard, not thrown', async () => {
-    baseline();
-    dropOnCommit = true;
-    try {
-        await assert.rejects(db.deleteAccessProfile(12, admin), (e) => e.code === 'PROFILE_DELETE_UNCONFIRMED');
-    } finally { dropOnCommit = false; }
-    assert.deepEqual(writes(), []);
-    assert.equal(lastClient.listenerCount('error'), 0, 'the listener is removed before release');
-    assert.equal(lastClient.released, true);
-});
-
-test('a failed audit insert rolls the delete back: the row stays and nothing is sent to NetBird', async () => {
-    baseline();
-    failSql = /^INSERT INTO app_audit/;
-    await assert.rejects(db.deleteAccessProfile(12, admin), /database unavailable/);
+    failSql = /^DELETE FROM access_profiles/;
+    await assert.rejects(db.deleteAccessProfile(12), /database unavailable/);
     assert.equal(T.profiles.length, 1, 'still there');
-    assert.ok(log.some(l => l.where === 'client' && l.sql === 'ROLLBACK'));
-    assert.ok(!log.some(l => l.sql === 'COMMIT'));
     assert.deepEqual(writes(), []);
 });
 
-test('policy deleted, group unanswered: 200 with the group as a leftover and a leftover audit', async () => {
+test('a NetBird object whose delete was not confirmed is reported as a leftover; an absent one is not', async () => {
     baseline();
     NB.answers[`DELETE /api/groups/${GID}`] = [{ status: 0, error: 'timeout' }];
-    const out = await db.deleteAccessProfile(12, admin);
-    assert.deepEqual(out.leftover, [{ kind: 'group', id: GID, name: 'Payroll', outcome: 'unconfirmed' }]);
+    assert.deepEqual(await db.deleteAccessProfile(12), { name: 'Payroll', leftover: [{ kind: 'group', id: GID, name: 'Payroll' }] });
     assert.equal(T.profiles.length, 0, 'the profile is deleted');
-    assert.deepEqual(T.audit.map(a => a.action), ['profile.delete', 'profile.delete_leftover']);
-});
-
-test('a 429 is not retried: the delete is sent once and reported as refused', async () => {
     baseline();
     NB.answers[`DELETE /api/policies/${PID}`] = [{ status: 429, body: { message: 'too many requests', code: 429 } }];
-    const out = await db.deleteAccessProfile(12, admin);
-    assert.deepEqual(out.leftover, [{ kind: 'policy', id: PID, name: 'Payroll Access', outcome: 'refused' }]);
-    assert.equal(calls.filter(c => c.method === 'DELETE' && c.path === `/api/policies/${PID}`).length, 1);
-});
-
-test('a NetBird object another profile row (any account) shares is kept', async () => {
+    assert.deepEqual(await db.deleteAccessProfile(12), { name: 'Payroll', leftover: [{ kind: 'policy', id: PID, name: 'Payroll Access' }] });
+    assert.deepEqual(writes(), [`DELETE /api/policies/${PID}`, `DELETE /api/groups/${GID}`], 'the group is still removed');
     baseline();
-    T.profiles.push({ id: 40, name: 'Payroll (tenant copy)', group_id: GID, policy_id: 'pol-t1', shared: true, tenant: 't1' });
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
-    assert.deepEqual(writes(), [`DELETE /api/policies/${PID}`], 'the shared group stays');
+    NB.answers[`DELETE /api/policies/${PID}`] = [notFound];
+    NB.answers[`DELETE /api/groups/${GID}`] = [notFound];
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
 });
 
 test('a Direct profile is deleted without any NetBird call; a missing profile is a no-op', async () => {
     baseline();
-    T.profiles = [{ id: 12, name: 'Ports', group_id: '', policy_id: '', shared: false, tenant: '' }];
-    assert.deepEqual(await db.deleteAccessProfile(12, admin), { leftover: [] });
-    assert.deepEqual(writes(), []);
-    assert.equal(await db.deleteAccessProfile(12, admin), null);
-});
-
-test('the real NetBird client sends a `once` DELETE a single time and returns the 429', async () => {
-    const seen = [];
-    const replies = [];
-    const server = http.createServer((req, res) => {
-        seen.push(`${req.method} ${req.url}`);
-        const r = replies.length > 1 ? replies.shift() : replies[0];
-        res.writeHead(r.status, { 'Content-Type': 'application/json', 'Retry-After': '1' });
-        res.end(JSON.stringify(r.body));
-    });
-    await new Promise((r) => server.listen(0, '127.0.0.1', r));
-    const prev = { url: nb._nbApi.url, token: nb._nbApi.token };
-    nb._nbApi.url = `http://127.0.0.1:${server.address().port}`;
-    nb._nbApi.token = crypto.randomBytes(24).toString('hex');
-    let clock = 0;
-    nb._setNetbirdTimingForTests({ now: () => clock, wallNow: () => clock, sleep: async (ms) => { clock += ms; } });
-    const origWarn = console.warn;
-    console.warn = () => { };
-    try {
-        replies.push({ status: 429, body: { message: 'too many requests', code: 429 } }, { status: 200, body: {} });
-        const once = await realNetbirdReq('DELETE', '/api/groups/g1', undefined, { once: true });
-        assert.equal(once.status, 429);
-        assert.deepEqual(seen, ['DELETE /api/groups/g1']);
-        // Without `once` the same answer is sent again (the default retry).
-        seen.length = 0; replies.length = 0;
-        nb._setNetbirdTimingForTests({});
-        replies.push({ status: 429, body: { message: 'too many requests', code: 429 } }, { status: 200, body: {} });
-        const retried = await realNetbirdReq('DELETE', '/api/groups/g1');
-        assert.equal(retried.status, 200);
-        assert.equal(seen.length, 2);
-    } finally {
-        console.warn = origWarn;
-        nb._nbApi.url = prev.url; nb._nbApi.token = prev.token;
-        nb._setNetbirdTimingForTests({});
-        await new Promise((r) => server.close(r));
-    }
+    T.profiles = [directProfile];
+    assert.deepEqual(await db.deleteAccessProfile(12), { name: 'Ports', leftover: [] });
+    assert.deepEqual(calls, []);
+    assert.equal(await db.deleteAccessProfile(12), null);
 });
 
 // ─── deleteResource ───
@@ -581,8 +466,6 @@ test('deleting a resource keeps the profile group and policy even when emptied; 
     assert.ok(w.includes('DELETE /api/groups/grp-priv'));
     assert.ok(!w.includes(`DELETE /api/groups/${GID}`), 'profile group kept');
     assert.ok(!w.includes(`DELETE /api/policies/${PID}`), 'profile policy kept');
-    const del = calls.find(c => c.method === 'DELETE' && c.path === '/api/networks/net1/resources/r1');
-    assert.equal(del.opts && del.opts.once, true, 'the resource DELETE is sent once');
 });
 
 test('a profile policy that targets the resource directly is never deleted with it', async () => {
@@ -592,9 +475,9 @@ test('a profile policy that targets the resource directly is never deleted with 
     assert.ok(!writes().includes(`DELETE /api/policies/${PID}`));
 });
 
-test('an unanswered or 5xx resource delete is unconfirmed (main account and tenant); a 4xx is a refusal; a 404 is done', async () => {
+test('an unanswered, 5xx or 429 resource delete is unconfirmed (main account and tenant); another 4xx is a refusal; a 404 is done', async () => {
     for (const ctx of [(fn) => fn(), (fn) => nb.runWithTenant('t1', fn)]) {
-        for (const answer of [{ status: 0, error: 'timeout' }, { status: 503, body: null }]) {
+        for (const answer of [{ status: 0, error: 'timeout' }, { status: 503, body: null }, { status: 429, body: null }]) {
             resourceFixture();
             NB.answers['DELETE /api/networks/net1/resources/r1'] = [answer];
             await assert.rejects(ctx(() => db.deleteResource('net1', 'r1')), (e) => e.unconfirmed === true && e.status === 502 && e.code === 'RESOURCE_DELETE_UNCONFIRMED'
@@ -624,29 +507,15 @@ test('a move whose source read fails before the DELETE is sent rolls back (nothi
     assert.equal(puts[1].body.rules[0].destinationResource.id, 'r1');
 });
 
-test('a move whose delete went unanswered reads the source again before rolling back', async () => {
-    const setup = () => {
+test('a move whose delete went unanswered keeps the copy and says the move may be half done', async () => {
+    for (const answer of [{ status: 0, error: 'timeout' }, { status: 503, body: null }, { status: 429, body: null }]) {
         resourceFixture();
         NB.networks.net2 = { id: 'net2', name: 'Lab' };
         NB.networks.net1 = { id: 'net1', name: 'Office' };
-        NB.answers['DELETE /api/networks/net1/resources/r1'] = [{ status: 0, error: 'timeout' }];
-    };
-    // Gone after all: the move counts as done.
-    setup();
-    NB.answers['GET /api/networks/net1/resources/r1'] = [{ status: 200, body: NB.resources['net1/r1'] }, notFound];
-    let out = await db.moveResources('net1', ['r1'], 'net2');
-    assert.deepEqual(out.failed, []);
-    assert.equal(out.moved.length, 1);
-    assert.ok(!writes().some(w => /^DELETE \/api\/networks\/net2\//.test(w)), 'the copy stays');
-    // Still there at the re-read (the delete may still land later), or unknown: never rolled back -
-    // the copy and the policies pointing at it stay, and the answer says to check the original.
-    // A 502 whose body says code 404 is not a confirmed absence: only an HTTP 404 is.
-    for (const reread of [{ status: 200, body: NB.resources['net1/r1'] }, { status: 0, error: 'timeout' }, { status: 502, body: { message: 'resource not found', code: 404 } }]) {
-        setup();
-        NB.answers['GET /api/networks/net1/resources/r1'] = [{ status: 200, body: NB.resources['net1/r1'] }, reread];
-        out = await db.moveResources('net1', ['r1'], 'net2');
-        assert.equal(out.failed.length, 1);
-        assert.equal(out.failed[0].error, 'The move may be half done: the original may still be in Office. Check it before moving again.');
+        NB.answers['DELETE /api/networks/net1/resources/r1'] = [answer];
+        const out = await db.moveResources('net1', ['r1'], 'net2');
+        assert.deepEqual(out.moved, []);
+        assert.deepEqual(out.failed.map(f => f.error), ['The move may be half done: the original may still be in its network. Check it before moving again.']);
         assert.ok(!writes().some(w => /^DELETE \/api\/networks\/net2\//.test(w)), 'the copy stays');
         const puts = calls.filter(c => c.method === 'PUT' && c.path === '/api/policies/pol-direct');
         assert.equal(puts.length, 1, 'the policy was pointed at the copy once');
@@ -660,28 +529,29 @@ function editorFixture() {
     baseline();
     NB.resources['net1/r1'] = { id: 'r1', name: 'NAS', address: '10.0.0.9', type: 'host', groups: [] };
     const rule = (extra = {}) => ({ name: 'NAS Policy', enabled: true, action: 'accept', bidirectional: false, protocol: 'tcp', ports: ['443'], sources: [g('a')], destinationResource: { id: 'r1', type: 'host' }, ...extra });
+    T.profiles = [profile({ protocol: 'tcp', ports: '443', sources: ['a'], posture_checks: [] })];
     NB.policies['pol-direct'] = { id: 'pol-direct', name: 'NAS Policy', description: '', enabled: true, source_posture_checks: [], rules: [rule()] };
-    // The profile's policy was pointed at this resource directly (F12).
     NB.policies[PID] = { id: PID, name: 'Payroll Access', description: '', enabled: true, source_posture_checks: [], rules: [rule({ name: 'Payroll Access' })] };
 }
 const both = (a = {}, b = {}) => [{ id: 'pol-direct', ...tcp443(a) }, { id: PID, ...tcp443({ name: 'Payroll Access', ...b }) }];
 
-test('an unchanged list changes nothing; an edited kept policy is updated in place, with the same id', async () => {
+test('an unchanged ordinary policy is not sent; an edited one is updated in place, with the same id', async () => {
     editorFixture();
-    await db.syncResourcePolicies('net1', 'r1', both());
+    await db.syncResourcePolicies('net1', 'r1', both(), { isAdmin: false });
     assert.deepEqual(writes(), [], 'no PUT for an unchanged policy');
-    editorFixture();
-    await db.syncResourcePolicies('net1', 'r1', both({ ports: ['8443'] }));
+    await db.syncResourcePolicies('net1', 'r1', both({ ports: ['8443'] }), { isAdmin: false });
     assert.deepEqual(writes(), ['PUT /api/policies/pol-direct']);
     const put = calls.find(c => c.method === 'PUT');
     assert.deepEqual(put.body.rules[0].destinationResource, { id: 'r1', type: 'host' }, 'the server sets the target');
     assert.deepEqual(put.body.rules[0].ports, ['8443']);
 });
 
-test('a profile policy edited from the resource is a PUT on the same id', async () => {
-    editorFixture();
-    await db.syncResourcePolicies('net1', 'r1', both({}, { sources: ['a', 'b'] }));
-    assert.deepEqual(writes(), [`PUT /api/policies/${PID}`]);
+test("an admin's save sends a profile policy on its own id, also when it is unchanged", async () => {
+    for (const edit of [{}, { sources: ['a', 'b'] }]) {
+        editorFixture();
+        await db.syncResourcePolicies('net1', 'r1', both({}, edit), { isAdmin: true });
+        assert.deepEqual(writes(), [`PUT /api/policies/${PID}`]);
+    }
 });
 
 test('leaving out a profile policy is refused before anything is written', async () => {
@@ -696,7 +566,7 @@ test('leaving out a profile policy is refused before anything is written', async
 test('a dropped ordinary policy is deleted and a policy without an id is created', async () => {
     editorFixture();
     await db.syncResourcePolicies('net1', 'r1', [{ id: PID, ...tcp443({ name: 'Payroll Access' }) }, tcp443({ name: 'SSH', ports: ['22'] })]);
-    assert.deepEqual(writes(), ['DELETE /api/policies/pol-direct', 'POST /api/policies']);
+    assert.deepEqual(writes(), [`PUT /api/policies/${PID}`, 'DELETE /api/policies/pol-direct', 'POST /api/policies']);
 });
 
 test('an id that is not one of this resource\'s policies, or sent twice, is refused before any write', async () => {
@@ -708,22 +578,16 @@ test('an id that is not one of this resource\'s policies, or sent twice, is refu
     assert.deepEqual(writes(), []);
 });
 
-test('the editor sends a kept policy\'s PUT once; an unanswered one is a partial change, a 429 a plain refusal', async () => {
-    editorFixture();
-    await db.syncResourcePolicies('net1', 'r1', both({ ports: ['8443'] }));
-    assert.deepEqual(calls.find(c => c.method === 'PUT').opts, { once: true });
+test('an unanswered PUT of the editor is a partial change; a refused one changed nothing', async () => {
+    const save = () => db.syncResourcePolicies('net1', 'r1', both({ ports: ['8443'] }), { isAdmin: false });
     for (const answer of [{ status: 0, error: 'timeout' }, { status: 503, body: null }]) {
         editorFixture();
         NB.answers['PUT /api/policies/pol-direct'] = [answer];
-        await assert.rejects(db.syncResourcePolicies('net1', 'r1', both({ ports: ['8443'] })),
-            (e) => e.unconfirmed === true && e.partial === true, 'the route must not say nothing changed');
+        await assert.rejects(save(), (e) => e.code === 'POLICY_UPDATE_UNCONFIRMED' && e.unconfirmed === true && e.partial === true, 'the route must not say nothing changed');
     }
-    // With `once` a 429 is the answer (sent a single time): a refusal, nothing changed.
     editorFixture();
-    NB.answers['PUT /api/policies/pol-direct'] = [{ status: 429, body: { message: 'too many requests', code: 429 } }, { status: 0, error: 'timeout' }];
-    await assert.rejects(db.syncResourcePolicies('net1', 'r1', both({ ports: ['8443'] })),
-        (e) => !e.unconfirmed && e.partial === false && /Failed to update policy/.test(e.message));
-    assert.equal(calls.filter(c => c.method === 'PUT').length, 1);
+    NB.answers['PUT /api/policies/pol-direct'] = [{ status: 422, body: { message: 'invalid' }, raw: 'invalid' }];
+    await assert.rejects(save(), (e) => !e.unconfirmed && e.partial === false && /Failed to update policy: invalid/.test(e.message));
 });
 
 test('a policy update NetBird did not answer (or answered 5xx) is unconfirmed, not a success', async () => {
@@ -738,84 +602,110 @@ test('a policy update NetBird did not answer (or answered 5xx) is unconfirmed, n
     await assert.rejects(db.updatePolicy('pol-direct', { ...tcp443(), destinationResource: { id: 'r1' } }), (e) => !e.unconfirmed && /Failed to update policy/.test(e.message));
 });
 
+const payrollRow = () => T.profiles.find(r => r.id === 12);
+const tempPolicies = () => calls.filter(c => c.method === 'POST' && c.path === '/api/policies').map(c => c.body);
+const grantPayroll = async () => {
+    calls.length = 0;
+    NB.lists['/api/users'] = [{ id: 'user-1', role: 'user', auto_groups: [] }];
+    await db.createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'profile', id: '12' }] }, admin);
+    assert.equal(tempPolicies().length, 1);
+    return tempPolicies()[0];
+};
+
 test('an admin changing a profile policy from the resource updates the profile row too; grants then use it', async () => {
     editorFixture();
-    T.profiles = [profile({ protocol: 'tcp', ports: '443', sources: ['a'], posture_checks: [] })];
-    await db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'], postureChecks: ['pc-1'] }));
+    await db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'], postureChecks: ['pc-1'], sources: ['a', 'b'] }));
     assert.deepEqual(writes(), [`PUT /api/policies/${PID}`]);
     const listed = (await db.listAccessProfiles()).find(p => p.id === 12);
     assert.equal(listed.protocol, 'tcp');
     assert.deepEqual(listed.ports, ['8443']);
     assert.deepEqual(listed.postureChecks, ['pc-1']);
-    assert.deepEqual(listed.sources.map(s => s.id), ['a']);
-    // A new temporary grant for the profile mirrors the new port and posture check.
-    calls.length = 0;
-    NB.lists['/api/users'] = [{ id: 'user-1', role: 'user', auto_groups: [] }];
-    await db.createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'profile', id: '12' }] }, admin);
-    const temp = calls.filter(c => c.method === 'POST' && c.path === '/api/policies').map(c => c.body);
-    assert.equal(temp.length, 1);
-    assert.deepEqual(temp[0].rules[0].ports, ['8443']);
-    assert.deepEqual(temp[0].source_posture_checks, ['pc-1']);
-    assert.deepEqual(temp[0].rules[0].destinations, [GID]);
+    assert.deepEqual(listed.sources.map(x => x.id), ['a', 'b']);
+    const temp = await grantPayroll();
+    assert.deepEqual(temp.rules[0].ports, ['8443']);
+    assert.deepEqual(temp.source_posture_checks, ['pc-1']);
+    assert.deepEqual(temp.rules[0].destinations, [GID]);
 });
 
-const profileRowUpdates = () => log.filter(l => /^UPDATE access_profiles/.test(l.sql)).length;
-const payrollRow = () => T.profiles.find(r => r.id === 12);
-
-test('(a) a failed profile row update is partial; the same save again repairs the row without a PUT', async () => {
+test('a failed profile row write after a confirmed PUT is unconfirmed; saving again brings the row up to date', async () => {
     editorFixture();
-    T.profiles = [profile({ protocol: 'tcp', ports: '443', sources: ['a'], posture_checks: [] })];
+    const save = () => db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'] }));
     failSql = /^UPDATE access_profiles/;
-    await assert.rejects(db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'] })),
-        (e) => e.partial === true && e.code === 'PROFILE_SETTINGS_STALE' && e.message === "The profile's settings may be out of date. Save again to refresh them.");
-    assert.equal(payrollRow().ports, '443', 'the row lags behind NetBird');
+    await assert.rejects(save(), (e) => e.unconfirmed === true && e.partial === true && e.status === 502
+        && e.message === "The policy was saved, but its Access Profile couldn't be updated. Save it again.");
     failSql = null;
+    assert.deepEqual(NB.policies[PID].rules[0].ports, ['8443']);
+    assert.equal(payrollRow().ports, '443', 'the row lags behind NetBird');
     calls.length = 0;
-    await db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'] }));
-    assert.deepEqual(writes(), [], 'NetBird already holds it: no PUT');
-    assert.equal(payrollRow().ports, '8443', 'repaired from the policy NetBird holds');
+    await save();
+    assert.deepEqual(writes(), [`PUT /api/policies/${PID}`], 'sent although NetBird already holds it');
+    assert.equal(payrollRow().ports, '8443');
 });
 
-test('(b) an unanswered PUT that landed syncs the row from the read-back; an unreadable read-back is partial, row untouched', async () => {
-    const applied = () => ({ ...clone(NB.policies[PID]), rules: [{ ...clone(NB.policies[PID].rules[0]), ports: ['8443'] }] });
+test('an unanswered PUT of a profile policy leaves the row as it was; saving again brings it up to date', async () => {
     editorFixture();
-    T.profiles = [profile({ protocol: 'tcp', ports: '443', sources: ['a'], posture_checks: [] })];
+    const save = () => db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'] }));
     NB.answers[`PUT /api/policies/${PID}`] = [{ status: 0, error: 'timeout' }];
-    NB.answers[`GET /api/policies/${PID}`] = [{ status: 200, body: clone(NB.policies[PID]) }, { status: 200, body: applied() }];
-    await assert.rejects(db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'] })), (e) => e.unconfirmed === true && e.partial === true);
-    assert.equal(payrollRow().ports, '8443', 'synced from what NetBird holds');
-    editorFixture();
-    T.profiles = [profile({ protocol: 'tcp', ports: '443', sources: ['a'], posture_checks: [] })];
-    NB.answers[`PUT /api/policies/${PID}`] = [{ status: 0, error: 'timeout' }];
-    NB.answers[`GET /api/policies/${PID}`] = [{ status: 200, body: clone(NB.policies[PID]) }, { status: 0, error: 'timeout' }];
-    await assert.rejects(db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'] })), (e) => e.partial === true && e.code === 'PROFILE_SETTINGS_STALE');
+    await assert.rejects(save(), (e) => e.code === 'POLICY_UPDATE_UNCONFIRMED' && e.unconfirmed === true && e.partial === true);
     assert.equal(payrollRow().ports, '443', 'untouched');
-    assert.equal(profileRowUpdates(), 0);
+    assert.ok(!log.some(l => /^UPDATE access_profiles/.test(l.sql)));
+    // The PUT landed after all.
+    delete NB.answers[`PUT /api/policies/${PID}`];
+    NB.policies[PID].rules[0].ports = ['8443'];
+    await save();
+    assert.equal(payrollRow().ports, '8443');
 });
 
-test('(c) the row takes the ports NetBird stored, and a new grant opens exactly those', async () => {
+test('the row takes the ports that were sent to NetBird, and a new grant opens exactly those', async () => {
     editorFixture();
-    T.profiles = [profile({ protocol: 'tcp', ports: '443', sources: ['a'], posture_checks: [] })];
     // "80,443" is not one port item: the policy builder drops it, so NetBird holds 22 only.
     await db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['80,443', '22'] }));
     assert.deepEqual(NB.policies[PID].rules[0].ports, ['22']);
     assert.equal(payrollRow().ports, '22');
     assert.deepEqual((await db.listAccessProfiles()).find(p => p.id === 12).ports, ['22']);
-    calls.length = 0;
-    NB.lists['/api/users'] = [{ id: 'user-1', role: 'user', auto_groups: [] }];
-    await db.createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'profile', id: '12' }] }, admin);
-    const temp = calls.filter(c => c.method === 'POST' && c.path === '/api/policies').map(c => c.body);
-    assert.equal(temp.length, 1);
-    assert.deepEqual(temp[0].rules[0].ports, ['22']);
-    assert.equal(temp[0].rules[0].port_ranges, undefined);
+    const temp = await grantPayroll();
+    assert.deepEqual(temp.rules[0].ports, ['22']);
+    assert.equal(temp.rules[0].port_ranges, undefined);
 });
 
-test('(d) an ordinary policy PUT never touches access_profiles', async () => {
+test('an ordinary policy PUT leaves every profile row as it was', async () => {
     editorFixture();
-    delete NB.policies[PID]; // this resource has only an ordinary policy
+    delete NB.policies[PID];
+    const before = clone(T.profiles);
     await db.syncResourcePolicies('net1', 'r1', [{ id: 'pol-direct', ...tcp443({ ports: ['8443'] }) }]);
     assert.deepEqual(writes(), ['PUT /api/policies/pol-direct']);
-    assert.equal(profileRowUpdates(), 0);
+    assert.deepEqual(T.profiles, before);
+});
+
+test("a resource save writes only the active account's profile rows", async () => {
+    editorFixture();
+    T.profiles.push(profile({ id: 40, tenant: 'tenant-a', protocol: 'tcp', ports: '443', sources: ['a'], posture_checks: [] }));
+    const other = clone(T.profiles[1]);
+    await db.syncResourcePolicies('net1', 'r1', both({}, { ports: ['8443'], postureChecks: ['pc-1'] }));
+    assert.equal(payrollRow().ports, '8443');
+    assert.deepEqual(T.profiles[1], other, "another account's row is not updated");
+});
+
+test("a network editor's save never changes a profile policy, also when the policy changed after the route's check", async () => {
+    editorFixture();
+    const changed = both({ ports: ['22'] }, { ports: ['8443'] });
+    await assert.rejects(db.checkResourcePolicySync('r1', changed, { isAdmin: false, resourceName: 'NAS' }),
+        (e) => e.status === 403 && e.code === 'PROFILE_POLICY_ADMIN_ONLY' && e.message === 'Only an admin can change the policy of Access Profile Payroll.');
+    await db.checkResourcePolicySync('r1', both({ ports: ['22'] }), { isAdmin: false, resourceName: 'NAS' });
+    assert.deepEqual(writes(), []);
+    await db.syncResourcePolicies('net1', 'r1', changed, { isAdmin: false });
+    assert.deepEqual(writes(), ['PUT /api/policies/pol-direct'], 'no PUT to the profile policy');
+    assert.equal(payrollRow().ports, '443');
+});
+
+test('the check before a resource save reads the profile rows, so a failed read refuses before the route writes anything', async () => {
+    editorFixture();
+    failSql = /FROM access_profiles/;
+    await assert.rejects(db.checkResourcePolicySync('r1', both()), /database unavailable/);
+    await assert.rejects(db.syncResourcePolicies('net1', 'r1', both({ ports: ['8443'] })), /database unavailable/);
+    assert.deepEqual(writes(), []);
+    failSql = null;
+    assert.deepEqual([...(await db.checkResourcePolicySync('r1', both())).profileOwned], [PID]);
 });
 
 test('the resource detail names the profile that owns a direct policy', async () => {
@@ -828,17 +718,16 @@ test('the resource detail names the profile that owns a direct policy', async ()
 });
 
 // ─── Automations ───
-// The real sync engine with fake resource writers: deletes answer per network.
 let deleteAnswers = {}; // network id → (resourceId) => throws or resolves
 const deleted = [];
-function automationFixture({ removalMode = 'delete', network = 'netB', realDelete = false } = {}) {
+function automationFixture({ realDelete = false } = {}) {
     baseline();
     deleted.length = 0;
-    NB.resources[`${network}/r-keep`] = { id: 'r-keep', name: '10.0.0.1', address: '10.0.0.1', groups: [] };
+    NB.resources['netB/r-keep'] = { id: 'r-keep', name: '10.0.0.1', address: '10.0.0.1', groups: [] };
     NB.resources['netA/r-old'] = { id: 'r-old', name: '10.0.0.2', address: '10.0.0.2', groups: [] };
-    T.automationRow = { id: 1, name: 'Source', endpoint_url: 'https://source.test/list', source_format: 'text', network_id: network, removal_mode: removalMode, min_items: 0, profile_ids: [], name_prefix: '' };
+    T.automationRow = { id: 1, name: 'Source', endpoint_url: 'https://source.test/list', source_format: 'text', network_id: 'netB', removal_mode: 'delete', min_items: 0, profile_ids: [], name_prefix: '' };
     T.automationRes = [
-        { automation_id: 1, external_key: '10.0.0.1', address: '10.0.0.1', resource_id: 'r-keep', network_id: network, status: 'active' },
+        { automation_id: 1, external_key: '10.0.0.1', address: '10.0.0.1', resource_id: 'r-keep', network_id: 'netB', status: 'active' },
         { automation_id: 1, external_key: '10.0.0.2', address: '10.0.0.2', resource_id: 'r-old', network_id: 'netA', status: 'active' },
     ];
     sourceText = '10.0.0.1';
@@ -886,125 +775,79 @@ test('automation removal: only NetBird\'s HTTP 404 on the resource path confirms
     NB.answers['GET /api/networks/netA/resources/r-old'] = [{ status: 404, body: null, raw: '404 page not found' }];
     await automations.runAutomation(1);
     assert.deepEqual(tracked(), ['r-keep'], 'confirmed gone');
-    // A 502 whose body says code 404: not a confirmed absence.
     automationFixture({ realDelete: true });
     NB.answers['GET /api/networks/netA/resources/r-old'] = [{ status: 502, body: { message: 'resource not found', code: 404 } }];
     await automations.runAutomation(1);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old']);
-    // An unanswered DELETE with the resource still there: kept; found gone afterwards (404): removed.
+    assert.deepEqual(tracked(), ['r-keep', 'r-old'], 'a 502 confirms nothing, whatever its body says');
     automationFixture({ realDelete: true });
     NB.answers['DELETE /api/networks/netA/resources/r-old'] = [{ status: 0, error: 'timeout' }];
     await automations.runAutomation(1);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old']);
+    assert.deepEqual(tracked(), ['r-keep', 'r-old'], 'unanswered, and still there');
     automationFixture({ realDelete: true });
     NB.answers['DELETE /api/networks/netA/resources/r-old'] = [{ status: 0, error: 'timeout' }];
     NB.answers['GET /api/networks/netA/resources/r-old'] = [{ status: 200, body: NB.resources['netA/r-old'] }, notFound];
     await automations.runAutomation(1);
-    assert.deepEqual(tracked(), ['r-keep']);
-    // A delete that succeeds.
+    assert.deepEqual(tracked(), ['r-keep'], 'unanswered, then found gone');
     automationFixture({ realDelete: true });
     await automations.runAutomation(1);
     assert.deepEqual(tracked(), ['r-keep']);
     assert.ok(writes().includes('DELETE /api/networks/netA/resources/r-old'));
 });
 
-test('automation removal of a row without a recorded network: gone everywhere, undeterminable network, unreadable list', async () => {
-    const setup = () => { automationFixture({ realDelete: true }); T.automationRes[1].network_id = ''; };
-    setup();
-    NB.lists['/api/networks/resources'] = [{ id: 'r-keep' }];
-    await automations.runAutomation(1);
-    assert.deepEqual(tracked(), ['r-keep'], 'absent from every network: gone');
-    assert.deepEqual(deleted, []);
-    setup();
-    NB.lists['/api/networks/resources'] = [{ id: 'r-keep' }, { id: 'r-old' }];
-    // No network lists it (and none leaves its resources unlisted): the network can't be determined.
-    let out = await automations.runAutomation(1);
-    assert.equal(out.failed, 1);
-    assert.match(out.error, /this resource's network isn't recorded - delete it in NetBird, then run Repair/);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old'], 'still somewhere: kept');
-    assert.deepEqual(deleted, [], 'never deleted in the automation\'s current network');
-    // A network's own resource list can't be read: still undeterminable.
-    setup();
-    NB.lists['/api/networks/resources'] = [{ id: 'r-keep' }, { id: 'r-old' }];
-    NB.networks = { netA: { id: 'netA', name: 'Old' } };
-    NB.answers['GET /api/networks/netA/resources'] = [{ status: 500, body: { message: 'boom' } }];
-    out = await automations.runAutomation(1);
-    assert.match(out.error, /network isn't recorded/);
-    assert.deepEqual(deleted, []);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old']);
-    setup();
-    NB.answers['GET /api/networks/resources'] = [{ status: 500, body: { message: 'boom' } }];
-    out = await automations.runAutomation(1);
-    assert.equal(out.failed, 1);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old'], 'unreadable: kept');
-});
-
-test('automation removal of a row without a recorded network deletes the resource in the network that holds it', async () => {
-    const setup = () => {
+test("automation removal: a refused delete closes the row only on NetBird's 404", async () => {
+    const path = '/api/networks/netA/resources/r-old';
+    // In the network launch links use, only an admin's delete is sent.
+    const guarded = () => {
         automationFixture({ realDelete: true });
-        T.automationRes[1].network_id = '';
-        NB.lists['/api/networks/resources'] = [{ id: 'r-keep' }, { id: 'r-old' }];
+        remoteAccess._internal.setConfigForTest({ networks: ['netA'], createResources: { enabled: true, networkId: 'netA', profileId: 12, groupId: GID } });
     };
-    const gets = () => calls.filter(c => c.method === 'GET').map(c => c.path);
-    // The networks list names each network's resources.
-    setup();
-    NB.networks = { netB: { id: 'netB', resources: ['r-keep'] }, netA: { id: 'netA', resources: ['r-old'] }, netC: { id: 'netC', resources: null } };
+    guarded();
+    NB.answers[`GET ${path}`] = [notFound];
     await automations.runAutomation(1);
-    assert.deepEqual(deleted, ['netA/r-old']);
-    assert.deepEqual(tracked(), ['r-keep'], 'deleted, then the row goes');
-    assert.ok(!gets().some(x => /^\/api\/networks\/net[BC]\/resources$/.test(x)), 'no per-network list read when the networks list says');
-    // A network that doesn't list its resources: its own list is read.
-    setup();
-    NB.networks = { netA: { id: 'netA' } };
-    await automations.runAutomation(1);
-    assert.deepEqual(deleted, ['netA/r-old']);
     assert.deepEqual(tracked(), ['r-keep']);
-    // The account-wide entry carries its network: no further read.
-    setup();
-    NB.lists['/api/networks/resources'] = [{ id: 'r-keep' }, { id: 'r-old', network_id: 'netA' }];
-    await automations.runAutomation(1);
-    assert.deepEqual(deleted, ['netA/r-old']);
-    assert.ok(!gets().includes('/api/networks'));
-    assert.deepEqual(tracked(), ['r-keep']);
-    // Found, but the delete went unanswered and the resource is still there: the row stays.
-    setup();
-    NB.networks = { netA: { id: 'netA', resources: ['r-old'] } };
-    NB.answers['DELETE /api/networks/netA/resources/r-old'] = [{ status: 0, error: 'timeout' }];
+    assert.ok(!writes().some(w => w.startsWith('DELETE')), 'no DELETE sent');
+    for (const answer of [null, { status: 502, body: { message: 'down', code: 404 } }]) {
+        guarded();
+        if (answer) NB.answers[`GET ${path}`] = [answer];
+        const out = await automations.runAutomation(1);
+        assert.equal(out.failed, 1);
+        assert.deepEqual(tracked(), ['r-keep', 'r-old']);
+        assert.ok(!writes().some(w => w.startsWith('DELETE')), 'no DELETE sent');
+        assert.equal(calls.filter(c => c.method === 'GET' && c.path === path).length, 1, 'read once');
+    }
+    const refusedByNetBird = () => {
+        automationFixture({ realDelete: true });
+        NB.answers[`DELETE ${path}`] = [{ status: 422, body: { message: 'in use' }, raw: 'in use' }];
+    };
+    refusedByNetBird();
     const out = await automations.runAutomation(1);
     assert.equal(out.failed, 1);
-    assert.deepEqual(deleted, ['netA/r-old']);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old'], 'unconfirmed: kept');
+    assert.deepEqual(tracked(), ['r-keep', 'r-old']);
+    refusedByNetBird();
+    NB.answers[`GET ${path}`] = [{ status: 200, body: NB.resources['netA/r-old'] }, notFound];
+    await automations.runAutomation(1);
+    assert.deepEqual(tracked(), ['r-keep']);
 });
 
 test('automation repair: a row whose network was deleted is an orphan; a resources 404 with the network still there fails', async () => {
     automationFixture();
+    NB.networks.netB = { id: 'netB', name: 'New' };
     NB.answers['GET /api/networks/netA/resources'] = [notFound];
-    assert.deepEqual(await automations.repairAutomation(1), { removed: 1 }, 'network netA is gone (404)');
+    assert.deepEqual(await automations.repairAutomation(1), { removed: 1 }, 'network netA is not in the list');
     assert.deepEqual(tracked(), ['r-keep']);
-    automationFixture();
-    NB.answers['GET /api/networks/netA/resources'] = [notFound];
-    NB.networks.netA = { id: 'netA', name: 'Old' };
-    await assert.rejects(automations.repairAutomation(1), /could not read network resources/);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old']);
-    automationFixture();
-    NB.answers['GET /api/networks/netA/resources'] = [notFound];
-    NB.answers['GET /api/networks/netA'] = [{ status: 502, body: { message: 'boom', code: 404 } }];
-    await assert.rejects(automations.repairAutomation(1), /could not read network resources/);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old']);
-});
-
-test('automation repair checks a row without a recorded network against every network', async () => {
-    automationFixture();
-    T.automationRes[1].network_id = '';
-    NB.lists['/api/networks/resources'] = [{ id: 'r-old' }];
-    assert.deepEqual(await automations.repairAutomation(1), { removed: 0 });
-    NB.lists['/api/networks/resources'] = [];
-    assert.deepEqual(await automations.repairAutomation(1), { removed: 1 });
-    automationFixture();
-    T.automationRes[1].network_id = '';
-    NB.answers['GET /api/networks/resources'] = [{ status: 0, error: 'timeout' }];
-    await assert.rejects(automations.repairAutomation(1), /could not read network resources/);
-    assert.deepEqual(tracked(), ['r-keep', 'r-old']);
+    const notDeleted = [
+        () => { NB.networks.netA = { id: 'netA', name: 'Old' }; },
+        () => { NB.answers['GET /api/networks'] = [{ status: 502, body: { message: 'boom', code: 404 } }]; },
+        () => { NB.answers['GET /api/networks'] = [notFound]; },
+        () => { NB.answers['GET /api/networks/netA/resources'] = [{ status: 502, body: { message: 'boom', code: 404 } }]; },
+    ];
+    for (const setup of notDeleted) {
+        automationFixture();
+        NB.answers['GET /api/networks/netA/resources'] = [notFound];
+        setup();
+        await assert.rejects(automations.repairAutomation(1), /could not read network resources/);
+        assert.deepEqual(tracked(), ['r-keep', 'r-old']);
+    }
 });
 
 test('automation repair checks each row in its own network and changes nothing when a read fails', async () => {
@@ -1024,7 +867,6 @@ test('automation repair reads a JSON null resource list as an empty network', as
     NB.answers['GET /api/networks/netA/resources'] = [{ status: 200, body: null, raw: 'null' }];
     assert.deepEqual(await automations.repairAutomation(1), { removed: 1 });
     assert.deepEqual(tracked(), ['r-keep']);
-    // A 2xx whose body isn't JSON at all is still a failure.
     automationFixture();
     NB.answers['GET /api/networks/netA/resources'] = [{ status: 200, body: null, raw: '<html>' }];
     await assert.rejects(automations.repairAutomation(1), /could not read network resources/);
@@ -1038,21 +880,18 @@ test('the tracking screen checks each row in its own network, not the automation
     assert.equal(m.networkKnown, true);
     assert.deepEqual(m.resources.map(r => [r.resourceId, r.orphan]).sort(), [['r-keep', false], ['r-old', false]]);
     assert.equal(m.resources.find(r => r.resourceId === 'r-old').name, '10.0.0.2');
-    // Gone from its own network: an orphan.
     delete NB.resources['netA/r-old'];
     m = await automations.getAutomationManaged(1);
     assert.equal(m.resources.find(r => r.resourceId === 'r-old').orphan, true);
-    // Its network can't be read: unknown, not an orphan.
     automationFixture();
     NB.answers['GET /api/networks/netA/resources'] = [{ status: 500, body: { message: 'boom' } }];
     m = await automations.getAutomationManaged(1);
     assert.equal(m.networkKnown, false);
     assert.equal(m.resources.find(r => r.resourceId === 'r-old').orphan, false);
-    // A row without a recorded network: checked against every network.
     automationFixture();
-    T.automationRes[1].network_id = '';
-    NB.lists['/api/networks/resources'] = [{ id: 'r-keep' }];
+    NB.answers['GET /api/networks/netA/resources'] = [notFound];
     m = await automations.getAutomationManaged(1);
+    assert.equal(m.networkKnown, true);
     assert.equal(m.resources.find(r => r.resourceId === 'r-old').orphan, true);
 });
 
@@ -1064,4 +903,126 @@ test('automation repair works without a current target network', async () => {
     assert.deepEqual(tracked(), ['r-keep']);
 });
 
-test.after(() => { console.error = origError; });
+// ─── Remote Access launch links use a profile ───
+const RA_USE = /Remote Access launch links \(choose another profile in Settings > Remote Access\)/;
+const raSettings = (createResources) => remoteAccess._internal.setConfigForTest({ networks: [], createResources });
+
+test('the profile Remote Access uses is in use: the delete is refused and the usage route says why', async () => {
+    baseline();
+    raSettings({ enabled: true, networkId: 'n-ra', profileId: 12, groupId: GID });
+    await refused(RA_USE);
+    const usage = await db.getAccessProfileUsage();
+    assert.deepEqual(usage['12'].reasons, [{ kind: 'remoteAccess', label: 'Remote Access launch links (choose another profile in Settings > Remote Access)' }]);
+    raSettings({ enabled: false, profileId: 12, groupId: GID });
+    await refused(RA_USE);
+});
+
+test('a profile Remote Access did not choose can be deleted, and no choice marks no profile', async () => {
+    baseline();
+    T.profiles.push(profile({ id: 50, name: 'Chosen', group_id: 'grp-50', policy_id: 'pol-50' }));
+    raSettings({ profileId: 50, groupId: 'grp-50' });
+    assert.deepEqual(await db.deleteAccessProfile(12), DELETED);
+    baseline();
+    T.profiles.push({ ...directProfile, id: 13 });
+    raSettings({ profileId: 0, groupId: '' });
+    const usage = await db.getAccessProfileUsage();
+    assert.deepEqual(usage, { 12: { reasons: [] }, 13: { reasons: [] } });
+});
+
+test('a tenant profile is never held by the main account\'s Remote Access', async () => {
+    baseline();
+    T.profiles = [profile({ tenant: 'tenant-a' })];
+    raSettings({ profileId: 12, groupId: GID });
+    const usage = await nb.runWithTenant('tenant-a', () => db.getAccessProfileUsage());
+    assert.deepEqual(usage['12'].reasons, []);
+});
+
+// ─── A profile's row, its policy, and the grants built from it ───
+const payroll = () => { baseline(); T.profiles = [profile({ protocol: 'tcp', ports: '22', sources: ['staff'], posture_checks: [] })]; };
+
+test('an Access Profiles save that NetBird did not confirm leaves the row as it was; a confirmed one updates it', async () => {
+    const save = () => db.updateAccessProfile(12, { name: 'Payroll 2', sources: ['ops'], protocol: 'tcp', ports: ['8443'], postureChecks: ['pc-1'] });
+    for (const answer of [{ status: 0, error: 'timeout' }, { status: 503, body: null }, { status: 422, raw: 'invalid' }, notFound]) {
+        payroll();
+        const before = clone(T.profiles);
+        NB.answers[`PUT /api/policies/${PID}`] = [answer];
+        await assert.rejects(save(), /Failed to update policy/);
+        assert.deepEqual(writes(), [`PUT /api/policies/${PID}`]);
+        assert.deepEqual(T.profiles, before);
+    }
+    payroll();
+    await save();
+    assert.deepEqual(payrollRow(), profile({ name: 'Payroll 2', sources: ['ops'], protocol: 'tcp', ports: '8443', posture_checks: ['pc-1'] }));
+    const temp = await grantPayroll();
+    assert.deepEqual(temp.rules[0].ports, ['8443']);
+    assert.deepEqual(temp.source_posture_checks, ['pc-1']);
+});
+
+test('the Policies page save of a profile policy updates the row after the confirmed PUT, and only then', async () => {
+    const form = (extra = {}) => ({ name: 'Payroll Access', description: '', enabled: true, protocol: 'tcp', ports: ['8443'], sources: ['ops'], destinations: [GID], postureChecks: ['pc-1'], ...extra });
+    payroll();
+    await db.updatePolicy(PID, form());
+    assert.deepEqual(payrollRow(), profile({ protocol: 'tcp', ports: '8443', sources: ['ops'], posture_checks: ['pc-1'] }));
+    const put = calls.find(c => c.method === 'PUT');
+    assert.ok(log.filter(l => /^UPDATE access_profiles/.test(l.sql)).every(l => l.seq > put.seq));
+    for (const answer of [{ status: 0, error: 'timeout' }, { status: 422, raw: 'invalid' }]) {
+        payroll();
+        const before = clone(T.profiles);
+        NB.answers[`PUT /api/policies/${PID}`] = [answer];
+        await assert.rejects(db.updatePolicy(PID, form()), (e) => (answer.status ? !e.unconfirmed : e.code === 'POLICY_UPDATE_UNCONFIRMED'));
+        assert.deepEqual(T.profiles, before);
+    }
+    payroll();
+    const before = clone(T.profiles);
+    NB.policies['pol-other'] = { id: 'pol-other', name: 'Other', enabled: true, rules: [{ name: 'Other', enabled: true, action: 'accept', protocol: 'tcp', ports: ['22'], sources: [g('staff')], destinations: [g(GID)] }] };
+    await db.updatePolicy('pol-other', form({ name: 'Other' }));
+    assert.deepEqual(T.profiles, before, "another policy to the profile's group is not the profile's policy");
+});
+
+test('a profile row is written only from the one accept rule to the profile group; its posture checks always follow', async () => {
+    const save = () => db.updatePolicy(PID, { preserveRules: true, name: 'Payroll Access', description: 'Who may open payroll', enabled: true, postureChecks: ['pc-1'] });
+    const rule = (extra = {}) => ({ name: 'Payroll', enabled: true, action: 'accept', protocol: 'tcp', ports: ['3389'], sources: [g('ops')], destinations: [g(GID)], ...extra });
+    const unclear = {
+        'two rules to the group': [rule(), rule({ ports: ['443'] })],
+        'a rule to another group next to it': [rule({ destinations: [g('grp-other')] }), rule()],
+        'a rule to another group only': [rule({ destinations: [g('grp-other')] })],
+        'a Drop rule': [rule({ action: 'drop' })],
+    };
+    for (const [label, rules] of Object.entries(unclear)) {
+        payroll();
+        NB.policies[PID].rules = rules;
+        await save();
+        assert.deepEqual(payrollRow(), profile({ protocol: 'tcp', ports: '22', sources: ['staff'], posture_checks: ['pc-1'] }), label);
+    }
+    payroll();
+    NB.policies[PID].rules = [rule()];
+    await save();
+    assert.deepEqual(payrollRow(), profile({ protocol: 'tcp', ports: '3389', sources: ['ops'], posture_checks: ['pc-1'] }));
+    // A policy that is turned off still says what a temporary grant opens.
+    payroll();
+    NB.policies[PID].rules = [rule({ enabled: false })];
+    await save();
+    assert.deepEqual(payrollRow(), profile({ protocol: 'tcp', ports: '3389', sources: ['ops'], posture_checks: ['pc-1'] }));
+    payroll();
+    NB.policies[PID].rules = [rule({ protocol: 'all', ports: [] })];
+    await save();
+    assert.deepEqual(payrollRow(), profile({ protocol: 'all', ports: '', sources: ['ops'], posture_checks: ['pc-1'] }));
+});
+
+test('a grant is built from the profile row, never from the live policy', async () => {
+    payroll();
+    NB.policies[PID].rules[0].ports = ['3389'];
+    NB.policies[PID].source_posture_checks = ['pc-9'];
+    const temp = await grantPayroll();
+    assert.deepEqual(temp.rules[0].ports, ['22']);
+    assert.deepEqual(temp.source_posture_checks, []);
+});
+
+test('each profile target of a grant opens its own ports', async () => {
+    payroll();
+    T.profiles.push(profile({ id: 13, name: 'Zeta', group_id: 'grp-13', policy_id: 'pol-13', protocol: 'tcp', ports: '3389', sources: ['staff'], posture_checks: [] }));
+    NB.lists['/api/users'] = [{ id: 'user-1', role: 'user', auto_groups: [] }];
+    await db.createTemporaryAccessGrant({ userId: 'user-1', durationMinutes: 60, targets: [{ type: 'profile', id: '12', access: { tcp: ['443'] } }, { type: 'profile', id: '13' }] }, admin);
+    const opened = tempPolicies().map(p => [p.rules[0].ports.join(','), p.rules[0].destinations.join(',')]).sort();
+    assert.deepEqual(opened, [['3389', 'grp-13'], ['443', GID]], "#12 pinned to 443 and #13's own 3389, never #12's default 22");
+});

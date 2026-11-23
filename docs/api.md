@@ -92,8 +92,8 @@ Every error is JSON with a message for people and a stable code for programs:
 | 403 | `ADDRESS_NOT_PUBLIC`, `NAME_NOT_PUBLIC`, `ADDRESS_BLOCKED` | `createResource: true` for an address that isn't public, a name with an answer that isn't public, or an address or name on the blocklist. Nothing was created. |
 | 403 | `NAME_NOT_FOUND` | The host name has no IPv4 address in the DNS. |
 | 409 | `CREATE_LIMIT` | Too many resources created by the API still exist (Settings > Remote Access sets the maximum). |
-| 409 | `CREATE_IN_PROGRESS` | Another request is creating or removing a resource for this server right now. Try again in a minute. |
-| 502 | `RESOURCE_CREATE_FAILED` | NetBird refused the new resource (also when it answered "too many requests"; the create is sent once). Nothing was created. |
+| 409 | `CREATE_IN_PROGRESS` | Another request is creating a resource for this server right now. Try again in a minute. |
+| 502 | `RESOURCE_CREATE_FAILED` | NetBird refused the new resource. Nothing was created. |
 | 502, 503 | `CREATE_UNCONFIRMED` | NetBird didn't confirm the new resource (502, with `resourceCreated`), or an earlier request for this server is still unconfirmed (503). Try again in a few minutes. |
 | 503 | `NAME_LOOKUP_FAILED`, `TARGETS_SETTLING` | The DNS didn't answer, or Remote Access is getting ready after a change. Try again shortly. |
 | 503 | `BUSY`, `SNAPSHOT_FAILED`, `AUDIT_FAILED`, `UNAVAILABLE` | Try again shortly. |
@@ -168,13 +168,14 @@ curl -sS https://control.example.com/api/v1/remote-access/launch \
 
 With `"createResource": true`, and a key with the `remote-access:create-resource` scope, the app adds
 a server that NetBird has no resource for, so the person can connect without waiting for an
-administrator. An admin turns this on in **Settings > Remote Access > Resources Created By The API**
-and chooses the network and the group the new resources go into. The app never creates or changes a
-policy: an admin's policy to that group (for example *CRM users -> that group*) decides who reaches
-the new servers.
+administrator. An admin turns this on in **Settings > Remote Access > Servers From Launch Links**,
+creates the network the new resources go into (or chooses an existing empty one), and chooses a
+Shared Access Profile. The new resources join that profile's group, and the profile's policy (for
+example *CRM users -> that group*) decides who reaches the new servers. The app never creates or
+changes a policy.
 
-The key must have the scope first (`403 SCOPE_MISSING`, before any other check). Then the app
-checks, in this order, and stops at the first refusal:
+The key must have the scope first (`403 SCOPE_MISSING`, before any other check), and with `user`
+that user must exist, only once, and not be blocked. Then the app checks, in this order, and stops at the first refusal:
 
 1. **Does NetBird cover the target already?** For an IPv4 address: a resource or an enabled legacy
    route covers it. For a host name: a domain resource or an enabled domain route covers the name;
@@ -183,26 +184,22 @@ checks, in this order, and stops at the first refusal:
    whether or not the address is public. An integration can send `createResource: true` on every
    launch: private servers that already have a resource keep working. When NetBird or the DNS can't
    be read and creating resources is off, the request also goes on as without `createResource`.
-2. Creating resources is on and the instance is not read-only (`CREATE_DISABLED`). The app reads these settings from the database on every request, so turning
-   the feature off stops it on every instance at once.
+2. Creating resources is on, a network and an Access Profile are chosen, and the instance is not
+   read-only (`CREATE_DISABLED`).
 3. The target is public. An IPv4 address must not be in the IANA IPv4 Special-Purpose Address
-   Registry (every entry), multicast, or be a Browser Gateway's own address (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
+   Registry (every entry) or multicast (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
    public (`NAME_NOT_PUBLIC`), and the app uses the first one. A name with no IPv4 answer is
    `NAME_NOT_FOUND`. Neither the address nor the name may be on the blocklist (`ADDRESS_BLOCKED`;
    names compare without regard to letter case, a trailing dot or international spelling).
-4. With `user`: the user exists, only once, and is not blocked.
-5. Fewer than the maximum resources created by the API exist (`CREATE_LIMIT`), and no other request is
+4. Fewer than the maximum resources created by the API exist (`CREATE_LIMIT`), and no other request is
    adding the same address.
-6. Right before the one send (inside the resource writer, after its own checks, its wait for the
-   lock and any wait for NetBird's rate limit), the key is checked again (`401 KEY_REVOKED`), and so
-   are the settings (`CREATE_DISABLED` when adding was turned off meanwhile). Then nothing is sent.
 
 Addresses that are never a Remote Access target (loopback, NetBird peers, multicast, reserved) go
 on as without `createResource`, and the usual checks refuse them. A host name with such an answer
 next to a public one is `NAME_NOT_PUBLIC`.
 
 The new resource is a host resource (`x.x.x.x/32`) named after the address (or `name (address)`
-for a host name), in the chosen network and group, with no policy. Then the usual checks follow:
+for a host name), in the chosen network and the Access Profile's group, with no policy. Then the usual checks follow:
 with `user`, that user's access to the address. The link connects to the address, also when the
 request sent a host name; it then keeps the name for the SSH host key set for it.
 
@@ -236,5 +233,5 @@ names directly, is kept and left to an admin. See
 [Browser remote access](remote-access.md#resources-created-by-the-launch-api).
 
 The audit log records `resource.create_intent` before the write, then `resource.create`,
-`resource.create_unconfirmed` or `resource.create_failed`, and later `resource.delete` or
-`resource.kept`.
+`resource.create_unconfirmed` or `resource.create_failed`, and later `resource.delete`,
+`resource.delete_unconfirmed` or `resource.kept`.

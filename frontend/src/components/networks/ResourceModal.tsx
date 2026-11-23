@@ -28,7 +28,6 @@ interface Props {
   allowDuplicates?: boolean; // per-network opt-out: overlapping addresses are allowed here
   /** Create only: the address (and name) the form starts with. */
   initialAddress?: string;
-  /** Create only: the resource was saved, with this id. */
   onCreated?: (resourceId: string) => void;
   /** Create only: NetBird's answer was only partly known (see CreateOutcome). */
   onUncertain?: () => void;
@@ -119,7 +118,6 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
   opts: PolicyOptions; profiles: AccessProfile[]; existingNames: string[]; existingResources: { name: string; address: string }[]; allowDuplicates: boolean;
   initialAddress?: string; onCreated?: (resourceId: string) => void; onUncertain?: () => void; onClose: () => void;
 }) {
-  // Duplicating: everything initializes from the source resource, but saving CREATES.
   const isEdit = !!resource && !duplicate;
   const appCfg = useAppConfig().data;
   const showGroups = appCfg?.showResourceGroups ?? true;
@@ -133,8 +131,6 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
   const [name, setName] = useState(resource ? (duplicate ? `${resource.name || ''} (copy)` : resource.name || '') : (initialAddress || ''));
   const [address, setAddress] = useState(resource?.address || initialAddress || '');
   const [description, setDescription] = useState(resource?.description || '');
-  // Shared access profiles the resource is assigned to (it inherits their policy).
-  // New resources start from the network's default profiles; existing ones from their groups.
   const [profileIds, setProfileIds] = useState<number[]>(() => {
     if (resource) {
       return sharedProfiles.filter((p) => (resource.groups || []).some((g) => g.id === p.groupId)).map((p) => p.id);
@@ -173,8 +169,6 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
     if (!cand) return null;
     return existingResources.find((r) => r.address && addressesOverlap(cand, r.address)) || null;
   }, [address, existingResources]);
-  // Blocks the save only when this network hasn't opted into duplicates; when it HAS,
-  // the conflict is still surfaced as an informational note below.
   const addressExists = !!addressConflict && !allowDuplicates;
   const blocklist = useBlocklist().data;
   const blockedBy = address.trim() ? addressBlockedForNetwork(address.trim(), networkId, blocklist || []) : null;
@@ -186,9 +180,7 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
 
   const policyLabel = name.trim() ? `${name.trim()} Policy` : 'Policy';
 
-  // App-standard table chrome for the staged policies: search, sortable columns (default
-  // Name A-Z), rows-per-page + pagination - same as every other table. Rows carry their
-  // ORIGINAL index so edit/copy/delete keep working regardless of the display order.
+  // Rows carry their ORIGINAL index so edit/copy/delete keep working regardless of the display order.
   const [polSearch, setPolSearch] = useState('');
   const polRows = useMemo(() => {
     const q = polSearch.toLowerCase().trim();
@@ -209,15 +201,13 @@ function ResourceForm({ networkId, resource, duplicate, initialTab, opts, profil
     setPolicies((prev) => editing?.index != null ? prev.map((x, i) => (i === editing.index ? { ...p, ...(x.id ? { id: x.id } : {}) } : x)) : [...prev, p]);
     setEditing(null);
   };
-  // Direct policies that are also an Access Profile's policy: id → profile name.
   const profileOfPolicy = useMemo(() => new Map((resource?.policies || []).filter((p) => !p.inherited && p.profileName).map((p) => [p.id, p.profileName as string])), [resource]);
   const profileNote = (p: PolicyInput) => {
     const name = p.id ? profileOfPolicy.get(p.id) : undefined;
     return name ? `This policy is also the policy of Access Profile ${name}. Changes here apply to the profile.` : '';
   };
 
-  // Copy a staged policy from the row menu / paste one straight into the list - same
-  // clipboard format as the policy editor's Copy/Paste, so both directions work.
+  // Same clipboard format as the policy editor's Copy/Paste, so both directions work.
   const [pasteFlash, setPasteFlash] = useState<'idle' | 'ok' | 'fail'>('idle');
   const flashPaste = (s: 'ok' | 'fail') => { setPasteFlash(s); setTimeout(() => setPasteFlash('idle'), 1500); };
   const copyStagedPolicy = async (p: PolicyInput) => {

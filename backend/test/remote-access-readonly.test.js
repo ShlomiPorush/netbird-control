@@ -10,31 +10,8 @@ const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] || null;
 core.setSetting = async (k, v) => { settings[k] = v; };
-// The settings write that keeps the stored createResources (a read-only save), on the same settings.
-const holds = require('./helpers/hold-table').holdTable((sql, params) => {
-    if (typeof sql === 'string' && sql.trim().startsWith('INSERT INTO app_settings')) {
-        const next = JSON.parse(params[0]);
-        const cur = settings.remote_access_config ? JSON.parse(settings.remote_access_config) : null;
-        if (cur && cur.createResources !== undefined) next.createResources = cur.createResources;
-        settings.remote_access_config = JSON.stringify(next);
-        return { rows: [{ value: settings.remote_access_config }] };
-    }
-    return { rows: [] };
-});
+const holds = require('./helpers/hold-table').holdTable();
 core.pool.query = holds.query;
-// The created-resources configuration lock's transaction (lib/remote-access.js), on the same
-// settings; no resources created by the API exist here.
-core.pool.connect = async () => ({
-    query: async (sql, params = []) => {
-        const s = String(sql).trim();
-        if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(s) || s.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] };
-        if (s.startsWith('SELECT value FROM app_settings')) return { rows: settings[params[0]] ? [{ value: settings[params[0]] }] : [] };
-        if (/FROM ra_created_resources/.test(s)) return { rows: [{ n: 0 }] };
-        if (s.startsWith('INSERT INTO app_settings')) { settings.remote_access_config = params[0]; return { rows: [] }; }
-        return holds.query(sql, params);
-    },
-    release: () => { },
-});
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
 nb.bustNbCaches = () => { };
@@ -158,25 +135,23 @@ test('the re-check on a read-only instance extends the holds of its open session
     assert.deepEqual(writes, []);
 });
 
+const CREATE = { enabled: true, networkId: 'n1', profileId: 3, groupId: 'g-srv', max: 7 };
 test('a read-only instance never adds or deletes a server for a launch link', async () => {
     await reset();
-    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 50 } });
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: CREATE });
     const key = { id: 7, name: 'Customer File', scopes: ['remote-access:launch', 'remote-access:create-resource'] };
-    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 50 } });
-    // Read-only: creating is never allowed, so the launch goes on as without createResource.
+    // Creating is never allowed, so the launch goes on as without createResource.
     const out = await ra.issueLaunch(key, { protocol: 'rdp', address: '8.8.8.8', port: 3389, createResource: true });
     assert.equal(out.resource.created, false);
-    assert.equal(await ra.maintainCreatedResources(), null);
+    await ra.maintainCreatedResources();
     assert.deepEqual(writes, []);
 });
 
-test('a save on a read-only instance never changes the stored createResources', async () => {
+test('a save on a read-only instance never changes the settings for created resources', async () => {
     await reset();
-    const stored = { enabled: true, networkId: 'n1', groupId: 'g-srv', max: 7 };
-    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], createResources: stored });
-    // This instance's copy is older; the save asks to change it.
-    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: { enabled: false, networkId: '', groupId: '', max: 50 } });
-    await ra.setRemoteAccessConfig({ idleTimeoutMin: 45, createResources: { enabled: false, networkId: 'other', groupId: 'g-x', max: 1 } }).catch(() => { });
-    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, stored);
-    assert.equal(JSON.parse(settings.remote_access_config).idleTimeoutMin, 45);
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: CREATE });
+    await ra.setRemoteAccessConfig({ idleTimeoutMin: 45, createResources: { enabled: false, profileId: 9, max: 1 } }).catch(() => { });
+    const saved = JSON.parse(settings.remote_access_config);
+    assert.deepEqual(saved.createResources, CREATE);
+    assert.equal(saved.idleTimeoutMin, 45);
 });

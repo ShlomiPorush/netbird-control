@@ -25,21 +25,16 @@ core.pool.query = async (sql, params = []) => {
     if (/LIKE 'telegram_config:%'/.test(sql)) {
         return { rows: [...store].filter(([k]) => k.startsWith('telegram_config:') || k.startsWith('telegram_bot_token:')).map(([key, value]) => ({ key, value })) };
     }
+    if (/FROM information_schema.columns/.test(sql)) return { rows: ['attempt_id', 'ip', 'state'].map(column_name => ({ column_name, data_type: 'text' })) };
     return { rows: [] };
 };
-// The created-resources configuration lock's transaction (lib/remote-access.js): its statements on
-// the same store; no resources created by the API exist here.
+// The encrypted backup's restore runs its table sections in a transaction.
+const restored = [];
 core.pool.connect = async () => ({
-    query: async (sql, params = []) => {
-        const s = String(sql).trim();
-        if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(s) || s.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] };
-        if (/FROM ra_created_resources/.test(s)) return { rows: [{ n: 0 }] };
-        if (s.startsWith("INSERT INTO app_settings (key, value) VALUES ('remote_access_config', $1)")) { store.set('remote_access_config', params[0]); return { rows: [] }; }
-        return core.pool.query(sql, params);
-    },
+    query: async (sql, params = []) => { restored.push([sql.trim(), params]); return { rows: [] }; },
     release: () => { },
 });
-const { importAppSettings, getNbApiConfig, getSmtpConfig, getTelegramWebhookSecret } = require('../db');
+const { restoreInternalBackup, _internal, importAppSettings, getNbApiConfig, getSmtpConfig, getTelegramWebhookSecret } = require('../db');
 
 const SMTP = { enabled: true, host: 'mail.example.com', port: 587, secure: false, user: 'notify', from: 'nb@example.com' };
 const TG = { enabled: false, chatId: '-100', categories: {}, netbirdEvents: [] };
@@ -145,11 +140,34 @@ test('a tenant Telegram config drops the file secret and must be an object', asy
     assert.deepEqual(skippedKeys(r), ['telegram_config:t1']);
 });
 
+const REMOTE_CFG = { enabled: false, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g1', max: 20 } };
+const REMOTE_OFF = { ...REMOTE_CFG.createResources, enabled: false };
 test('an import never turns on creating resources from the launch API; the other fields are kept', async () => {
     await seed();
-    const cfg = { enabled: false, networks: ['n1'], createResources: { enabled: true, networkId: 'n1', groupId: 'g1', max: 20 } };
-    const r = await importAppSettings({ settings: { remote_access_config: JSON.stringify(cfg) } });
+    const r = await importAppSettings({ settings: { remote_access_config: JSON.stringify(REMOTE_CFG) } });
     assert.deepEqual(r.keys, ['remote_access_config']);
-    assert.deepEqual(JSON.parse(store.get('remote_access_config')).createResources, { enabled: false, networkId: 'n1', groupId: 'g1', max: 20 });
+    assert.deepEqual(JSON.parse(store.get('remote_access_config')).createResources, REMOTE_OFF);
     assert.equal(require('../lib/remote-access').getRemoteAccessConfig().createResources.enabled, false);
+    assert.deepEqual(skippedKeys(await importAppSettings({ settings: { remote_access_config: '[1]' } })), ['remote_access_config']);
+});
+
+test('a backup restore turns it off too, and adds the servers launch links created to the live rows', async () => {
+    await seed();
+    const passphrase = crypto.randomBytes(16).toString('hex');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const pub = publicKey.export({ type: 'spki', format: 'pem' });
+    const blob = Buffer.from(_internal.encryptPrivateKey(privateKey.export({ type: 'pkcs8', format: 'der' }), passphrase), 'base64');
+    const row = { attempt_id: 'a1', ip: '9.9.9.9', state: 'created' };
+    const file = _internal.encryptBackup({ kind: 'internal-backup', settings: { remote_access_config: JSON.stringify(REMOTE_CFG) }, tables: { ra_created_resources: [row] } }, pub, blob);
+    restored.length = 0;
+    const out = await restoreInternalBackup(file, passphrase);
+    assert.deepEqual(JSON.parse(store.get('remote_access_config')).createResources, REMOTE_OFF);
+    assert.equal(out.tables.ra_created_resources, 1);
+    const statements = restored.map(([sql]) => sql);
+    assert.ok(!statements.some(s => s.startsWith('DELETE FROM ra_created_resources')));
+    assert.ok(statements.some(s => /^INSERT INTO ra_created_resources .* ON CONFLICT DO NOTHING$/.test(s)));
+    // The plaintext import never takes the table.
+    restored.length = 0;
+    await importAppSettings({ settings: { retention_days: '30' }, tables: { ra_created_resources: [row] } });
+    assert.equal(restored.length, 0);
 });

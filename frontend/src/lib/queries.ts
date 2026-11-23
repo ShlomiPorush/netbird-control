@@ -38,24 +38,23 @@ export function useVersion() {
   return useQuery({ queryKey: ['version'], queryFn: () => api.version(), staleTime: Infinity });
 }
 
-// App display name (configurable in Settings). Available to every user.
+// Available to every user.
 export function useAppConfig() {
   return useQuery({ queryKey: ['app-config'], queryFn: () => api.get<AppConfig>('/api/app-config'), staleTime: 5 * 60_000 });
 }
 
-// NetBird Management API connection (admin only). Never includes the token.
+// Admin only. Never includes the token.
 export function useNetbirdApiConfig(enabled = true) {
   return useQuery({ queryKey: ['netbird-api'], queryFn: () => api.get<NetbirdApiConfig>('/api/integrations/netbird'), enabled });
 }
 
-// Incoming-webhook endpoint + auth status (admin only). Never includes the token.
+// Admin only. Never includes the token.
 export function useWebhookConfig(enabled = true) {
   return useQuery({ queryKey: ['webhook-config'], queryFn: () => api.get<WebhookConfig>('/api/integrations/webhook'), enabled });
 }
 
-// Live "is it actually configured in NetBird" status for the Webhook page badges (admin only). Kept
-// separate from the config query because it hits the NetBird API and can be slow / plan-gated; the UI
-// shows it with its own loading state. Refetches periodically so the badge reflects config changes.
+// Admin only. Kept separate from the config query because it hits the NetBird API and can be slow /
+// plan-gated; the UI shows it with its own loading state. Refetches so the badge reflects config changes.
 export function useNetbirdWebhookStatus(enabled = true) {
   return useQuery({
     queryKey: ['webhook-nb-status'],
@@ -64,67 +63,63 @@ export function useNetbirdWebhookStatus(enabled = true) {
   });
 }
 
-// Traffic Events API pull - the per-account opt-in plus its last-run status (admin only).
+// Admin only.
 export function useTrafficPull(enabled = true) {
   return useQuery({ queryKey: ['traffic-pull'], queryFn: () => api.get<TrafficPullStatus>('/api/traffic-pull'), enabled });
 }
 
-// Audit Events API pull - the per-account opt-in plus its last-run status (admin only).
+// Admin only.
 export function useAuditPull(enabled = true) {
   return useQuery({ queryKey: ['audit-pull'], queryFn: () => api.get<AuditPullStatus>('/api/audit-pull'), enabled });
 }
 
-// Telegram notification config (admin only). Never includes the bot token.
+// Admin only. Never includes the bot token.
 export function useTelegramConfig(enabled = true) {
   return useQuery({ queryKey: ['telegram'], queryFn: () => api.get<TelegramConfig>('/api/integrations/telegram'), enabled });
 }
 
-// SMTP email settings (admin only). Password never returned.
+// Admin only. Password never returned.
 export function useSmtpConfig(enabled = true) {
   return useQuery({ queryKey: ['smtp'], queryFn: () => api.get<SmtpConfig>('/api/integrations/smtp'), enabled });
 }
 
-// Who may approve access requests - Entra groups + Telegram approvers (admin only).
+// Admin only.
 export function useApproverConfig(enabled = true) {
   return useQuery({ queryKey: ['approver-config'], queryFn: () => api.get<ApproverConfig>('/api/approver-config'), enabled });
 }
 
-// Auto-approval rules - trusted groups + per-target self-service (admin only).
+// Admin only.
 export function useAutoApprovalConfig(enabled = true) {
   return useQuery({ queryKey: ['auto-approval-config'], queryFn: () => api.get<AutoApprovalConfig>('/api/auto-approval-config'), enabled });
 }
 
-// Recurring access rules (weekday + daily-window schedules that spawn temp grants).
 export function useRecurringAccess(enabled = true) {
   return useQuery({ queryKey: ['recurring-access'], queryFn: () => api.get<RecurringAccessRule[]>('/api/recurring-access'), enabled });
 }
 
-// Security & alerts settings - session limits, escalation, review digest, anomalies (admin only).
+// Admin only.
 export function useSecurityConfig(enabled = true) {
   return useQuery({ queryKey: ['security-config'], queryFn: () => api.get<SecurityConfig>('/api/security-config'), enabled });
 }
 
-// Automatic EDR bypass rules (admin only). Per account - tenant-aware, like data retention.
+// Admin only. Per account - tenant-aware, like data retention.
 export function useEdrAutoBypass(enabled = true) {
   return useQuery({ queryKey: ['edr-auto-bypass'], queryFn: () => api.get<EdrAutoBypassConfig>('/api/edr-auto-bypass'), enabled });
 }
 
-// Per-account data-retention window (admin only). Tenant-aware - works in tenant mode too, where
-// the rest of security-config stays main-only.
+// Admin only. Tenant-aware - works in tenant mode too, where the rest of security-config stays main-only.
 export function useRetention(enabled = true) {
   return useQuery({ queryKey: ['data-retention'], queryFn: () => api.get<RetentionStatus>('/api/data-retention'), enabled });
 }
 
-// Distinct device tags in use (Peers tag filter + tag editor suggestions).
 export function usePeerTags(enabled = true) {
   return useQuery({ queryKey: ['peer-tags'], queryFn: () => api.get<string[]>('/api/peer-tags'), enabled });
 }
 
-// Access recertification - the open review round + last completed summary (admin only).
+// Admin only.
 export function useRecertification(enabled = true) {
   return useQuery({ queryKey: ['recertification'], queryFn: () => api.get<Recertification>('/api/recertification'), enabled });
 }
-// Completed review rounds history + one round's full who-decided-what report.
 export function useRecertRounds(enabled = true) {
   return useQuery({ queryKey: ['recert-rounds'], queryFn: () => api.get<RecertRoundSummary[]>('/api/recertification/rounds'), enabled });
 }
@@ -160,8 +155,7 @@ export function useWhoHasAccess(p: AccessCheckParams | null) {
   });
 }
 
-// System Health - scheduler status, DB size, integrations (admin only). Refreshes every 30s
-// while the tab is open so a failing scheduler surfaces without a manual reload.
+// Admin only. Refreshes so a failing scheduler surfaces without a manual reload.
 export function useSystemHealth(enabled = true) {
   return useQuery({
     queryKey: ['system-health'],
@@ -171,12 +165,12 @@ export function useSystemHealth(enabled = true) {
   });
 }
 
-// Feature permissions - per-capability users + groups (admin only).
+// Admin only.
 export function useFeaturePerms(enabled = true) {
   return useQuery({ queryKey: ['feature-permissions'], queryFn: () => api.get<FeaturePermsConfig>('/api/feature-permissions'), enabled });
 }
 
-// Global search (⌘K palette) - permission-filtered networks/resources/peers/groups/users/policies.
+// Results are permission-filtered.
 export function useSearch(q: string, enabled: boolean) {
   return useQuery({
     queryKey: ['search', q],
@@ -214,7 +208,6 @@ export function useAdminLogs(params: LogParams) {
   });
 }
 
-// Traffic summary - the filtered events aggregated per source→destination pair.
 export function useLogSummary(params: LogParams, enabled = true) {
   return useQuery({
     queryKey: ['logs-summary', params],
@@ -253,7 +246,6 @@ export function useProxyAccessLogs(page: number, perPage: number, search: string
   });
 }
 
-// Proxy logs aggregated per service (Summary view) - same filters as the detailed list.
 export function useProxyLogsSummary(search: string, f: ProxyLogFilters, enabled = true) {
   return useQuery({
     queryKey: ['reverse-proxy-logs-summary', search, f],
@@ -274,7 +266,7 @@ export function useProxyLogsSummary(search: string, f: ProxyLogFilters, enabled 
   });
 }
 
-// One service for the Edit modal (auth secrets stripped server-side).
+// Auth secrets are stripped server-side.
 export function useProxyServiceDetail(id: string | undefined) {
   return useQuery({
     queryKey: ['reverse-proxy-service', id],
@@ -283,7 +275,6 @@ export function useProxyServiceDetail(id: string | undefined) {
   });
 }
 
-// Flat peers + resources inventory for the unified target picker.
 export function useProxyTargetOptions(enabled = true) {
   return useQuery({
     queryKey: ['reverse-proxy-target-options'],
@@ -293,7 +284,6 @@ export function useProxyTargetOptions(enabled = true) {
   });
 }
 
-// Custom domains available as bases for new reverse-proxy services.
 export function useProxyDomains(enabled = true) {
   return useQuery({
     queryKey: ['reverse-proxy-domains'],
@@ -313,7 +303,6 @@ export function useProxyServiceStats(enabled = true) {
   });
 }
 
-// Distinct users seen in the stored proxy logs (user dropdown on the Reverse Proxy page).
 export function useProxyLogUsers(enabled = true) {
   return useQuery({
     queryKey: ['reverse-proxy-log-users'],
@@ -323,7 +312,7 @@ export function useProxyLogUsers(enabled = true) {
   });
 }
 
-// Reverse-proxy (Cloud ingress) clusters + services status (admin only; hidden on self-hosted).
+// Admin only; hidden on self-hosted.
 export function useReverseProxyStatus(enabled = true) {
   return useQuery({
     queryKey: ['reverse-proxy-status'],
@@ -333,7 +322,7 @@ export function useReverseProxyStatus(enabled = true) {
   });
 }
 
-// Events-per-hour for the dashboard chart (a restricted user gets only their own traffic).
+// A restricted user gets only their own traffic.
 export interface HourlyStat { hour: string; count: number }
 export function useHourlyStats(hours = 24) {
   return useQuery({
@@ -343,7 +332,7 @@ export function useHourlyStats(hours = 24) {
   });
 }
 
-// IP-assignment history (admin only) - who held a NetBird IP at a given time.
+// Admin only.
 export function useIpHistory(params: { q?: string; at?: string; user?: string; sort?: string; dir?: string; page?: number; per_page?: number }) {
   return useQuery({
     queryKey: ['ip-history', params],
@@ -352,12 +341,12 @@ export function useIpHistory(params: { q?: string; at?: string; user?: string; s
   });
 }
 
-// Distinct users in the IP history, for the page's user filter (audit-view gated).
+// Audit-view gated.
 export function useIpHistoryUsers(enabled = true) {
   return useQuery({ queryKey: ['ip-history-users'], queryFn: () => api.get<LogUser[]>('/api/ip-history/users'), enabled });
 }
 
-// Audit log of changes made through this app (admin only).
+// Admin only.
 export function useAuditLog(params: LogParams) {
   return useQuery({
     queryKey: ['audit', params],
@@ -367,7 +356,6 @@ export function useAuditLog(params: LogParams) {
   });
 }
 
-// Outbound log - everything the app itself sent out (email / Telegram).
 export interface OutboundResponse {
   rows: OutboundEntry[];
   total: number;
@@ -415,7 +403,6 @@ export function useMspTenants(enabled = true) {
     refetchInterval: 60_000,
   });
 }
-// The switchable accounts - what the tenant switcher lists and what "Manage" switches into.
 export function useMspSwitcher(enabled = true) {
   return useQuery({
     queryKey: ['msp-switcher'],
@@ -425,8 +412,7 @@ export function useMspSwitcher(enabled = true) {
     refetchInterval: 60_000,
   });
 }
-// Settings Sync: a tenant's Event Filtering + Blocklist + Data Retention + webhook tokens
-// compared against main's current config. Enabled only when a tenant id is selected.
+// Settings Sync: the tenant's settings and webhook tokens compared against main's current config.
 export function useTenantDrift(id: string | null) {
   return useQuery({
     queryKey: ['msp-tenant-drift', id],
@@ -434,8 +420,7 @@ export function useTenantDrift(id: string | null) {
     enabled: id != null,
   });
 }
-// Tenant Defaults (admin, main only): the saved profile new tenants are seeded with, plus main's
-// current live settings for the "Load Current Main Values" prefill. Only meaningful on MSP accounts.
+// Admin, main account only. Only meaningful on MSP accounts.
 export function useTenantDefaults(enabled = true) {
   return useQuery({
     queryKey: ['tenant-defaults'],
@@ -443,17 +428,16 @@ export function useTenantDefaults(enabled = true) {
     enabled,
   });
 }
-// Live NetBird Settings (admin): the CURRENT account's own NetBird settings - main in main mode, the
-// managed tenant's account in tenant mode. Distinct from Tenant Defaults (the seed template for new
-// tenants). Separate query key per tenant so switching accounts never serves a stale settings object.
+// Admin. The CURRENT account's own settings (main, or the managed tenant's account), not the Tenant
+// Defaults seed template. Separate query key per tenant so switching accounts never serves a stale
+// settings object.
 export function useNetbirdSettings() {
   return useQuery({
     queryKey: ['netbird-settings', getTenantMode() || 'main'],
     queryFn: () => api.get<NetbirdSettingsResponse>('/api/netbird-settings'),
   });
 }
-// Fleet Report (admin, main only): a management snapshot across every tenant - peers, versions,
-// known issues, integration and service-user status. Manual refetch from the tab; short stale time.
+// Admin, main account only.
 export function useFleetReport(enabled = true) {
   return useQuery({
     queryKey: ['msp-fleet-report'],
@@ -462,7 +446,7 @@ export function useFleetReport(enabled = true) {
     staleTime: 60_000,
   });
 }
-// Weekly MSP digest config (admin, main only). Disabled by default (kill switch).
+// Admin, main account only.
 export function useMspDigest(enabled = true) {
   return useQuery({
     queryKey: ['msp-digest'],
@@ -470,8 +454,7 @@ export function useMspDigest(enabled = true) {
     enabled,
   });
 }
-// The MSP's upgradeable plan catalog (Team / Business) in its own billing currency. Backed by a
-// ~10 min server cache; only fetched while the tenant modal's Plan tab is open.
+// Backed by a ~10 min server cache; only fetched while the tenant modal's Plan tab is open.
 export function useMspBillingPlans(enabled = true) {
   return useQuery({
     queryKey: ['msp-billing-plans'],
@@ -507,7 +490,7 @@ export function useDiagnosticsInfo() {
   });
 }
 
-// Report-only hygiene sweep for the Cleanup page (admin only).
+// Admin only.
 export function useCleanupScan(staleDays: number) {
   return useQuery({
     queryKey: ['cleanup-scan', staleDays],
@@ -520,7 +503,7 @@ export function useUsers(enabled = true) {
   return useQuery({ queryKey: ['users'], queryFn: () => api.get<NbUser[]>('/api/users'), enabled });
 }
 
-// Distinct users for the Activity user filter dropdown (admin only).
+// Admin only.
 export interface LogUser { user_id: string; display_name?: string; email?: string }
 export function useLogUsers(enabled = true) {
   return useQuery({ queryKey: ['log-users'], queryFn: () => api.get<LogUser[]>('/api/logs/users'), enabled });
@@ -534,7 +517,6 @@ export function usePeers(enabled = true, own = false) {
   return useQuery({ queryKey: ['peers', own], queryFn: () => api.get<Peer[]>('/api/peers', own ? { own: 1 } : undefined), enabled });
 }
 
-// Expanded detail for one peer (peer detail page).
 export function usePeerDetail(id: string | undefined) {
   return useQuery({
     queryKey: ['peer-detail', id],
@@ -543,13 +525,12 @@ export function usePeerDetail(id: string | undefined) {
   });
 }
 
-// All NetBird groups with usage counts (admin only).
+// Admin only.
 export function useGroups(enabled = true) {
   return useQuery({ queryKey: ['groups'], queryFn: () => api.get<NbGroup[]>('/api/groups'), enabled });
 }
 
-// Default Auto-Assigned Groups for invitations (admin only, per account) - prefills the invite
-// modal. Fetched only while the modal is open, so non-admin pages never hit the endpoint.
+// Admin only, per account. Fetched only while the modal is open, so non-admin pages never hit the endpoint.
 export function useInviteDefaultGroups(enabled = true) {
   return useQuery({
     queryKey: ['invite-defaults'],
@@ -558,7 +539,6 @@ export function useInviteDefaultGroups(enabled = true) {
   });
 }
 
-// Expanded detail for one group (group detail page).
 export function useGroupDetail(id: string | undefined) {
   return useQuery({
     queryKey: ['group-detail', id],
@@ -567,7 +547,6 @@ export function useGroupDetail(id: string | undefined) {
   });
 }
 
-// Expanded detail for one user (user detail page).
 export function useUserDetail(id: string | undefined) {
   return useQuery({
     queryKey: ['user-detail', id],
@@ -596,7 +575,7 @@ export function usePolicyOptions(id: string | undefined, enabled = true) {
   });
 }
 
-// All access-control policies (admin-only overview page).
+// Admin only.
 export function usePolicies(enabled = true) {
   return useQuery({ queryKey: ['policies'], queryFn: () => api.get<Policy[]>('/api/policies'), enabled });
 }
@@ -609,33 +588,29 @@ export function useAdGroups(enabled = true) {
   return useQuery({ queryKey: ['ad-groups'], queryFn: () => api.get<GroupRef[]>('/api/ad-groups'), enabled });
 }
 
-// Access Profiles (group + shared policy bundles).
 export function useAccessProfiles(enabled = true) {
   return useQuery({ queryKey: ['access-profiles'], queryFn: () => api.get<AccessProfile[]>('/api/access-profiles'), enabled });
 }
 
-// Where each Access Profile is used (admin only) - a profile in use can't be deleted. Under the
-// 'access-profiles' key, so whatever refreshes the profiles refreshes this too.
+// Admin only. Any change elsewhere can add or end a use: the key sits under 'access-profiles', so what
+// refreshes the profiles refreshes this, and staleTime 0 reads it again whenever its page opens.
 export function useAccessProfileUsage(enabled = true) {
   return useQuery({ queryKey: ['access-profiles', 'usage'], queryFn: () => api.get<AccessProfileUsage>('/api/access-profiles/usage'), enabled, staleTime: 0 });
 }
 
-// Per-network default Access Profiles (admin only).
+// Admin only.
 export function useNetworkDefaultProfiles(enabled = true) {
   return useQuery({ queryKey: ['network-default-profiles'], queryFn: () => api.get<NetworkDefaultProfiles>('/api/network-default-profiles'), enabled });
 }
 
-// Posture checks (proxied from NetBird).
 export function usePostureChecks(enabled = true) {
   return useQuery({ queryKey: ['posture-checks'], queryFn: () => api.get<PostureCheck[]>('/api/posture-checks'), enabled });
 }
 
-// Country list for the geo-location posture check editor.
 export function useCountries(enabled = true) {
   return useQuery({ queryKey: ['countries'], queryFn: () => api.get<Country[]>('/api/locations/countries'), enabled, staleTime: Infinity });
 }
 
-// Cities for a chosen country (geo-location editor).
 export function useCities(countryCode: string | undefined) {
   return useQuery({
     queryKey: ['cities', countryCode],
@@ -645,7 +620,7 @@ export function useCities(countryCode: string | undefined) {
   });
 }
 
-// Automations (admin only).
+// Admin only.
 export function useAutomations(enabled = true) {
   return useQuery({ queryKey: ['automations'], queryFn: () => api.get<Automation[]>('/api/automations'), enabled });
 }
@@ -666,7 +641,7 @@ export function useAutomationManaged(id: number | undefined, enabled = true) {
   });
 }
 
-// Address blocklist (readable by any editor for inline checks).
+// Readable by any editor, for inline checks.
 export function useBlocklist(enabled = true) {
   return useQuery({ queryKey: ['blocklist'], queryFn: () => api.get<BlocklistEntry[]>('/api/blocklist'), enabled });
 }
@@ -675,7 +650,7 @@ export function useFilterRules(enabled = true) {
   return useQuery({ queryKey: ['filter-rules'], queryFn: () => api.get<FilterRulesResponse>('/api/filter-rules'), enabled });
 }
 
-// Temporary access grants (admin only). Polls so the countdown / auto-revoke stays live.
+// Admin only. Polls so the countdown / auto-revoke stays live.
 export function useTemporaryAccessGrants(enabled = true) {
   return useQuery({
     queryKey: ['temporary-access-grants'],
@@ -702,7 +677,6 @@ export function useMyAccessRequests(enabled = true) {
     refetchInterval: 20_000,
   });
 }
-// Pending-request count for the admin nav badge.
 export function usePendingRequestCount(enabled = true) {
   return useQuery({
     queryKey: ['pending-request-count'],
@@ -711,7 +685,7 @@ export function usePendingRequestCount(enabled = true) {
     refetchInterval: 30_000,
   });
 }
-// Billed-users count from the latest stored NetBird billing event (admin dashboard tile).
+// From the latest stored NetBird billing event.
 export function useBillingSummary(enabled = true) {
   return useQuery({
     queryKey: ['billing-summary'],
@@ -721,8 +695,7 @@ export function useBillingSummary(enabled = true) {
   });
 }
 
-// Same-address resources with overlapping audiences (unpredictable access) - admins /
-// networks.manage holders. Drives the network-page warning banner + Needs Attention.
+// Admins / networks.manage holders.
 export function useResourceConflicts(enabled = true) {
   return useQuery({
     queryKey: ['resource-conflicts'],
@@ -732,7 +705,7 @@ export function useResourceConflicts(enabled = true) {
   });
 }
 
-// Typeahead search for request targets (any logged-in user).
+// Any logged-in user.
 export function useRequestTargetSearch(q: string, enabled: boolean) {
   return useQuery({
     queryKey: ['request-targets', q],
@@ -742,8 +715,7 @@ export function useRequestTargetSearch(q: string, enabled: boolean) {
   });
 }
 
-// Internal envelope-encrypted backup status (admin, main account only): folder writability,
-// whether a keypair is configured, the schedule, and the list of backup files (newest first).
+// Admin, main account only.
 export function useInternalBackup(enabled = true) {
   return useQuery({ queryKey: ['internal-backup'], queryFn: () => api.get<InternalBackupStatus>('/api/internal-backup'), enabled });
 }

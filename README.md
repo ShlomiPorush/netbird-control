@@ -54,7 +54,9 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   network Remote Access uses, and a status line shows whether NetBird and the gateways are online.
   Another system, such as a customer file, can open a session with stored credentials through the
   public API ([API reference](docs/api.md), [integration guide](docs/remote-launch-integration.md)).
-  When an admin allows it, the launch API can also create a temporary resource for a missing public server
+  When an admin allows it, the launch API can also create a temporary resource for a missing public server,
+  in a network the app creates (or an empty one the admin chooses) and in the group of a Shared Access
+  Profile whose policy decides who reaches it
   ([resources created by the launch API](docs/remote-access.md#resources-created-by-the-launch-api)).
 - **Public API and API keys** - admins create keys in **Settings → API Keys**, each limited to the
   actions, addresses and dates it needs. The audit log records keys being created and revoked,

@@ -343,8 +343,7 @@ function InternalBackupCard() {
         : await upload.mutateAsync({ bytes: restoreTarget.bytes, passphrase });
       const tableRows = Object.values(result.tables || {}).reduce((n, v) => n + (v || 0), 0);
       setRestoreTarget(null);
-      const notes = Object.values((result as { messages?: Record<string, string> }).messages || {});
-      setMsg(`Restored ${result.settings} settings plus ${tableRows} configuration rows - applied immediately.${notes.length ? ' ' + notes.join(' ') : ''}`);
+      setMsg(`Restored ${result.settings} settings plus ${tableRows} configuration rows - applied immediately.`);
     } catch (e) { setRestoreErr((e as Error).message); }
   };
 

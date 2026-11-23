@@ -26,7 +26,6 @@ const leftoverText = (items: AccessProfileLeftover[]) => {
 
 export function AccessProfiles() {
   const { data, isLoading } = useAccessProfiles();
-  // Where each profile is used: a profile in use can't be deleted (the server checks again).
   const usage = useAccessProfileUsage();
   const del = useDeleteAccessProfile();
   const confirm = useConfirm();
@@ -36,7 +35,6 @@ export function AccessProfiles() {
   const profiles = data || [];
   const reasonsOf = (p: AccessProfile) => usage.data?.[String(p.id)]?.reasons || [];
 
-  // Standard table chrome (same as every list page): search + sort + client pagination.
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
     if (!q) return profiles;
@@ -54,16 +52,8 @@ export function AccessProfiles() {
 
   const onDelete = async (p: AccessProfile) => {
     let reasons = reasonsOf(p);
-    // A muted Delete reads the uses again first: one may have ended since (an expired grant).
-    if (reasons.length) {
-      const fresh = await usage.refetch();
-      // A failed read keeps the old answer in the cache - never show it as current.
-      if (fresh.isError) {
-        setNotice({ title: "Can't Delete Profile", body: "Couldn't check where this profile is used. Try again." });
-        return;
-      }
-      reasons = fresh.data?.[String(p.id)]?.reasons ?? [];
-    }
+    // A use may have ended since the page was opened (an expired grant).
+    if (reasons.length) reasons = (await usage.refetch()).data?.[String(p.id)]?.reasons ?? [];
     if (reasons.length) {
       setNotice({
         title: "Can't Delete Profile",
@@ -88,7 +78,6 @@ export function AccessProfiles() {
       const out = await del.mutateAsync(p.id);
       if (out?.leftover?.length) setNotice({ title: 'Profile Deleted', body: leftoverText(out.leftover) });
     } catch (e) {
-      // In use after all (409), or the uses couldn't be read (502): nothing was deleted.
       setNotice({ title: 'Delete Failed', body: (e as Error).message });
     }
   };
@@ -110,7 +99,6 @@ export function AccessProfiles() {
         <EmptyState title="No Access Profiles" hint="Create a profile to share one policy across resources, or a preset for per-resource policies." icon={<Share2 size={22} />} />
       ) : (
         <>
-          {/* Standard table chrome: search + rows-per-page, sortable columns, pagination. */}
           <div className="flex flex-wrap items-center gap-3 mb-4">
             <SearchInput value={search} onChange={setSearch} placeholder="Search name…" />
             <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />

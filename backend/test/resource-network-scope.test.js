@@ -49,8 +49,6 @@ before(async () => {
     console.error = () => { };
 
     // Stub the NetBird client BEFORE db.js loads (it destructures these at require time).
-    // No database here: the stored settings (the Remote Access launch-link guard reads them) are empty.
-    require('../lib/core').getSetting = async () => null;
     const nb = require('../lib/netbird');
     nb.netbirdGet = async (path) => {
         if (netbirdDown) return null;
@@ -68,10 +66,10 @@ before(async () => {
     };
     nb.netbirdPost = async (path) => { writes.push(`POST ${path}`); return { status: 200, body: { id: 'new1' } }; };
     nb.bustNbCaches = () => { };
-    // Access Profile rows (a resource delete keeps their groups and policies): none.
+    // No Access Profile rows, and no servers added by launch links.
     const core = require('../lib/core');
     const realQuery = core.pool.query.bind(core.pool);
-    core.pool.query = (sql, ...rest) => (/FROM access_profiles/.test(String(sql)) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
+    core.pool.query = (sql, ...rest) => (/access_profiles|ra_created_resources/.test(sql) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
 
     const db = require('../db');
     ({ deleteResource, syncResourcePolicies, deleteNetwork } = db);

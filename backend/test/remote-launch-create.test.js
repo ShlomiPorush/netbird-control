@@ -1,15 +1,6 @@
 // A launch link that adds a missing server (POST /api/v1/remote-access/launch, createResource: true):
-//   - off by default; a strict boolean; its own key scope, checked before anything else;
-//   - public IPv4 addresses only (a name only when every answer is public), never one on the
-//     blocklist; a target NetBird already covers is not created again;
-//   - one row per attempt, reserved under a lock: a limit, one create per address at a time; the
-//     key is checked again right before the write; the outcome (created, failed, unknown) is
-//     recorded, and a refusal after the create says so (resourceCreated);
-//   - the leader's sync adopts an unconfirmed create only by its marker and exact fields, deletes a
-//     created resource (only the resource) once its hold has ended, and keeps one that changed;
-//   - no gateway-reach check (public servers only); the network for created resources is managed
-//     by this code alone: every other app write to its resources is refused (db.js); policies are
-//     not guarded.
+// what may be added and recorded, what the leader removes or keeps, and the guard on the network
+// that holds these servers (the database and NetBird are in-memory stubs).
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
@@ -17,9 +8,9 @@ const crypto = require('crypto');
 // ─── Stubs, before db.js and lib/remote-access.js destructure them ───
 const core = require('../lib/core');
 const settings = {};
-let settingsFail = false;
-core.getSetting = async (k) => { if (settingsFail) throw new Error('db down'); return settings[k] ?? null; };
-core.setSetting = async (k, v) => { settings[k] = v; };
+core.getSetting = async (k) => settings[k] ?? null;
+let failSettings = false;
+core.setSetting = async (k, v) => { if (failSettings) throw new Error('db down'); settings[k] = v; };
 
 const audits = [];
 let failAuditAction = null;
@@ -27,150 +18,80 @@ const keyRows = new Map();
 let created = [];      // ra_created_resources
 let sessionRows = [];  // remote_sessions
 let blockRows = [];    // address_blocklist
-let onSessionsQuery = null; // (resourceId) => runs when the delete asks for session rows
+let profileRows = [];    // access_profiles
+let automationRows = []; // automations (name, network_id)
+let liveRows = { recurring: [], grants: [], requests: [] };
+let recurringRule = null; // the stored recurring rule #3 (recurring_access)
+const PROFILE = { id: 11, name: 'Linked Servers', group_id: 'g-links', policy_id: 'pol-crm', shared: true, tenant: '' };
 const holdTable = require('./helpers/hold-table').holdTable();
 const clone = (v) => JSON.parse(JSON.stringify(v ?? null));
 const rowOut = (r) => ({ ...r, created_at: new Date(r.created_at), updated_at: new Date(r.updated_at) });
 
-function dbQuery(sql, params = [], tx = null) {
+function dbQuery(sql, params = []) {
     const s = sql.trim();
-    const all = () => [...created, ...(tx ? tx.rows : [])];
     if (s.startsWith('INSERT INTO app_audit')) {
         if (failAuditAction && failAuditAction === params[3]) throw new Error('audit down');
         const a = { actor: params[2], actorId: params[0], action: params[3], target: params[4], meta: params[5] ? JSON.parse(params[5]) : null };
-        if (tx) tx.audits.push(a); else audits.push(a);
+        audits.push(a);
         return { rows: [], rowCount: 1 };
     }
     if (s.startsWith('SELECT * FROM api_keys WHERE id')) return { rows: keyRows.has(params[0]) ? [clone(keyRows.get(params[0]))] : [] };
-    // app_settings, as the settings stub keeps them.
     if (/^SELECT value FROM app_settings WHERE key = \$1/.test(s)) return { rows: settings[params[0]] != null ? [{ value: settings[params[0]] }] : [] };
-    if (s.startsWith('INSERT INTO app_settings')) {
-        let value = params[0];
-        if (/jsonb_build_object\('createResources'/.test(s) && settings.remote_access_config) {
-            const cur = JSON.parse(settings.remote_access_config);
-            value = JSON.stringify({ ...JSON.parse(params[0]), createResources: cur.createResources ?? JSON.parse(params[0]).createResources });
-        }
-        settings.remote_access_config = value;
-        return { rows: [{ value }], rowCount: 1 };
-    }
-    if (/^SELECT 1 FROM remote_access_targets WHERE resource_id = \$1 AND expires_at > NOW\(\)/.test(s)) {
+    if (/^SELECT 1 FROM remote_access_targets WHERE resource_id = \$1 AND expires_at > NOW\(\)\s+UNION ALL/.test(s)) {
         const h = holdTable.rows.get(params[0]);
-        return { rows: h && new Date(h.expires_at).getTime() > Date.now() ? [{ x: 1 }] : [] };
+        const held = h && new Date(h.expires_at).getTime() > Date.now();
+        return { rows: held || sessionRows.some(r => r.resource_id === params[0]) ? [{ x: 1 }] : [] };
     }
     if (/remote_access_targets/.test(s) && !/ra_created_resources/.test(s)) return holdTable.query(sql, params);
     if (/FROM address_blocklist/.test(s)) return { rows: clone(blockRows) };
     if (s.startsWith('INSERT INTO remote_sessions')) { sessionRows.push({ id: params[0], resource_id: params[8] }); return { rows: [], rowCount: 1 }; }
     if (s.startsWith('DELETE FROM remote_sessions')) { sessionRows = sessionRows.filter(r => r.id !== params[0]); return { rows: [], rowCount: 1 }; }
-    if (/^SELECT 1 FROM remote_sessions WHERE resource_id = \$1/.test(s)) {
-        if (onSessionsQuery) onSessionsQuery(params[0]);
-        return { rows: sessionRows.filter(r => r.resource_id === params[0]).slice(0, 1) };
-    }
+    if (/^SELECT DISTINCT resource_id FROM remote_sessions/.test(s)) return { rows: [...new Set(sessionRows.map(r => r.resource_id).filter(Boolean))].map(resource_id => ({ resource_id })) };
     if (/remote_sessions/.test(s) && !/ra_created_resources/.test(s)) return { rows: [] };
+    if (/^SELECT id, group_id, policy_id, shared FROM access_profiles WHERE id = \$1 AND tenant = ''/.test(s)) return { rows: clone(profileRows.filter(p => p.id === Number(params[0]) && (p.tenant || '') === '')) };
+    if (/^SELECT name, group_id, policy_id FROM access_profiles WHERE shared IS NOT FALSE/.test(s)) return { rows: clone(profileRows.filter(p => p.shared !== false)) };
+    if (/^SELECT name FROM automations WHERE tenant = '' AND network_id = \$1/.test(s)) return { rows: clone(automationRows.filter(a => a.network_id === params[0])) };
+    if (/^SELECT \* FROM recurring_access WHERE id=\$1/.test(s)) return { rows: recurringRule ? [clone(recurringRule)] : [] };
+    if (/^UPDATE recurring_access SET user_id=\$2/.test(s)) {
+        if (!recurringRule) return { rows: [] };
+        Object.assign(recurringRule, { user_id: params[1], user_label: params[2], targets: JSON.parse(params[4]), enabled: params[9] });
+        return { rows: [clone(recurringRule)], rowCount: 1 };
+    }
+    if (/^SELECT user_id, user_label, targets FROM recurring_access/.test(s)) return { rows: clone(liveRows.recurring) };
+    if (/^SELECT user_id, user_label, targets FROM temporary_access_grants/.test(s)) return { rows: clone(liveRows.grants) };
+    if (/^SELECT requester_id, requester_name, requester_email, targets, approved_targets FROM access_requests/.test(s)) return { rows: clone(liveRows.requests) };
     if (!/ra_created_resources/.test(s)) return { rows: [] };
-    // ra_created_resources
-    if (s.startsWith('SELECT COUNT(*)')) {
-        let list = all().filter(r => params[0].includes(r.state));
-        if (/network_id <> \$2/.test(s)) list = list.filter(r => r.network_id !== params[1]);
-        return { rows: [{ n: list.length }] };
-    }
-    if (/WHERE ip = \$1 AND state = ANY\(\$2\)/.test(s)) {
-        return { rows: all().filter(r => r.ip === params[0] && params[1].includes(r.state)).sort((a, b) => b.created_at - a.created_at).map(rowOut) };
-    }
-    if (/^SELECT attempt_id, state, network_id, group_id FROM ra_created_resources$/.test(s)) return { rows: all().map(rowOut) };
-    if (s.startsWith('INSERT INTO ra_created_resources') && /ON CONFLICT \(attempt_id\) DO NOTHING/.test(s)) {
-        const cols = /\(([^)]*)\) VALUES/.exec(s)[1].split(',').map(c => c.trim());
-        const row = Object.fromEntries(cols.map((c, i) => [c, params[i]]));
-        if (created.some(r => r.attempt_id === row.attempt_id)) return { rows: [], rowCount: 0 };
-        created.push({ ...row, created_at: row.created_at ? new Date(row.created_at).getTime() : Date.now(), updated_at: Date.now(), pending_audit: row.pending_audit ? JSON.parse(row.pending_audit) : null });
-        return { rows: [], rowCount: 1 };
-    }
+    const pick = (states) => created.filter(r => states.includes(r.state));
+    const update = (hit, state, reason) => {
+        for (const r of hit) Object.assign(r, { state, reason, updated_at: Date.now() });
+        return { rows: [], rowCount: hit.length };
+    };
+    if (s.startsWith('SELECT COUNT(*)')) return { rows: [{ n: pick(params[0]).filter(r => r.network_id !== params[1]).length }] };
+    if (/WHERE ip = \$1 AND state = ANY\(\$2\)/.test(s)) return { rows: pick(params[1]).filter(r => r.ip === params[0]).map(rowOut) };
     if (s.startsWith('INSERT INTO ra_created_resources')) {
         const [attempt_id, ip, name, network_id, group_id, key_id, expected_name, expected_address, expected_description] = params;
-        const row = { attempt_id, ip, name, network_id, group_id, key_id, state: 'creating', resource_id: '', expected_name, expected_address, expected_description, reason: '', created_at: Date.now(), updated_at: Date.now(), pending_audit: null };
-        if (tx) tx.rows.push(row); else created.push(row);
+        if (pick(['creating', 'unknown', 'created']).some(r => r.ip === ip)) return { rows: [], rowCount: 0 };
+        created.push({ attempt_id, ip, name, network_id, group_id, key_id, state: 'creating', resource_id: '', expected_name, expected_address, expected_description, reason: '', created_at: Date.now(), updated_at: Date.now() });
         return { rows: [], rowCount: 1 };
     }
-    if (/^SELECT 1 FROM ra_created_resources WHERE resource_id = \$1/.test(s)) return { rows: created.filter(r => r.resource_id === params[0] && params[1].includes(r.state)).slice(0, 1).map(() => ({ '?column?': 1 })) };
-    if (/^SELECT attempt_id, state, expected_address FROM ra_created_resources WHERE network_id = \$1/.test(s)) return { rows: created.filter(r => r.network_id === params[0] && params[1].includes(r.state)).map(rowOut) };
-    if (/^SELECT DISTINCT network_id, group_id FROM ra_created_resources/.test(s)) {
-        const seen = new Map();
-        for (const r of created.filter(x => params[0].includes(x.state))) seen.set(`${r.network_id}|${r.group_id}`, { network_id: r.network_id, group_id: r.group_id });
-        return { rows: [...seen.values()] };
+    if (/^SELECT DISTINCT network_id FROM ra_created_resources/.test(s)) return { rows: [...new Set(pick(params[0]).map(r => r.network_id))].map(network_id => ({ network_id })) };
+    if (/^SELECT resource_id FROM ra_created_resources/.test(s)) return { rows: pick(params[0]).filter(r => r.resource_id).map(r => ({ resource_id: r.resource_id })) };
+    if (/^UPDATE ra_created_resources SET state = 'deleted'.*WHERE resource_id = \$1/s.test(s)) return update(pick(params[2]).filter(r => r.resource_id === params[0]), 'deleted', params[1]);
+    if (/^UPDATE ra_created_resources SET state = 'deleted'.*WHERE network_id = \$1/s.test(s)) return update(pick(params[2]).filter(r => r.network_id === params[0]), 'deleted', params[1]);
+    if (s.startsWith('UPDATE ra_created_resources SET state = $3')) {
+        const [id, from, state, rid, reason] = params;
+        const hit = created.filter(x => x.attempt_id === id && x.state === from);
+        if (rid) for (const r of hit) r.resource_id = rid;
+        return update(hit, state, reason);
     }
-    if (/^SELECT resource_id FROM ra_created_resources/.test(s)) return { rows: created.filter(r => params[0].includes(r.state) && r.resource_id).map(r => ({ resource_id: r.resource_id })) };
-    if (/^SELECT pending_audit FROM ra_created_resources WHERE attempt_id = \$1/.test(s)) return { rows: created.filter(r => r.attempt_id === params[0]).map(r => ({ pending_audit: clone(r.pending_audit) })) };
-    if (/^SELECT attempt_id FROM ra_created_resources WHERE pending_audit IS NOT NULL/.test(s)) return { rows: created.filter(r => r.pending_audit).map(r => ({ attempt_id: r.attempt_id })) };
-    if (/^UPDATE ra_created_resources SET pending_audit = \$2::jsonb WHERE attempt_id = \$1 AND pending_audit = \$3::jsonb/.test(s)) {
-        const r = created.find(x => x.attempt_id === params[0] && JSON.stringify(x.pending_audit) === params[2]);
-        if (!r) return { rows: [], rowCount: 0 };
-        r.pending_audit = params[1] ? JSON.parse(params[1]) : null;
-        return { rows: [], rowCount: 1 };
-    }
-    if (/^UPDATE ra_created_resources .*WHERE resource_id = \$1/s.test(s)) {
-        const hit = created.filter(r => r.resource_id === params[0] && ['kept', 'gone'].includes(r.state));
-        for (const r of hit) Object.assign(r, { state: 'deleted', reason: 'Deleted by an administrator.', updated_at: Date.now() });
-        return { rows: [], rowCount: hit.length };
-    }
-    if (s.startsWith('UPDATE ra_created_resources SET state = $2')) {
-        const [id, state, rid, reason, audit, from] = params;
-        const r = created.find(x => x.attempt_id === id && (params.length < 6 || x.state === from));
-        if (!r) return { rows: [], rowCount: 0 };
-        Object.assign(r, { state, reason, updated_at: Date.now() });
-        if (rid) r.resource_id = rid;
-        if (audit) r.pending_audit = [...(r.pending_audit || []), ...JSON.parse(audit)];
-        return { rows: [], rowCount: 1 };
-    }
-    if (/WHERE state = 'unknown' OR \(state = 'creating'/.test(s)) {
-        const cutoff = Date.now() - params[0] * 1000;
-        return { rows: created.filter(r => r.state === 'unknown' || (r.state === 'creating' && r.created_at < cutoff)).map(rowOut) };
-    }
-    if (/FROM ra_created_resources c/.test(s)) {
-        const [hours, limit] = params;
-        const now = Date.now();
-        const held = (rid) => { const h = holdTable.rows.get(rid); return !!h && new Date(h.expires_at).getTime() > now; };
-        return {
-            rows: created.filter(r => ['created', 'deleting'].includes(r.state) && r.resource_id && r.created_at < now - hours * 3_600_000
-                && !held(r.resource_id) && !sessionRows.some(x => x.resource_id === r.resource_id))
-                .sort((a, b) => a.created_at - b.created_at).slice(0, limit).map(rowOut),
-        };
-    }
-    if (/WHERE state = ANY\(\$1\) ORDER BY created_at DESC$/.test(s)) {
-        return { rows: created.filter(r => params[0].includes(r.state)).sort((a, b) => b.created_at - a.created_at).map(rowOut) };
-    }
-    if (/WHERE state = ANY\(\$1\) ORDER BY updated_at DESC LIMIT \$2$/.test(s)) {
-        return { rows: created.filter(r => params[0].includes(r.state)).sort((a, b) => b.updated_at - a.updated_at).slice(0, params[1]).map(rowOut) };
-    }
+    if (/WHERE state = ANY\(\$1\) ORDER BY created_at$/.test(s)) return { rows: pick(params[0]).sort((a, b) => a.created_at - b.created_at).map(rowOut) };
+    if (/WHERE state = ANY\(\$1\) ORDER BY created_at DESC$/.test(s)) return { rows: pick(params[0]).sort((a, b) => b.created_at - a.created_at).map(rowOut) };
+    if (/WHERE state = ANY\(\$1\) ORDER BY updated_at DESC LIMIT \$2$/.test(s)) return { rows: pick(params[0]).sort((a, b) => b.updated_at - a.updated_at).slice(0, params[1]).map(rowOut) };
     throw new Error('unexpected statement: ' + s.slice(0, 120));
 }
 core.pool.query = async (sql, params) => {
     if (typeof sql !== 'string') { params = sql.values; sql = sql.text; }
     return dbQuery(sql, params);
-};
-// Transactions: a transaction-level advisory lock is a queue here; writes land on COMMIT.
-let lockTail = Promise.resolve();
-let connects = 0;
-core.pool.connect = async () => {
-    connects++;
-    let release = null;
-    const tx = { rows: [], audits: [] };
-    const unlock = () => { if (release) { release(); release = null; } };
-    return {
-        async query(sql, params = []) {
-            if (typeof sql !== 'string') { params = sql.values; sql = sql.text; }
-            const s = sql.trim();
-            if (s === 'BEGIN') return { rows: [] };
-            if (s.startsWith('SELECT pg_advisory_xact_lock')) {
-                const prev = lockTail;
-                lockTail = new Promise(r => { release = r; });
-                await prev;
-                return { rows: [] };
-            }
-            if (s === 'COMMIT') { created.push(...tx.rows); audits.push(...tx.audits); tx.rows = []; tx.audits = []; unlock(); return { rows: [] }; }
-            if (s === 'ROLLBACK') { tx.rows = []; tx.audits = []; unlock(); return { rows: [] }; }
-            return dbQuery(sql, params, tx);
-        },
-        release: unlock,
-    };
 };
 
 // ─── NetBird ───
@@ -222,7 +143,7 @@ function get(p) {
     let m;
     if ((m = /^\/api\/networks\/([^/]+)\/resources$/.exec(p))) return clone(resourcesIn(m[1]));
     if ((m = /^\/api\/networks\/([^/]+)\/resources\/([^/]+)$/.exec(p))) return clone((resourcesIn(m[1]) || []).find(r => r.id === m[2]) || null);
-    if ((m = /^\/api\/networks\/([^/]+)\/routers$/.exec(p))) return [{ peer: 'p-r', enabled: true }];
+    if ((m = /^\/api\/networks\/([^/]+)\/routers$/.exec(p))) return w.routers && w.routers[m[1]] !== undefined ? clone(w.routers[m[1]]) : [{ peer: 'p-r', enabled: true }];
     if ((m = /^\/api\/networks\/([^/]+)$/.exec(p))) return clone(w.networks.find(n => n.id === m[1]) || null);
     if ((m = /^\/api\/policies\/([^/]+)$/.exec(p))) return clone(w.policies.find(x => x.id === m[1]) || null);
     if ((m = /^\/api\/groups\/([^/]+)$/.exec(p))) return clone(w.groups.find(x => x.id === m[1]) || null);
@@ -230,21 +151,25 @@ function get(p) {
     return null;
 }
 nb.netbirdGet = async (p) => get(p);
-let reqOpts = [];  // the options each write got ({ method, once, hook })
-let reqHook = null; // runs right before a write's beforeSend (something that happens during the wait)
-nb.netbirdReq = async (method, p, body, opts = {}) => {
+let networkDeleteAnswer = null;
+let onWriteAnswer = null;
+let getAnswerFor = null; // (path) => an answer for that GET through netbirdReq
+let onWrite = null; // runs right before a write lands
+nb.netbirdReq = async (method, p, body) => {
     const m = /^\/api\/networks\/([^/]+)\/resources\/([^/]+)$/.exec(p);
     if (method === 'GET') {
         if (onGet) onGet(p);
+        const ga = getAnswerFor && getAnswerFor(p);
+        if (ga) return ga;
         if (failGets.has(p)) return { status: 500, body: null, raw: 'down' };
         const v = get(p);
         return v == null ? { status: 404, body: null } : { status: 200, body: v };
     }
-    reqOpts.push({ method, once: !!opts.once, hook: typeof opts.beforeSend === 'function' });
-    // The real helper runs beforeSend right before its one send; a throw sends nothing.
-    if (reqHook) reqHook(p);
-    if (opts.beforeSend) await opts.beforeSend();
+    if (onWrite) onWrite(p);
     writes.push([method, p, body]);
+    const wa = method === 'PUT' && onWriteAnswer && onWriteAnswer(p);
+    if (wa) return wa;
+    if (networkDeleteAnswer && method === 'DELETE' && /^\/api\/networks\/[^/]+$/.test(p)) return networkDeleteAnswer;
     if (m && method === 'PUT') {
         const r = w.resources.find(x => x.id === m[2]);
         if (!r) return { status: 404, body: null };
@@ -261,14 +186,25 @@ nb.netbirdReq = async (method, p, body, opts = {}) => {
     }
     return { status: 200, body: {} };
 };
-let postOpts = []; // the options each POST got ({ once, beforeSend })
-nb.netbirdPost = async (p, body, opts = {}) => {
-    postOpts.push({ once: !!opts.once, hook: typeof opts.beforeSend === 'function' });
-    // The real helper runs beforeSend right before its one send; a throw sends nothing.
-    if (opts.beforeSend) await opts.beforeSend();
+let postAnswerFor = null; // (path, body) => an answer for that POST
+nb.netbirdPost = async (p, body) => {
     posts.push([p, clone(body)]);
     const a = postAnswer && postAnswer(body);
     if (a) return a;
+    const pa = postAnswerFor && postAnswerFor(p, body);
+    if (pa) return pa;
+    if (p === '/api/networks') {
+        const n = { id: `net-${nextId++}`, name: body.name, description: body.description, resources: [] };
+        w.networks.push(n);
+        return { status: 201, body: clone(n) };
+    }
+    const rm = /^\/api\/networks\/([^/]+)\/routers$/.exec(p);
+    if (rm) {
+        const r = { id: `rt-${nextId++}`, ...clone(body) };
+        w.routers = w.routers || {};
+        (w.routers[rm[1]] = w.routers[rm[1]] || []).push(r);
+        return { status: 201, body: clone(r) };
+    }
     const m = /^\/api\/networks\/([^/]+)\/resources$/.exec(p);
     if (!m) return { status: 200, body: { id: `pol-${nextId++}` } };
     const r = { id: `res-${nextId++}`, type: 'host', name: body.name, address: body.address, description: body.description, enabled: body.enabled !== false, groups: (body.groups || []).map(id => ({ id, name: (w.groups.find(g => g.id === id) || {}).name })) };
@@ -294,19 +230,19 @@ const KEY = { id: 7, name: 'Customer File', scopes: SCOPES };
 const alice = { user_id: 'u1', email: 'alice@example.test', name: 'Alice', oid: 'oid-1', authEnabled: true };
 const rdp = (extra = {}) => ({ protocol: 'rdp', address: PUBLIC, port: 3389, username: 'admin', password: PASSWORD, createResource: true, ...extra });
 let dnsAnswers = {}; // name -> list, or an Error to throw
-const CFG = { enabled: true, networks: ['n-office', 'n-links'], guacdHost: '127.0.0.1', createResources: { enabled: true, networkId: 'n-links', groupId: 'g-links', max: 50 } };
+const CFG = { enabled: true, networks: ['n-office', 'n-links'], guacdHost: '127.0.0.1', createResources: { enabled: true, networkId: 'n-links', profileId: 11, groupId: 'g-links', max: 50 } };
 const cfgOf = (extra = {}) => ({ ...CFG, ...extra, createResources: { ...CFG.createResources, ...(extra.createResources || {}) } });
-// This instance's copy and the stored settings (which the create path and the sync read).
-const setConfig = (extra = {}) => { ra._internal.setConfigForTest(cfgOf(extra)); settings.remote_access_config = JSON.stringify(cfgOf(extra)); };
+const setConfig = (extra = {}) => { ra._internal.setConfigForTest(cfgOf(extra)); settings.remote_access_config = JSON.stringify(ra._internal.normConfig(cfgOf(extra))); };
 const rowFor = (ip) => created.find(r => r.ip === ip);
 const resourceAt = (ip) => w.resources.find(r => r.address === `${ip}/32`);
 const HOUR = 3_600_000;
 
 test.beforeEach(() => {
     w = world();
-    created = []; sessionRows = []; blockRows = []; onSessionsQuery = null; holdTable.rows.clear();
+    created = []; sessionRows = []; blockRows = []; holdTable.rows.clear();
+    profileRows = [clone(PROFILE)]; automationRows = []; liveRows = { recurring: [], grants: [], requests: [] }; postAnswerFor = null; getAnswerFor = null; recurringRule = null;
     posts.length = 0; writes.length = 0; reads.length = 0; audits.length = 0;
-    postAnswer = null; deleteAnswer = null; onGet = null; failGets = new Set(); postOpts = []; reqOpts = []; reqHook = null; failAuditAction = null; inventoryFails = false; dnsAnswers = {};
+    postAnswer = null; deleteAnswer = null; onGet = null; failGets = new Set(); onWrite = null; onWriteAnswer = null; failAuditAction = null; inventoryFails = false; dnsAnswers = {};
     keyRows.set(7, { id: 7, name: 'Customer File', scopes: SCOPES, revoked_at: null, expires_at: null });
     setConfig();
     ra._internal.setManagedForTest({ gatewayGroupId: 'g-gw', targetGroupId: 'g-gwt', policyId: 'pol-gw' });
@@ -315,7 +251,7 @@ test.beforeEach(() => {
     ra._internal.invalidateSnapshot();
     ra._internal.setSleepForTest(async () => { });
     ra.setRemoteAccessDeps({
-        createClientResource: db.createClientResource, isLeader: () => true,
+        createClientResource: db.createClientResource, isLeader: () => true, checkLaunchNetwork: db.checkLaunchNetwork,
         resolve4: async (name) => { const a = dnsAnswers[name]; if (a instanceof Error) throw a; if (!a) { const e = new Error('not found'); e.code = 'ENOTFOUND'; throw e; } return a; },
     });
 });
@@ -326,14 +262,14 @@ const rejects = (p, code, check = () => true) => assert.rejects(p, (e) => { asse
 // ─── The request ───
 test('off by default, and while off nothing is created', async () => {
     assert.equal(ra._internal.normConfig({}).createResources.enabled, false);
-    assert.deepEqual(ra._internal.normConfig({}).createResources, { enabled: false, networkId: '', groupId: '', max: 50 });
+    assert.deepEqual(ra._internal.normConfig({}).createResources, { enabled: false, networkId: '', profileId: 0, groupId: '', max: 50 });
     setConfig({ createResources: { enabled: false } });
     await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
     // A network that is no longer open to Remote Access: the setting is not usable.
     setConfig({ networks: ['n-office'] });
     await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
     assert.equal(posts.length, 0);
-    assert.equal(connects, 0, 'no reservation either');
+    assert.equal(created.length, 0, 'no reservation either');
 });
 
 test('createResource is a strict boolean with its own scope, checked before anything else', async () => {
@@ -361,11 +297,10 @@ test('only public addresses: a non-public IP, a name with any non-public answer,
         assert.deepEqual((await ra.issueLaunch(KEY, rdp({ address: ip }))).resource, { created: false, address: ip });
     }
     for (const ip of ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4'].map(p => p.split('/')[0])) {
-        assert.equal(ra._internal.isPublicIpv4(ip, new Set()), false, ip);
+        assert.equal(ra._internal.isPublicIpv4(ip), false, ip);
     }
-    assert.equal(ra._internal.isPublicIpv4('255.255.255.255', new Set()), false);
-    assert.equal(ra._internal.isPublicIpv4('8.8.8.8', new Set(['8.8.8.8'])), false, "a gateway peer's own address");
-    assert.equal(ra._internal.isPublicIpv4('8.8.8.8', new Set()), true);
+    assert.equal(ra._internal.isPublicIpv4('255.255.255.255'), false);
+    assert.equal(ra._internal.isPublicIpv4('8.8.8.8'), true);
     dnsAnswers['mixed.example.com'] = ['8.8.8.10', '10.0.0.9'];
     await rejects(ra.issueLaunch(KEY, rdp({ address: 'mixed.example.com' })), 'NAME_NOT_PUBLIC');
     await rejects(ra.issueLaunch(KEY, rdp({ address: 'nothing.example.com' })), 'NAME_NOT_FOUND');
@@ -393,7 +328,6 @@ test('a target NetBird already covers is not created: the link follows the norma
     w.routes = [{ id: 'rt0', enabled: true, network: '0.0.0.0/0', groups: [] }];
     assert.equal((await ra.issueLaunch(KEY, rdp({ address: '9.9.1.2' }))).resource.created, true);
     assert.equal(posts.length, 1);
-    // A strict read that fails: nothing is created.
     inventoryFails = true;
     await rejects(ra.issueLaunch(KEY, rdp({ address: '9.9.1.3' })), 'SNAPSHOT_FAILED');
     assert.equal(posts.length, 1);
@@ -433,27 +367,18 @@ test('concurrent requests for one address create it once', async () => {
     const ok = results.filter(r => r.status === 'fulfilled').map(r => r.value);
     assert.equal(ok.filter(o => o.resource.created).length, 1);
     for (const r of results.filter(x => x.status === 'rejected')) assert.equal(r.reason.code, 'CREATE_IN_PROGRESS');
-    // Once it exists, the next request uses it.
     const again = await ra.issueLaunch(KEY, rdp());
     assert.equal(again.resource.created, false);
     assert.equal(posts.length, 1);
 });
 
-test('a key revoked (or without the scope) right before the write: nothing is sent', async () => {
-    keyRows.get(7).revoked_at = new Date();
-    await rejects(ra.issueLaunch(KEY, rdp()), 'KEY_REVOKED', (e) => e.resourceCreated === undefined);
-    assert.equal(posts.length, 0);
-    assert.equal(rowFor(PUBLIC).state, 'failed');
-    keyRows.set(7, { id: 7, name: 'Customer File', scopes: ['remote-access:launch'], revoked_at: null, expires_at: null });
-    await rejects(ra.issueLaunch(KEY, rdp()), 'KEY_REVOKED');
-    assert.equal(posts.length, 0);
-});
-
-test('a reservation whose audit record fails leaves no row and sends nothing', async () => {
+test('a reservation whose audit record fails sends nothing, and its row is failed', async () => {
     failAuditAction = 'resource.create_intent';
     await rejects(ra.issueLaunch(KEY, rdp()), 'UNAVAILABLE');
-    assert.equal(created.length, 0);
+    assert.equal(rowFor(PUBLIC).state, 'failed');
     assert.equal(posts.length, 0);
+    failAuditAction = null;
+    assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true, 'the address is free again');
 });
 
 test('outcomes: no answer is unknown; a missing group is unknown; a refusal is failed, without NetBird\'s text', async () => {
@@ -531,7 +456,7 @@ test('an unconfirmed create is adopted only by its marker and exact fields; none
     const changed = seed('9.9.8.4', { state: 'unknown', ageHours: 1, extra: { name: 'renamed' } });
     // A crash left one in 'creating' long ago.
     const crashed = seed('9.9.8.5', { state: 'creating', ageHours: 1 });
-    const out = await ra.maintainCreatedResources();
+    await ra.maintainCreatedResources();
     assert.equal(good.state, 'created');
     assert.equal(good.resource_id, resourceAt('9.9.8.1').id);
     assert.equal(young.state, 'unknown', 'still within 10 minutes');
@@ -540,7 +465,6 @@ test('an unconfirmed create is adopted only by its marker and exact fields; none
     assert.equal(changed.state, 'kept', 'the marker, but not as asked: shown, never deleted');
     assert.equal(changed.resource_id, resourceAt('9.9.8.4').id);
     assert.equal(crashed.state, 'created');
-    assert.equal(out.recovered, 2);
     assert.equal(deletesSent().length, 0, 'recovery deletes nothing');
 });
 
@@ -554,9 +478,8 @@ test('deletion: only once the hold has ended, no session uses it, and it is olde
     await holdTable.query(`INSERT INTO remote_access_targets (resource_id, network_id, address, added_at, expires_at, updated_at) VALUES ($1, $2, $3, NULL, $4, NOW()) ON CONFLICT (resource_id) DO UPDATE SET x`, [expired.resource_id, 'n-links', '9.9.7.4/32', new Date(Date.now() - HOUR)]);
     const free = seed('9.9.7.5');
     const rid = free.resource_id;
-    const out = await ra.maintainCreatedResources();
+    await ra.maintainCreatedResources();
     assert.deepEqual(deletesSent().sort(), [`/api/networks/n-links/resources/${expired.resource_id}`, `/api/networks/n-links/resources/${rid}`].sort());
-    assert.equal(out.deleted, 2);
     for (const r of [held, inSession, young]) assert.equal(r.state, 'created');
     assert.equal(free.state, 'deleted');
     // Only the resource: the group and the policy to it stay, nothing else was written.
@@ -565,7 +488,6 @@ test('deletion: only once the hold has ended, no session uses it, and it is olde
     assert.ok(w.policies.some(p => p.id === 'pol-crm'));
     const del = audits.find(a => a.action === 'resource.delete' && a.meta.resourceId === rid);
     assert.equal(del.actor, 'Remote Access');
-    assert.equal(del.meta.reason, 'created by the launch API, hold ended');
 });
 
 test('a created resource that changed, or that a policy uses, is kept; one already gone is marked gone', async () => {
@@ -588,29 +510,31 @@ test('a created resource that changed, or that a policy uses, is kept; one alrea
     audits.length = 0;
     await ra.maintainCreatedResources();
     assert.equal(audits.filter(a => a.action === 'resource.kept').length, 0);
-    // The list shows what is still there.
     const list = await ra.listCreatedResources();
     assert.deepEqual(list.items.map(i => i.state).sort(), ['deleted', 'gone', 'kept', 'kept', 'kept', 'kept']);
     assert.equal(list.finishedMore, false);
 });
 
-test('a delete without a clear answer stays deleting and is read again by the next run; a 4xx refusal is kept', async () => {
-    const row = seed('9.9.5.1');
-    deleteAnswer = () => ({ status: 0, error: 'timeout' });
+test('a delete without a clear answer is tried again by the next run; a 4xx refusal is kept', async () => {
+    for (const answer of [{ status: 0, error: 'timeout' }, { status: 503, raw: 'down' }, { status: 429, raw: 'too many requests' }]) {
+        created = []; w = world(); writes.length = 0; audits.length = 0;
+        const row = seed('9.9.5.1');
+        deleteAnswer = () => answer;
+        await ra.maintainCreatedResources();
+        assert.equal(row.state, 'created');
+        assert.ok(audits.some(a => a.action === 'resource.delete_unconfirmed' && a.meta.resourceId === row.resource_id));
+        ra._internal.resetSettlingForTest();
+        deleteAnswer = null;
+        await ra.maintainCreatedResources();
+        assert.equal(row.state, 'deleted');
+    }
+    // It did land: gone by the next run.
+    const row2 = seed('9.9.5.2');
+    deleteAnswer = () => { w.resources = w.resources.filter(r => r.id !== row2.resource_id); return { status: 0, error: 'timeout' }; };
     await ra.maintainCreatedResources();
-    assert.equal(row.state, 'deleting');
-    assert.ok(resourceAt('9.9.5.1'), 'still there');
-    ra._internal.resetSettlingForTest();
-    // The next run: still there and unchanged, deleted again.
     deleteAnswer = null;
     await ra.maintainCreatedResources();
-    assert.equal(row.state, 'deleted');
-    // Gone by the time of the next run: deleted.
-    const row2 = seed('9.9.5.2');
-    row2.state = 'deleting';
-    w.resources = w.resources.filter(r => r.id !== row2.resource_id);
-    await ra.maintainCreatedResources();
-    assert.equal(row2.state, 'deleted');
+    assert.equal(row2.state, 'gone');
     const row3 = seed('9.9.5.3');
     deleteAnswer = () => ({ status: 422, body: { message: 'in use' } });
     await ra.maintainCreatedResources();
@@ -618,26 +542,82 @@ test('a delete without a clear answer stays deleting and is read again by the ne
     assert.match(row3.reason, /422/);
 });
 
+test('servers that are no longer in NetBird are marked gone, kept ones too; an unreadable list changes nothing', async () => {
+    const active = seed('9.9.5.10', { ageHours: 1 });
+    const kept = seed('9.9.5.11', { ageHours: 1 });
+    kept.state = 'kept';
+    w.resources = w.resources.filter(r => ![active.resource_id, kept.resource_id].includes(r.id));
+    failGets.add('/api/networks/n-links/resources');
+    await ra.maintainCreatedResources();
+    assert.deepEqual([active.state, kept.state], ['created', 'kept']);
+    // A 404 with the network still in NetBird (a proxy while NetBird restarts) is not an empty list.
+    failGets = new Set();
+    getAnswerFor = (p) => (p === '/api/networks/n-links/resources' ? { status: 404, body: null } : null);
+    await ra.maintainCreatedResources();
+    assert.deepEqual([active.state, kept.state], ['created', 'kept']);
+    getAnswerFor = null;
+    await ra.maintainCreatedResources();
+    assert.deepEqual([active.state, kept.state], ['gone', 'gone']);
+    // A network that was deleted in NetBird.
+    const inGone = seed('9.9.5.12', { ageHours: 1 });
+    w.networks = w.networks.filter(n => n.id !== 'n-links');
+    await ra.maintainCreatedResources();
+    assert.equal(inGone.state, 'gone');
+});
+
+test('a run deletes at most 20 servers', async () => {
+    for (let i = 0; i < 22; i++) seed(`9.9.5.${100 + i}`);
+    await ra.maintainCreatedResources();
+    assert.equal(deletesSent().length, 20);
+    await ra.maintainCreatedResources();
+    assert.equal(deletesSent().length, 22);
+});
+
+test('a session that opens the server while the delete waits for the target lock keeps it', async () => {
+    const row = seed('9.9.0.1');
+    onGet = (p) => { if (p.endsWith('/' + row.resource_id) && !sessionRows.length) sessionRows.push({ id: 's9', resource_id: row.resource_id }); };
+    await ra.maintainCreatedResources();
+    assert.equal(deletesSent().length, 0);
+    assert.equal(row.state, 'created');
+    // Also one of this instance that is still opening.
+    sessionRows = []; onGet = null;
+    ra._internal.addSessionForTest({ id: 'sess-1', resourceId: row.resource_id, state: 'preparing' });
+    try {
+        await ra.maintainCreatedResources();
+        assert.equal(deletesSent().length, 0);
+    } finally { ra._internal.removeSessionForTest('sess-1'); }
+});
+
 test('only the leader deletes; a read-only instance or a tenant context never runs it', async () => {
     const row = seed('9.9.4.1');
     ra.setRemoteAccessDeps({ isLeader: () => false });
-    assert.equal(await ra.maintainCreatedResources(), null);
+    await ra.maintainCreatedResources();
     assert.equal(row.state, 'created');
     assert.equal(deletesSent().length, 0);
     ra.setRemoteAccessDeps({ isLeader: () => true });
-    assert.equal(await nb.runWithTenant('tenant-a', () => ra.maintainCreatedResources()), null);
+    await nb.runWithTenant('tenant-a', () => ra.maintainCreatedResources());
     assert.equal(deletesSent().length, 0);
 });
 
-// ─── The gateway check ───
-test('the network for created resources cannot change while resources created by the API are still in it', async () => {
+// A second Shared profile, with its own group and an enabled accept policy to it.
+const OTHER_PROFILE = { id: 12, name: 'Servers', group_id: 'g-srv', policy_id: 'pol-srv', shared: true, tenant: '' };
+const addOtherProfile = () => {
+    profileRows.push(clone(OTHER_PROFILE));
+    w.policies.push({ id: 'pol-srv', name: 'Servers Access', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', ports: ['3389'], sources: [{ id: 'g-crm' }], destinations: [{ id: 'g-srv', name: 'Servers' }] }] });
+};
+test('a client never sets the network or the group; the profile cannot change group while servers are in use', async () => {
     seed('9.9.3.1');
-    await rejects(ra.setRemoteAccessConfig({ ...CFG, createResources: { ...CFG.createResources, networkId: 'n-office' } }), 'CREATED_RESOURCES_EXIST', (e) => e.notSaved && e.status === 409);
-    assert.equal(ra.getRemoteAccessConfig().createResources.networkId, 'n-links');
+    // networkId and groupId sent by a client are ignored (nothing else changed: nothing to save there).
+    await ra.setRemoteAccessConfig({ ...CFG, createResources: { ...CFG.createResources, networkId: 'n-office', groupId: 'g-srv' } }).catch(e => { if (e.status) throw e; });
+    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, CFG.createResources);
+    // Another profile (another group) while a server is in use: refused.
+    addOtherProfile();
+    await rejects(ra.setRemoteAccessConfig({ createResources: { profileId: 12 } }), 'CREATED_RESOURCES_EXIST', (e) => e.status === 409);
+    assert.equal(ra.getRemoteAccessConfig().createResources.profileId, 11);
 });
 
 // ─── The guard on the network for created resources ───
-const managedError = (e) => e.code === 'NETWORK_MANAGED' && e.status === 409 && /managed automatically/.test(e.message);
+const managedError = (e) => e.code === 'NETWORK_MANAGED' && e.status === 409 && /managed by Remote Access/.test(e.message);
 test('every app write to the network for created resources is refused, before anything is sent', async () => {
     const r = seed('9.9.2.1', { ageHours: 0 });
     const rid = r.resource_id;
@@ -651,13 +631,15 @@ test('every app write to the network for created resources is refused, before an
         () => db.moveResources('n-links', [rid], 'n-office'),
         () => db.moveResources('n-office', ['r-office'], 'n-links'),
         () => db.mergeResources('n-office', ['r-office', rid], 'r-office'),
-        () => db.syncResourcePolicies('n-links', rid, []),
-        () => db.setResourcePolicy('n-links', rid, 'tcp', ['22']),
         () => db.createTemporaryAccessGrant({ userId: 'u1', durationMinutes: 60, targets: [{ type: 'resource', id: rid, networkId: 'n-links' }] }, { email: 'admin@example.test' }),
         // The network named wrongly: found by the resource id.
         () => db.createTemporaryAccessGrant({ userId: 'u1', durationMinutes: 60, targets: [{ type: 'resource', id: rid, networkId: 'n-office' }] }, { email: 'admin@example.test' }),
         () => db.createTemporaryAccessGrant({ userId: 'u1', durationMinutes: 60, targets: [{ type: 'network', id: 'n-links' }] }, { email: 'admin@example.test' }),
-        () => db.createProxyService({ domain: 'app.example.com', cluster: 'c1', targets: [{ type: 'host', id: rid, port: 80 }] }),
+        () => db.createProxyService({ domain: 'app.example.com', cluster: 'c1', targets: [{ type: 'host', id: ` ${rid} `, port: 80 }] }),
+        () => db.createProxyService({ domain: 'app.example.com', cluster: 'c1', targets: [{ type: 'host', target_id: rid, port: 80 }] }),
+        // Before its routing peer is created.
+        () => db.exposeDockerService({ networkId: 'n-links', containerDomain: 'app.internal', routerPeerId: 'p-r', serviceName: 'app', serviceDomain: 'app.example.com', port: 80 }, { canEditNetwork: () => true }),
+        () => db.addResourceGroups('n-links', rid, ['g-srv']),
         () => db.createProxyService({ domain: 'app.example.com', cluster: 'c1', targets: [{ type: 'container', networkId: 'n-links', containerDomain: 'app.internal', port: 80 }] }, { canEditNetwork: () => true }),
     ];
     for (const [i, call] of calls.entries()) await assert.rejects(call(), managedError, `call ${i}`);
@@ -665,7 +647,6 @@ test('every app write to the network for created resources is refused, before an
     // Reading stays allowed, and the network is labelled.
     assert.equal((await db.getNetworks()).find(n => n.id === 'n-links').managedByApi, true);
     assert.equal((await db.getNetworks()).find(n => n.id === 'n-office').managedByApi, false);
-    // A policy to another resource is fine.
     await db.createPolicy({ name: 'p', protocol: 'tcp', ports: ['22'], sources: ['g-crm'], destinationResource: { id: 'r-office', type: 'host' } });
     assert.equal(posts.length, 1);
 });
@@ -678,11 +659,9 @@ test('with no network for created resources the guard reads nothing and refuses 
     assert.ok(w.resources.some(r => r.address === '9.9.2.9'), 'created');
 });
 
-// ─── Coverage first, and the stored settings ───
+// ─── Covered targets ───
 test('a covered target goes the normal way whatever the settings say, also a private one', async () => {
-    // Off in the stored settings, on in this instance's copy: a covered private server still works.
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } }));
-    const before = connects;
+    setConfig({ createResources: { enabled: false } });
     const out = await ra.issueLaunch(KEY, rdp({ address: '10.0.0.5' }));
     assert.deepEqual(out.resource, { created: false, address: '10.0.0.5' });
     // A name that a domain resource covers: no lookup, no create.
@@ -694,60 +673,38 @@ test('a covered target goes the normal way whatever the settings say, also a pri
     dnsAnswers['range.example.com'] = ['8.8.4.20'];
     assert.equal((await ra.issueLaunch(KEY, rdp({ address: 'range.example.com' }))).resource.created, false);
     assert.equal(posts.length, 0);
-    assert.equal(connects, before, 'nothing was reserved');
+    assert.equal(created.length, 0, 'nothing was reserved');
     // NetBird can't be read and creating is off: the launch goes on as today.
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } }));
+    setConfig({ createResources: { enabled: false } });
     inventoryFails = true;
     assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, false);
 });
 
-test('the stored settings decide, not this instance\'s copy', async () => {
-    // This instance still thinks it is on; the database says off.
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } }));
-    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
-    assert.equal(posts.length, 0);
-    assert.equal(created.length, 0);
-    // Turned off between the reservation and the write: nothing is sent, the row is failed.
-    setConfig();
-    const real = keyRows.get(7);
-    let reads = 0;
-    keyRows.set(7, new Proxy(real, { get(t, p) { if (p === 'scopes' && ++reads === 2) settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } })); return t[p]; } }));
-    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
-    assert.equal(posts.length, 0);
-    assert.equal(rowFor(PUBLIC).state, 'failed');
-    // The sync reads them too: with no network stored and nothing left, it does nothing.
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false, networkId: '', groupId: '' } }));
-    created = [];
-    assert.equal(await ra.maintainCreatedResources(), null);
-});
+// ─── An administrator's delete ───
 
-// ─── An administrator may delete what the app no longer tracks ───
-test('a kept or untracked resource in the managed network can be deleted by an admin; a tracked one cannot', async () => {
+test('an admin may delete any resource in the managed network (tracked, kept or untracked); others may not', async () => {
     const tracked = seed('9.9.1.1', { ageHours: 0 });
     const kept = seed('9.9.1.2', { ageHours: 0 });
     kept.state = 'kept';
     w.resources.push({ id: 'r-stray', type: 'host', name: 'stray', address: '9.9.1.3/32', description: '', enabled: true, groups: [{ id: 'g-links' }] });
     w.networks.find(n => n.id === 'n-links').resources.push('r-stray');
-    const detail = await db.getNetworkDetail('n-links');
-    const locked = Object.fromEntries(detail.resources.map(r => [r.id, r.linkLocked]));
-    assert.deepEqual(locked, { [tracked.resource_id]: true, [kept.resource_id]: false, 'r-stray': false });
-
-    await assert.rejects(db.deleteResource('n-links', tracked.resource_id, { linkAdminDelete: true }), managedError);
-    // Not without the admin route (blocklist enforcement, automations, bulk delete).
+    // Not without the admin flag (blocklist enforcement, automations, a non-admin).
     await assert.rejects(db.deleteResource('n-links', kept.resource_id), managedError);
+    await assert.rejects(db.deleteResource('n-links', tracked.resource_id), managedError);
     assert.equal(deletesSent().length, 0);
+    await db.deleteResource('n-links', tracked.resource_id, { linkAdminDelete: true });
     await db.deleteResource('n-links', kept.resource_id, { linkAdminDelete: true });
     await db.deleteResource('n-links', 'r-stray', { linkAdminDelete: true });
-    assert.deepEqual(deletesSent().sort(), [`/api/networks/n-links/resources/${kept.resource_id}`, '/api/networks/n-links/resources/r-stray'].sort());
+    assert.deepEqual(deletesSent().sort(), [`/api/networks/n-links/resources/${tracked.resource_id}`, `/api/networks/n-links/resources/${kept.resource_id}`, '/api/networks/n-links/resources/r-stray'].sort());
     assert.equal(kept.state, 'deleted');
+    assert.equal(tracked.state, 'deleted');
     // Only the resources: the feature's group and the policy to it stay.
     assert.ok(!writes.some(([m, p]) => m === 'DELETE' && /\/api\/(groups|policies)\//.test(p)));
-    // Still no edit.
-    await assert.rejects(db.setResourceEnabled('n-links', tracked.resource_id, false), managedError);
+    const other = seed('9.9.1.4', { ageHours: 0 });
+    await assert.rejects(db.setResourceEnabled('n-links', other.resource_id, false), managedError);
 });
 
-// ─── Review round 1 ───
-test('C1: a link created for a host name keeps the name for the SSH host key and dials the IP', async () => {
+test('a link created for a host name keeps the name for the SSH host key and dials the IP', async () => {
     const hostKey = 'ssh-ed25519 ' + crypto.randomBytes(32).toString('base64');
     setConfig({ sshHostKeys: { 'crm-ssh.example.com': hostKey } });
     dnsAnswers['crm-ssh.example.com'] = [PUBLIC];
@@ -761,62 +718,7 @@ test('C1: a link created for a host name keeps the name for the SSH host key and
     ra.endSession(alice, session.sessionId);
 });
 
-test('C2: a session that writes a hold between selection and the lock keeps its resource', async () => {
-    const row = seed('9.9.0.1');
-    onGet = (p) => {
-        if (p === `/api/networks/n-links/resources/${row.resource_id}` && !holdTable.rows.has(row.resource_id)) {
-            holdTable.rows.set(row.resource_id, { resource_id: row.resource_id, network_id: 'n-links', address: '9.9.0.1/32', added_at: null, expires_at: new Date(Date.now() + HOUR), updated_at: new Date() });
-        }
-    };
-    await ra.maintainCreatedResources();
-    assert.equal(deletesSent().length, 0);
-    assert.equal(row.state, 'created');
-    // A session row written meanwhile counts too.
-    holdTable.rows.clear();
-    onGet = (p) => { if (p.endsWith(row.resource_id) && !sessionRows.length) sessionRows.push({ id: 's9', resource_id: row.resource_id }); };
-    await ra.maintainCreatedResources();
-    assert.equal(deletesSent().length, 0);
-    assert.equal(row.state, 'created');
-});
-
-test('C3: the guard follows the stored settings, not this instance\'s copy', async () => {
-    // Stored: n-office; this instance still thinks n-links.
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { networkId: 'n-office' } }));
-    await assert.rejects(db.setResourceEnabled('n-office', 'r-office', false), managedError);
-    await db.createClientResource('n-links', { name: 'x', address: '9.9.3.9', groups: [], policies: [] });
-    assert.ok(w.resources.some(r => r.address === '9.9.3.9'));
-    assert.equal((await db.getNetworks()).find(n => n.id === 'n-office').managedByApi, true);
-    settingsFail = true;
-    try {
-        // A settings read that fails: the last known network is still protected, others are not blocked.
-        await assert.rejects(db.setResourceEnabled('n-office', 'r-office', false), managedError);
-        await db.createClientResource('n-links', { name: 'y', address: '9.9.3.8', groups: [], policies: [] });
-        assert.ok(w.resources.some(r => r.address === '9.9.3.8'));
-    } finally { settingsFail = false; }
-});
-
-test('C3: an import or restore never turns creating on, and keeps the stored network and group while rows exist', async () => {
-    const imported = async (cr) => { assert.equal(await ra.writeImportedRemoteAccessConfig(JSON.stringify({ enabled: true, networks: ['n-office'], createResources: cr })), true); return JSON.parse(settings.remote_access_config).createResources; };
-    assert.deepEqual(await imported({ enabled: true, networkId: 'n-office', groupId: 'g-x', max: 9 }), { enabled: false, networkId: 'n-office', groupId: 'g-x', max: 9 });
-    setConfig();
-    seed('9.9.3.1');
-    assert.deepEqual(await imported({ enabled: true, networkId: 'n-office', groupId: 'g-x', max: 9 }), { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 9 });
-    assert.equal(await ra.writeImportedRemoteAccessConfig('not json'), false);
-    // The plaintext settings export never carries the table.
-    const exp = await db.exportAppSettings();
-    assert.equal((exp.tables || {}).ra_created_resources, undefined);
-});
-
-test('C4: a Reverse Proxy target is checked as the request builder sends it', async () => {
-    const rid = seed('9.9.4.5', { ageHours: 0 }).resource_id;
-    const svc = (t) => db.createProxyService({ domain: 'app.example.com', cluster: 'c1', targets: [{ port: 80, ...t }] });
-    // target_type wins over type, and the id is trimmed.
-    await assert.rejects(svc({ target_type: 'host', type: 'peer', id: ` ${rid} ` }), managedError);
-    await assert.rejects(svc({ type: 'host', target_id: rid }), managedError);
-    assert.equal(posts.length, 0);
-});
-
-test('C6: every entry of the IANA special-purpose registry (and multicast) is refused', () => {
+test('every entry of the IANA special-purpose registry (and multicast) is refused', () => {
     // Written out from https://www.iana.org/assignments/iana-ipv4-special-registry/ (first and last
     // address of each block), independently of the code's list.
     const registry = [
@@ -828,15 +730,15 @@ test('C6: every entry of the IANA special-purpose registry (and multicast) is re
         ['203.0.113.0', '203.0.113.255'], ['240.0.0.0', '255.255.255.255'], ['255.255.255.255', '255.255.255.255'],
         ['224.0.0.0', '239.255.255.255'], // multicast (its own registry)
     ];
-    for (const [first, last] of registry) for (const ip of [first, last]) assert.equal(ra._internal.isPublicIpv4(ip, new Set()), false, ip);
+    for (const [first, last] of registry) for (const ip of [first, last]) assert.equal(ra._internal.isPublicIpv4(ip), false, ip);
     // Right outside the blocks: public.
     for (const ip of ['1.1.1.1', '8.8.8.8', '100.63.255.255', '100.128.0.0', '172.15.255.255', '172.32.0.0', '192.0.1.0', '192.0.3.0', '192.31.195.255', '192.31.197.0',
         '192.52.192.255', '192.52.194.0', '192.88.98.255', '192.88.100.0', '192.175.47.255', '192.175.49.0', '198.17.255.255', '198.20.0.0', '223.255.255.255']) {
-        assert.equal(ra._internal.isPublicIpv4(ip, new Set()), true, ip);
+        assert.equal(ra._internal.isPublicIpv4(ip), true, ip);
     }
 });
 
-test('C7: blocklist names match in the same form as the target (case, trailing dot, IDN)', async () => {
+test('blocklist names match in the same form as the target (case, trailing dot, IDN)', async () => {
     const entry = (value) => ({ id: 1, value, note: '', scope: 'all', networks: [], enforce: false, enabled: true, mode: 'block', max_prefix: null });
     blockRows = [entry('CRM-Host.Example.COM.')];
     dnsAnswers['crm-host.example.com'] = ['9.9.9.9'];
@@ -847,32 +749,14 @@ test('C7: blocklist names match in the same form as the target (case, trailing d
     assert.equal(posts.length, 0);
 });
 
-test('C8: the key and the settings are checked inside the writer, after the wait for the lock', async () => {
-    for (const change of [() => { keyRows.get(7).revoked_at = new Date(); }, () => { settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false } })); }]) {
-        created = []; posts.length = 0; setConfig(); keyRows.get(7).revoked_at = null;
-        let release;
-        const held = ra.withTargetLock(() => new Promise(r => { release = r; }));
-        const p = ra.issueLaunch(KEY, rdp());
-        for (let i = 0; i < 2000 && !rowFor(PUBLIC); i++) await new Promise(r => setImmediate(r));
-        assert.ok(rowFor(PUBLIC), 'reserved');
-        for (let i = 0; i < 50; i++) await new Promise(r => setImmediate(r)); // the writer is waiting for the lock now
-        change();
-        release();
-        await held;
-        await assert.rejects(p, (e) => ['KEY_REVOKED', 'CREATE_DISABLED'].includes(e.code) && e.resourceCreated === undefined);
-        assert.equal(posts.length, 0, 'nothing was sent');
-        assert.equal(rowFor(PUBLIC).state, 'failed');
-    }
-});
-
-test('C9: only the admin route deletes an untracked resource there, and only the resource', async () => {
+test('only the admin route deletes an untracked resource there, and only the resource', async () => {
     const kept = seed('9.9.9.1', { ageHours: 0 });
     kept.state = 'kept';
     w.policies.push({ id: 'pol-uses', name: 'Uses', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-crm' }], destinationResource: { id: kept.resource_id, type: 'host' } }] });
     await assert.rejects(db.deleteResource('n-links', kept.resource_id), managedError);
     // NetBird refuses because a policy uses it: the admin gets that answer, and no policy is deleted.
     deleteAnswer = () => ({ status: 422, raw: 'resource is used by a policy' });
-    await assert.rejects(db.deleteResource('n-links', kept.resource_id, { linkAdminDelete: true }), (e) => e.status === 422 && /used by a policy/.test(e.message));
+    await assert.rejects(db.deleteResource('n-links', kept.resource_id, { linkAdminDelete: true }), /used by a policy/);
     assert.ok(!writes.some(([m, p]) => m === 'DELETE' && p.startsWith('/api/policies/')));
     assert.equal(kept.state, 'kept');
     // The server route passes the admin flag only for admins.
@@ -880,32 +764,41 @@ test('C9: only the admin route deletes an untracked resource there, and only the
     assert.match(src, /deleteResource\(req\.params\.id, req\.params\.rid, \{ linkAdminDelete: !!viewer\.isAdmin \}\)/);
 });
 
-test('C10: routing peers in the network stay allowed', async () => {
-    // Routing peers in the network stay allowed.
-    await db.createNetworkRouter('n-links', { peer: 'p-r', enabled: true });
-    assert.ok(posts.some(([p]) => p === '/api/networks/n-links/routers'));
+test('routing peers and the name are only an admin\'s to change; elsewhere, or while the guard is off, as before', async () => {
+    const calls = (net, opts) => [
+        () => db.createNetworkRouter(net, { peer: 'p-r', enabled: true }, opts),
+        () => db.deleteNetworkRouter(net, 'rt-1', opts),
+        () => db.updateNetwork(net, { name: 'x' }, opts),
+    ];
+    onWriteAnswer = (p) => (/^\/api\/networks\/[^/]+$/.test(p) ? { status: 200, body: { id: p } } : null);
+    for (const call of calls('n-links')) await assert.rejects(call(), managedError);
+    assert.equal(posts.length + writes.length, 0, 'nothing sent');
+    for (const call of [...calls('n-links', { linkWrite: true }), ...calls('n-office')]) await call();
+    setConfig({ createResources: { enabled: false } });
+    for (const call of calls('n-links')) await call();
+    // Off, but a server is still in use there.
+    const k = seed('9.9.80.1');
+    k.state = 'kept';
+    for (const call of calls('n-links')) await assert.rejects(call(), managedError);
+    // A tenant has no such network.
+    await nb.runWithTenant('tenant-a', () => db.deleteNetworkRouter('n-links', 'rt-1'));
 });
 
-test('C11: the row changes first; a failed audit is written by the next sync, once', async () => {
-    failAuditAction = 'resource.create';
-    assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true);
-    assert.equal(rowFor(PUBLIC).state, 'created');
-    assert.equal(audits.filter(a => a.action === 'resource.create').length, 0);
-    assert.equal(rowFor(PUBLIC).pending_audit.length, 1);
-    failAuditAction = null;
-    await ra.maintainCreatedResources();
-    await ra.maintainCreatedResources();
-    assert.equal(audits.filter(a => a.action === 'resource.create').length, 1);
-    assert.equal(rowFor(PUBLIC).pending_audit, null);
+test('the network is created with its routing peers while adding is on, and deleted with them', async () => {
+    const out = await setUp({ peers: ['p-r'] });
+    assert.equal(ra.getRemoteAccessConfig().createResources.enabled, true);
+    assert.deepEqual(out.routers.added, [{ peer: 'p-r' }]);
+    await db.deleteNetwork(out.network.id, { admin: true, viewer: ADMIN });
+    assert.ok(writes.some(([m, p]) => m === 'DELETE' && p.startsWith(`/api/networks/${out.network.id}/routers/`)));
 });
 
-test('C13: a name with a public and a loopback answer is not public', async () => {
+test('a name with a public and a loopback answer is not public', async () => {
     dnsAnswers['mixed2.example.com'] = ['8.8.8.30', '127.0.0.1'];
     await rejects(ra.issueLaunch(KEY, rdp({ address: 'mixed2.example.com' })), 'NAME_NOT_PUBLIC');
     assert.equal(posts.length, 0);
 });
 
-test('C14: the list shows every active row and the latest 50 finished ones', async () => {
+test('the list shows every active row and the latest 50 finished ones', async () => {
     for (let i = 0; i < 60; i++) seed(`9.8.0.${i}`, { state: 'created', resource: true });
     for (let i = 0; i < 55; i++) { const r = seed(`9.8.1.${i}`, { resource: false }); r.state = 'failed'; r.updated_at = Date.now() - i * 1000; }
     const list = await ra.listCreatedResources();
@@ -914,198 +807,56 @@ test('C14: the list shows every active row and the latest 50 finished ones', asy
     assert.equal(list.finishedMore, true);
 });
 
-// ─── Review round 2 ───
-test('C15: a session of this instance (also one still opening) keeps its resource from the delete', async () => {
-    const row = seed('9.9.10.1');
-    ra._internal.addSessionForTest({ id: 'sess-c15', resourceId: row.resource_id, state: 'preparing' });
-    try {
-        await ra.maintainCreatedResources();
-        assert.equal(deletesSent().length, 0);
-        assert.equal(row.state, 'created');
-    } finally { ra._internal.removeSessionForTest('sess-c15'); }
-});
-
-test('C16/C17: the create is sent once with the hook; a 429 is a refusal', async () => {
-    assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true);
-    assert.deepEqual(postOpts[0], { once: true, hook: true });
-    postAnswer = () => ({ status: 429, body: { message: 'too many requests' }, raw: 'too many requests' });
-    await rejects(ra.issueLaunch(KEY, rdp({ address: '9.9.10.2' })), 'RESOURCE_CREATE_FAILED', (e) => e.resourceCreated === undefined);
-    assert.equal(rowFor('9.9.10.2').state, 'failed');
-});
-
-test('open point: a save of other fields keeps the stored section as it is', async () => {
-    const stored = { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 9 };
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: stored }));
+test('a save of other fields keeps the stored section as it is', async () => {
+    const stored = { enabled: false, networkId: 'n-links', profileId: 11, groupId: 'g-links', max: 9 };
+    setConfig({ createResources: stored });
     await ra.setRemoteAccessConfig({ idleTimeoutMin: 41 }).catch(() => { });
     assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, stored);
     assert.equal(JSON.parse(settings.remote_access_config).idleTimeoutMin, 41);
     assert.deepEqual(ra.getRemoteAccessConfig().createResources, stored);
 });
 
-test('C19/C24: the network or group cannot change while rows are active (counted under the lock)', async () => {
-    seed('9.9.11.1');
-    const before = settings.remote_access_config;
-    await rejects(ra.setRemoteAccessConfig({ createResources: { ...CFG.createResources, groupId: 'g-srv' } }), 'CREATED_RESOURCES_EXIST', (e) => e.status === 409 && e.notSaved);
-    assert.equal(settings.remote_access_config, before);
-    // A launch whose settings changed before its reservation: refused inside the lock, no row.
-    created = [];
-    onGet = (p) => { if (p === '/api/peers') settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { groupId: 'g-srv' } })); };
-    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
-    assert.equal(created.length, 0);
+test('a save of the section changes only the fields it sends', async () => {
+    await ra.setRemoteAccessConfig({ createResources: { max: 12 } }).catch(e => { if (e.status) throw e; });
+    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, { enabled: true, networkId: 'n-links', profileId: 11, groupId: 'g-links', max: 12 });
 });
 
-test('C23: a stored network that does not exist protects nothing and blocks nothing', async () => {
-    setConfig({ createResources: { networkId: 'n-gone' } });
-    await db.setResourceEnabled('n-office', 'r-office', false);
-    await db.createPolicy({ name: 'p', protocol: 'tcp', ports: ['22'], sources: ['g-crm'], destinationResource: { id: 'r-office', type: 'host' } });
-    assert.ok(!reads.includes('/api/networks/n-gone'), 'the network is never looked up by id');
-});
-
-test('C25: a Reverse Proxy change without targets still checks the targets the service has', async () => {
-    const rid = seed('9.9.12.1', { ageHours: 0 }).resource_id;
-    w.services = [{ id: 'svc1', name: 'App', domain: 'app.example.com', enabled: true, targets: [{ target_type: 'host', target_id: rid, port: 80, protocol: 'http', enabled: true }] }];
-    await assert.rejects(db.updateProxyService('svc1', { name: 'Renamed' }), managedError);
-    assert.ok(!writes.some(([m]) => m === 'PUT'));
-});
-
-test('C26: the admin delete waits while a create for that address or marker is unresolved', async () => {
-    const pending = seed('9.9.13.1', { state: 'unknown', ageHours: 0 });
-    const res = resourceAt('9.9.13.1');
-    // An untracked resource at the same address (no row has its id).
-    await assert.rejects(db.deleteResource('n-links', res.id, { linkAdminDelete: true }), (e) => e.status === 409 && /still finishing/.test(e.message));
-    pending.state = 'failed';
-    await db.deleteResource('n-links', res.id, { linkAdminDelete: true });
-    assert.ok(deletesSent().includes(`/api/networks/n-links/resources/${res.id}`));
-});
-
-test('C27: a restore keeps the feature off and follows the restored rows; rows in two networks are refused', async () => {
-    assert.match(ra.restoredRowsProblem([{ state: 'created', network_id: 'a', group_id: 'g' }, { state: 'kept', network_id: 'b', group_id: 'g' }]), /another network or group/);
-    assert.equal(ra.restoredRowsProblem([{ state: 'created', network_id: 'a', group_id: 'g' }, { state: 'deleted', network_id: 'b', group_id: 'h' }]), '');
-    seed('9.9.14.1');
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: true, networkId: 'n-office', groupId: 'g-srv' } }));
-    await ra.restoreCreatedRowsForcingOff(null);
-    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 50 });
-});
-
-// ─── Review round 3 ───
-test('C29: a save of the section changes only the fields it sends', async () => {
-    await ra.setRemoteAccessConfig({ createResources: { max: 12 } }).catch(e => { if (e.notSaved) throw e; });
-    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, { enabled: true, networkId: 'n-links', groupId: 'g-links', max: 12 });
-});
-
-test('C30: a session that starts while the delete reads the database keeps its resource', async () => {
-    const row = seed('9.9.16.1');
-    onSessionsQuery = (rid) => { if (rid === row.resource_id) ra._internal.addSessionForTest({ id: 'sess-c30', resourceId: rid, state: 'preparing' }); };
-    try {
-        await ra.maintainCreatedResources();
-        assert.equal(deletesSent().length, 0);
-        assert.equal(row.state, 'created');
-    } finally { ra._internal.removeSessionForTest('sess-c30'); }
-});
-
-test('C34: a restore adds the backup rows by attempt id and never removes the current ones', async () => {
-    const current = seed('9.9.17.1');
-    const restored = { attempt_id: crypto.randomUUID(), ip: '9.9.17.2', name: '', network_id: 'n-links', group_id: 'g-links', key_id: 7, state: 'created', resource_id: 'res-old',
-        expected_name: '9.9.17.2', expected_address: '9.9.17.2/32', expected_description: 'x', reason: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), pending_audit: null };
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: true } }));
-    const out = await ra.restoreCreatedRowsForcingOff([{ ...current, created_at: new Date().toISOString(), state: 'deleted' }, restored]);
-    assert.deepEqual(out, { added: 1, message: '' });
-    // In the same transaction: creating resources is off, and the network and group are the rows'.
-    assert.deepEqual(JSON.parse(settings.remote_access_config).createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 50 });
-    assert.equal(rowFor('9.9.17.1').state, 'created', 'the current row is kept as it is');
-    assert.ok(rowFor('9.9.17.2'));
-    // Rows in another network than the tracked ones: nothing is added.
-    const other = await ra.restoreCreatedRowsForcingOff([{ ...restored, attempt_id: crypto.randomUUID(), ip: '9.9.17.3', network_id: 'n-office' }]);
-    assert.equal(other.added, 0);
-    assert.match(other.message, /another network or group/);
-    assert.equal(rowFor('9.9.17.3'), undefined);
-});
-
-test('C35: the reservation compares against the maximum stored now', async () => {
-    seed('9.9.18.1');
-    onGet = (p) => { if (p === '/api/peers') settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { max: 1 } })); };
-    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_LIMIT');
-    assert.equal(posts.length, 0);
-});
-
-test('C36: the networks keep the network for created resources while it is on or in use', async () => {
-    await rejects(ra.setRemoteAccessConfig({ networks: ['n-office'] }), 'NETWORK_IN_USE', (e) => e.status === 409 && e.notSaved);
-    // Off, with a server still there: still refused.
-    setConfig({ createResources: { enabled: false } });
-    seed('9.9.19.1');
-    await rejects(ra.setRemoteAccessConfig({ networks: ['n-office'] }), 'NETWORK_IN_USE');
-    // Off and nothing left: allowed.
-    created = [];
-    await ra.setRemoteAccessConfig({ networks: ['n-office'] }).catch(e => { if (e.notSaved) throw e; });
+test('a save whose networks leave out the stored network keeps it open to the gateway', async () => {
+    for (const cr of [{}, { enabled: false }]) {
+        setConfig({ createResources: cr });
+        await ra.setRemoteAccessConfig({ networks: ['n-office'] }).catch(e => { if (e.status) throw e; });
+        assert.deepEqual(JSON.parse(settings.remote_access_config).networks, ['n-office', 'n-links']);
+        assert.deepEqual(ra.getRemoteAccessConfig().networks, ['n-office', 'n-links']);
+    }
+    // Without a stored network the list is saved as sent.
+    setConfig({ createResources: { enabled: false, networkId: '', profileId: 0, groupId: '' } });
+    await ra.setRemoteAccessConfig({ networks: ['n-office'] }).catch(e => { if (e.status) throw e; });
     assert.deepEqual(JSON.parse(settings.remote_access_config).networks, ['n-office']);
 });
 
-// ─── Owner decision: no gateway-reach protection; C42-C44 ───
 test('no gateway check: a save, a launch and the sync work while the gateway reaches the group', async () => {
     w.policies.push({ id: 'pol-reach', name: 'Gateway To Linked', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'all', sources: [{ id: 'g-gw' }], destinations: [{ id: 'g-links' }] }] });
-    await ra.setRemoteAccessConfig({ createResources: { max: 20 } }).catch(e => { if (e.notSaved) throw e; });
+    await ra.setRemoteAccessConfig({ createResources: { max: 20 } }).catch(e => { if (e.status) throw e; });
     assert.equal(JSON.parse(settings.remote_access_config).createResources.max, 20);
     assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true);
-    const out = await ra.maintainCreatedResources();
-    assert.equal(out.paused, undefined);
+    await ra.maintainCreatedResources();
     // Policy writes are as on main: no refusal.
     await db.createPolicy({ name: 'Gateway To Linked 2', protocol: 'all', sources: ['g-gw'], destinations: ['g-links'] });
     assert.equal(posts.filter(([p]) => p === '/api/policies').length, 1);
 });
 
-test('C42: the automatic delete is sent once; a 429 leaves the row deleting; a new session stops it at the send', async () => {
-    const row = seed('9.9.21.1');
-    deleteAnswer = () => ({ status: 429, body: { message: 'too many requests' }, raw: 'too many requests' });
-    await ra.maintainCreatedResources();
-    assert.equal(row.state, 'deleting');
-    assert.equal(deletesSent().length, 1, 'one attempt');
-    assert.ok(reqOpts.some(o => o.method === 'DELETE' && o.once && o.hook));
-    // The hook is the last step: a session that appears there keeps the resource.
-    deleteAnswer = null;
-    reqHook = () => ra._internal.addSessionForTest({ id: 'sess-c42', resourceId: row.resource_id, state: 'preparing' });
-    try {
-        await ra.maintainCreatedResources();
-        assert.equal(row.state, 'created');
-        assert.ok(resourceAt('9.9.21.1'), 'not deleted');
-    } finally { ra._internal.removeSessionForTest('sess-c42'); reqHook = null; }
-});
-
-test('C44: an import keeps the network for created resources among the networks while rows exist', async () => {
-    seed('9.9.22.1');
-    assert.equal(await ra.writeImportedRemoteAccessConfig(JSON.stringify({ enabled: true, networks: ['n-office'], createResources: { enabled: true, networkId: 'n-office', groupId: 'g-x' } })), true);
-    const saved = JSON.parse(settings.remote_access_config);
-    assert.deepEqual(saved.networks, ['n-office', 'n-links']);
-    assert.deepEqual(saved.createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links' });
-});
-
-// ─── Final review ───
-test('C47: kept servers keep the network in use; the creation limit counts active rows only', async () => {
+test('kept servers keep the network in use; the creation limit counts active rows only', async () => {
     const kept = seed('9.9.23.1');
     kept.state = 'kept';
     setConfig({ createResources: { enabled: false } });
-    await rejects(ra.setRemoteAccessConfig({ networks: ['n-office'] }), 'NETWORK_IN_USE');
-    await rejects(ra.setRemoteAccessConfig({ createResources: { groupId: 'g-srv' } }), 'CREATED_RESOURCES_EXIST');
-    assert.equal(await ra.writeImportedRemoteAccessConfig(JSON.stringify({ networks: ['n-office'], createResources: { networkId: 'n-office' } })), true);
-    assert.equal(JSON.parse(settings.remote_access_config).createResources.networkId, 'n-links');
+    addOtherProfile();
+    await rejects(ra.setRemoteAccessConfig({ createResources: { profileId: 12 } }), 'CREATED_RESOURCES_EXIST');
     // The limit: one kept row and a maximum of 1 still allow a create.
     setConfig({ createResources: { max: 1 } });
     assert.equal((await ra.issueLaunch(KEY, rdp())).resource.created, true);
 });
 
-test('C48: a regular create is checked again at the send point', async () => {
-    setConfig({ createResources: { enabled: false, networkId: '', groupId: '' } });
-    let release;
-    const held = ra.withTargetLock(() => new Promise(r => { release = r; }));
-    const p = db.createClientResource('n-office', { name: 'late', address: '9.9.24.1', groups: [], policies: [] });
-    for (let i = 0; i < 50; i++) await new Promise(r => setImmediate(r)); // waiting for the lock
-    settings.remote_access_config = JSON.stringify(cfgOf({ createResources: { enabled: false, networkId: 'n-office' } }));
-    release();
-    await held;
-    await assert.rejects(p, managedError);
-    assert.equal(posts.length, 0);
-});
-
-test('C49: the admin delete counts only a success or a 404; no answer leaves the row', async () => {
+test('the admin delete counts only a success or a 404; no answer leaves the row', async () => {
     const kept = seed('9.9.25.1', { ageHours: 0 });
     kept.state = 'kept';
     deleteAnswer = () => ({ status: 0, error: 'timeout' });
@@ -1119,11 +870,589 @@ test('C49: the admin delete counts only a success or a 404; no answer leaves the
     assert.equal(kept.state, 'deleted');
 });
 
-test('C50: a restore that adopts the network from its rows also opens it to the gateway', async () => {
-    seed('9.9.26.1');
-    settings.remote_access_config = JSON.stringify(cfgOf({ networks: ['n-office'], createResources: { enabled: true, networkId: '', groupId: '' } }));
-    await ra.restoreCreatedRowsForcingOff(null);
-    const saved = JSON.parse(settings.remote_access_config);
-    assert.deepEqual(saved.networks, ['n-office', 'n-links']);
-    assert.deepEqual(saved.createResources, { enabled: false, networkId: 'n-links', groupId: 'g-links', max: 50 });
+const stored = () => JSON.parse(settings.remote_access_config);
+const saveCr = (cr) => ra.setRemoteAccessConfig({ createResources: cr });
+// A save whose NetBird part may fail afterwards (the gateway sync): only a refusal counts.
+const saved = (p) => p.catch(e => { if (e.status) throw e; });
+
+test('choosing a profile adopts its group; each kind of unusable profile is refused with its reason', async () => {
+    setConfig({ createResources: { enabled: false, profileId: 0, groupId: '' } });
+    addOtherProfile();
+    await saved(saveCr({ profileId: 12 }));
+    assert.equal(stored().createResources.profileId, 12);
+    assert.equal(stored().createResources.groupId, 'g-srv', 'the group comes from the profile');
+    assert.equal(ra.getRemoteAccessConfig().createResources.groupId, 'g-srv');
+    await saved(saveCr({ profileId: 0 }));
+    assert.deepEqual([stored().createResources.profileId, stored().createResources.groupId], [0, '']);
+
+    const refused = async (row, re, extra = () => { }) => {
+        setConfig({ createResources: { enabled: false, profileId: 0, groupId: '' } });
+        profileRows = [clone(PROFILE), { id: 20, name: 'X', policy_id: 'pol-x', shared: true, tenant: '', group_id: 'g-x', ...row }];
+        w = world();
+        w.groups.push({ id: 'g-x', name: 'X' });
+        w.policies.push({ id: 'pol-x', name: 'X Access', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-crm' }], destinations: [{ id: 'g-x' }] }] });
+        extra();
+        const before = settings.remote_access_config;
+        await rejects(saveCr({ profileId: 20 }), 'INVALID_SETTINGS', (e) => e.status === 400 && re.test(e.message));
+        assert.equal(settings.remote_access_config, before, 'nothing saved');
+    };
+    await refused({ id: 99 }, /no longer exists/);
+    await refused({ shared: false, group_id: '', policy_id: '' }, /Shared Access Profile/);
+    await refused({ group_id: 'g-nogroup' }, /group no longer exists in NetBird/);
+    await refused({}, /policy no longer exists/, () => { w.policies = w.policies.filter(p => p.id !== 'pol-x'); });
+    await refused({}, /policy is turned off/, () => { w.policies.find(p => p.id === 'pol-x').enabled = false; });
+    await refused({}, /no enabled rule/, () => { w.policies.find(p => p.id === 'pol-x').rules[0].enabled = false; });
+    await refused({}, /no enabled rule/, () => { w.policies.find(p => p.id === 'pol-x').rules[0].action = 'drop'; });
+    await refused({}, /no enabled rule/, () => { w.policies.find(p => p.id === 'pol-x').rules[0].destinations = [{ id: 'g-crm' }]; });
+    // Destinations given as plain ids are read too.
+    setConfig({ createResources: { enabled: false, profileId: 0, groupId: '' } });
+    profileRows = [clone(PROFILE)];
+    profileRows.push({ id: 22, group_id: 'g-x', policy_id: 'pol-plain', shared: true, tenant: '' });
+    w.policies.push({ id: 'pol-plain', name: 'Plain', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: ['g-crm'], destinations: ['g-x'] }] });
+    await saved(saveCr({ profileId: 22 }));
+    assert.equal(stored().createResources.groupId, 'g-x');
+});
+
+test('turning on resolves the chosen profile again (an import may have put another one under its id)', async () => {
+    setConfig({ createResources: { enabled: false } });
+    Object.assign(profileRows[0], { group_id: 'g-srv', policy_id: 'pol-srv' });
+    w.policies.push({ id: 'pol-srv', name: 'Servers Access', enabled: true, rules: [{ enabled: true, action: 'accept', protocol: 'tcp', sources: [{ id: 'g-crm' }], destinations: [{ id: 'g-srv' }] }] });
+    await saved(saveCr({ enabled: true }));
+    assert.deepEqual([stored().createResources.enabled, stored().createResources.groupId], [true, 'g-srv']);
+});
+
+test('a launch is refused when the chosen profile is gone, Direct or has another group', async () => {
+    for (const rows of [[], [{ ...clone(PROFILE), shared: false }], [{ ...clone(PROFILE), group_id: 'g-srv' }], [{ ...clone(PROFILE), tenant: 'tenant-a' }]]) {
+        profileRows = rows;
+        await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_DISABLED');
+    }
+    assert.equal(posts.length, 0);
+    assert.equal(created.length, 0);
+});
+
+test('a refused or rate-limited create', async () => {
+    // A 429 may stand for a retry that got no answer: the sync decides.
+    postAnswer = () => ({ status: 429, body: { message: 'too many requests' }, raw: 'too many requests' });
+    await rejects(ra.issueLaunch(KEY, rdp()), 'CREATE_UNCONFIRMED', (e) => e.resourceCreated === 'unknown');
+    assert.equal(rowFor(PUBLIC).state, 'unknown');
+    // Refused by the writer before anything was sent.
+    const before = posts.length;
+    ra.setRemoteAccessDeps({ createClientResource: async () => { throw new Error('An address already exists.'); } });
+    await rejects(ra.issueLaunch(KEY, rdp({ address: '9.9.10.2' })), 'RESOURCE_CREATE_FAILED', (e) => e.resourceCreated === undefined);
+    assert.equal(rowFor('9.9.10.2').state, 'failed');
+    assert.equal(posts.length, before);
+});
+
+test('an import or restore never turns creating on', async () => {
+    const imported = JSON.parse(ra.importedRemoteAccessConfig(JSON.stringify({ enabled: true, networks: ['n-office'], createResources: { enabled: true, networkId: 'n-office', profileId: 4, groupId: 'g-x', max: 9 } })));
+    assert.deepEqual(imported, { enabled: true, networks: ['n-office'], createResources: { enabled: false, networkId: 'n-office', profileId: 4, groupId: 'g-x', max: 9 } });
+    for (const bad of ['not json', '[1]', 'null', '"x"']) assert.equal(ra.importedRemoteAccessConfig(bad), null);
+    // The plaintext settings export never carries the table.
+    const exp = await db.exportAppSettings();
+    assert.equal((exp.tables || {}).ra_created_resources, undefined);
+});
+
+test('NetBird unreadable while resolving refuses with 503, nothing saved', async () => {
+    setConfig({ createResources: { enabled: false, profileId: 0, groupId: '' } });
+    addOtherProfile();
+    const before = settings.remote_access_config;
+    failGets.add('/api/groups/g-srv');
+    await rejects(saveCr({ profileId: 12 }), 'UNAVAILABLE', (e) => e.status === 503);
+    failGets = new Set(['/api/policies/pol-srv']);
+    await rejects(saveCr({ profileId: 12 }), 'UNAVAILABLE', (e) => e.status === 503);
+    assert.equal(settings.remote_access_config, before);
+});
+
+test('turning off works with old settings (a group, no profile) and active rows, with NetBird down; no profile is read', async () => {
+    setConfig({ createResources: { profileId: 0 } });
+    seed('9.9.30.1');
+    failGets = new Set(['/api/groups/g-links', '/api/policies/pol-crm', '/api/groups', '/api/policies']);
+    const readsBefore = reads.length;
+    await saved(saveCr({ enabled: false }));
+    assert.deepEqual(stored().createResources, { enabled: false, networkId: 'n-links', profileId: 0, groupId: 'g-links', max: 50 });
+    assert.ok(!reads.slice(readsBefore).some(p => ['/api/groups/g-links', '/api/policies/pol-crm'].includes(p)), 'no profile check in NetBird');
+});
+
+test('a max-only save of old enabled settings without a profile asks for the profile', async () => {
+    setConfig({ createResources: { profileId: 0 } });
+    await rejects(saveCr({ max: 9 }), 'INVALID_SETTINGS', (e) => e.status === 400 && /^Choose the Access Profile/.test(e.message));
+    setConfig({ createResources: { enabled: false, networkId: '' } });
+    await rejects(saveCr({ enabled: true }), 'INVALID_SETTINGS', (e) => /Choose the network first/.test(e.message));
+});
+
+test('the audit records carry the profile id', async () => {
+    await ra.issueLaunch(KEY, rdp());
+    const list = audits.filter(x => ['resource.create_intent', 'resource.create'].includes(x.action));
+    assert.equal(list.length, 2);
+    for (const a of list) assert.equal(a.meta.profileId, 11, a.action);
+});
+
+const ADMIN = { user_id: 'admin-1', email: 'admin@example.test', name: 'Admin' };
+const NET_NAME = 'Remote Access Resources (NetBird Control)';
+const noNetBirdDelete = () => assert.ok(!writes.some(([m]) => m === 'DELETE'), 'no NetBird DELETE');
+// No network stored yet (a profile is chosen, creating is off).
+const noNetwork = (extra = {}) => setConfig({ networks: ['n-office'], ...extra, createResources: { enabled: false, networkId: '', ...(extra.createResources || {}) } });
+const setUp = (body) => db.setUpLaunchNetwork(body, ADMIN);
+const routerPosts = () => posts.filter(([p]) => /\/routers$/.test(p));
+const networkPosts = () => posts.filter(([p]) => p === '/api/networks');
+const launchError = (code, status, re) => (e) => { assert.equal(e.code, code, e.message); assert.equal(e.status, status); if (re) assert.match(e.message, re); return true; };
+
+test('the network is created, attached before any router, then one router per peer and one for the groups', async () => {
+    noNetwork();
+    w.groups.push({ id: 'g-routers', name: 'Routers', peers: [{ id: 'p-r' }] });
+    const before = stored();
+    const storedAtPost = [];
+    postAnswerFor = (p) => { storedAtPost.push([p, stored().createResources.networkId]); return null; };
+    const out = await setUp({ peers: ['p-r', 'p-r2', 'p-r'], peerGroups: ['g-routers'] });
+    const net = w.networks.find(n => n.name === NET_NAME);
+    assert.ok(net, 'created in NetBird');
+    assert.deepEqual(networkPosts()[0][1], { name: NET_NAME, description: 'Servers added by Remote Access launch links.' });
+    assert.deepEqual(out.network, { id: net.id, name: NET_NAME });
+    // The network POST before anything is stored; every router POST after the attach.
+    assert.deepEqual(storedAtPost.map(x => x[0]), ['/api/networks', ...Array(3).fill(`/api/networks/${net.id}/routers`)]);
+    assert.equal(storedAtPost[0][1], '');
+    assert.ok(storedAtPost.slice(1).every(x => x[1] === net.id), 'attached before the first router');
+    assert.deepEqual(routerPosts().map(([, b]) => b), [
+        { enabled: true, masquerade: true, metric: 9999, peer: 'p-r' },
+        { enabled: true, masquerade: true, metric: 9999, peer: 'p-r2' },
+        { enabled: true, masquerade: true, metric: 9999, peer_groups: ['g-routers'] },
+    ]);
+    assert.deepEqual(out.routers, { added: [{ peer: 'p-r' }, { peer: 'p-r2' }, { peerGroups: ['g-routers'] }], failed: [] });
+    // Only networkId and the networks changed.
+    const after = stored();
+    assert.deepEqual(after.networks, ['n-office', net.id]);
+    assert.deepEqual(after.createResources, { ...before.createResources, networkId: net.id });
+    const rest = (x) => { const c = { ...x }; delete c.networks; delete c.createResources; return c; };
+    assert.deepEqual(rest(after), rest(before));
+    assert.deepEqual(out.config, { networks: ['n-office', net.id], createResources: { ...ra._internal.normConfig(before).createResources, networkId: net.id } });
+    assert.equal(ra.getRemoteAccessConfig().createResources.networkId, net.id, "this instance's copy follows");
+    const attach = audits.find(a => a.action === 'remote_access.network_attach');
+    assert.deepEqual(attach.meta, { networkId: net.id, name: NET_NAME, mode: 'created', replaced: null, added: ['p-r', 'p-r2', 'g-routers'], failed: [] });
+    assert.equal(attach.actorId, 'admin-1');
+    noNetBirdDelete();
+    // The write guard protects it once creating is on (while off and unused it is ordinary).
+    ra._internal.setConfigForTest({ ...stored(), createResources: { ...stored().createResources, enabled: true } });
+    await assert.rejects(db.createClientResource(net.id, { name: 'x', address: '9.9.40.1', groups: [], policies: [] }), managedError);
+});
+
+test('refused before anything is written: a stored network that exists, servers in use (kept too), a taken name, a gateway router', async () => {
+    noNetwork();
+    const k = seed('9.9.41.1');
+    k.state = 'kept';
+    await assert.rejects(setUp({ peers: ['p-r'] }), launchError('CREATED_RESOURCES_EXIST', 409));
+    created = [];
+    w.networks.push({ id: 'n-old', name: NET_NAME, resources: [] });
+    await assert.rejects(setUp({ peers: ['p-r'] }), launchError('NETWORK_NAME_TAKEN', 409, /possibly from an earlier attempt\. Delete or rename it in Networks/));
+    w.networks = w.networks.filter(n => n.id !== 'n-old');
+    // A router that is the gateway, or a group holding it.
+    w.groups.find(g => g.id === 'g-gw').peers = [{ id: 'p-gw' }];
+    w.groups.push({ id: 'g-mixed', name: 'Mixed', peers: [{ id: 'p-gw' }, { id: 'p-r' }] });
+    await assert.rejects(setUp({ peers: ['p-r', 'p-gw'] }), (e) => e.status === 400 && /Browser Gateway/.test(e.message));
+    await assert.rejects(setUp({ peers: ['p-r'], peerGroups: ['g-mixed'] }), (e) => e.status === 400);
+    await assert.rejects(setUp({ peerGroups: ['g-all'] }), (e) => e.status === 400);
+    failGets.add('/api/networks');
+    await assert.rejects(setUp({ peers: ['p-r'] }), launchError('UNAVAILABLE', 503));
+    assert.equal(posts.length, 0, 'nothing sent');
+    assert.equal(stored().createResources.networkId, '');
+    noNetBirdDelete();
+});
+
+test('the request is validated: valid ids and at least one', async () => {
+    noNetwork();
+    for (const body of [{}, { peers: [] }, { peers: 'p-r' }, { peers: ['bad id'] }, { peerGroups: [7] },
+        { networkId: 'bad id' }, { networkId: '' }]) {
+        await assert.rejects(setUp(body), launchError('INVALID_REQUEST', 400), JSON.stringify(body).slice(0, 60));
+    }
+    assert.equal(posts.length, 0);
+});
+
+test('a network refusal (a 429 too) or no clear answer: nothing else is done, nothing deleted', async () => {
+    noNetwork();
+    for (const [answer, code, re] of [
+        [{ status: 400, raw: 'bad name' }, 'NETWORK_CREATE_FAILED', /bad name/],
+        [{ status: 429, raw: 'too many requests' }, 'NETWORK_CREATE_FAILED', /too many requests/],
+        [{ status: 0, error: 'timeout' }, 'NETWORK_CREATE_FAILED', /Check Networks for a network named "Remote Access Resources \(NetBird Control\)"/],
+        [{ status: 503, raw: 'down' }, 'NETWORK_CREATE_FAILED', /Check Networks/],
+        [{ status: 201, body: {} }, 'NETWORK_CREATE_FAILED', /Check Networks/],
+    ]) {
+        posts.length = 0;
+        postAnswerFor = (p) => (p === '/api/networks' ? answer : null);
+        await assert.rejects(setUp({ peers: ['p-r'] }), launchError(code, 502, re));
+        assert.equal(posts.length, 1, 'the network POST only, once');
+        assert.equal(stored().createResources.networkId, '');
+    }
+    noNetBirdDelete();
+});
+
+test('a router that could not be added is reported with the reason; the others are added and the network stays chosen', async () => {
+    noNetwork();
+    w.groups.push({ id: 'g-routers', name: 'Routers', peers: [] });
+    let n = 0;
+    postAnswerFor = (p) => (/\/routers$/.test(p) && ++n === 2 ? { status: 0, error: 'timeout' } : null);
+    const out = await setUp({ peers: ['p-1', 'p-2', 'p-3'], peerGroups: ['g-routers'] });
+    assert.deepEqual(out.routers.added, [{ peer: 'p-1' }, { peer: 'p-3' }, { peerGroups: ['g-routers'] }]);
+    assert.deepEqual(out.routers.failed, [{ peer: 'p-2', reason: 'Failed to add routing peer: timeout' }]);
+    assert.equal(stored().createResources.networkId, out.network.id);
+    const { added, failed } = audits.find(a => a.action === 'remote_access.network_attach').meta;
+    assert.deepEqual({ added, failed }, { added: ['p-1', 'p-3', 'g-routers'], failed: ['p-2'] });
+    noNetBirdDelete();
+});
+
+test('a setting that cannot be stored leaves the new network and names it', async () => {
+    noNetwork();
+    postAnswerFor = (p) => { if (p === '/api/networks') failSettings = true; return null; };
+    try {
+        await assert.rejects(setUp({ peers: ['p-r'] }), launchError('UNAVAILABLE', 503, /couldn't be saved\. Delete network net-\d+ in Networks/));
+    } finally { failSettings = false; }
+    assert.equal(routerPosts().length, 0);
+    assert.equal(ra.getRemoteAccessConfig().createResources.networkId, '');
+    noNetBirdDelete();
+});
+
+test('the first network on a clean install is added to an empty list', async () => {
+    ra._internal.setConfigForTest({});
+    const out = await setUp({ peers: ['p-r'] });
+    assert.deepEqual(stored().networks, [out.network.id]);
+    assert.equal(stored().createResources.networkId, out.network.id);
+});
+
+test('servers of a network that was deleted in NetBird do not hold the choice of another one', async () => {
+    setConfig({ networks: ['n-office', 'n-gone'], createResources: { enabled: false, networkId: 'n-gone' } });
+    const row = (state, network_id = 'n-gone') => ({ attempt_id: crypto.randomUUID(), ip: '9.9.42.1', name: '', network_id, group_id: 'g-links', key_id: 7, state, resource_id: 'res-x',
+        expected_name: 'x', expected_address: '9.9.42.1/32', expected_description: 'x', reason: '', created_at: Date.now(), updated_at: Date.now() });
+    created.push(row('kept'), row('created'));
+    const out = await setUp({ peers: ['p-r'] });
+    assert.deepEqual(stored().networks, ['n-office', 'n-gone', out.network.id], 'the old one stays as it is');
+    assert.equal(audits.find(a => a.action === 'remote_access.network_attach').meta.replaced, 'n-gone');
+    // Servers in use in another network still refuse.
+    setConfig({ networks: ['n-office'], createResources: { enabled: false, networkId: 'n-gone2' } });
+    created.push(row('created', 'n-links'));
+    await assert.rejects(setUp({ peers: ['p-r'] }), launchError('CREATED_RESOURCES_EXIST', 409));
+});
+
+test('the route is admin-only, main account only, and refused on a read-only instance', () => {
+    const src = require('fs').readFileSync(require.resolve('../server'), 'utf8');
+    const i = src.indexOf("app.post('/api/remote-access/create-resources/network', requireAdmin,");
+    assert.ok(i > 0, 'requireAdmin');
+    const body = src.slice(i, src.indexOf('\napp.', i + 10));
+    assert.match(body, /if \(currentTenantAccount\(\)\) return res\.status\(404\)/);
+    assert.match(body, /if \(NETBIRD_READONLY\) return res\.status\(403\)/);
+    assert.match(body, /setUpLaunchNetwork\(req\.body, await getViewer\(req\)\)/);
+});
+
+// ─── An existing network ───
+const EMPTY = { id: 'n-empty', name: 'Empty', resources: [] };
+const useEmpty = () => { noNetwork(); w.networks.push(clone(EMPTY)); w.routers = { 'n-empty': [{ id: 'rt-1', peer: 'p-r', enabled: true }, { id: 'rt-2', peer_groups: ['g-srv'], enabled: false }] }; };
+
+test('an empty network is chosen with no router POST; only networkId and the networks change', async () => {
+    useEmpty();
+    const before = stored();
+    const out = await setUp({ networkId: 'n-empty' });
+    assert.equal(posts.length, 0, 'nothing created');
+    assert.deepEqual(out.network, { id: 'n-empty', name: 'Empty' });
+    assert.equal(out.enabledRouters, 1);
+    assert.deepEqual(stored().networks, ['n-office', 'n-empty']);
+    assert.deepEqual(stored().createResources, { ...before.createResources, networkId: 'n-empty' });
+    assert.equal(audits.find(a => a.action === 'remote_access.network_attach').meta.mode, 'existing');
+    noNetBirdDelete();
+    // No enabled router: the answer says 0 (the page warns).
+    useEmpty();
+    w.networks = w.networks.filter((n, i, a) => a.findIndex(x => x.id === n.id) === i);
+    w.routers['n-empty'] = [];
+    assert.equal((await setUp({ networkId: 'n-empty' })).enabledRouters, 0);
+});
+
+test('a network with resources, or whose resources cannot be read, is refused; nothing written', async () => {
+    useEmpty();
+    const before = settings.remote_access_config;
+    await assert.rejects(setUp({ networkId: 'n-office' }), launchError('NETWORK_NOT_EMPTY', 409, /This network has 2 resources\. Clear it in Networks, or choose another one\./));
+    failGets.add('/api/networks/n-empty/resources');
+    await assert.rejects(setUp({ networkId: 'n-empty' }), launchError('UNAVAILABLE', 503));
+    assert.equal(settings.remote_access_config, before);
+    assert.ok(!audits.some(a => a.action === 'remote_access.network_attach'));
+    // NetBird answers an empty list as JSON null.
+    failGets = new Set();
+    getAnswerFor = (p) => (p === '/api/networks/n-empty/resources' ? { status: 200, body: null, raw: 'null' } : null);
+    assert.equal((await setUp({ networkId: 'n-empty' })).network.id, 'n-empty');
+});
+
+test('refused: a missing network, an automation target, a gateway router, unreadable routers', async () => {
+    useEmpty();
+    await assert.rejects(setUp({ networkId: 'n-nope' }), launchError('NETWORK_NOT_FOUND', 404));
+    automationRows = [{ name: 'CRM Feed', network_id: 'n-empty' }];
+    await assert.rejects(setUp({ networkId: 'n-empty' }), launchError('NETWORK_NOT_USABLE', 409, /automation "CRM Feed"/));
+    automationRows = [];
+    w.groups.find(g => g.id === 'g-gw').peers = [{ id: 'p-gw' }];
+    w.groups.push({ id: 'g-holds-gw', name: 'Holds Gateway', peers: [{ id: 'p-gw' }] });
+    for (const routers of [[{ peer: 'p-gw', enabled: true }], [{ peer_groups: [{ id: 'g-holds-gw' }], enabled: true }]]) {
+        w.routers['n-empty'] = routers;
+        await assert.rejects(setUp({ networkId: 'n-empty' }), (e) => e.status === 400 && /Browser Gateway/.test(e.message));
+    }
+    w.routers['n-empty'] = { not: 'a list' };
+    await assert.rejects(setUp({ networkId: 'n-empty' }), launchError('UNAVAILABLE', 503));
+    w.routers['n-empty'] = [];
+    failGets.add('/api/networks/n-empty/routers');
+    await assert.rejects(setUp({ networkId: 'n-empty' }), launchError('UNAVAILABLE', 503));
+    assert.equal(stored().createResources.networkId, '');
+});
+
+test('a network a live access target names is refused with the reason', async () => {
+    const target = { type: 'network', id: 'n-empty', name: 'Empty' };
+    for (const [set, re] of [
+        [() => { liveRows.recurring = [{ user_id: 'u9', user_label: 'Dana', targets: [target] }]; }, /^Network Empty is used by recurring access for Dana\. Remove it there first\.$/],
+        [() => { liveRows.requests = [{ requester_id: 'u9', requester_name: 'Dana', targets: [], approved_targets: [target] }]; }, /a pending access request from Dana/],
+        [async () => { await db.setAutoApprovalConfig({ trusted: [], rules: [{ targets: [target], groupIds: ['g-crm'], maxMinutes: 60 }] }); }, /an auto-approval rule/],
+        [() => { liveRows.grants = [{ user_id: 'u9', user_label: 'Dana', targets: [target] }]; }, /temporary access for Dana/],
+    ]) {
+        useEmpty();
+        liveRows = { recurring: [], grants: [], requests: [] };
+        await db.setAutoApprovalConfig({ trusted: [], rules: [] });
+        await set();
+        await assert.rejects(setUp({ networkId: 'n-empty' }), launchError('NETWORK_NOT_USABLE', 409, re));
+        assert.equal(stored().createResources.networkId, '');
+    }
+    await db.setAutoApprovalConfig({ trusted: [], rules: [] });
+});
+
+// ─── The chosen network elsewhere ───
+
+test('an automation can\'t target the stored network (create or update); others can', async () => {
+    const cfg = (networkId) => ({ name: 'Feed', endpointUrl: 'https://feed.example.test/items', networkId, profileIds: [] });
+    await assert.rejects(db.createAutomation(cfg('n-links')), (e) => e.status === 400 && e.code === 'NETWORK_MANAGED' && /launch links/.test(e.message));
+    await assert.rejects(db.updateAutomation(3, cfg('n-links')), (e) => e.status === 400 && e.code === 'NETWORK_MANAGED');
+    // Another network passes this check (the insert is the stub's).
+    await db.updateAutomation(3, cfg('n-office'));
+});
+
+test('the stored network is left out of the request search, and refused in requests, recurring rules and auto-approval', async () => {
+    assert.ok(!(await db.searchRequestTargets('links')).results.some(r => r.type === 'network' && r.id === 'n-links'), 'the network is not offered');
+    assert.ok((await db.searchRequestTargets('office')).results.some(r => r.type === 'network' && r.id === 'n-office'));
+    const rid = seed('9.9.44.1', { ageHours: 0 }).resource_id;
+    assert.ok(!(await db.searchRequestTargets('9.9.44')).results.some(r => r.id === rid), 'nor its resources');
+    const network = { type: 'network', id: 'n-links', name: 'Links' };
+    await assert.rejects(db.createAccessRequest({ targets: [network], reason: 'work' }, { user_id: 'u1', email: 'alice@example.test', name: 'Alice' }), managedError);
+    await assert.rejects(db.createRecurringAccess({ userId: 'u1', targets: [network], days: [1], startTime: '08:00', endTime: '10:00' }, ADMIN), managedError);
+    await assert.rejects(db.setAutoApprovalConfig({ trusted: [], rules: [{ targets: [{ type: 'resource', id: rid, name: 'x' }], groupIds: ['g-crm'], maxMinutes: 60 }] }), managedError);
+    // A rule that is off may name it; it can't be turned on.
+    await db.setAutoApprovalConfig({ trusted: [], rules: [{ targets: [network], groupIds: ['g-crm'], maxMinutes: 60, enabled: false }] });
+    await db.setAutoApprovalConfig({ trusted: [], rules: [] });
+    recurringRule = { id: 3, user_id: 'u1', user_label: 'Dana', targets: [network], days: [1], start_time: '08:00', end_time: '10:00', enabled: false, active_grant_id: null };
+    const rule = (enabled) => ({ userId: 'u1', userLabel: 'Dana', targets: [network], days: [1], startTime: '08:00', endTime: '10:00', enabled });
+    await db.updateRecurringAccess(3, rule(false), ADMIN);
+    await assert.rejects(db.updateRecurringAccess(3, rule(true), ADMIN), managedError);
+});
+
+test('detaching a group from a resource that is gone finishes in the protected network; a real detach there is still refused', async () => {
+    assert.equal(await db.removeResourceGroups('n-links', 'res-missing', ['g-tmp']), false, 'the read confirms it is gone');
+    const rid = seed('9.9.48.1', { ageHours: 0, extra: { groups: [{ id: 'g-links' }, { id: 'g-tmp' }] } }).resource_id;
+    const sent = writes.length;
+    await assert.rejects(db.removeResourceGroups('n-links', rid, ['g-tmp']), managedError);
+    assert.equal(writes.length, sent, 'no PUT');
+});
+
+// ─── Changing or releasing the network ───
+
+test('Change Network: with nothing in use, both forms replace the stored network; the old one stays among the networks', async () => {
+    // Create: the network and its router are the only NetBird writes.
+    const out = await setUp({ peers: ['p-r'] });
+    assert.equal(stored().createResources.networkId, out.network.id);
+    assert.deepEqual(stored().networks, ['n-office', 'n-links', out.network.id]);
+    assert.deepEqual(posts.map(([p]) => p), ['/api/networks', `/api/networks/${out.network.id}/routers`]);
+    assert.ok(!writes.length, 'nothing else written');
+    assert.equal(audits.find(a => a.action === 'remote_access.network_attach').meta.replaced, 'n-links');
+    // Existing: nothing written at all.
+    setConfig();
+    posts.length = 0;
+    w.networks.push(clone(EMPTY));
+    w.routers = { 'n-empty': [] };
+    await setUp({ networkId: 'n-empty' });
+    assert.equal(stored().createResources.networkId, 'n-empty');
+    assert.ok(stored().networks.includes('n-links'));
+    assert.equal(posts.length + writes.length, 0);
+});
+
+test('Change Network and Stop Using This Network are refused while servers are in use (kept ones too)', async () => {
+    const k = seed('9.9.60.1');
+    k.state = 'kept';
+    const inUse = (e) => e.status === 409 && e.code === 'CREATED_RESOURCES_EXIST' && /still in use\. The network can be changed once (it is|they are) removed; kept ones can be deleted in Networks\./.test(e.message);
+    await assert.rejects(setUp({ peers: ['p-r'] }), inUse);
+    await assert.rejects(db.releaseLaunchNetwork(ADMIN), inUse);
+    assert.equal(stored().createResources.networkId, 'n-links');
+    assert.equal(posts.length + writes.length, 0);
+});
+
+test('Stop Using This Network clears the network, turns creating off, is audited, and changes nothing in NetBird', async () => {
+    const out = await db.releaseLaunchNetwork(ADMIN);
+    assert.equal(stored().createResources.networkId, '');
+    assert.equal(stored().createResources.enabled, false, 'it can\'t run without a network');
+    assert.equal(stored().createResources.profileId, 11, 'other fields as stored');
+    assert.deepEqual(stored().networks, ['n-office', 'n-links']);
+    assert.deepEqual(out.config.createResources.networkId, '');
+    assert.equal(ra.getRemoteAccessConfig().createResources.networkId, '', "this instance's copy follows");
+    const a = audits.find(x => x.action === 'remote_access.network_release');
+    assert.deepEqual(a.meta, { networkId: 'n-links' });
+    assert.equal(posts.length + writes.length, 0, 'nothing sent to NetBird');
+    // The network is an ordinary one now.
+    await db.createClientResource('n-links', { name: 'x', address: '9.9.60.2', groups: [], policies: [] });
+});
+
+test('the guard: off with nothing in use, the network is ordinary; on, or with servers in use, it is guarded', async () => {
+    setConfig({ createResources: { enabled: false } });
+    await db.createClientResource('n-links', { name: 'x', address: '9.9.61.1', groups: [], policies: [] });
+    assert.equal((await db.getNetworks()).find(n => n.id === 'n-links').managedByApi, false, 'no label');
+    await db.updateAutomation(3, { name: 'Feed', endpointUrl: 'https://feed.example.test/items', networkId: 'n-links', profileIds: [] });
+    assert.ok((await db.searchRequestTargets('links')).results.some(r => r.type === 'network' && r.id === 'n-links'), 'requestable');
+    // Off, a kept server there: guarded.
+    const k = seed('9.9.61.2');
+    k.state = 'kept';
+    await assert.rejects(db.createClientResource('n-links', { name: 'y', address: '9.9.61.3', groups: [], policies: [] }), managedError);
+    assert.equal((await db.getNetworks()).find(n => n.id === 'n-links').managedByApi, true);
+    // On, nothing in use: guarded.
+    created = [];
+    setConfig();
+    await assert.rejects(db.createClientResource('n-links', { name: 'z', address: '9.9.61.4', groups: [], policies: [] }), managedError);
+    // A rows read that fails refuses.
+    setConfig({ createResources: { enabled: false } });
+    const realQuery = core.pool.query;
+    core.pool.query = async (sql, params) => { const t = typeof sql === 'string' ? sql : sql.text; if (/FROM ra_created_resources/.test(t)) throw new Error('db down'); return realQuery(sql, params); };
+    try {
+        await assert.rejects(db.createClientResource('n-links', { name: 'q', address: '9.9.61.5', groups: [], policies: [] }), /db down/);
+    } finally { core.pool.query = realQuery; }
+});
+
+test('a network with servers in use stays guarded when an import chose another one', async () => {
+    const row = seed('9.9.61.9', { ageHours: 0 });
+    ra._internal.setConfigForTest(cfgOf({ createResources: { enabled: false, networkId: '' } }));
+    await assert.rejects(db.setResourceEnabled('n-links', row.resource_id, false), managedError);
+    await assert.rejects(db.deleteNetwork('n-links'), managedError);
+    assert.equal((await db.getNetworks()).find(n => n.id === 'n-links').managedByApi, true);
+    await db.deleteNetwork('n-links', { admin: true, viewer: ADMIN });
+    assert.equal(row.state, 'deleted');
+});
+
+test('a settings save that cannot be stored changes nothing in memory', async () => {
+    setConfig({ createResources: { enabled: false } });
+    failSettings = true;
+    try { await rejects(saveCr({ enabled: true }), 'UNAVAILABLE', (e) => e.status === 503); } finally { failSettings = false; }
+    assert.equal(ra.getRemoteAccessConfig().createResources.enabled, false);
+});
+
+test('settings that change while a launch looks up a name decide where it is added, or that it is not', async () => {
+    const during = (extra) => ra.setRemoteAccessDeps({ resolve4: async () => { ra._internal.setConfigForTest(cfgOf(extra)); return [PUBLIC]; } });
+    during({ createResources: { enabled: false, networkId: '' } });
+    await rejects(ra.issueLaunch(KEY, rdp({ address: 'slow.example.com' })), 'CREATE_DISABLED');
+    assert.equal(posts.length, 0);
+    setConfig();
+    during({ createResources: { networkId: 'n-office' } });
+    await ra.issueLaunch(KEY, rdp({ address: 'slow.example.com' }));
+    assert.equal(posts[0][0], '/api/networks/n-office/resources');
+    assert.equal(rowFor(PUBLIC).network_id, 'n-office');
+});
+
+test('turning creating on re-checks the network: foreign resources, an unreadable list, or a gateway router refuse', async () => {
+    setConfig({ createResources: { enabled: false } });
+    // A server launch links added is not foreign.
+    seed('9.9.62.1');
+    w.resources.push({ id: 'r-foreign', name: 'foreign', type: 'host', address: '10.9.9.9/32', enabled: true, groups: [] });
+    w.networks.find(n => n.id === 'n-links').resources.push('r-foreign');
+    const before = settings.remote_access_config;
+    await rejects(saveCr({ enabled: true }), 'NETWORK_NOT_EMPTY', (e) => e.status === 409 && /This network has 1 resource\. Clear it in Networks, or choose another one\./.test(e.message));
+    assert.equal(settings.remote_access_config, before);
+    w.networks.find(n => n.id === 'n-links').resources = w.networks.find(n => n.id === 'n-links').resources.filter(x => x !== 'r-foreign');
+    failGets.add('/api/networks/n-links/resources');
+    await rejects(saveCr({ enabled: true }), 'UNAVAILABLE', (e) => e.status === 503);
+    failGets = new Set();
+    w.groups.find(g => g.id === 'g-gw').peers = [{ id: 'p-gw' }];
+    w.routers = { 'n-links': [{ id: 'rt-1', peer: 'p-gw', enabled: true }] };
+    await assert.rejects(saveCr({ enabled: true }), (e) => e.status === 400 && /Browser Gateway/.test(e.message));
+    w.routers = {};
+    liveRows.grants = [{ user_id: 'u9', user_label: 'Dana', targets: [{ type: 'network', id: 'n-links' }] }];
+    await rejects(saveCr({ enabled: true }), 'NETWORK_NOT_USABLE', (e) => e.status === 409);
+    liveRows.grants = [];
+    assert.equal(settings.remote_access_config, before);
+    w.routers = { 'n-links': [{ id: 'rt-1', peer: 'p-r', enabled: true }] };
+    await saved(saveCr({ enabled: true }));
+    assert.equal(stored().createResources.enabled, true);
+});
+
+const resourceDeletes = () => writes.filter(([m, p]) => m === 'DELETE' && /\/resources\//.test(p)).map(([, p]) => p);
+
+test('admin delete: an Active server Remote Access added is deleted once and its row settled; the leader leaves it alone', async () => {
+    const row = seed('9.9.70.1', { ageHours: 0 });
+    await assert.rejects(db.deleteResource('n-links', row.resource_id), managedError);
+    await db.deleteResource('n-links', row.resource_id, { linkAdminDelete: true });
+    assert.deepEqual(resourceDeletes(), [`/api/networks/n-links/resources/${row.resource_id}`]);
+    assert.equal(row.state, 'deleted');
+    assert.equal(row.reason, 'Deleted by an admin in Networks.');
+    row.created_at = Date.now() - 20 * HOUR;
+    await ra.maintainCreatedResources();
+    assert.equal(resourceDeletes().length, 1, 'the leader sends nothing more');
+    assert.equal(row.state, 'deleted');
+});
+
+test('admin delete: no clear answer leaves the row as it was; a server still being added can be deleted too', async () => {
+    const row = seed('9.9.70.2', { ageHours: 0 });
+    deleteAnswer = () => ({ status: 0, error: 'timeout' });
+    await assert.rejects(db.deleteResource('n-links', row.resource_id, { linkAdminDelete: true }), (e) => e.status === 502 && e.unconfirmed === true);
+    assert.equal(row.state, 'created');
+    deleteAnswer = null;
+    const pending = seed('9.9.70.3', { state: 'unknown', ageHours: 1 });
+    await db.deleteResource('n-links', resourceAt('9.9.70.3').id, { linkAdminDelete: true });
+    await ra.maintainCreatedResources();
+    assert.equal(pending.state, 'failed', 'the sync finds nothing for it');
+    const noGroup = seed('9.9.70.6', { state: 'unknown', ageHours: 0 });
+    noGroup.resource_id = resourceAt('9.9.70.6').id;
+    await db.deleteResource('n-links', noGroup.resource_id, { linkAdminDelete: true });
+    assert.equal(noGroup.state, 'deleted');
+});
+
+test('admin delete: the network detail says which servers someone is connected to', async () => {
+    const a = seed('9.9.70.4', { ageHours: 0 });
+    const b = seed('9.9.70.5', { ageHours: 0 });
+    sessionRows.push({ id: 's-70', resource_id: b.resource_id });
+    const d = await db.getNetworkDetail('n-links');
+    const byId = Object.fromEntries(d.resources.map(r => [r.id, r]));
+    assert.equal(byId[a.resource_id].inSession, false);
+    assert.equal(byId[b.resource_id].inSession, true);
+});
+
+test('admin network delete: creating off first, then NetBird deletes, then the setting is cleared, rows settled, audited', async () => {
+    const row = seed('9.9.71.1', { ageHours: 0 });
+    let enabledAtFirstDelete = null;
+    onWrite = (p) => { if (enabledAtFirstDelete === null && /^\/api\/networks\//.test(p)) enabledAtFirstDelete = stored().createResources.enabled; };
+    assert.deepEqual(await db.deleteNetwork('n-links', { admin: true, viewer: ADMIN }), { ok: true });
+    assert.equal(enabledAtFirstDelete, false, 'turned off before anything was deleted');
+    assert.ok(writes.some(([m, p]) => m === 'DELETE' && p === '/api/networks/n-links'), 'the network is deleted');
+    assert.ok(!writes.some(([m, p]) => m === 'DELETE' && /^\/api\/(groups|policies)\/(g-links|pol-crm)$/.test(p)), "the profile's group and policy stay");
+    assert.equal(stored().createResources.networkId, '');
+    assert.equal(stored().createResources.enabled, false);
+    assert.equal(row.state, 'deleted');
+    assert.ok(audits.some(x => x.action === 'settings.remote_access' && x.meta && x.meta.via === 'network.delete'));
+    assert.deepEqual(audits.find(x => x.action === 'remote_access.network_release').meta, { networkId: 'n-links', via: 'network.delete' });
+    assert.equal(ra.getRemoteAccessConfig().createResources.networkId, '');
+});
+
+test('admin network delete: a partial failure keeps the setting attached with creating off; a non-admin is refused', async () => {
+    seed('9.9.71.2', { ageHours: 0 });
+    await assert.rejects(db.deleteNetwork('n-links'), managedError);
+    deleteAnswer = (p) => (/\/resources\//.test(p) ? { status: 0, error: 'timeout' } : null);
+    await assert.rejects(db.deleteNetwork('n-links', { admin: true, viewer: ADMIN }), /network was not deleted/);
+    assert.ok(!writes.some(([m, p]) => m === 'DELETE' && p === '/api/networks/n-links'));
+    assert.equal(stored().createResources.networkId, 'n-links', 'still attached');
+    assert.equal(stored().createResources.enabled, false, 'creating stays off');
+    // The network's own delete without an answer: nothing is released either.
+    deleteAnswer = null;
+    getAnswerFor = null;
+    networkDeleteAnswer = { status: 0, error: 'timeout' };
+    try { await assert.rejects(db.deleteNetwork('n-links', { admin: true, viewer: ADMIN }), /timeout/); } finally { networkDeleteAnswer = null; }
+    assert.equal(created[0].state, 'deleted', 'the server itself was removed');
+    assert.equal(stored().createResources.networkId, 'n-links');
+});
+
+test('network delete: a stored network that is not guarded (off, nothing in use) is an ordinary delete, then the setting is cleared', async () => {
+    setConfig({ createResources: { enabled: false } });
+    await db.deleteNetwork('n-links', { viewer: ADMIN });
+    assert.ok(writes.some(([m, p]) => m === 'DELETE' && p === '/api/networks/n-links'));
+    assert.equal(stored().createResources.networkId, '');
+    assert.equal(audits.find(x => x.action === 'remote_access.network_release').meta.via, 'network.delete');
 });

@@ -246,10 +246,7 @@ const nb429Answer = () => ({ body: JSON.parse(NB_429_RAW), raw: NB_429_RAW });
 // Run `attempt` (one HTTP call that resolves { status, retryAfter, value })
 // and send it again while NetBird answers 429, within the limits above. Resolves the final
 // attempt's `value`; a call never sent because of the pause resolves `from429(nb429Answer())`.
-// opts.once: send at most once (a 429 answer is the result, and still sets the shared pause).
-// opts.beforeSend: runs after every wait, right before the send; when the pause was set again
-// while it ran, the call waits and runs it again. A throw sends nothing.
-async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429, { once = false, beforeSend = null } = {}) {
+async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429) {
     let waited = 0;
     let last = null; // this call's own last 429
     const giveUp = () => {
@@ -266,10 +263,6 @@ async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429, { once =
             waited += _nbTiming.now() - t0; // the time that really passed (a timer can fire late)
         }
         if (last && waited > maxWaitMs) return giveUp(); // a late timer used up the budget
-        if (beforeSend) {
-            await beforeSend();
-            if (_nbPausedUntil - _nbTiming.now() > 0) { n--; continue; } // paused meanwhile: wait, check again
-        }
         const r = await attempt();
         // A retry that ends in a network error or timeout reports the 429 the call already got:
         // the caller sees the same failure as before this retry existed, never a status 0 that some
@@ -281,7 +274,7 @@ async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429, { once =
         const now = _nbTiming.now();
         _nbPausedUntil = Math.max(_nbPausedUntil, now + Math.min(wait, NB_429_MAX_PAUSE_MS));
         const need = _nbPausedUntil - now; // may be longer than this answer's wait (another call's pause)
-        if (once || n === NB_429_MAX_ATTEMPTS || need > maxWaitMs - waited) return giveUp();
+        if (n === NB_429_MAX_ATTEMPTS || need > maxWaitMs - waited) return giveUp();
         console.warn('[NetBird %s] rate limited (429), retry %d of %d in %d ms', label, n, NB_429_MAX_ATTEMPTS - 1, Math.round(need));
     }
 }
@@ -347,8 +340,7 @@ function netbirdWriteOnce(transport, url, method, headers, body) {
     });
 }
 
-// opts ({ once, beforeSend }): see withNbRateLimitRetry. Server-side code only.
-function netbirdPost(apiPath, bodyObj, opts = {}) {
+function netbirdPost(apiPath, bodyObj) {
     if (NETBIRD_READONLY) return Promise.resolve(readOnlyResp());
     if (!netbirdApiConfigured()) return Promise.resolve({ status: 0, error: 'NetBird API not configured' });
     const url = new URL(apiPath, _nbApi.url);
@@ -361,17 +353,15 @@ function netbirdPost(apiPath, bodyObj, opts = {}) {
         'Accept': 'application/json',
         'Content-Length': Buffer.byteLength(body),
     };
-    return withNbRateLimitRetry(`POST ${apiPath}`, NB_429_WRITE_WAIT_MS, () => netbirdWriteOnce(transport, url, 'POST', headers, body), writeFrom429,
-        { once: !!(opts && opts.once), beforeSend: opts && typeof opts.beforeSend === 'function' ? opts.beforeSend : null });
+    return withNbRateLimitRetry(`POST ${apiPath}`, NB_429_WRITE_WAIT_MS, () => netbirdWriteOnce(transport, url, 'POST', headers, body), writeFrom429);
 }
 
 // Authenticated PUT (thin wrapper over netbirdReq) - a named companion to netbirdPost for the
 // update call sites (notifications channels, etc.); same read-only guard + result shape.
 function netbirdPut(apiPath, bodyObj) { return netbirdReq('PUT', apiPath, bodyObj); }
 
-// Authenticated PUT / DELETE to the NetBird API. opts ({ once, beforeSend }): see withNbRateLimitRetry.
-// Server-side code only.
-function netbirdReq(method, apiPath, bodyObj, opts = {}) {
+// Authenticated PUT / DELETE to the NetBird API
+function netbirdReq(method, apiPath, bodyObj) {
     if (NETBIRD_READONLY && String(method).toUpperCase() !== 'GET') return Promise.resolve(readOnlyResp());
     if (!netbirdApiConfigured()) return Promise.resolve({ status: 0, error: 'NetBird API not configured' });
     const url = new URL(apiPath, _nbApi.url);
@@ -380,8 +370,7 @@ function netbirdReq(method, apiPath, bodyObj, opts = {}) {
     const transport = url.protocol === 'https:' ? https : http;
     const headers = { 'Authorization': `Token ${auth}`, 'Accept': 'application/json' };
     if (body !== null) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(body); }
-    return withNbRateLimitRetry(`${method} ${apiPath}`, nbWaitFor(method), () => netbirdWriteOnce(transport, url, method, headers, body), writeFrom429,
-        { once: !!(opts && opts.once), beforeSend: opts && typeof opts.beforeSend === 'function' ? opts.beforeSend : null });
+    return withNbRateLimitRetry(`${method} ${apiPath}`, nbWaitFor(method), () => netbirdWriteOnce(transport, url, method, headers, body), writeFrom429);
 }
 
 // In-memory caches for groups (id→name) and policies (id→{name,enabled})

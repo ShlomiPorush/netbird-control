@@ -6,8 +6,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 // Stub the NetBird client BEFORE db.js loads (it destructures these at require time).
-// No database here: the stored settings (the Remote Access launch-link guard reads them) are empty.
-require('../lib/core').getSetting = async () => null;
 const nb = require('../lib/netbird');
 let stored = {}, sent = [];
 nb.netbirdGet = async (path) => {
@@ -21,10 +19,10 @@ const failNext = { post: [], req: [] };
 nb.netbirdPost = async (path, body) => { sent.push({ method: 'POST', path, body }); const f = failNext.post.shift(); const st = f === -1 ? 0 : (f || 200); return { status: st, body: { id: 'new1' } }; };
 nb.netbirdReq = async (method, path, body) => { sent.push({ method, path, body }); const f = failNext.req.shift(); const st = f === -1 ? 0 : (f || 200); return { status: st, body: {} }; };
 nb.bustNbCaches = () => { };
-// Access Profile rows (the resource editor never deletes a profile's policy): none.
+// No Access Profile rows, and no servers added by launch links.
 const core = require('../lib/core');
 const realQuery = core.pool.query.bind(core.pool);
-core.pool.query = (sql, ...rest) => (/FROM access_profiles/.test(String(sql)) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
+core.pool.query = (sql, ...rest) => (/access_profiles|ra_created_resources/.test(sql) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
 const { createPolicy, updatePolicy, _internal } = require('../db');
 const { carryRuleExtras, ruleHasUnmodeled } = _internal;
 

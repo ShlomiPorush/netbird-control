@@ -17,15 +17,27 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   Keys** links to it (**API Documentation**).
 - **The launch API can create a missing resource.** A launch request with `"createResource": true` and the
   new API key permission **Create Missing Resources** (`remote-access:create-resource`) adds a public
-  server that NetBird has no resource for, as a temporary host resource in the network and group
-  chosen in **Settings > Remote Access > Resources Created By The API**. Your policy to that group
-  decides who reaches it; the app never creates a policy. Only public IPv4 addresses (a host name
+  server that NetBird has no resource for, as a temporary host resource. In **Settings > Remote
+  Access > Servers From Launch Links**, the **Choose Network** window creates the network for them
+  (**Create New**: `Remote Access Resources (<application name>)`, with the routing peers you
+  choose), or takes a network that has no resources (**Use Existing**; **Clear In Networks** links to
+  a network that still has some). The app never deletes such a network: a failure says what to do. You also
+  choose a Shared **Access Profile**: the servers join its group, and its policy decides who reaches
+  them; the app never creates a policy. While chosen it can't be deleted. While creating is on, or servers
+  launch links added are still in use, the stored network stays open to the gateway and out of
+  access requests, recurring access, auto-approval and automations. **Change Network** and **Stop
+  Using This Network** replace or clear it while none are in use; they change only this setting,
+  never anything in NetBird.
+  Only public IPv4 addresses (a host name
   only when every address it resolves to is public), never one on the blocklist, and at most the
   configured number at a time (50 by default). The answer says whether the request made the
   resource (`resource.created`), and a refusal after the resource was made says so
   (`resourceCreated`). The leader removes such a resource once its hold time has passed and no
-  session uses it, and keeps one that someone changed. An admin can delete a kept one (the resource only) from the network's page. The app changes that network no other way,
-  and the Networks page labels it **Managed By The Remote Access API**. Off by default: turn
+  session uses it, and keeps one that someone changed. An admin can delete any of them (the resource
+  only), or the whole network (adding servers is turned off first, and the setting lets go of it),
+  from the Networks pages, and only an admin can change the network's name, description and routing
+  peers. The app changes that network's servers no other way,
+  and the Networks page labels it **Managed By Remote Access**. Off by default: turn
   it on only after every instance runs this version. A settings import never turns it on.
 - **Add a missing server as a resource.** When the Remote Access check finds that nothing in
   NetBird covers the address, and the user may edit a network that Remote Access uses, the page
@@ -60,22 +72,26 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   start the connection again from the system that sent you, since the link is used up.
 
 ### Fixed
+- **A bulk resource delete that fails for some rows says so.** On a network's page, **Delete** of
+  selected resources used to clear the selection even when NetBird refused some of them. Now the
+  rows that couldn't be deleted stay selected, and the page names them with the
+  reason, for example "2 resources couldn't be deleted: Web: used by a policy".
 - **An Access Profile in use can no longer be deleted, and its NetBird group and policy are no
   longer destroyed by other changes.** Delete used to remove the profile's group and policy
   whatever used them. Now a profile that has resources or peers, is referenced in NetBird, or is
-  used by a grant, a recurring rule, a pending request, an auto-approval rule, a network default
-  or an automation can't be deleted: the Delete button is muted and **Can't Delete Profile** lists
-  the uses. An unused profile's row and its audit entry are saved first; if NetBird then doesn't
-  confirm removing its group or policy, the page says which one to delete in NetBird. Deleting a
-  profile's last resource no longer deletes the profile's group and policy. Saving a resource's
-  Access Control tab updates its existing policies in place instead of deleting and recreating
-  them, so a profile's policy keeps its id; removing a profile's policy there is refused. Saving a
+  used by a grant, a recurring rule, a pending request, an auto-approval rule, a network default,
+  an automation or Remote Access launch links can't be deleted: the Delete button is muted and **Can't Delete Profile** lists
+  the uses. When NetBird doesn't confirm removing an unused profile's group or policy, the page says
+  which one to delete in NetBird. Deleting a profile's last resource no longer deletes the profile's
+  group and policy. Saving a resource's Access Control tab updates its existing policies in place
+  instead of deleting and recreating them, so a profile's policy keeps its id; removing a profile's
+  policy there is refused, and the profile follows a change made to it there or on the Policies page.
+  Saving a
   network default, an automation, a recurring rule, an auto-approval rule, a grant or a request
-  with a profile that no longer exists is refused with `PROFILE_NOT_FOUND`. See
+  with a profile that no longer exists is refused. See
   [Access Profiles](docs/access-profiles.md#deleting-a-profile).
-- **Deletes that NetBird doesn't answer are no longer counted as done.** A resource delete or a
-  policy save without an answer (or with a server error) says NetBird didn't confirm it, and a
-  resource or profile delete is sent only once, also when NetBird answers "too many requests". An
+- **Deletes that NetBird doesn't answer are no longer counted as done.** A resource, network or
+  policy change without an answer (or with a server error) says NetBird didn't confirm it. An
   automation keeps tracking a resource until the delete succeeded or NetBird confirmed the
   resource is gone in the network the automation recorded; Repair changes nothing when it can't
   read a network. A move whose delete got no answer is never rolled back: it keeps the copy and

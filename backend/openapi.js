@@ -3,7 +3,6 @@
 // `requireAdmin` middleware is present in the route's handler stack). The META map below only
 // adds human summaries; any route without one still appears (summary = "METHOD /path").
 
-// Friendlier tag (sidebar group) per first path segment.
 const TAG_BY_SEGMENT = {
     me: 'Auth', health: 'Meta', docs: 'Meta', webhook: 'Webhook',
     'app-config': 'Settings', integrations: 'Settings',
@@ -233,7 +232,7 @@ const PUBLIC_PATHS = {
                 '',
                 'The person who opens the link signs in with SSO and needs the Browser Remote Access permission. The link works once, expires after five minutes, and stops working when the key is revoked or expires.',
                 '',
-                '**`createResource: true`** (also needs the `remote-access:create-resource` scope, and **Settings > Remote Access > Resources Created By The API** turned on): when NetBird has no resource for the target, the app creates a temporary host resource for it in the network and group chosen there. Only public IPv4 addresses, or a host name whose every IPv4 answer is public; never an address or name on the blocklist. When NetBird already covers the target, nothing is created and the request goes on as without `createResource`. The app never creates a policy: an admin policy to that group decides who reaches the resource. The resource is deleted after the hold time once no session uses it.',
+                '**`createResource: true`** (also needs the `remote-access:create-resource` scope, and **Settings > Remote Access > Servers From Launch Links** turned on): when NetBird has no resource for the target, the app creates a temporary host resource for it in the network chosen there, in the group of the Access Profile chosen there. Only public IPv4 addresses, or a host name whose every IPv4 answer is public; never an address or name on the blocklist. When NetBird already covers the target, nothing is created and the request goes on as without `createResource`. The app never creates a policy: the policy of that Access Profile decides who reaches the resource. The resource is deleted after the hold time once no session uses it.',
                 '',
                 'Limits: 30 calls a minute per key, 300 a minute per client address. The body is JSON, up to 64 KB.',
             ].join('\n'),
@@ -290,7 +289,7 @@ const PUBLIC_PATHS = {
                 401: errorResponse('The key is missing or can\'t be used: `MISSING_KEY`, `INVALID_KEY`, `KEY_REVOKED`, `KEY_EXPIRED`.'),
                 403: errorResponse('Refused: `IP_NOT_ALLOWED`, `SCOPE_MISSING`, `DISABLED`, `NO_SSO`, `USER_BLOCKED`, `NO_ACCESS` and the other access codes, or with `createResource`: `CREATE_DISABLED`, `ADDRESS_NOT_PUBLIC`, `NAME_NOT_PUBLIC`, `ADDRESS_BLOCKED`, `NAME_NOT_FOUND`.', resourceCreatedField),
                 404: errorResponse('`USER_NOT_FOUND`: no NetBird user has this email address.'),
-                409: errorResponse('`USER_AMBIGUOUS`, or with `createResource`: `CREATE_LIMIT` (too many resources created by the API still exist), `CREATE_IN_PROGRESS` (another request is creating or removing a resource for this server; try again in a minute).'),
+                409: errorResponse('`USER_AMBIGUOUS`, or with `createResource`: `CREATE_LIMIT` (too many resources created by the API still exist), `CREATE_IN_PROGRESS` (another request is creating a resource for this server; try again in a minute).'),
                 413: errorResponse('`TOO_LARGE`: the body is over 64 KB.'),
                 415: errorResponse('`UNSUPPORTED_MEDIA_TYPE`: the body is not sent as JSON.'),
                 429: errorResponse('Too many calls with this key or from this address (no code), or `TOO_MANY_FAILURES` after repeated failed attempts from this address.'),

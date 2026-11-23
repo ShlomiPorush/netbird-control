@@ -1,4 +1,4 @@
-// API response shapes - mirror the existing Express endpoints (backend unchanged).
+// API response shapes - mirror the Express endpoints.
 
 export interface Viewer {
   authEnabled: boolean;
@@ -18,8 +18,7 @@ export interface Viewer {
   remoteAccess?: boolean;
 }
 
-// Fine-grained feature permissions: who (users and/or groups) gets each capability.
-// Security & alerts settings (Settings → Security). All numeric limits: 0 = disabled.
+// All numeric limits: 0 = disabled.
 export interface SecurityConfig {
   sessionIdleHours: number;
   sessionMaxHours: number;
@@ -40,7 +39,6 @@ export interface SecurityConfig {
   trafficFloorMb: number;
   /** Event retention in days - admin-controlled. 0 = keep forever. */
   retentionDays: number;
-  /** Periodic access recertification (keep/revoke attestation of standing access). */
   recertEnabled: boolean;
   recertIntervalDays: number;
 }
@@ -112,7 +110,6 @@ export interface Recertification {
   open: { id: number; startedAt: string; dueAt: string; items: RecertItem[] } | null;
   lastCompleted: { id: number; startedAt: string; completedAt: string; kept: number; revoked: number } | null;
 }
-/** One row in the completed-rounds history. */
 export interface RecertRoundSummary {
   id: number;
   startedAt: string;
@@ -120,7 +117,6 @@ export interface RecertRoundSummary {
   kept: number;
   revoked: number;
 }
-/** A full round report - who decided what, when. */
 export interface RecertRoundDetail {
   id: number;
   status: string;
@@ -158,7 +154,6 @@ export interface MspTenant {
   /** Onboarding checklist - which management prerequisites are in place. Absent on older backends. */
   readiness?: TenantReadiness;
 }
-/** The five onboarding checks surfaced as the tenant's "N/5" readiness chip. */
 export interface TenantReadiness {
   verified: boolean;
   serviceUser: boolean;
@@ -181,7 +176,6 @@ export interface MspBillingPlans {
   currency: string;
   plans: MspBillingPlan[];
 }
-/** One tenant row of the Fleet Report (GET /api/msp/fleet-report). */
 export interface FleetReportTenant {
   id: string;
   name: string;
@@ -241,7 +235,6 @@ export interface TenantDrift {
   tenant: string;
   items: TenantDriftItem[];
 }
-/** Result of replacing a tenant's Event Filtering + Blocklist + Data Retention + NetBird account settings with main's. */
 export interface ApplyTenantDefaultsResult { rules: number; blocklist: number; retentionDays: number; nbSettings: boolean; mfa?: boolean; copiedRules?: boolean; copiedBlocklist?: boolean }
 /**
  * The flat NetBird account-settings field shape, shared by the Tenant Defaults profile (the seed
@@ -366,7 +359,6 @@ export type FeaturePermsConfig = Record<string, FeaturePermEntry>;
 
 export interface UserRef { display_name?: string; email?: string }
 
-// Global search (⌘K command palette) result.
 export interface SearchResult {
   type: 'network' | 'resource' | 'peer' | 'group' | 'user' | 'policy' | 'profile' | 'proxy';
   id: string;
@@ -375,7 +367,6 @@ export interface SearchResult {
   to: string;
 }
 
-// Stored events that match the filters (the admin "purge garbage" tool).
 export interface MatchingEvent {
   id: string;
   timestamp: string;
@@ -434,7 +425,6 @@ export interface NetbirdWebhookStatus {
   notifications: NetbirdFeatureStatus;
 }
 
-/** Opt-in polling of NetBird's Traffic Events API - config + last-run status, per account. */
 export interface TrafficPullStatus {
   enabled: boolean;
   /** ISO timestamp of the last completed pull, or null when it has never run. */
@@ -446,7 +436,6 @@ export interface TrafficPullStatus {
   lastError: string | null;
 }
 
-/** Opt-in polling of NetBird's Audit Events API - config + last-run status, per account. */
 export interface AuditPullStatus {
   enabled: boolean;
   /** ISO timestamp of the last completed pull, or null when it has never run. */
@@ -507,7 +496,6 @@ export interface SmtpConfigInput {
   complianceBlockedEmail?: boolean;
 }
 
-// Who may approve access requests - in-app (Entra groups) and via Telegram.
 // One Telegram approver: a Telegram user id mapped to a system user, so a Telegram approval is
 // attributed to the real person. name/email are a snapshot of the chosen user (for display/audit).
 export interface TelegramApprover {
@@ -625,7 +613,6 @@ export interface OutboundEntry {
   error: string;
 }
 
-// The full rendered body of one sent message - fetched on demand for the preview modal.
 export interface OutboundBody {
   id: number;
   channel: 'email' | 'telegram';
@@ -697,7 +684,6 @@ export interface CleanupReport {
   scannedAt: string;
 }
 
-// Reverse-proxy (NetBird Cloud ingress) status - clusters + the services published on them.
 export interface ProxyCluster {
   id: string;
   address: string;
@@ -716,9 +702,8 @@ export interface ProxyService {
   cluster: string;
   mode: string;
   targets: number;
-  /** "host:port" per target (Reverse Proxy page tooltip). */
+  /** "host:port" per target. */
   targetList?: string[];
-  /** Full target rows for the expandable Targets sub-table. */
   targetsDetail?: { name: string; sub: string; path: string; destination: string; enabled: boolean; accessAction?: 'bypass' | 'block' }[];
   /** Enabled auth methods for the lock badge's hover card. */
   authMethods?: { kind: string; label: string; groups?: string[]; headers?: number }[];
@@ -775,7 +760,6 @@ export interface CreateProxyServiceInput {
   passHostHeader?: boolean;
   rewriteRedirects?: boolean;
 }
-// Flat inventory for the unified target picker.
 export interface ProxyTargetOptions {
   peers: { id: string; name: string; ip: string; dns: string; os: string }[];
   resources: { id: string; name: string; address: string; type: string; network: string }[];
@@ -1054,7 +1038,6 @@ export interface NbGroup {
   setup_keys_count: number;
 }
 
-// A peer as shown inside group/user detail pages.
 export interface DetailPeer {
   id: string;
   name: string;
@@ -1218,7 +1201,6 @@ export interface Peer {
   country_code?: string;
   city?: string;
   geo?: string;
-  // Compliance / posture-relevant flags.
   login_expired?: boolean;
   login_expiration_enabled?: boolean;
   inactivity_expiration_enabled?: boolean;
@@ -1322,7 +1304,7 @@ export interface Network {
   routingPeers?: number;
   /** Per-network opt-out of the duplicate/overlapping-address guard. */
   allowDuplicates?: boolean;
-  /** Holds the resources Remote Access launch links create; only the app itself changes its resources. */
+  /** Holds the servers Remote Access launch links add. */
   managedByApi?: boolean;
 }
 
@@ -1353,8 +1335,8 @@ export interface Resource {
   enabled?: boolean;
   groups?: GroupRef[];
   policies?: ResourcePolicy[];
-  /** In the network for launch-link resources: Remote Access still manages it. An untracked one may be deleted. */
-  linkLocked?: boolean;
+  /** In the network launch links use: a Remote Access session uses it now. */
+  inSession?: boolean;
 }
 
 export interface Router {
@@ -1417,7 +1399,7 @@ export interface TidyNamesPlan {
 }
 export interface TidyNamesResult { renamed: number; failed: number; errors: { id: string; name: string; error: string }[] }
 
-// Payload for the admin policy editor (create/update). Sources/destinations are group ids.
+// Sources and destinations are group ids.
 export interface PolicyEditInput {
   name: string;
   description?: string;
@@ -1489,7 +1471,7 @@ export interface AccessProfileInput {
 export interface AccessProfileUsageReason { kind: string; label: string }
 export type AccessProfileUsage = Record<string, { reasons: AccessProfileUsageReason[] }>;
 /** A NetBird object an Access Profile delete couldn't confirm removing. */
-export interface AccessProfileLeftover { kind: 'group' | 'policy'; id: string; name: string; outcome: 'refused' | 'unconfirmed' }
+export interface AccessProfileLeftover { kind: 'group' | 'policy'; id: string; name: string }
 export interface DeleteAccessProfileResult { status: string; leftover?: AccessProfileLeftover[] }
 
 // ─── Posture Checks (mirror the NetBird Management API) ───
@@ -1516,7 +1498,6 @@ export interface PostureChecks {
   certificate_check?: { ca_certificates: string[] };
 }
 
-/** Server-side parse of one pasted CA certificate (POST /api/posture-checks/inspect-certificates). */
 export interface CaCertInfo {
   ok: boolean;
   error?: string;
@@ -1648,7 +1629,6 @@ export interface BlocklistEntry {
   maxPrefix?: number;
 }
 export interface BlocklistInput { value: string; note: string; scope: string; networks: string[]; enforce: BlocklistEnforce; enabled?: boolean; mode?: 'block' | 'limit'; maxPrefix?: number }
-// Bulk add (addresses picked from a network's resources) - shared note/scope/networks/enforce.
 export interface BulkBlocklistInput { values: string[]; note: string; scope: string; networks: string[]; enforce: BlocklistEnforce }
 export interface BulkBlocklistResult { added: number; skipped: number }
 
@@ -1820,7 +1800,6 @@ export interface TemplatesResponse {
   templates: Template[];
 }
 
-// Policy entry as edited in the resource modal and POSTed to the backend.
 export interface PolicyInput {
   /** An existing direct policy of the resource: saved in place (same id) instead of replaced. */
   id?: string;

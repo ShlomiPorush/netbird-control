@@ -11,7 +11,7 @@ import { Badge, Button, Checkbox, CopyButton, EmptyState, Field, Input, LoadingS
 // once when it is created; only its first characters are kept for telling keys apart.
 
 const SCOPE_NAMES: Record<string, string> = { 'remote-access:launch': 'Open Remote Sessions', 'remote-access:create-resource': 'Create Missing Resources' };
-// A new key starts with these permissions only; the others are chosen on purpose.
+// Ticked on a new key; the others are chosen on purpose.
 const DEFAULT_SCOPES = ['remote-access:launch'];
 
 // Replace = a new key with the old key's settings. keepExpiry: the old key's exact expiry, sent as
@@ -84,7 +84,6 @@ export function ApiKeys() {
 
   return (
     <div className="max-w-3xl">
-      {/* The app's own API reference (Swagger UI, admin only); its first section is the public API. */}
       <a href="/api/docs" target="_blank" rel="noopener noreferrer"
         className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-netbird hover:underline">
         <BookOpen size={15} /> API Documentation <ExternalLink size={13} />

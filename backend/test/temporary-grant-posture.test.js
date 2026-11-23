@@ -133,11 +133,14 @@ test('targets with the same ports but different posture checks get separate poli
 
 test('a profile group that no profile owns is refused', async () => {
     reset([]);
-    // A profile id that doesn't exist is refused up front, with a code.
-    await assert.rejects(grant([{ type: 'profile', id: '99', groupId: 'grp-unknown' }]), (e) => e.status === 400 && e.code === 'PROFILE_NOT_FOUND');
-    // An existing profile id with a group no profile owns.
     await assert.rejects(grant([{ type: 'profile', id: '7', groupId: 'grp-unknown' }]), /access profile not found/);
     await assert.rejects(grant([{ type: 'profile', id: '7', groupId: 'grp-unknown', access: { tcp: ['443'] } }]), /access profile not found/);
+    assert.equal(tempPolicies().length, 0);
+});
+
+test('a profile that no longer exists is refused with a code', async () => {
+    reset([]);
+    await assert.rejects(grant([{ type: 'profile', id: '99', groupId: 'grp-payroll' }]), (e) => e.status === 400 && e.code === 'PROFILE_NOT_FOUND');
     assert.equal(tempPolicies().length, 0);
 });
 

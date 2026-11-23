@@ -46,11 +46,9 @@ async function writeAuditStrict(q, { actorId = '', actorEmail = '', actorName = 
     await (timeoutMs ? q.query({ text, values, query_timeout: timeoutMs }) : q.query(text, values));
 }
 
-// The audit actor for a change made by a signed-in admin.
 const viewerActor = (v) => ({
     actorId: (v && (v.user_id || v.oid)) || '', actorEmail: (v && v.email) || '', actorName: (v && v.name) || '',
 });
-// The audit actor for an action a key takes.
 const keyActor = (k) => ({ actorId: `apikey:${k.id}`, actorEmail: '', actorName: `API key "${k.name}"` });
 
 // "::ffff:10.0.0.1" -> "10.0.0.1", so an IPv4 client matches an IPv4 entry whatever socket it used.

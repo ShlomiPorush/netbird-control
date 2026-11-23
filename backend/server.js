@@ -14,7 +14,7 @@ const { withCancelOnClose, DB_CONNECTION } = require('./lib/core');
 const { Client: PgClient } = require('pg');
 const { createLeader } = require('./lib/leader');
 const { settleTelegramQueue } = require('./lib/telegram');
-const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getAccessProfileUsage, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetAllStuckRuns, reloadConfigCaches, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
+const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, setUpLaunchNetwork, releaseLaunchNetwork, checkLaunchNetwork, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getAccessProfileUsage, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetAllStuckRuns, reloadConfigCaches, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
@@ -40,21 +40,17 @@ async function resolveTemplatePorts(template, protocol, ports) {
     return { protocol: p, ports: (p === 'all' || p === 'icmp') ? [] : t.ports };
 }
 
-// The same policy id the resource-save pre-check reads (db.checkResourcePolicySync).
-const { editorPolicyId } = require('./db');
 // Normalize a resource's policies for the acting viewer. Admins choose source groups
 // freely; a regular editor's sources are forced to the network's Network Access grants.
-// `keepAsSent`: policy ids (Access Profile policies) whose entries keep their sources as sent - the
-// pre-check allows a non-admin to send those only unchanged, so the save writes nothing to them.
-async function resolvePolicySources(viewer, networkId, grants, policies, keepAsSent = null) {
+async function resolvePolicySources(viewer, networkId, grants, policies) {
     const list = Array.isArray(policies) ? policies : [];
     // The shared policy editor sends richer per-policy fields - they must survive this
     // source-resolution step or they silently vanish on save (posture checks did). An existing
-    // policy's id too: the resource editor updates that policy in place instead of replacing it.
+    // policy's id too: the resource editor updates that policy in place.
     const extras = (p) => ({
         name: p.name, description: p.description, enabled: p.enabled, bidirectional: p.bidirectional,
         postureChecks: Array.isArray(p.postureChecks) ? p.postureChecks.filter(Boolean) : [],
-        ...(editorPolicyId(p) ? { id: editorPolicyId(p) } : {}),
+        ...(p.id ? { id: p.id } : {}),
     });
     if (viewer.isAdmin) {
         return list.map(p => ({
@@ -74,7 +70,6 @@ async function resolvePolicySources(viewer, networkId, grants, policies, keepAsS
     const allowed = new Set([...grantGroups, ...grantable].map(g => g.id));
     const srcIds = grantGroups.map(g => g.id);
     return list.map(p => {
-        if (keepAsSent && keepAsSent.has(editorPolicyId(p))) return { sources: (p.sources || []).filter(Boolean), protocol: p.protocol, ports: p.ports, ...extras(p) };
         const chosen = (p.sources || []).map(String).filter(s => allowed.has(s));
         return { sources: chosen.length ? chosen : srcIds, protocol: p.protocol, ports: p.ports, ...extras(p) };
     });
@@ -395,11 +390,11 @@ apiV1.post('/remote-access/launch', apiKeyAuth('remote-access:launch'), apiKeyLi
         const base = String(process.env.BASE_URL || '').replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`;
         res.status(201).json({ url: `${base}/remote-access?launch=${out.ticket}`, expiresAt: out.expiresAt, ...(out.resource ? { resource: out.resource } : {}) });
     } catch (e) {
-        // resourceCreated: the refusal came after a resource was created for the request (true) or
-        // sent without a clear answer ('unknown'); the resource stays.
-        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code, ...(e.resourceCreated !== undefined ? { resourceCreated: e.resourceCreated } : {}) });
+        // Set when the refusal came after a resource was sent to NetBird for this request.
+        const created = e.resourceCreated !== undefined ? { resourceCreated: e.resourceCreated } : {};
+        if (e.status) return res.status(e.status).json({ error: e.message, code: e.code, ...created });
         console.error('[api v1] launch failed:', e.message);
-        res.status(500).json({ error: 'Internal server error', code: 'INTERNAL', ...(e && e.resourceCreated !== undefined ? { resourceCreated: e.resourceCreated } : {}) });
+        res.status(500).json({ error: 'Internal server error', code: 'INTERNAL', ...created });
     }
 });
 apiV1.use((req, res) => res.status(404).json({ error: 'Not Found', code: 'NOT_FOUND' }));
@@ -2261,7 +2256,7 @@ app.put('/api/auto-approval-config', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error saving auto-approval config:', err.message);
-        res.status(err.status || 500).json({ error: err.status ? err.message : 'Internal server error', code: err.status ? err.code : undefined });
+        res.status(err.status || 500).json({ error: err.status ? err.message : 'Internal server error', code: err.status && err.code });
     }
 });
 
@@ -2357,7 +2352,7 @@ app.post('/api/access-requests', async (req, res) => {
         res.json(await createAccessRequest(req.body || {}, viewer));
     } catch (e) {
         console.error('Error creating access request:', e.message);
-        res.status(e.status || 400).json({ error: e.message || 'Failed to create request', code: e.status ? e.code : undefined });
+        res.status(400).json({ error: e.message || 'Failed to create request' });
     }
 });
 
@@ -2404,7 +2399,7 @@ app.post('/api/access-requests/:id/approve', requireApprover, async (req, res) =
         res.json(await approveAccessRequest(parseInt(req.params.id, 10), { durationMinutes: b.durationMinutes, expiresAt: b.expiresAt, targets: b.targets, actor: await getViewer(req) }));
     } catch (e) {
         console.error('Error approving access request:', e.message);
-        res.status(e.status || 400).json({ error: e.message || 'Failed to approve request', code: e.status ? e.code : undefined });
+        res.status(400).json({ error: e.message || 'Failed to approve request' });
     }
 });
 app.post('/api/access-requests/:id/deny', requireApprover, async (req, res) => {
@@ -2453,34 +2448,26 @@ app.put('/api/access-profiles/:id', requireAdmin, async (req, res) => {
     }
 });
 
-// Where each profile is used (admin): { [id]: { reasons: [{ kind, label }] } }. A profile in use
-// can't be deleted; the page shows why.
+// Where each profile is used: { [id]: { reasons: [{ kind, label }] } }.
 app.get('/api/access-profiles/usage', requireAdmin, async (req, res) => {
     try {
         res.json(await getAccessProfileUsage());
     } catch (err) {
         console.error('Error reading access profile usage:', err.message);
-        res.status(err.status || 500).json({ error: err.status ? "Couldn't read where the profiles are used. Try again." : 'Internal server error', ...(err.status && err.code ? { code: err.code } : {}) });
+        res.status(err.status || 500).json({ error: "Couldn't read where the profiles are used. Try again." });
     }
 });
 
-// Delete an unused profile. In use: 409 PROFILE_IN_USE with the reasons. The audit row is written
-// by deleteAccessProfile, in the same transaction as the delete.
 app.delete('/api/access-profiles/:id', requireAdmin, async (req, res) => {
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
-    const raw = String(req.params.id);
-    const id = /^[1-9]\d*$/.test(raw) ? Number(raw) : NaN;
-    if (!(id <= 2147483647)) return res.status(400).json({ error: 'Invalid profile id.', code: 'INVALID_PROFILE_ID' });
     try {
-        const out = await deleteAccessProfile(id, await getViewer(req));
+        const out = await deleteAccessProfile(parseInt(req.params.id, 10));
         if (!out) return res.status(404).json({ error: 'This profile no longer exists.', code: 'PROFILE_NOT_FOUND' });
+        audit(await getViewer(req), 'profile.delete', out.name, out.leftover.length ? { leftInNetBird: out.leftover.map(l => `${l.kind} ${l.name}`).join(', ') } : undefined);
         res.json({ status: 'ok', leftover: out.leftover });
     } catch (err) {
         console.error('Error deleting access profile:', err.message);
-        res.status(err.status || 500).json({
-            error: err.status ? err.message : "Couldn't delete the profile - nothing was deleted. Try again.",
-            ...(err.status && err.code ? { code: err.code } : {}), ...(err.reasons ? { reasons: err.reasons } : {}),
-        });
+        res.status(err.status || 502).json({ error: err.status ? err.message : 'Failed to delete profile', code: err.status && err.code, reasons: err.reasons });
     }
 });
 
@@ -2509,7 +2496,7 @@ app.put('/api/networks/:id/default-profiles', requireAdmin, async (req, res) => 
         res.json({ status: 'ok', profileIds: saved });
     } catch (err) {
         console.error('Error saving network default profiles:', err.message);
-        res.status(err.status || 500).json({ error: err.status ? err.message : 'Internal server error', code: err.status ? err.code : undefined });
+        res.status(err.status || 500).json({ error: err.status ? err.message : 'Internal server error', code: err.status && err.code });
     }
 });
 
@@ -2612,7 +2599,7 @@ app.post('/api/automations', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error creating automation:', err.message);
-        res.status(err.status || 500).json({ error: err.message || 'Failed to create automation', code: err.status ? err.code : undefined });
+        res.status(500).json({ error: err.message || 'Failed to create automation' });
     }
 });
 
@@ -2625,7 +2612,7 @@ app.put('/api/automations/:id', requireAdmin, async (req, res) => {
         res.json({ status: 'ok' });
     } catch (err) {
         console.error('Error updating automation:', err.message);
-        res.status(err.status || 500).json({ error: err.message || 'Failed to update automation', code: err.status ? err.code : undefined });
+        res.status(500).json({ error: err.message || 'Failed to update automation' });
     }
 });
 
@@ -3554,19 +3541,14 @@ app.post('/api/api-keys/:id/revoke', requireAdmin, async (req, res) => {
 });
 
 // Admin: settings, managed NetBird objects, gateway enrollment, status.
-app.get('/api/remote-access/config', requireAdmin, async (req, res) => {
+app.get('/api/remote-access/config', requireAdmin, (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
-    // The settings for resources created by the API as stored (another instance may have changed them).
-    let createResources;
-    try { createResources = (await remoteAccessLib.getStoredCreateSettings()).createResources; } catch {
-        return res.status(503).json({ error: "The Remote Access settings couldn't be read. Try again." });
-    }
-    res.json({ ...getRemoteAccessConfig(), createResources, ssoEnabled: AUTH_ENABLED, readonly: NETBIRD_READONLY });
+    res.json({ ...getRemoteAccessConfig(), ssoEnabled: AUTH_ENABLED, readonly: NETBIRD_READONLY });
 });
 app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     const before = getRemoteAccessConfig();
-    const createMeta = (c) => ({ enabled: c.enabled, networkId: c.networkId, groupId: c.groupId, max: c.max });
+    const createMeta = ({ enabled, networkId, profileId, groupId, max }) => ({ enabled, networkId, profileId, groupId, max });
     try {
         const out = await setRemoteAccessConfig(req.body || {});
         audit(await getViewer(req), 'settings.remote_access', '', {
@@ -3575,8 +3557,8 @@ app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
         });
         res.json(out);
     } catch (e) {
-        // Refused before anything was saved (the settings for resources created by the API): the reason.
-        if (e.notSaved) return res.status(e.status || 400).json({ error: e.message, code: e.code, notSaved: true });
+        // Refused before anything was saved; the page reads a 502 as saved.
+        if (e.status) return res.status(e.status === 502 ? 503 : e.status).json({ error: e.message, code: e.code });
         // The settings are saved even when NetBird could not be updated; the error says what failed.
         // A change that was saved is audited all the same, with the error.
         const after = getRemoteAccessConfig();
@@ -3594,15 +3576,26 @@ app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
     try { res.json(await getRemoteAccessStatus()); }
     catch (e) { sendRemoteError(res, e); }
 });
-// The resources the launch API created (Settings > Remote Access).
+// Settings > Remote Access > Servers From Launch Links.
 app.get('/api/remote-access/created-resources', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     res.set('Cache-Control', 'no-store');
     try { res.json(await remoteAccessLib.listCreatedResources()); }
-    catch (e) {
-        console.error('[remote-access] created resources:', e.message);
-        res.status(500).json({ error: "The resources created by the API couldn't be listed. Try again." });
-    }
+    catch (e) { sendRemoteError(res, e); }
+});
+// The network launch links add servers to: { peers, peerGroups } creates it with those routing
+// peers, { networkId } uses an existing network that has no resources.
+app.post('/api/remote-access/create-resources/network', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).', code: 'READONLY' });
+    try { res.json(await setUpLaunchNetwork(req.body, await getViewer(req))); }
+    catch (e) { sendRemoteError(res, e); }
+});
+app.delete('/api/remote-access/create-resources/network', requireAdmin, async (req, res) => {
+    if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
+    if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).', code: 'READONLY' });
+    try { res.json(await releaseLaunchNetwork(await getViewer(req))); }
+    catch (e) { sendRemoteError(res, e); }
 });
 app.post('/api/remote-access/setup-key', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
@@ -4102,7 +4095,7 @@ app.put('/api/networks/:id', requirePerm('networks.manage'), async (req, res) =>
         let out = null;
         if (name !== undefined || description !== undefined) {
             if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
-            out = await updateNetwork(req.params.id, { name: String(name).trim(), description: description || '' });
+            out = await updateNetwork(req.params.id, { name: String(name).trim(), description: description || '' }, { linkWrite: !!(await getViewer(req)).isAdmin });
         }
         if (allowDuplicates !== undefined) await setNetworkAllowDuplicates(req.params.id, !!allowDuplicates);
         audit(await getViewer(req), 'network.update', (name && String(name).trim()) || req.params.id,
@@ -4110,7 +4103,7 @@ app.put('/api/networks/:id', requirePerm('networks.manage'), async (req, res) =>
         res.json(out || { ok: true });
     } catch (err) {
         console.error('Error updating network:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to update network' });
+        res.status(err.status === 409 ? 409 : 502).json({ error: err.message || 'Failed to update network' });
     }
 });
 
@@ -4119,8 +4112,9 @@ app.put('/api/networks/:id', requirePerm('networks.manage'), async (req, res) =>
 app.delete('/api/networks/:id', requirePerm('networks.manage'), async (req, res) => {
     try {
         const label = await labelBeforeDelete('network', req.params.id);
-        const out = await deleteNetwork(req.params.id);
-        audit(await getViewer(req), 'network.delete', label);
+        const viewer = await getViewer(req);
+        const out = await deleteNetwork(req.params.id, { admin: !!viewer.isAdmin, viewer });
+        audit(viewer, 'network.delete', label);
         res.json(out);
     } catch (err) {
         console.error('Error deleting network:', err.message);
@@ -4464,14 +4458,14 @@ app.post('/api/recurring-access', requirePerm('temp.manage'), async (req, res) =
     try {
         res.json(await createRecurringAccess(req.body || {}, await getViewer(req)));
     } catch (e) {
-        res.status(e.status || 400).json({ error: e.message || 'Failed to create rule', code: e.status ? e.code : undefined });
+        res.status(400).json({ error: e.message || 'Failed to create rule' });
     }
 });
 app.put('/api/recurring-access/:id', requirePerm('temp.manage'), async (req, res) => {
     try {
         res.json(await updateRecurringAccess(parseInt(req.params.id, 10), req.body || {}, await getViewer(req)));
     } catch (e) {
-        res.status(e.status || 400).json({ error: e.message || 'Failed to update rule', code: e.status ? e.code : undefined });
+        res.status(400).json({ error: e.message || 'Failed to update rule' });
     }
 });
 app.delete('/api/recurring-access/:id', requirePerm('temp.manage'), async (req, res) => {
@@ -4498,7 +4492,7 @@ app.post('/api/temporary-access', requirePerm('temp.manage'), async (req, res) =
         res.json(out);
     } catch (e) {
         console.error('Error creating temporary access grant:', e.message);
-        res.status(e.status || 400).json({ error: e.message || 'Failed to grant access', code: e.status ? e.code : undefined });
+        res.status(400).json({ error: e.message || 'Failed to grant access' });
     }
 });
 
@@ -4597,15 +4591,13 @@ app.put('/api/networks/:id/resources/:rid', async (req, res) => {
         if (blocked) audit(viewer, 'blocklist.override', name, { network: await netLabel(req.params.id), address, rule: blocked });
         // The policy replacement below must not change access it can't reproduce - check it BEFORE
         // saving anything, so a refusal leaves the resource and its policies untouched.
-        // Source resolution leaves the Access Profile policies the pre-check found as sent.
-        const checked = policies !== undefined ? await checkResourcePolicySync(req.params.rid, policies, { isAdmin: !!viewer.isAdmin, resourceName: name }) : null;
-        const profilePolicies = checked && !viewer.isAdmin ? checked.profileOwned : null;
+        if (policies !== undefined) await checkResourcePolicySync(req.params.rid, policies, { isAdmin: !!viewer.isAdmin, resourceName: name });
         const out = await editResource(req.params.id, req.params.rid, { name, address, description, groups, enabled, allowBlocked: viewer.isAdmin });
         // Replace the resource's access policies (source groups / protocol / ports) if provided
         let policyError = null;
         if (policies !== undefined) {
-            const finalPolicies = await resolvePolicySources(viewer, req.params.id, grants, policies, profilePolicies);
-            await syncResourcePolicies(req.params.id, req.params.rid, finalPolicies).catch(e => { console.error('Policy sync:', e.message); policyError = e; });
+            const finalPolicies = await resolvePolicySources(viewer, req.params.id, grants, policies);
+            await syncResourcePolicies(req.params.id, req.params.rid, finalPolicies, { isAdmin: !!viewer.isAdmin }).catch(e => { console.error('Policy sync:', e.message); policyError = e; });
         }
         audit(viewer, 'resource.update', name, { network: await netLabel(req.params.id), address, ...(policyError ? { policySyncFailed: policyError.message } : {}) });
         // The resource itself is saved at this point; say plainly that its access policies are not.
@@ -4613,12 +4605,12 @@ app.put('/api/networks/:id/resources/:rid', async (req, res) => {
             const what = policyError.partial
                 ? 'its access policies were only partly updated - review them on the Policies page'
                 : 'its access policies were not changed';
-            return res.status(policyError.status === 409 ? 409 : 502).json({ error: `The resource was saved, but ${what}: ${policyError.message}`, partial: true, resource: out, code: policyError.code });
+            return res.status(policyError.status === 409 ? 409 : 502).json({ error: `The resource was saved, but ${what}: ${policyError.message}`, partial: true, resource: out });
         }
         res.json({ status: 'ok', resource: out });
     } catch (err) {
         console.error('Error editing resource:', err.message);
-        res.status([400, 403, 404, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to edit resource', code: err.status ? err.code : undefined });
+        res.status([400, 403, 404, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to edit resource' });
     }
 });
 
@@ -4649,15 +4641,13 @@ app.delete('/api/networks/:id/resources/:rid', async (req, res) => {
         // Resolve the resource's NAME before it's gone - the audit target should be readable.
         let rname = req.params.rid;
         try { rname = (((await getNetworkDetail(req.params.id)).resources || []).find(r => r && r.id === req.params.rid) || {}).name || rname; } catch { /* keep the id */ }
-        // Only an admin, only here, may delete a resource Remote Access no longer manages in the
-        // network for launch-link resources (db.js deleteResource).
         await deleteResource(req.params.id, req.params.rid, { linkAdminDelete: !!viewer.isAdmin });
         console.log(`[${new Date().toISOString()}] ${viewer.email || 'user'} deleted resource ${req.params.rid} from network ${req.params.id}`);
         audit(viewer, 'resource.delete', rname, { network: await netLabel(req.params.id) });
         res.json({ status: 'ok' });
     } catch (err) {
         console.error('Error deleting resource:', err.message);
-        res.status(err.status >= 400 && err.status < 600 ? err.status : 502).json({ error: err.message || 'Failed to delete resource', code: err.status ? err.code : undefined });
+        res.status([404, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to delete resource' });
     }
 });
 
@@ -4758,7 +4748,7 @@ app.post('/api/networks/:id/resources/bulk-delete', requirePerm('networks.manage
         let deleted = 0;
         const failed = [];
         for (const rid of ids) {
-            try { await deleteResource(req.params.id, rid); deleted++; }
+            try { await deleteResource(req.params.id, rid, { linkAdminDelete: !!viewer.isAdmin }); deleted++; }
             catch (e) { failed.push({ id: rid, error: e.message }); }
         }
         console.log(`[${new Date().toISOString()}] ${viewer.email || 'user'} bulk-deleted ${deleted}/${ids.length} resources from network ${req.params.id}`);
@@ -4789,12 +4779,12 @@ app.post('/api/networks/:id/routers', async (req, res) => {
         if (!peer && !(Array.isArray(peerGroups) && peerGroups.length)) {
             return res.status(400).json({ error: 'a peer or at least one peer group is required' });
         }
-        const out = await createNetworkRouter(req.params.id, { peer, peerGroups, metric, masquerade, enabled });
+        const out = await createNetworkRouter(req.params.id, { peer, peerGroups, metric, masquerade, enabled }, { linkWrite: !!viewer.isAdmin });
         audit(viewer, 'router.create', peer || (peerGroups || []).join(', '), { network: await netLabel(req.params.id) });
         res.json({ status: 'ok', router: out });
     } catch (err) {
         console.error('Error adding routing peer:', err.message);
-        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to add routing peer' });
+        res.status([400, 409].includes(err.status) ? err.status : 502).json({ error: err.message || 'Failed to add routing peer' });
     }
 });
 
@@ -4804,12 +4794,12 @@ app.delete('/api/networks/:id/routers/:rid', async (req, res) => {
         const viewer = await getViewer(req);
         const grants = await getAllGrants();
         if (!canEditNetwork(viewer, req.params.id, grants)) return res.status(403).json({ error: 'Forbidden' });
-        await deleteNetworkRouter(req.params.id, req.params.rid);
+        await deleteNetworkRouter(req.params.id, req.params.rid, { linkWrite: !!viewer.isAdmin });
         audit(viewer, 'router.delete', req.params.rid, { network: await netLabel(req.params.id) });
         res.json({ status: 'ok' });
     } catch (err) {
         console.error('Error deleting routing peer:', err.message);
-        res.status(502).json({ error: err.message || 'Failed to delete routing peer' });
+        res.status(err.status === 409 ? 409 : 502).json({ error: err.message || 'Failed to delete routing peer' });
     }
 });
 
@@ -4913,7 +4903,7 @@ app.put('/api/policies/:id', requireAdmin, async (req, res) => {
         res.json(out);
     } catch (err) {
         console.error('Error updating policy:', err.message);
-        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to update policy', code: err.status ? err.code : undefined });
+        res.status(err.status === 400 ? 400 : 502).json({ error: err.message || 'Failed to update policy' });
     }
 });
 
@@ -5175,7 +5165,7 @@ async function start() {
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
         setRemoteAccessDeps({
-            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource,
+            createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource, checkLaunchNetwork,
             isLeader: leaderReady,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
             // peers mirrors behind getViewer refresh only every 10 minutes).

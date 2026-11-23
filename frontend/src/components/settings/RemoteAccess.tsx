@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, KeyRound, Plus, Trash2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, KeyRound, Plus, Server, Trash2, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
-import { useGroups, useNetworks } from '@/lib/queries';
+import { useAccessProfiles, useNetworks } from '@/lib/queries';
 import { formatTimestamp } from '@/lib/logfmt';
-import { remoteApi, type CreatedResourceState, type CreateResourcesConfig, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
-import { Button, CopyButton, Field, Input, LoadingState, Select, Textarea } from '@/components/ui';
+import { remoteApi, type CreatedResourceState, type CreateResourcesConfig, type LaunchNetworkResult, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
+import { Badge, Button, CopyButton, Field, Input, LoadingState, Select, SelectMenu, Textarea, type SelectOption } from '@/components/ui';
+import { LaunchNetworkRow, StepRow } from './LaunchNetworkPanel';
+import { Toggle } from './NetbirdFields';
 
 // guacd's keymaps, by name. An id missing here shows as is.
 const LAYOUT_NAMES: Record<string, string> = {
@@ -28,20 +30,17 @@ const RDP_EFFECTS: { key: 'fontSmoothing' | 'wallpaper' | 'theming' | 'fullWindo
   { key: 'menuAnimations', label: 'Menu Animations', hint: 'Menus fade and slide.' },
 ];
 
-// Resources created by the launch API: each state in plain words, and its text color.
 const CREATED_STATES: Record<CreatedResourceState, { label: string; tone: string }> = {
   creating: { label: 'Creating', tone: 'text-nb-gray-500' },
   unknown: { label: 'Unconfirmed', tone: 'text-amber-600 dark:text-amber-400' },
   created: { label: 'Active', tone: 'text-green-600 dark:text-green-500' },
-  deleting: { label: 'Removing', tone: 'text-nb-gray-500' },
   kept: { label: 'Kept', tone: 'text-amber-600 dark:text-amber-400' },
   failed: { label: 'Failed', tone: 'text-nb-gray-500' },
   deleted: { label: 'Removed', tone: 'text-nb-gray-500' },
   gone: { label: 'Gone', tone: 'text-nb-gray-500' },
 };
-// States that come with a reason worth showing under them.
 const CREATED_REASON_STATES: CreatedResourceState[] = ['kept', 'unknown', 'failed', 'gone'];
-const CREATE_DEFAULTS: CreateResourcesConfig = { enabled: false, networkId: '', groupId: '', max: 50 };
+const CREATE_DEFAULTS: CreateResourcesConfig = { enabled: false, networkId: '', profileId: 0, groupId: '', max: 50 };
 const createdCols = 'grid grid-cols-2 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)_11rem_minmax(0,1fr)] gap-x-3 gap-y-1.5';
 
 const box = 'rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-4';
@@ -67,7 +66,7 @@ export function RemoteAccessSettings() {
   const cfgQ = useQuery({ queryKey: ['remote-access-config'], queryFn: remoteApi.config });
   const statusQ = useQuery({ queryKey: ['remote-access-status'], queryFn: remoteApi.status, refetchInterval: 30000 });
   const networksQ = useNetworks();
-  const groupsQ = useGroups();
+  const profilesQ = useAccessProfiles();
   const createdQ = useQuery({ queryKey: ['remote-access-created'], queryFn: remoteApi.createdResources, refetchInterval: 30000 });
   const [form, setForm] = useState<RemoteAccessConfig | null>(null);
   const [keys, setKeys] = useState<{ address: string; key: string }[]>([]);
@@ -76,7 +75,7 @@ export function RemoteAccessSettings() {
   const [error, setError] = useState('');
   const [setupKey, setSetupKey] = useState<{ kind: 'ip' | 'names'; key: string; expires: string } | null>(null);
   const [keyBusy, setKeyBusy] = useState<'' | 'ip' | 'names'>('');
-  // The section for resources created by the API as last loaded or saved: it is sent only when it changed.
+  // As last loaded or saved: the section is sent only when it changed.
   const [savedCr, setSavedCr] = useState<CreateResourcesConfig | null>(null);
 
   useEffect(() => {
@@ -87,27 +86,14 @@ export function RemoteAccessSettings() {
     }
   }, [cfgQ.data, form]);
 
-  if (cfgQ.isError && !form) {
-    return (
-      <div className="max-w-2xl flex flex-col items-start gap-3">
-        <p className="text-sm text-red-500">{cfgQ.error instanceof ApiError && cfgQ.error.message ? cfgQ.error.message : 'The Remote Access settings could not be loaded. Try again.'}</p>
-        <Button variant="secondary" size="sm" onClick={() => cfgQ.refetch()} disabled={cfgQ.isFetching}>{cfgQ.isFetching ? 'Retrying…' : 'Retry'}</Button>
-      </div>
-    );
-  }
   if (cfgQ.isLoading || !form) return <LoadingState />;
   const set = <K extends keyof RemoteAccessConfig>(k: K, v: RemoteAccessConfig[K]) => { setForm({ ...form, [k]: v }); setSaved(''); };
   const st = statusQ.data;
   const cr = form.createResources || CREATE_DEFAULTS;
   const setCr = (patch: Partial<CreateResourcesConfig>) => set('createResources', { ...cr, ...patch });
-  const crKey = (c: CreateResourcesConfig) => JSON.stringify([!!c.enabled, c.networkId || '', c.groupId || '', Number(c.max)]);
+  const crKey = (c: CreateResourcesConfig) => JSON.stringify([!!c.enabled, Number(c.profileId) || 0, Number(c.max)]);
   const crChanged = crKey(cr) !== crKey(savedCr || CREATE_DEFAULTS);
-  const crDiff = (): Partial<CreateResourcesConfig> => {
-    const base = savedCr || CREATE_DEFAULTS;
-    const now = { enabled: cr.enabled, networkId: cr.networkId, groupId: cr.groupId, max: Number(cr.max) };
-    return Object.fromEntries(Object.entries(now).filter(([k, v]) => v !== base[k as keyof CreateResourcesConfig]));
-  };
-  // The network that holds the resources the API creates follows these settings, and so does its badge.
+  // The network's Managed By Remote Access badge follows these settings too.
   const refreshCreated = () => {
     qc.invalidateQueries({ queryKey: ['remote-access-created'] });
     qc.invalidateQueries({ queryKey: ['networks'] });
@@ -125,21 +111,20 @@ export function RemoteAccessSettings() {
         idleTimeoutMin: Number(form.idleTimeoutMin), maxDurationHours: Number(form.maxDurationHours), holdHours: Number(form.holdHours),
         clipboard: form.clipboard, sshHostKeys,
         rdp: form.rdp, ssh: { ...form.ssh, fontSize: Number(form.ssh.fontSize) },
-        // Only when that section changed: saving another field never changes it.
-        // Only the fields that changed: the server keeps the others as stored.
-        ...(crChanged ? { createResources: crDiff() } : {}),
+        ...(crChanged ? { createResources: { enabled: cr.enabled, profileId: Number(cr.profileId) || 0, max: Number(cr.max) } } : {}),
       });
       setForm(r.config);
+      // The form starts from the cache when this page is opened again.
+      qc.setQueryData<RemoteAccessConfig>(['remote-access-config'], (old) => ({ ...old, ...r.config }));
       setSavedCr(r.config.createResources || CREATE_DEFAULTS);
       setSaved(r.sync?.removed ? `Saved. NetBird updated: ${r.sync.removed} server(s) taken off the gateways.` : 'Saved.');
       qc.invalidateQueries({ queryKey: ['remote-access-status'] });
       qc.invalidateQueries({ queryKey: ['me'] });
       refreshCreated();
     } catch (e) {
-      // notSaved: the settings were refused before anything was saved, and the reason says why.
-      const notSaved = e instanceof ApiError && !!(e.body as { notSaved?: boolean } | null)?.notSaved;
-      if (notSaved) {
-        setError((e as ApiError).message);
+      // Any status but the 502 of a failed NetBird update is a refusal: nothing was saved.
+      if (e instanceof ApiError && e.status !== 502) {
+        setError(e.message);
       } else {
         setError(e instanceof ApiError ? `${e.message} The settings were saved; NetBird was not fully updated.` : 'Saving failed.');
         qc.invalidateQueries({ queryKey: ['remote-access-config'] });
@@ -161,25 +146,51 @@ export function RemoteAccessSettings() {
   const setSsh = <K extends keyof SshTerminal>(k: K, v: SshTerminal[K]) => set('ssh', { ...form.ssh, [k]: v });
   const opts = form.options || { rdpLayouts: [form.rdp.serverLayout], rdpColorDepths: [form.rdp.colorDepth], sshColorSchemes: [form.ssh.colorScheme] };
 
-  const toggleNetwork = (id: string) => set('networks', form.networks.includes(id) ? form.networks.filter((n) => n !== id) : [...form.networks, id]);
+  // It always stays open to the gateway (the server keeps it too).
+  const launchNetworkId = (savedCr || CREATE_DEFAULTS).networkId;
+  const toggleNetwork = (id: string) => {
+    if (id === launchNetworkId) return;
+    set('networks', form.networks.includes(id) ? form.networks.filter((n) => n !== id) : [...form.networks, id]);
+  };
+  // Only what the network action changed is applied; other unsaved edits stay.
+  const onLaunchNetwork = (r: Pick<LaunchNetworkResult, 'config'>) => {
+    const newId = r.config.createResources.networkId;
+    const off = newId ? {} : { enabled: false };
+    setForm((f) => f && ({
+      ...f,
+      networks: newId ? [...f.networks.filter((n) => n !== newId), newId] : f.networks,
+      createResources: { ...(f.createResources || CREATE_DEFAULTS), networkId: newId, ...off },
+    }));
+    setSavedCr((s) => ({ ...(s || CREATE_DEFAULTS), networkId: newId, ...off }));
+    // The form starts from the cache when this page is opened again.
+    qc.setQueryData<RemoteAccessConfig>(['remote-access-config'], (old) => old && ({ ...old, networks: r.config.networks, createResources: r.config.createResources }));
+    refreshCreated();
+  };
 
-  // Resources created by the API: the network is one of those open to the gateway; the group is any
-  // group but All and the groups this page manages. A saved choice that no longer fits stays
-  // visible in its select, so the server's refusal explains it instead of a silent change.
   const created = createdQ.data;
   const crReadonly = !!form.readonly || !!created?.readonly;
-  const netName = (id: string) => (networksQ.data || []).find((n) => n.id === id)?.name || id;
-  const crNetworks = form.networks.map((id) => ({ id, name: netName(id) }));
   const managedIds = new Set(Object.values(form.managed || {}).filter(Boolean));
-  const crGroups = (groupsQ.data || []).filter((g) => g.name !== 'All' && !managedIds.has(g.id)).sort((a, b) => a.name.localeCompare(b.name));
-  const groupName = (id: string) => (groupsQ.data || []).find((g) => g.id === id)?.name || id;
+  const sharedProfiles = (profilesQ.data || []).filter((p) => p.shared).sort((a, b) => a.name.localeCompare(b.name));
+  const chosenProfile = sharedProfiles.find((p) => p.id === Number(cr.profileId));
+  // A saved profile that no longer fits stays visible, so the server's refusal explains it.
+  const profileOptions: SelectOption[] = [
+    { value: '0', label: 'None' },
+    ...sharedProfiles.map((p) => ({ value: String(p.id), label: p.name })),
+    ...(cr.profileId && !chosenProfile && !profilesQ.isLoading ? [{ value: String(cr.profileId), label: `Profile #${cr.profileId} (not available)` }] : []),
+  ];
+  const savedCrNow = savedCr || CREATE_DEFAULTS;
+  const crInUse = (created?.items || []).filter((i) => ['creating', 'unknown', 'created', 'kept'].includes(i.state)).length;
+  const crNetMissing = !!launchNetworkId && networksQ.isSuccess && !(networksQ.data || []).some((n) => n.id === launchNetworkId);
+  const crReady = !!launchNetworkId && !crNetMissing && !!Number(cr.profileId);
+  const crStatus = !launchNetworkId || !Number(savedCrNow.profileId) ? 'Not Set Up' : savedCrNow.enabled ? 'On' : 'Off';
+  const crSwitchLocked = crReadonly || (!cr.enabled && !crReady);
 
   return (
     <div className="max-w-2xl flex flex-col gap-5">
       <p className="text-nb-gray-500 text-sm">
         Let users open RDP and SSH sessions from the browser through the Browser Gateway - NetBird peers next to this app.
         Each session is checked against the user's own NetBird access. The gateways reach only servers in the networks you pick here,
-        once someone has opened a session to them, unless one of your NetBird policies lets them reach more. Resources created by the API are
+        once someone has opened a session to them, unless one of your NetBird policies lets them reach more. Servers added by launch links are
         public, so the app doesn't check that for their group.
         The IP gateway serves IPv4 addresses. The names gateway, which is optional, serves host names of NetBird domain resources.
       </p>
@@ -195,7 +206,6 @@ export function RemoteAccessSettings() {
         </p>
       )}
 
-      {/* Status */}
       <div className={box}>
         <div className="text-sm font-semibold mb-1 text-nb-gray-800 dark:text-nb-gray-100">Status</div>
         {statusQ.isLoading ? <div className="text-sm text-nb-gray-500">Checking…</div> : st ? (
@@ -264,7 +274,6 @@ export function RemoteAccessSettings() {
         ) : <div className="text-sm text-red-500">The status could not be loaded.</div>}
       </div>
 
-      {/* Main switches */}
       <label className={toggleCard}>
         <input type="checkbox" className="mt-1 accent-netbird" checked={form.enabled} onChange={(e) => set('enabled', e.target.checked)} />
         <div>
@@ -290,13 +299,17 @@ export function RemoteAccessSettings() {
         <div className={`${box} max-h-64 overflow-auto flex flex-col gap-1.5`}>
           {networksQ.isLoading ? <span className="text-sm text-nb-gray-500">Loading networks…</span>
             : (networksQ.data || []).length === 0 ? <span className="text-sm text-nb-gray-500">No networks found.</span>
-              : (networksQ.data || []).map((n) => (
-                <label key={n.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input type="checkbox" className="accent-netbird" checked={form.networks.includes(n.id)} onChange={() => toggleNetwork(n.id)} />
-                  <span>{n.name || n.id}</span>
-                  {typeof n.resources === 'number' && <span className="text-[0.75rem] text-nb-gray-500">{n.resources} resources</span>}
-                </label>
-              ))}
+              : (networksQ.data || []).map((n) => {
+                const locked = n.id === launchNetworkId;
+                return (
+                  <label key={n.id} className={`flex items-center gap-2 text-sm ${locked ? 'cursor-default' : 'cursor-pointer'}`}>
+                    <input type="checkbox" className="accent-netbird" checked={locked || form.networks.includes(n.id)} disabled={locked} onChange={() => toggleNetwork(n.id)} />
+                    <span>{n.name || n.id}</span>
+                    {typeof n.resources === 'number' && <span className="text-[0.75rem] text-nb-gray-500">{n.resources} resources</span>}
+                    {locked && <span className="text-[0.75rem] font-medium text-nb-blue-600 dark:text-nb-blue-400">Used by launch links</span>}
+                  </label>
+                );
+              })}
         </div>
       </Field>
 
@@ -318,7 +331,6 @@ export function RemoteAccessSettings() {
         </div>
       </label>
 
-      {/* How sessions look. Applies to sessions opened after saving. */}
       <div className={`${box} flex flex-col gap-4`}>
         <div>
           <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">RDP Display</div>
@@ -385,62 +397,69 @@ export function RemoteAccessSettings() {
         </div>
       </Field>
 
-      {/* Resources created by the launch API */}
-      <div className={`${box} flex flex-col gap-4`}>
-        <div>
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Resources Created By The API</div>
-          <div className="text-[0.8rem] text-nb-gray-500">
-            A launch request through the API can create a resource for a public server that NetBird has none for. It joins the group below, where an admin
-            policy decides who can reach it, and it is removed after the hold time once nobody uses it.
+      <div className="overflow-hidden rounded-xl border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950">
+        <div className="flex items-start gap-3.5 p-4 sm:p-5">
+          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-netbird/10 text-netbird"><Server size={20} /></div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-base font-bold text-nb-gray-900 dark:text-nb-gray-50">Servers From Launch Links</h3>
+              <Badge tone={crStatus === 'On' ? 'green' : 'gray'}>{crStatus}</Badge>
+              {crNetMissing && <Badge tone="orange" icon={<AlertTriangle size={11} />}>Network Missing</Badge>}
+            </div>
+            <p className="mt-0.5 text-[0.82rem] text-nb-gray-500 dark:text-nb-gray-400">Launch links can add a public server NetBird doesn't have yet. It's removed after the hold time.</p>
+          </div>
+          <div className="ml-auto flex shrink-0 flex-col items-end gap-1.5">
+            <label className="inline-flex">
+              <span className="sr-only">Add Missing Servers From Launch Links</span>
+              <Toggle checked={cr.enabled} disabled={crSwitchLocked} onChange={(v) => setCr({ enabled: v })} />
+            </label>
+            {!cr.enabled && !crReady && !crReadonly && (
+              <span className="max-w-[180px] text-right text-[0.72rem] leading-snug text-nb-gray-500">Set a network and an Access Profile to turn this on.</span>
+            )}
           </div>
         </div>
-        {crReadonly && <div className="text-[0.8rem] text-nb-gray-500">This instance is read-only, so these settings can't be changed here.</div>}
+        {crReadonly && <p className="px-4 pb-3 sm:px-5 text-[0.8rem] text-nb-gray-500">This instance is read-only, so these settings can't be changed here.</p>}
 
-        <label className={`${toggleCard} ${crReadonly ? 'cursor-default! opacity-70' : ''}`}>
-          <input type="checkbox" className="mt-1 accent-netbird" checked={cr.enabled} disabled={crReadonly} onChange={(e) => setCr({ enabled: e.target.checked })} />
-          <div>
-            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Create Missing Resources From The API</div>
-            <div className="text-[0.8rem] text-nb-gray-500">Off by default. The API key also needs the Create Missing Resources permission (Settings → API Keys).</div>
+        <LaunchNetworkRow networkId={launchNetworkId} readonly={crReadonly} managedGroupIds={managedIds} onDone={onLaunchNetwork}
+          inUse={crInUse} done={!!launchNetworkId && !crNetMissing} />
+
+        <StepRow n={2} done={!!chosenProfile} label="Who Can Reach Them" actions={(
+          <Link className="text-[0.82rem] font-medium text-netbird hover:underline underline-offset-4" to="/operations?tab=profiles">Manage Access Profiles</Link>
+        )}>
+          <div className="max-w-xs">
+            <SelectMenu options={profileOptions} value={String(Number(cr.profileId) || 0)} disabled={crReadonly}
+              placeholder={profilesQ.isLoading ? 'Loading Profiles…' : 'Choose Access Profile'}
+              onChange={(v) => setCr({ profileId: Number(v) || 0 })} />
           </div>
-        </label>
+          {!Number(cr.profileId) && !!cr.groupId && (
+            <div className="mt-1.5 text-[0.78rem] text-amber-700 dark:text-amber-400">Choose an Access Profile before turning this on.</div>
+          )}
+        </StepRow>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Field label="Network" hint="One of the networks open to the gateway above. The app manages it: other changes to it are refused.">
-            <Select value={cr.networkId} disabled={crReadonly} onChange={(e) => setCr({ networkId: e.target.value })}>
-              <option value="">Choose A Network</option>
-              {crNetworks.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
-              {cr.networkId && !form.networks.includes(cr.networkId) && (
-                <option value={cr.networkId}>{netName(cr.networkId)} (not open to the gateway)</option>
-              )}
-            </Select>
-          </Field>
-          <Field label="Group" hint="Created resources join this group. Give it an admin policy in NetBird to decide who can reach them.">
-            <Select value={cr.groupId} disabled={crReadonly} onChange={(e) => setCr({ groupId: e.target.value })}>
-              <option value="">{groupsQ.isLoading ? 'Loading Groups…' : 'Choose A Group'}</option>
-              {crGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-              {cr.groupId && !crGroups.some((g) => g.id === cr.groupId) && (
-                <option value={cr.groupId}>{groupName(cr.groupId)}{groupsQ.isLoading ? '' : ' (not available)'}</option>
-              )}
-            </Select>
-          </Field>
-          <Field label="Maximum Active Created Resources" hint="1 to 500. The API creates no more resources while this many exist.">
-            <Input inputMode="numeric" value={String(cr.max)} disabled={crReadonly} onChange={(e) => setCr({ max: Number(e.target.value.replace(/\D/g, '')) || 0 })} />
-          </Field>
-        </div>
+        <StepRow n={3} done={crReady} label="Limit">
+          <div className="flex flex-wrap items-center gap-2 text-sm text-nb-gray-700 dark:text-nb-gray-200">
+            Up to
+            <Input inputMode="numeric" aria-label="Most servers at a time (1 to 500)" className="w-16 text-center font-semibold" value={String(cr.max)} disabled={crReadonly}
+              onChange={(e) => setCr({ max: Number(e.target.value.replace(/\D/g, '')) || 0 })} />
+            servers at a time
+          </div>
+        </StepRow>
 
-        <div className="border-t border-nb-gray-200 dark:border-nb-gray-800 pt-3">
-          <div className="text-[0.75rem] font-semibold uppercase tracking-wide text-nb-gray-500 mb-1">Created Resources</div>
+        <div className="border-t border-nb-gray-100 dark:border-nb-gray-900 px-4 py-4 sm:px-5">
+          <div className="mb-2 flex items-center gap-2 text-sm font-bold text-nb-gray-800 dark:text-nb-gray-100">
+            Servers Added {created && <Badge tone="gray">{created.items.length}</Badge>}
+          </div>
           {createdQ.isLoading ? <div className="text-[0.8rem] text-nb-gray-500 py-1.5">Loading…</div>
             : !created ? <div className="text-sm text-red-500 py-1.5">The list could not be loaded.</div>
               : created.items.length === 0 ? <div className="text-[0.8rem] text-nb-gray-500 py-1.5">None right now.</div>
                 : (
                   <div>
                     <div className={`${createdCols} hidden sm:grid py-1.5 text-[0.72rem] font-medium uppercase tracking-wide text-nb-gray-500`}>
-                      <span>Address</span><span>Name</span><span>Created</span><span>State</span>
+                      <span>Address</span><span>Name</span><span>Added</span><span>State</span>
                     </div>
                     <ul>
                       {created.items.map((it) => {
-                        const s = CREATED_STATES[it.state] || { label: it.state, tone: 'text-nb-gray-500' };
+                        const st = CREATED_STATES[it.state] || { label: it.state, tone: 'text-nb-gray-500' };
                         const cellLabel = 'sm:hidden block text-[0.7rem] uppercase tracking-wide text-nb-gray-500';
                         return (
                           <li key={it.id} className={`${createdCols} py-2 border-t border-nb-gray-100 dark:border-nb-gray-900 text-sm`}>
@@ -453,12 +472,12 @@ export function RemoteAccessSettings() {
                               <span className="break-words text-nb-gray-700 dark:text-nb-gray-200">{it.name || '-'}</span>
                             </div>
                             <div className="min-w-0">
-                              <span className={cellLabel}>Created</span>
+                              <span className={cellLabel}>Added</span>
                               <span className="text-[0.8rem] text-nb-gray-600 dark:text-nb-gray-400">{it.createdAt ? formatTimestamp(it.createdAt) : '-'}</span>
                             </div>
                             <div className="min-w-0">
                               <span className={cellLabel}>State</span>
-                              <span className={`text-[0.8rem] font-medium ${s.tone}`}>{s.label}</span>
+                              <span className={`text-[0.8rem] font-medium ${st.tone}`}>{st.label}</span>
                               {CREATED_REASON_STATES.includes(it.state) && it.reason && (
                                 <span className="block text-[0.76rem] text-nb-gray-500 break-words">{it.reason}</span>
                               )}
@@ -473,6 +492,9 @@ export function RemoteAccessSettings() {
                   </div>
                 )}
         </div>
+        <div className="flex items-center gap-2 border-t border-nb-gray-100 dark:border-nb-gray-900 bg-nb-gray-50 dark:bg-nb-gray-900/40 px-4 py-3 sm:px-5 text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
+          <KeyRound size={13} className="shrink-0" /> The API key also needs the Create Missing Resources permission (Settings → API Keys).
+        </div>
       </div>
 
       <div className="flex items-center gap-3">
@@ -481,7 +503,6 @@ export function RemoteAccessSettings() {
         {error && <span className="text-sm text-red-500">{error}</span>}
       </div>
 
-      {/* Enrollment */}
       <div className={box}>
         <div className="text-sm font-semibold mb-1 text-nb-gray-800 dark:text-nb-gray-100">Enroll The Gateways</div>
         <p className="text-[0.82rem] text-nb-gray-500 mb-3">

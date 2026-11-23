@@ -5,15 +5,12 @@ import { cn } from '@/lib/cn';
 import { registerPopup } from '@/lib/popupBus';
 import { IconButton } from './Button';
 
-// A ⋮ dropdown for table rows. The menu is rendered in a fixed-position PORTAL (not
-// absolutely inside the cell) so the table's `overflow-x-auto` wrapper can't clip it -
-// which is what made row menus get cut off and add a stray scrollbar. It positions
-// itself under the trigger, clamped to the viewport, and closes on outside click,
-// scroll, resize, or Escape.
+// The menu is rendered in a fixed-position PORTAL (not absolutely inside the cell) so the table's
+// `overflow-x-auto` wrapper can't clip it - which is what made row menus get cut off and add a
+// stray scrollbar.
 export function RowMenu({
   children, width = 180, align = 'right', title = 'More', icon,
 }: {
-  /** Render menu contents; call the passed `close` to dismiss after an action. */
   children: (close: () => void) => ReactNode;
   width?: number;
   align?: 'left' | 'right';
@@ -40,9 +37,8 @@ export function RowMenu({
   // Only one popup panel open app-wide (see lib/popupBus).
   useEffect(() => { if (open) return registerPopup(close); }, [open]);
 
-  // Close (rather than chase the anchor) when the page moves out from under the menu.
-  // Arrow keys move focus between the menu's action buttons (they're real <button>s,
-  // so Enter/Space activate natively); focus returns to the ⋮ trigger on close.
+  // Close (rather than chase the anchor) when the page moves out from under the menu. The items are
+  // real <button>s, so Enter/Space need no handler here (they activate natively).
   useEffect(() => {
     if (!open) return;
     const onScroll = () => close();
@@ -91,20 +87,22 @@ export function RowMenu({
   );
 }
 
-// A single action row inside a RowMenu.
 export function MenuItem({
-  icon, children, onClick, danger,
-}: { icon?: ReactNode; children: ReactNode; onClick: () => void; danger?: boolean }) {
+  icon, children, onClick, danger, disabled,
+}: { icon?: ReactNode; children: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }) {
   return (
     <button
       role="menuitem"
       onClick={onClick}
+      disabled={disabled}
       className={cn(
         'flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded-sm text-sm text-left',
         'focus-visible:outline-hidden focus-visible:bg-nb-gray-100 dark:focus-visible:bg-nb-gray-900',
-        danger
-          ? 'text-red-600 dark:text-red-500 hover:bg-red-500/10'
-          : 'text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900',
+        disabled
+          ? 'cursor-not-allowed text-nb-gray-400 dark:text-nb-gray-500'
+          : danger
+            ? 'text-red-600 dark:text-red-500 hover:bg-red-500/10'
+            : 'text-nb-gray-700 dark:text-nb-gray-200 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900',
       )}
     >
       {icon}

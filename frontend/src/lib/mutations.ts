@@ -12,12 +12,6 @@ export interface ResourcePayload {
   enabled?: boolean;
 }
 
-// Where each Access Profile is used (its Delete stays muted while it is): refreshed after every
-// change that can add or remove a use. The resource and profile mutations refresh it through their
-// ['access-profiles'] invalidation (the usage query sits under that key).
-const invalidateProfileUsage = (qc: ReturnType<typeof useQueryClient>) => qc.invalidateQueries({ queryKey: ['access-profiles', 'usage'] });
-
-// Enable / disable a resource (the dashboard's Disable action).
 export function useToggleResource(networkId: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -123,14 +117,12 @@ export function useCreateNetwork() {
   });
 }
 
-// Rename/re-describe a network; allowDuplicates toggles the app's duplicate-address guard.
 export function useUpdateNetwork() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...payload }: { id: string; name?: string; description?: string; allowDuplicates?: boolean }) =>
       api.put(`/api/networks/${encodeURIComponent(id)}`, payload),
     onSuccess: (_r, v) => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['networks'] });
       qc.invalidateQueries({ queryKey: ['network-detail', v.id] });
     },
@@ -142,7 +134,6 @@ export function useDeleteNetwork() {
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/networks/${encodeURIComponent(id)}`),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['networks'] });
       qc.invalidateQueries({ queryKey: ['network-detail'] });
     },
@@ -155,7 +146,6 @@ export function useCreateRouter(networkId: string) {
     mutationFn: (payload: { peer?: string; peerGroups?: string[]; metric: number; masquerade: boolean; enabled: boolean }) =>
       api.post(`/api/networks/${encodeURIComponent(networkId)}/routers`, payload),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['network-detail', networkId] });
       qc.invalidateQueries({ queryKey: ['networks'] });
     },
@@ -167,7 +157,6 @@ export function useDeleteRouter(networkId: string) {
   return useMutation({
     mutationFn: (rid: string) => api.del(`/api/networks/${encodeURIComponent(networkId)}/routers/${encodeURIComponent(rid)}`),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['network-detail', networkId] });
       qc.invalidateQueries({ queryKey: ['networks'] });
     },
@@ -183,14 +172,12 @@ export function useSaveGrants() {
   });
 }
 
-// Per-network default Access Profiles (pre-selected when adding a resource).
 export function useSaveNetworkDefaultProfiles() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ networkId, profileIds }: { networkId: string; profileIds: number[] }) =>
       api.put(`/api/networks/${encodeURIComponent(networkId)}/default-profiles`, { profileIds }),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['network-default-profiles'] });
       qc.invalidateQueries({ queryKey: ['policy-options'] });
     },
@@ -226,12 +213,11 @@ export function useSaveAccessProfile() {
   });
 }
 
-// A profile in use answers 409 with its reasons; a delete NetBird didn't fully confirm answers 200
-// with `leftover`. Either way the list and its usage are read again.
 export function useDeleteAccessProfile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del<DeleteAccessProfileResult>(`/api/access-profiles/${id}`),
+    // A refusal (in use) is new information about its uses too.
     onSettled: () => qc.invalidateQueries({ queryKey: ['access-profiles'] }),
   });
 }
@@ -260,7 +246,7 @@ export function useSaveAutomation() {
   return useMutation({
     mutationFn: ({ id, payload }: { id?: number; payload: AutomationInput }) =>
       id ? api.put(`/api/automations/${id}`, payload) : api.post('/api/automations', payload),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['automations'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['automations'] }),
   });
 }
 
@@ -268,7 +254,7 @@ export function useDeleteAutomation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del(`/api/automations/${id}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['automations'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['automations'] }),
   });
 }
 
@@ -277,7 +263,6 @@ export function useRunAutomation() {
   return useMutation({
     mutationFn: (id: number) => api.post<AutomationRunResult>(`/api/automations/${id}/run`),
     onSuccess: (_d, id) => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['automations'] });
       qc.invalidateQueries({ queryKey: ['automation-runs', id] });
       qc.invalidateQueries({ queryKey: ['network-detail'] });
@@ -348,7 +333,7 @@ export function useCreateProxyService() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: CreateProxyServiceInput) => api.post<{ id: string; domain: string }>('/api/reverse-proxy-services', payload),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }),
   });
 }
 export function useUpdateProxyService() {
@@ -357,7 +342,6 @@ export function useUpdateProxyService() {
     mutationFn: ({ id, patch }: { id: string; patch: UpdateProxyServiceInput }) =>
       api.put(`/api/reverse-proxy-services/${encodeURIComponent(id)}`, patch),
     onSuccess: (_d, v) => {
-      invalidateProfileUsage(qc); // a service's access groups can hold a profile group
       qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] });
       qc.invalidateQueries({ queryKey: ['reverse-proxy-service', v.id] });
     },
@@ -367,7 +351,7 @@ export function useDeleteProxyService() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/reverse-proxy-services/${encodeURIComponent(id)}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] }),
   });
 }
 export function useExposeDocker() {
@@ -375,7 +359,6 @@ export function useExposeDocker() {
   return useMutation({
     mutationFn: (payload: ExposeDockerInput) => api.post<{ service: { id: string; domain: string } }>('/api/reverse-proxy-services/expose-docker', payload),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['reverse-proxy-status'] });
       qc.invalidateQueries({ queryKey: ['networks'] });
       qc.invalidateQueries({ queryKey: ['network-detail'] });
@@ -405,7 +388,7 @@ export function useSaveBlocklist() {
   });
 }
 
-// Bulk add - addresses picked from a network's existing resources; duplicates are skipped.
+// Duplicates are skipped.
 export function useBulkAddBlocklist() {
   const qc = useQueryClient();
   return useMutation({
@@ -452,7 +435,7 @@ export function useCreateGrant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: TemporaryAccessGrantInput) => api.post<{ id: number; devices: number }>('/api/temporary-access', payload),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }),
   });
 }
 export function useExtendGrant() {
@@ -466,14 +449,14 @@ export function useRevokeGrant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.post(`/api/temporary-access/${id}/revoke`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }),
   });
 }
 export function useDeleteGrant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del(`/api/temporary-access/${id}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }),
   });
 }
 
@@ -482,14 +465,14 @@ export function useCreateAccessRequest() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: CreateAccessRequestInput) => api.post<CreateAccessRequestResult>('/api/access-requests', payload),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['my-access-requests'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['my-access-requests'] }),
   });
 }
 export function useSaveAutoApproval() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: AutoApprovalConfigInput) => api.put('/api/auto-approval-config', payload),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['auto-approval-config'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['auto-approval-config'] }),
   });
 }
 // ── Recurring access rules ──
@@ -499,7 +482,6 @@ export function useSaveRecurring() {
     mutationFn: ({ id, payload }: { id?: number; payload: RecurringAccessInput }) =>
       id ? api.put(`/api/recurring-access/${id}`, payload) : api.post('/api/recurring-access', payload),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['recurring-access'] });
       qc.invalidateQueries({ queryKey: ['temporary-access-grants'] });
     },
@@ -510,7 +492,6 @@ export function useDeleteRecurring() {
   return useMutation({
     mutationFn: (id: number) => api.del(`/api/recurring-access/${id}`),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['recurring-access'] });
       qc.invalidateQueries({ queryKey: ['temporary-access-grants'] });
     },
@@ -525,8 +506,7 @@ export function useSaveSecurity() {
   });
 }
 
-// Save the per-account automatic EDR bypass rules. Peers are re-read because the next sync may
-// bypass devices right away.
+// Peers are re-read because the next sync may bypass devices right away.
 export function useSaveEdrAutoBypass() {
   const qc = useQueryClient();
   return useMutation({
@@ -538,7 +518,7 @@ export function useSaveEdrAutoBypass() {
   });
 }
 
-// Save the per-account data-retention window (days; 0 = keep forever). Tenant-aware endpoint.
+// days: 0 = keep forever. Tenant-aware endpoint.
 export function useSaveRetention() {
   const qc = useQueryClient();
   return useMutation({
@@ -550,14 +530,14 @@ export function useSaveRetention() {
   });
 }
 
-// Automation dry-run: preview exactly what a sync would do right now (no writes, no cache impact).
+// No writes, so no cache is invalidated.
 export function useDryRunAutomation() {
   return useMutation({
     mutationFn: (id: number) => api.post<DryRunResult>(`/api/automations/${id}/dry-run`, {}),
   });
 }
 
-// Device tags & notes (operational metadata, app-side; admin only).
+// Admin only.
 export function useSavePeerMeta() {
   const qc = useQueryClient();
   return useMutation({
@@ -571,7 +551,7 @@ export function useSavePeerMeta() {
   });
 }
 
-// Bulk-add tags to many devices (merge - existing tags and notes stay).
+// Merges: existing tags and notes stay.
 export function useBulkTagPeers() {
   const qc = useQueryClient();
   return useMutation({
@@ -584,8 +564,6 @@ export function useBulkTagPeers() {
   });
 }
 
-// Access recertification: open a round on demand / decide one item (keep or revoke).
-// A revoke performs the actual removal, so the affected caches are invalidated too.
 export function useStartRecert() {
   const qc = useQueryClient();
   return useMutation({
@@ -607,6 +585,7 @@ export function useDecideRecertItem() {
       api.post(`/api/recertification/items/${id}/${decision}`, {}),
     onSuccess: (_r, vars) => {
       qc.invalidateQueries({ queryKey: ['recertification'] });
+      // A revoke performs the actual removal, so the affected caches are invalidated too.
       if (vars.decision === 'revoke') {
         qc.invalidateQueries({ queryKey: ['peers'] });
         qc.invalidateQueries({ queryKey: ['feature-permissions'] });
@@ -632,7 +611,6 @@ export function useCancelAccessRequest() {
   return useMutation({
     mutationFn: (id: number) => api.post(`/api/access-requests/${id}/cancel`),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['my-access-requests'] });
       qc.invalidateQueries({ queryKey: ['access-requests'] });
     },
@@ -647,14 +625,14 @@ export function useApproveRequest() {
   return useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: { durationMinutes?: number; expiresAt?: string; targets?: GrantTarget[] } }) =>
       api.post(`/api/access-requests/${id}/approve`, payload),
-    onSuccess: () => { invalidateRequestViews(qc); qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => { invalidateRequestViews(qc); qc.invalidateQueries({ queryKey: ['temporary-access-grants'] }); },
   });
 }
 export function useDenyRequest() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, reason }: { id: number; reason?: string }) => api.post(`/api/access-requests/${id}/deny`, { reason }),
-    onSuccess: () => { invalidateRequestViews(qc); invalidateProfileUsage(qc); },
+    onSuccess: () => invalidateRequestViews(qc),
   });
 }
 
@@ -665,7 +643,6 @@ export function useSavePolicy() {
     mutationFn: ({ id, payload }: { id?: string; payload: PolicyEditInput }) =>
       id ? api.put(`/api/policies/${encodeURIComponent(id)}`, payload) : api.post('/api/policies', payload),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['policies'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
       // A policy sourced from a group changes that group's policy count / list (group detail).
@@ -679,7 +656,6 @@ export function useDeletePolicy() {
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/policies/${encodeURIComponent(id)}`),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['policies'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
     },
@@ -691,7 +667,7 @@ export function useDeletePeer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/peers/${encodeURIComponent(id)}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['peers'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['peers'] }),
   });
 }
 
@@ -711,7 +687,7 @@ export function useBulkDeletePeers() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (ids: string[]) => api.post<BulkDeleteResult>('/api/peers/bulk-delete', { ids }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['peers'] }); invalidateProfileUsage(qc); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['peers'] }),
   });
 }
 
@@ -721,7 +697,6 @@ export function useDeleteGroup() {
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/groups/${encodeURIComponent(id)}`),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['group-detail'] });
     },
@@ -734,23 +709,19 @@ export function useBulkDeleteGroups() {
     mutationFn: (ids: string[]) =>
       api.post<BulkDeleteResult>('/api/groups/bulk-delete', { ids }),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['group-detail'] });
     },
   });
 }
 
-// Replace a group's PEER membership. The frontend computes the FULL desired peer id list (for both
-// add and remove); the server PUTs it to NetBird (which replaces the set). The group detail and the
-// groups/peers lists all reflect membership, so all three are invalidated.
+// `peers` is the FULL desired peer id list: the server PUTs it to NetBird, which replaces the set.
 export function useSetGroupPeers() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, peers }: { id: string; peers: string[] }) =>
       api.post<{ ok: boolean; name: string; count: number }>(`/api/groups/${encodeURIComponent(id)}/peers`, { peers }),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['group-detail'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['peers'] });
@@ -758,8 +729,8 @@ export function useSetGroupPeers() {
   });
 }
 
-// Add/remove USERS to/from a group. Group membership for users lives in each user's auto_groups, so
-// the server does one PUT per user (best-effort) - here we just pass add/remove user-id deltas.
+// Group membership for users lives in each user's auto_groups, so the server does one PUT per user
+// (best-effort).
 export interface AssignGroupUsersResult {
   ok: boolean;
   added: number;
@@ -772,7 +743,6 @@ export function useAssignGroupUsers() {
     mutationFn: ({ id, add, remove }: { id: string; add?: string[]; remove?: string[] }) =>
       api.post<AssignGroupUsersResult>(`/api/groups/${encodeURIComponent(id)}/users`, { add: add || [], remove: remove || [] }),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['group-detail'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
       qc.invalidateQueries({ queryKey: ['users'] });
@@ -780,9 +750,7 @@ export function useAssignGroupUsers() {
   });
 }
 
-// ── Users: invite / resend invitation ──
-// The invite goes through our backend, which posts to NetBird in the CURRENT account
-// Create an empty NetBird group (official parity). Works in tenant context too.
+// Works in tenant context too.
 export function useCreateGroup() {
   const qc = useQueryClient();
   return useMutation({
@@ -794,7 +762,7 @@ export function useCreateGroup() {
   });
 }
 
-// Rename a group (API-created groups only; the "All" and IdP-issued groups are rejected server-side).
+// API-created groups only; the "All" and IdP-issued groups are rejected server-side.
 export function useRenameGroup(id: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -807,21 +775,21 @@ export function useRenameGroup(id: string) {
   });
 }
 
-// context - so it works while managing an MSP tenant too. The server force-refreshes the
-// users mirror, so invalidating ['users'] already shows the new user as Invited.
+// ── Users: invite / resend invitation ──
+// The invite goes through our backend, which posts to NetBird in the CURRENT account context - so it
+// works while managing an MSP tenant too. The server force-refreshes the users mirror, so
+// invalidating ['users'] already shows the new user as Invited.
 export function useInviteUser() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: InviteUserInput) => api.post<NbUser>('/api/users/invite', input),
     onSuccess: () => {
-      invalidateProfileUsage(qc); // the new user's auto groups
       qc.invalidateQueries({ queryKey: ['users'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
     },
   });
 }
 
-// Save the current Auto-Assigned Groups selection as this account's invite default.
 // Per account server-side, so an MSP tenant's defaults never touch the main account's.
 export function useSaveInviteDefaultGroups() {
   const qc = useQueryClient();
@@ -844,22 +812,19 @@ export function useResendInvite() {
   });
 }
 
-// Delete a user. NetBird deletes the user's peers along with them, so the peers list is
-// invalidated too - it is stale the moment this succeeds.
+// NetBird deletes the user's peers along with them, so the peers list is stale the moment this succeeds.
 export function useDeleteUser() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.del(`/api/users/${encodeURIComponent(id)}`),
     onSuccess: () => {
-      invalidateProfileUsage(qc); // the user's auto groups
       qc.invalidateQueries({ queryKey: ['users'] });
       qc.invalidateQueries({ queryKey: ['peers'] });
     },
   });
 }
 
-// Block / unblock a user. The Users list and the user-detail page both reflect is_blocked, so
-// both are invalidated on success.
+// The Users list and the user-detail page both reflect is_blocked.
 export function useSetUserBlocked() {
   const qc = useQueryClient();
   return useMutation({
@@ -872,7 +837,7 @@ export function useSetUserBlocked() {
   });
 }
 
-// Reset a user's MFA methods. Only the user-detail view carries MFA state, so it alone is refreshed.
+// Only the user-detail view carries MFA state, so it alone is refreshed.
 export function useResetUserMfa() {
   const qc = useQueryClient();
   return useMutation({
@@ -895,7 +860,6 @@ export function useCreateSetupKey() {
   return useMutation({
     mutationFn: (input: CreateSetupKeyInput = {}) => api.post<SetupKeyResult>('/api/setup-keys', input),
     onSuccess: () => {
-      invalidateProfileUsage(qc);
       qc.invalidateQueries({ queryKey: ['group-detail'] });
       qc.invalidateQueries({ queryKey: ['groups'] });
     },
@@ -1012,17 +976,13 @@ export function useCreateTelegramTopics() {
   });
 }
 
-// ── Manual "Refresh": bust + re-pull the server-side NetBird caches, then refetch every active
-// query. `onSettled` fires on success OR error, so the UI still refetches even if the bust call
-// fails (e.g. an older backend) - the button never silently does nothing. ──
-// Send the weekly review digest right now (skips the schedule; admin only).
+// Skips the schedule; admin only.
 export function useSendReviewDigest() {
   return useMutation({
     mutationFn: () => api.post<{ telegram: boolean; emails: number }>('/api/security-config/send-digest', {}),
   });
 }
 
-// Mark / unmark a Cleanup finding as deliberately ignored.
 export function useSetCleanupIgnore() {
   const qc = useQueryClient();
   return useMutation({
@@ -1053,7 +1013,7 @@ export function useDeleteTenant() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['msp-tenants'] }),
   });
 }
-// MSP provisioning token (write-only; empty string clears it).
+// Write-only; an empty string clears it.
 export function useSetProvisioningToken() {
   const qc = useQueryClient();
   return useMutation({
@@ -1069,7 +1029,7 @@ export function useProvisionTenant() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['msp-tenants'] }),
   });
 }
-// Per-tenant API token (write-only; empty string clears it).
+// Write-only; an empty string clears it.
 export function useSetTenantToken() {
   const qc = useQueryClient();
   return useMutation({
@@ -1079,8 +1039,7 @@ export function useSetTenantToken() {
   });
 }
 // REAL BILLING ACTION: subscribe a tenant to a paid plan, billed to the MSP account. The server
-// picks POST (free/trial) or PUT (already paying) against NetBird itself. Invalidating the tenant
-// list refreshes the Plan column.
+// picks POST (free/trial) or PUT (already paying) against NetBird itself.
 export function useChangeTenantPlan() {
   const qc = useQueryClient();
   return useMutation({
@@ -1101,8 +1060,7 @@ export function useApplyTenantDefaults() {
     },
   });
 }
-// Save the Tenant Defaults profile (admin, main only) - what new tenants are seeded with and what
-// "Apply Defaults" applies. Returns the saved profile; invalidates the query.
+// Admin, main account only.
 export function useSaveTenantDefaults() {
   const qc = useQueryClient();
   return useMutation({
@@ -1110,8 +1068,7 @@ export function useSaveTenantDefaults() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tenant-defaults'] }),
   });
 }
-// Save the CURRENT account's live NetBird settings (admin) - main in main mode, the managed tenant's
-// account in tenant mode. Returns the account's merged/normalized settings; invalidates the query.
+// Admin. Saves the CURRENT account: main in main mode, the managed tenant's account in tenant mode.
 export function useSaveNetbirdSettings() {
   const qc = useQueryClient();
   return useMutation({
@@ -1127,7 +1084,7 @@ export function useSaveMspDigest() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['msp-digest'] }),
   });
 }
-// Send the MSP digest right now (skips the schedule). Returns what it actually reached.
+// Skips the schedule.
 export function useSendMspDigest() {
   return useMutation({
     mutationFn: () => api.post<MspDigestSendResult>('/api/msp-digest/send', {}),
@@ -1154,12 +1111,13 @@ export function useNetbirdRefresh() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.post('/api/refresh'),
+    // POST /api/refresh busts and re-pulls the server-side NetBird caches. onSettled, so the UI still
+    // refetches when it fails (e.g. an older backend) - the button never silently does nothing.
     onSettled: () => qc.invalidateQueries(),
   });
 }
 
 // ── Purge stored events matching the filters (EVENT_PURGE_ADMINS only) ──
-// Scan returns a count + sample; purge deletes them and refreshes the traffic log.
 export function useScanMatchingEvents() {
   return useMutation({ mutationFn: () => api.get<MatchingEventsResult>('/api/filter-rules/matching') });
 }
@@ -1172,7 +1130,7 @@ export function usePurgeMatchingEvents() {
 }
 
 // ─── Internal envelope-encrypted backup (tier 2) ───
-// Set / change / reset the encryption passphrase. The passphrase is sent once and never stored.
+// The passphrase is sent once and never stored.
 export function useSetBackupPassphrase() {
   const qc = useQueryClient();
   return useMutation({

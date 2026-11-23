@@ -23,7 +23,6 @@ function idsOf(items?: PolicyGroupRef[]): string[] {
 export interface StagedPolicyCtx {
   initial: PolicyInput | null;
   resourceName: string;
-  /** Prefill for a NEW staged policy's name (e.g. "My Server Policy"). */
   defaultName: string;
   /** Admin-configured template (Settings → General), e.g. "{resource} - {protocol}". The
    *  suggested name follows protocol changes until the user types their own. NetBird allows
@@ -47,7 +46,7 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
   const postureQ = usePostureChecks();
   const save = useSavePolicy();
 
-  const src = policy || duplicateOf || null; // prefill source (never mutated)
+  const src = policy || duplicateOf || null;
   const rule = (src?.rules && src.rules[0]) || undefined;
   const allRules = src?.rules || [];
   // A policy may target specific resources (a rule's destinationResource) instead of groups;
@@ -70,8 +69,6 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
   const rulesLocked = !staged && (copyRules || keepRules);
   const [tab, setTab] = useState<Tab>('policy');
 
-  // Suggested name from the admin's template ({resource} / {protocol} placeholders).
-  // Falls back to defaultName when no template is configured.
   const suggestName = (proto: string): string => {
     if (!staged) return '';
     if (!staged.nameTemplate) return staged.defaultName;
@@ -84,10 +81,6 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
   const [name, setName] = useState(staged ? (staged.initial?.name || suggestName(staged.initial?.protocol || 'tcp')) : duplicateOf ? `${duplicateOf.name || 'Policy'} (copy)` : (policy?.name || ''));
   const [description, setDescription] = useState(staged ? (staged.initial?.description || '') : (src?.description || ''));
   const [enabled, setEnabled] = useState(staged ? staged.initial?.enabled !== false : src?.enabled !== false);
-  // Staged: a NEW policy always prefills the network's default source groups
-  // (Network Access edit-grants marked as policy sources); editing keeps what's stored.
-  // Standalone create (e.g. the group detail's "Add Policy") can prefill the source group via
-  // initialSources; editing an existing policy always reads its stored rule sources.
   const [sources, setSources] = useState<string[]>(
     staged ? (staged.initial ? staged.initial.sources.slice() : staged.defaultSourceIds.slice())
       : (src ? idsOf(rule?.sources) : (initialSources || [])),
@@ -114,8 +107,7 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
   const togglePosture = (id: string) =>
     setPostureChecks((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  // Protocol changes keep the SUGGESTED name in sync (e.g. "DC - TCP" → "DC - UDP") - but
-  // only while the field still holds the previous suggestion; a hand-typed name is never touched.
+  // A hand-typed name is never touched: only a name still equal to the suggestion follows the protocol.
   const changeProtocol = (v: string) => {
     if (staged && !staged.initial && name === suggestName(protocol)) setName(suggestName(v));
     setProtocol(v);
@@ -126,10 +118,9 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
     if (t) { changeProtocol(t.protocol || 'all'); setPorts((t.ports || []).slice()); }
   };
 
-  // Copy the WHOLE policy (every form field) to the clipboard as tagged JSON, and paste it
-  // into any other policy editor - regular or per-resource. Destination is never pasted into
-  // a resource-targeted policy (it's fixed), and group ids unknown in the paste context are
-  // dropped instead of becoming phantom selections.
+  // The copy is tagged JSON, so it pastes into any other policy editor - regular or per-resource.
+  // Destination is never pasted into a resource-targeted policy (it's fixed), and group ids unknown
+  // in the paste context are dropped instead of becoming phantom selections.
   const [clip, setClip] = useState<'idle' | 'copied' | 'pasted' | 'fail'>('idle');
   const flash = (s: 'copied' | 'pasted' | 'fail') => { setClip(s); setTimeout(() => setClip('idle'), 1500); };
   const copyPolicy = async () => {
@@ -260,7 +251,6 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
           )}
           <fieldset disabled={rulesLocked} aria-disabled={rulesLocked || undefined}
             className={cn('flex flex-col gap-6 min-w-0', rulesLocked && 'opacity-60 pointer-events-none select-none')}>
-          {/* Protocol */}
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center sm:gap-10">
             <div className="flex flex-col gap-1">
               <Label>Protocol</Label>
@@ -294,7 +284,6 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
             </div>
           )}
 
-          {/* Source ↔ Destination */}
           <div className="flex flex-col gap-4 sm:flex-row sm:gap-5 sm:items-center">
             <div className="w-full self-start flex flex-col gap-2">
               <Label className="flex items-center gap-2"><FolderDown size={15} /> Source</Label>
@@ -344,7 +333,6 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
             </div>
           </div>
 
-          {/* Ports */}
           <div className={cn('flex flex-col gap-2', portDisabled && 'opacity-30 pointer-events-none')}>
             <div className="flex flex-col gap-1">
               <Label className="flex items-center gap-2"><Shield size={14} /> Ports</Label>
@@ -354,7 +342,6 @@ export function PolicyModal({ policy, onClose, staged, initialSources, duplicate
           </div>
           </fieldset>
 
-          {/* Enable Policy */}
           <div className="flex items-center justify-between gap-4 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 px-4 py-3.5">
             <div>
               <div className="flex items-center gap-2 text-sm font-medium text-nb-gray-800 dark:text-nb-gray-100"><Power size={15} /> Enable Policy</div>
@@ -632,8 +619,6 @@ function PostureCheckDetailModal({ check, onClose }: { check: PostureCheck; onCl
   );
 }
 
-// Bidirectional / one-way toggle: two stacked arrow pills (→ over ←). Green = both ways,
-// blue top + gray bottom = one-way (source → destination).
 function PolicyDirection({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
   return (
     <button

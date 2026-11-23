@@ -7,8 +7,8 @@ const crypto = require('crypto');
 
 // Stub the NetBird client BEFORE db.js loads (it destructures these at require time), so the
 // real update path runs end-to-end without touching a live account.
-// No database here: the stored settings (the Remote Access launch-link guard reads them) are empty.
-require('../lib/core').getSetting = async () => null;
+// No servers added by launch links.
+{ const core = require('../lib/core'); const real = core.pool.query.bind(core.pool); core.pool.query = (sql, ...rest) => (/ra_created_resources/.test(sql) ? Promise.resolve({ rows: [] }) : real(sql, ...rest)); }
 const nb = require('../lib/netbird');
 let stored = null, sent = null;
 nb.netbirdGet = async () => JSON.parse(JSON.stringify(stored));

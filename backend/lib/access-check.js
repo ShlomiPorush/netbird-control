@@ -590,7 +590,6 @@ function networksForTarget(snap, target) {
     return [...nets];
 }
 
-// Routing status of the networks that hold a winning route for any listed result.
 // Routing status of networks, from the same router eligibility the answer uses: online when a
 // peer that surely routes is connected, offline when such peers exist but none is connected,
 // unknown when only peers of uncertain eligibility (or unread routers) remain, none otherwise.
@@ -854,7 +853,6 @@ function compactDevice(d) {
     };
 }
 
-// Minimal lists for the pickers.
 function accessCheckOptions(snap) {
     const ix = buildIndex(snap);
     return {
