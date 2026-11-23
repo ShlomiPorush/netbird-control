@@ -28,6 +28,16 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   when you press refresh, never on a timer.
 
 ### Changed
+- **The exit node's isolation survives reboots and covers all private ranges.** The reference
+  exit node (`netbird-docker-compose-files`) now comes with a script and a `docker.service`
+  drop-in in `exit-node-isolation/` instead of one manual `iptables` rule, which was lost on
+  reboot. The rules block the exit node from the private IPv4 ranges (RFC 1918), the shared
+  address space and 9 other reserved ranges listed in the script, and from its own VM. They
+  match its bridge interface (now pinned as `br-nb-exit`, with IPv6 off), and are in place
+  every time before Docker starts. The Compose project name is pinned too, and the exit node
+  uses public DNS servers, so its lookups never reach an internal DNS server. If you run the
+  reference exit node, stop it, install the rules and start it again as described in
+  `netbird-docker-compose-files/README.md`.
 - **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
   **Network**, **Access** and **Administration**. A group with no page you may open is not shown.
 - **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**

@@ -159,7 +159,8 @@ covers the database, SSO and a few locked values:
 The Browser Remote Access add-on and reference Compose files for the NetBird infrastructure
 (routing peer, exit node, reverse proxy) are in
 [`netbird-docker-compose-files`](netbird-docker-compose-files/README.md), with a description of
-each file.
+each file. The exit node needs host firewall rules to stay away from internal networks: a script
+and a `docker.service` drop-in for them are in the same folder.
 
 ## Upgrading
 
