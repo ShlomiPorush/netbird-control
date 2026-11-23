@@ -43,6 +43,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   reached. A host name whose resource was removed while a session opened showed
   `NO_DOMAIN_MATCH`; it now says that NetBird has no resource for the name. An answer without a
   message (such as a proxy's 502) no longer shows as `HTTP 502`.
+- **Actions in a tenant use the tenant's own API token.** The MSP Provisioning Token is used in a
+  tenant only to create or renew that token and to send invitations. The main API token is no longer
+  used in a tenant: a tenant without its own token can't be managed until an administrator creates one
+  (Tenants, the key icon). Each token is checked against the account it answers from before it is
+  used. When the check fails, nothing is sent and the action says why. The data-retention purge now
+  also runs for a tenant without a token.
 
 ---
 

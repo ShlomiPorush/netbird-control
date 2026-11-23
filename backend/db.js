@@ -86,7 +86,7 @@ const {
     getGroupRefMap, getUsageData, getReverseProxyStatus, bustReverseProxyCache,
     refreshBypassedPeers, peerIsBypassed, getBypassedPeerCount,
     runWithTenant, currentTenantAccount, getMspStatus, bustMspCache,
-    loadTenantTokens, setTenantTokenInMemory, hasTenantToken,
+    loadTenantTokens, setTenantTokenInMemory, hasTenantToken, tenantAccessError,
     getMspProvisioningToken, setMspProvisioningTokenInMemory,
 } = require('./lib/netbird');
 // The tenant scope of the CURRENT request for DB queries: '' = the main account. Every
@@ -1951,11 +1951,7 @@ async function listMspTenants({ withUsage = true } = {}) {
     if (!withUsage) return tenants;
     await Promise.all(tenants.map(async t => {
         if (String(t.status).toLowerCase() === 'invited') return;
-        // Fetch usage IN the tenant's own context so it uses the tenant PAT. Without a working
-        // context the ?account= switch is silently ignored and NetBird returns MAIN's usage -
-        // an empty tenant would show main's peer/user counts. Skip (usage stays null) unless the
-        // switch is verified honored.
-        if (!(await tenantContextSafe(t.id))) return;
+        if (!hasTenantToken(t.id)) return;
         const [u, sub] = await runWithTenant(t.id, () => Promise.all([
             netbirdGet('/api/integrations/billing/usage').catch(() => null),
             netbirdGet('/api/integrations/billing/subscription').catch(() => null),
@@ -2057,10 +2053,10 @@ async function getFleetReport() {
         for (const row of r.rows) issuesRaw.set(row.tenant, row.n);
     }
 
-    // Per-tenant management figures fetched IN the tenant's own context (tenantContextSafe guard +
-    // runWithTenant, exactly like listMspTenants' usage fetch). The report is on-demand (manual
+    // Per-tenant management figures fetched IN the tenant's own context (runWithTenant,
+    // exactly like listMspTenants' usage fetch). The report is on-demand (manual
     // refresh) + the weekly digest, so a per-tenant billing/usage/subscription/notices call is
-    // acceptable. A tenant with no working context is skipped cleanly - its figures stay null and
+    // acceptable. A tenant with no API token is skipped cleanly - its figures stay null and
     // knownIssues falls back to the raw count above.
     //  - knownIssues: getNbNotices({forAdmin:true}).length so the number MATCHES the Known Issues
     //    banner exactly (48h routing window, newest-per-peer/message dedup, connected-router
@@ -2073,7 +2069,7 @@ async function getFleetReport() {
     //    mapping as the tenants-table Plan cell (t.plan), so the frontend reuses its renderer.
     const ctx = new Map();
     await Promise.all(tenants.map(async t => {
-        if (!(await tenantContextSafe(t.id))) return;
+        if (!hasTenantToken(t.id)) return;
         const data = await runWithTenant(t.id, async () => {
             const [usage, sub, billing, notices] = await Promise.all([
                 netbirdGet('/api/integrations/billing/usage').catch(() => null),
@@ -2336,40 +2332,15 @@ function tenantNameOf(id) {
 // iteration try/catch collects errors so ONE account's failure never blocks the rest; after the
 // loop, if any failed, throw a single summary Error (so tracked() raises the scheduler alert)
 // naming the count + the first message.
-// Scheduler-side honored-switch guard. NetBird silently IGNORES ?account= when the main token's
-// service user has no permission group on the tenant - the HTTP middleware detects that and 502s,
-// but scheduler iterations had no equivalent check, so a tokenless tenant's jobs would mirror
-// MAIN's peers/users/logs stamped with the tenant id (cross-account leak into tenant rows).
-// A tenant with its own PAT needs no switch; otherwise verify once per 10 minutes (both outcomes
-// cached so a broken tenant is not re-probed every tick) and SKIP the tenant when not honored.
-const _switchSafe = new Map(); // tenant id → { at, ok }
-async function tenantContextSafe(id) {
-    if (hasTenantToken(id)) return true;
-    const c = _switchSafe.get(id);
-    if (c && Date.now() - c.at < 10 * 60_000) return c.ok;
-    let ok = false;
-    try {
-        const [tAcc, mAcc] = await Promise.all([
-            runWithTenant(id, () => netbirdGet('/api/accounts')),
-            netbirdGet('/api/accounts'),
-        ]);
-        const tid = Array.isArray(tAcc) && tAcc[0] && tAcc[0].id;
-        const mid = Array.isArray(mAcc) && mAcc[0] && mAcc[0].id;
-        ok = !!(tid && mid && tid !== mid);
-    } catch { ok = false; }
-    _switchSafe.set(id, { at: Date.now(), ok });
-    if (!ok) console.warn(`[Scheduler] tenant ${id}: no PAT and account switch not honored - per-tenant jobs skipped (provision its service user)`);
-    return ok;
-}
-
-async function forEachTenant(fn) {
+// A tenant without its own token is skipped, since every one of its calls would be refused, unless
+// the job needs no NetBird.
+async function forEachTenant(fn, { needsNetbird = true } = {}) {
     const ids = await listActiveTenantIds();
     const errors = [];
     for (const id of ids) {
         try {
             if (id) {
-                // Better no sync than main's inventory written under the tenant's id.
-                if (!(await tenantContextSafe(id))) continue;
+                if (needsNetbird && !hasTenantToken(id)) continue;
                 await runWithTenant(id, fn);
             } else await fn();
         } catch (e) {
@@ -3146,8 +3117,7 @@ async function createMspTenant({ name, domain, groups }, setup) {
     }
     // Provision the tenant's managed service user + token FIRST (best-effort, awaited), so the
     // NetBird-account-settings step of seeding below has a tenant token to authenticate with. Order
-    // matters: copyNbSettingsTo needs the tenant's own token (or, if provisioning fails, falls back to
-    // main-token ?account= switching). A provisioning failure never blocks creation - the manual
+    // matters: copyNbSettingsTo needs the tenant's own token. A provisioning failure never blocks creation - the manual
     // Provision button remains and rotation retries. Only runs when an MSP provisioning token exists
     // AND the caller left "Create Managed Service User" checked (null = skipped, not attempted).
     let provisioned = null;
@@ -3203,10 +3173,9 @@ async function verifyMspTenantDomain(id) {
 }
 
 // Per-tenant usage + subscription for the Overview drawer. Fetched IN the tenant's context (its
-// own PAT) - a bare ?account= with the main token is silently ignored when the main service user
-// can't switch, returning MAIN's numbers. Null when the tenant has no working context.
+// own token). Null when the tenant has none.
 async function getMspTenantOverview(id) {
-    if (!(await tenantContextSafe(id))) return { usage: null, subscription: null };
+    if (!hasTenantToken(id)) return { usage: null, subscription: null };
     const [usage, sub] = await runWithTenant(id, () => Promise.all([
         netbirdGet('/api/integrations/billing/usage').catch(() => null),
         netbirdGet('/api/integrations/billing/subscription').catch(() => null),
@@ -3265,9 +3234,8 @@ async function getMspBillingPlans() {
 // Subscribe ONE tenant to a paid plan. THIS CHARGES MONEY - the plan is billed to the MSP account.
 // Which verb NetBird expects depends on the tenant's CURRENT tier (official TenantsProvider
 // updateSubscription): free/trial → POST (the initial MSP subscription), anything else → PUT (update
-// the existing one). That tier is read in the TENANT's context (its own PAT); a bare ?account= with
-// the main token is silently ignored when the switch is not honored, which would read MAIN's tier and
-// pick the wrong verb. The write itself is an MSP endpoint and therefore runs against MAIN.
+// the existing one). That tier is read in the TENANT's context (its own token), never
+// MAIN's, which would pick the wrong verb. The write itself is an MSP endpoint and therefore runs against MAIN.
 // The priceId is validated against the catalog first - a real billing call must never be made with
 // an id the MSP's own plan list does not know.
 async function setMspTenantSubscription(id, priceId) {
@@ -3278,7 +3246,7 @@ async function setMspTenantSubscription(id, priceId) {
     const catalog = await getMspBillingPlans();
     const plan = catalog.plans.find(p => p.priceId && p.priceId === price);
     if (!plan) throw new Error('Unknown plan price - reload the plan list and try again');
-    if (!(await tenantContextSafe(tenantId))) {
+    if (!hasTenantToken(tenantId)) {
         throw new Error('No working context for this tenant - provision its service user first');
     }
     const sub = await runWithTenant(tenantId, () => netbirdGet('/api/integrations/billing/subscription'));
@@ -5166,9 +5134,7 @@ async function deleteGroup(id) {
 // Replace a group's PEER membership (official dashboard mechanics: group members-peers live ON the
 // group object, so PUT /api/groups/{id} with the FULL desired peer id list - NetBird REPLACES the
 // set). Used for both add and remove; the caller computes the final list. NetBird's PUT REPLACES
-// the group, so name + resources are resent or they would be wiped. Routed through asRealUser (the
-// MSP provisioning token when set) because tenant service-user tokens are restricted on group
-// writes, exactly like inviteUser/setUserBlocked. The auto-managed "All" group is rejected (400).
+// the group, so name + resources are resent or they would be wiped. The auto-managed "All" group is rejected (400).
 async function setGroupPeers(groupId, peerIds) {
     const acct = tnt();
     const g = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
@@ -5221,12 +5187,11 @@ async function renameGroup(groupId, newName) {
 // in the user's auto_groups, NOT on the group - so PUT /api/users/{id} { role, auto_groups }). The
 // role and is_blocked MUST be resent or NetBird's PUT wipes them (a missing is_blocked unblocks the
 // user; same constraint as setUserBlocked). Sends the FULL
-// desired auto_groups set. Routed through asRealUser (tenant service-user tokens are restricted on
-// user writes).
+// desired auto_groups set.
 // NetBird's user PUT replaces role + auto_groups + is_blocked together, so they are read FRESH from
 // NetBird right before the write - never from the local mirror, which can be minutes old (a stale
 // is_blocked would unblock a user blocked meanwhile, or re-block one unblocked meanwhile). There is
-// no GET /api/users/{id}, so this reads the list (regular + service users) as the real user that
+// no GET /api/users/{id}, so this reads the list (regular + service users) with the token that
 // performs the write. A failed read, or a user without a boolean is_blocked, aborts: no write.
 async function liveUsersById(ids) {
     const [regular, service] = await asRealUser(() => Promise.all([
@@ -5664,8 +5629,7 @@ async function guardProtectedUser(id, raw, acct, verb) {
 
 // Block / unblock a user (the official dashboard's user block toggle - UserActionCell). NetBird's
 // PUT /api/users/{id} REPLACES the user, so role + auto_groups MUST be resent or they are wiped;
-// only is_blocked changes here. The write routes through the MSP Provisioning Token when set
-// (asRealUser), matching the tenant service-user restriction on user writes. The owner and the
+// only is_blocked changes here. The owner and the
 // app's own service user cannot be blocked. The identity/label is resolved for the audit entry.
 // Changes to one user run one at a time, so a slow earlier change never lands after a newer one.
 const _blockChanges = new Map(); // `${account}|${user id}` → the last queued change
@@ -5718,8 +5682,7 @@ async function applyUserBlocked(id, blocked) {
 // service (DELETE /service/mfa/{userId}), NOT the management API. On the public MANAGEMENT API base
 // that route answers a plain-text 404 (see mfaSupported), so it is likely unreachable here. Probe
 // first: if unsupported, throw a clear 501 the route turns into a disabled button + tooltip. When
-// supported, DELETE /api/service/mfa/{id} in the current context (routed through asRealUser for the
-// same tenant service-user restriction). The label is resolved BEFORE the call, for the audit.
+// supported, DELETE /api/service/mfa/{id} in the current context. The label is resolved BEFORE the call, for the audit.
 async function resetUserMfa(id) {
     if (!(await mfaSupported())) {
         const e = new Error('NetBird MFA reset is not available through the management API on this deployment.');
@@ -8612,31 +8575,19 @@ function ensureUsersFresh() {
 // is transferred, never assigned at creation.
 const USER_ROLES = ['user', 'auditor', 'network_admin', 'admin'];
 
-// The MAIN account's NetBird id, resolved once and cached for the process lifetime (an account
-// id never changes). MUST only be called OUTSIDE a tenant context - inside one, /api/accounts
-// answers with the tenant's own account.
-let _mainAcctId = '';
-async function mainAccountId() {
-    if (_mainAcctId) return _mainAcctId;
-    const accounts = await netbirdGet('/api/accounts').catch(() => null);
-    _mainAcctId = (Array.isArray(accounts) && accounts[0] && accounts[0].id) || '';
-    return _mainAcctId;
-}
-
 // Run `fn` AS A REAL ADMIN USER (the MSP Provisioning Token, a real admin's PAT) instead of the
-// app's SERVICE-USER token. NetBird restricts several actions for service users: invitations are
-// refused outright ("inviter user with id ... is empty"), and GET /api/users comes back
-// empty/limited so a managed tenant's human user list syncs as 0 (peers, on a different fetcher,
-// sync fine). authToken + ?account= is exactly the tenant provisioning mechanism; the override
-// only engages when an account id is set, so in MAIN context we switch to our OWN account id (a
-// no-op NetBird honors). No prov token → run fn on the service token unchanged. Scope this to the
+// app's SERVICE-USER token. No prov token → run fn on the service token unchanged. Scope this to the
 // NetBird call ONLY: the mirror refresh and everything else must keep running on the service token.
-async function asRealUser(fn) {
+// In a tenant only an invitation needs it: NetBird takes the account owner as the inviter when a
+// service user invites, and refuses it ("inviter user with id ... is empty"). Everything else in a
+// tenant runs on the tenant's own token.
+async function asInviter(fn) {
     const prov = getMspProvisioningToken();
     if (!prov) return fn();
-    const acct = currentTenantAccount() || await mainAccountId().catch(() => '');
-    if (!acct) return fn(); // account id unresolvable - fall back to the service token
-    return runWithTenant(acct, fn, { authToken: prov });
+    return runWithTenant(currentTenantAccount(), fn, { authToken: prov });
+}
+async function asRealUser(fn) {
+    return currentTenantAccount() ? fn() : asInviter(fn);
 }
 
 // A NetBird inviter-identity failure is a configuration problem, not a form error - rewrite it
@@ -8660,23 +8611,22 @@ async function inviteUser({ name, email, role, autoGroups }) {
         auto_groups: (Array.isArray(autoGroups) ? autoGroups : []).map(g => String(g || '')).filter(Boolean),
         is_service_user: false,
     };
-    const r = await asRealUser(() => netbirdPost('/api/users', body));
+    const r = await asInviter(() => netbirdPost('/api/users', body));
     if (!r || r.status >= 300 || !r.body || !r.body.id) {
         throw new Error(inviterHint((r && ((r.body && (r.body.message || r.body.error)) || r.raw || r.error || r.status)) || 'Failed to invite the user'));
     }
     // The mirror is TTL-based, so the invited user would stay invisible for minutes.
     // Refresh it now (bypassing the TTL) so the Users page shows them immediately.
-    // Deliberately OUTSIDE asRealUser: the mirror refresh is a service-token concern (and it
-    // routes through asRealUser itself when a tenant needs the provisioning token).
+    // Deliberately OUTSIDE asInviter: the mirror refresh is a service-token concern.
     await refreshUsersCache().catch(err => console.error('[UserResolve] post-invite refresh error:', err.message));
     return r.body;
 }
 
 // Re-send a pending invitation (dashboard's "Resend"). Only meaningful while the user is
 // still in the "invited" state - NetBird decides, we just forward the call. Same inviter-identity
-// constraint as the initial invite, so it runs through asRealUser too.
+// constraint as the initial invite, so it runs through asInviter too.
 async function resendUserInvite(userId) {
-    const r = await asRealUser(() => netbirdPost(`/api/users/${encodeURIComponent(String(userId || ''))}/invite`, {}));
+    const r = await asInviter(() => netbirdPost(`/api/users/${encodeURIComponent(String(userId || ''))}/invite`, {}));
     if (!r || r.status >= 300) {
         throw new Error(inviterHint((r && ((r.body && (r.body.message || r.body.error)) || r.raw || r.error || r.status)) || 'Failed to resend the invitation'));
     }
@@ -8712,7 +8662,7 @@ async function setInviteDefaultGroups(ids) {
 //     usageLimit, ephemeral, autoGroups, allowExtraDnsLabels }. `expiresInDays: 0` means the
 //     key never expires; `usageLimit: 0` (reusable only) means unlimited - matching NetBird.
 // Setup keys are a normal service-token call (not restricted to a real user like invites), so
-// no asRealUser wrapper is needed; this works with a tenant service-user token.
+// no asInviter wrapper is needed; this works with a tenant service-user token.
 // The returned object carries the PLAINTEXT `key` exactly once: callers must hand it to the UI
 // and never persist or log it.
 async function createSetupKey({ name, type, expiresInDays, usageLimit, ephemeral, autoGroups, allowExtraDnsLabels } = {}) {
@@ -9669,8 +9619,9 @@ async function getNbUser(userId) {
     const users = await netbirdGet('/api/users');
     return (Array.isArray(users) ? users : []).find(u => String(u.id) === uid || String(u.id).split('|').pop() === tail) || null;
 }
-// True only when both full user lists (regular + service users, read as the real user) were
-// read and neither has this user.
+// True only when both full user lists (regular + service users) were read and neither has this user.
+// NetBird lists only the token's own user when its role may not read users, and a tenant's token can
+// have any role, so there the lists are proof only for an admin's token.
 async function nbUserIsGone(userId) {
     const uid = String(userId || '');
     const tail = uid.split('|').pop();
@@ -9679,7 +9630,9 @@ async function nbUserIsGone(userId) {
         netbirdGet('/api/users?service_user=true').catch(() => null),
     ]));
     if (!Array.isArray(regular) || !Array.isArray(service)) return false;
-    return ![...regular, ...service].some(u => u && (String(u.id) === uid || String(u.id).split('|').pop() === tail));
+    const all = [...regular, ...service];
+    if (tnt() && !all.some(u => u && u.is_current && ['owner', 'admin'].includes(u.role))) return false;
+    return !all.some(u => u && (String(u.id) === uid || String(u.id).split('|').pop() === tail));
 }
 
 // Add/remove a group from a user's auto-assigned groups (what NetBird's "Assign Users" does).
@@ -12500,7 +12453,7 @@ module.exports = {
     runWithTenant, currentTenantAccount, getMspStatus, bustMspCache,
     listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview,
     getMspBillingPlans, setMspTenantSubscription,
-    setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken,
+    tenantAccessError, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken,
     getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest,
     listActiveTenantIds, forEachTenant, propagateFilterRules, propagateBlocklist,
     seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf,
