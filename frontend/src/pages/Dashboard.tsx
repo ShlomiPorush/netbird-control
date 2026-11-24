@@ -16,6 +16,7 @@ import { formatTimestamp, formatMaybeDate } from '@/lib/logfmt';
 import { ucLabel } from '@/lib/str';
 import { Badge, Card, LinkButton, PageHeader } from '@/components/ui';
 import { TargetChips } from '@/components/access/targets';
+import { CloudStatusBanner } from '@/components/admin/CloudStatus';
 import { ACTION_LABELS } from '@/pages/Admin';
 
 /** Home: an overview dashboard. Admins get fleet health + "needs attention" + recent activity;
@@ -175,6 +176,8 @@ function AdminDashboard() {
           <LinkButton to="/temporary-access" variant="secondary" size="sm"><Clock size={14} /> Grant Access</LinkButton>
           <LinkButton to="/networks" variant="secondary" size="sm"><Layers3 size={14} /> Add Resource</LinkButton>
         </>} />
+
+      <CloudStatusBanner className="mb-6" />
 
       {/* Stat tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 mb-6">

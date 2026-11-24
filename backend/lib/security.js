@@ -30,6 +30,11 @@ const SECURITY_DEFAULTS = {
     anomalyEnabled: true,
     // Telegram alert when a background job fails repeatedly (and when it recovers)
     schedAlertsEnabled: true,
+    // NetBird Cloud status (status.netbird.io): shown in the app, with an alert when an
+    // incident opens or closes
+    cloudStatusEnabled: true,
+    cloudStatusAlerts: true,
+    cloudStatusEmails: [],      // optional email recipients (requires SMTP)
     workDays: [0, 1, 2, 3, 4],  // 0=Sunday … 6=Saturday; admin actions on other days alert
     workStart: 6,               // admin actions outside [workStart, workEnd) alert
     workEnd: 22,
@@ -69,6 +74,10 @@ async function loadSecurityConfig({ strict = false } = {}) {
         console.error('[Security] config load error:', e.message);
     }
 }
+function emailList(v) {
+    return (Array.isArray(v) ? v : String(v || '').split(','))
+        .map(s => String(s).trim().toLowerCase()).filter(Boolean);
+}
 function normSecurityConfig(cfg) {
     cfg = cfg || {};
     return {
@@ -80,10 +89,12 @@ function normSecurityConfig(cfg) {
         reviewEnabled: cfg.reviewEnabled !== false,
         reviewDay: Math.round(secNum(cfg.reviewDay, SECURITY_DEFAULTS.reviewDay, 0, 6)),
         reviewHour: Math.round(secNum(cfg.reviewHour, SECURITY_DEFAULTS.reviewHour, 0, 23)),
-        reviewEmails: (Array.isArray(cfg.reviewEmails) ? cfg.reviewEmails : String(cfg.reviewEmails || '').split(','))
-            .map(s => String(s).trim().toLowerCase()).filter(Boolean),
+        reviewEmails: emailList(cfg.reviewEmails),
         anomalyEnabled: cfg.anomalyEnabled !== false,
         schedAlertsEnabled: cfg.schedAlertsEnabled !== false,
+        cloudStatusEnabled: cfg.cloudStatusEnabled !== false,
+        cloudStatusAlerts: cfg.cloudStatusAlerts !== false,
+        cloudStatusEmails: emailList(cfg.cloudStatusEmails),
         workDays: (() => {
             const d = [...new Set((Array.isArray(cfg.workDays) ? cfg.workDays : []).map(x => parseInt(x, 10)).filter(x => x >= 0 && x <= 6))].sort();
             return d.length ? d : [...SECURITY_DEFAULTS.workDays]; // never allow an empty week

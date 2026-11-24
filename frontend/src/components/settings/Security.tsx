@@ -145,6 +145,7 @@ export function Security() {
   const save = useSaveSecurity();
   const [cfg, setCfg] = useState<SecurityConfig | null>(null);
   const [emails, setEmails] = useState('');
+  const [cloudEmails, setCloudEmails] = useState('');
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const sendDigest = useSendReviewDigest();
@@ -158,8 +159,13 @@ export function Security() {
   };
 
   useEffect(() => {
-    if (data) { setCfg(data); setEmails((data.reviewEmails || []).join(', ')); }
+    if (data) {
+      setCfg(data);
+      setEmails((data.reviewEmails || []).join(', '));
+      setCloudEmails((data.cloudStatusEmails || []).join(', '));
+    }
   }, [data]);
+  const emailList = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
 
   const patch = (p: Partial<SecurityConfig>) => setCfg((c) => (c ? { ...c, ...p } : c));
 
@@ -167,7 +173,7 @@ export function Security() {
     if (!cfg) return;
     setError('');
     try {
-      await save.mutateAsync({ ...cfg, reviewEmails: emails.split(',').map((s) => s.trim()).filter(Boolean) });
+      await save.mutateAsync({ ...cfg, reviewEmails: emailList(emails), cloudStatusEmails: emailList(cloudEmails) });
       setSaved(true); setTimeout(() => setSaved(false), 2000);
     } catch (e) { setError((e as Error).message || 'Failed to save'); }
   };
@@ -283,6 +289,32 @@ export function Security() {
             and ✅ once it recovers - one alert per breakage, not per failing run. Uses the same Security
             Alerts topic; job details live in Operations → System Health.
           </p>
+        </Card>
+
+        <Card className="p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">NetBird Cloud Status</div>
+            <label className="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-nb-gray-600 dark:text-nb-gray-300">
+              <Checkbox checked={cfg.cloudStatusEnabled !== false} onChange={(e) => patch({ cloudStatusEnabled: e.target.checked })} /> Enabled
+            </label>
+          </div>
+          <p className="text-nb-gray-500 text-[0.82rem] mt-0.5">
+            Reads status.netbird.io every few minutes. Open incidents show on the Overview and in System Health.
+            Only for accounts on NetBird Cloud.
+          </p>
+          {cfg.cloudStatusEnabled !== false && (
+            <div className="mt-3 flex flex-col gap-3">
+              <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                <Checkbox checked={cfg.cloudStatusAlerts !== false} onChange={(e) => patch({ cloudStatusAlerts: e.target.checked })} />
+                <span className="text-sm text-nb-gray-700 dark:text-nb-gray-200">Alert When an Incident Opens or Closes</span>
+              </label>
+              {cfg.cloudStatusAlerts !== false && (
+                <Field label="Email Recipients (Optional)" hint="Alerts go to the Security Alerts Telegram topic, and to these addresses. Comma-separated; requires SMTP.">
+                  <Input value={cloudEmails} onChange={(e) => setCloudEmails(e.target.value)} placeholder="ops@example.com" />
+                </Field>
+              )}
+            </div>
+          )}
         </Card>
 
         {/* ── Automatic EDR bypass by OS (its own endpoint + Save) ── */}

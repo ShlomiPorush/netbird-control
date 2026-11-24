@@ -94,6 +94,7 @@ const META = {
     'POST /api/groups/bulk-delete': 'Bulk-delete groups',
 
     'GET /api/system-health': 'System health - scheduler status, DB sizes, integrations, retention (admin)',
+    'GET /api/netbird-cloud-status': 'NetBird Cloud status from status.netbird.io - overall state, services and open incidents',
     'POST /api/automations/:id/dry-run': 'Preview exactly what a sync would do right now - zero writes (admin)',
     'PUT /api/peers/:id/meta': 'Set a device’s operational tags + note (app-side; admin)',
     'POST /api/peers/bulk-tags': 'Bulk-add tags to many devices (merge; notes untouched; admin)',

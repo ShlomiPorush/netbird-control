@@ -4,7 +4,7 @@ import { api, getTenantMode } from './api';
 import type {
   Viewer, LogsResponse, AdminLogsResponse, AuditResponse, IpHistoryResponse, TrafficSummaryResponse, ReverseProxyStatus, ProxyLogsResponse, ProxyLogsSummaryResponse, ProxyServiceStats, ProxyDomain, EditableProxyService, ProxyTargetOptions, NbUser, Peer, PeerDetail, NbGroup, GroupDetail, UserDetail,
   Network, NetworkDetail, Policy, PolicyOptions, TemplatesResponse, GroupRef, FilterRulesResponse, AppConfig, NetbirdApiConfig, WebhookConfig, NetbirdWebhookStatus, TelegramConfig, SmtpConfig, ApproverConfig, AutoApprovalConfig, FeaturePermsConfig, RecurringAccessRule, SecurityConfig, EdrAutoBypassConfig, RetentionStatus, SearchResult, AccessProfile, AccessProfileUsage, NetworkDefaultProfiles, PostureCheck, Country, CityRef, Automation, AutomationRun, AutomationManaged, BlocklistEntry, TemporaryAccessGrant, AccessRequest, RequestTargetResult, SystemHealth, Recertification, RecertRoundSummary, RecertRoundDetail, ResourceConflict, OutboundEntry, OutboundBody, CleanupReport, DiagnosticsInfo, NbNotice, MspStatus, MspTenant, MspBillingPlans, TenantOverview, MspSwitcherItem, TenantDrift, TenantDefaultsResponse, NetbirdSettingsResponse, FleetReport, MspDigestConfig, InternalBackupStatus, InviteDefaultGroups, TrafficPullStatus, AuditPullStatus,
-  AccessCheckOptions, UserAccessResult, WhoHasAccessResult,
+  AccessCheckOptions, UserAccessResult, WhoHasAccessResult, NetbirdCloudStatus,
 } from './types';
 
 export type LogParams = {
@@ -152,6 +152,14 @@ export function useWhoHasAccess(p: AccessCheckParams | null) {
     enabled: !!p,
     retry: false,
     staleTime: 0,
+  });
+}
+
+export function useNetbirdCloudStatus() {
+  return useQuery({
+    queryKey: ['netbird-cloud-status'],
+    queryFn: () => api.get<NetbirdCloudStatus>('/api/netbird-cloud-status'),
+    refetchInterval: 60_000,
   });
 }
 

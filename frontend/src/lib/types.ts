@@ -32,6 +32,9 @@ export interface SecurityConfig {
   anomalyEnabled: boolean;
   /** Telegram alert when a background job fails repeatedly (and when it recovers). */
   schedAlertsEnabled: boolean;
+  cloudStatusEnabled: boolean;
+  cloudStatusAlerts: boolean;
+  cloudStatusEmails: string[];
   workDays: number[]; // 0=Sunday … 6=Saturday
   workStart: number;
   workEnd: number;
@@ -42,6 +45,30 @@ export interface SecurityConfig {
   recertEnabled: boolean;
   recertIntervalDays: number;
 }
+
+// ─── NetBird Cloud status (GET /api/netbird-cloud-status, from status.netbird.io) ───
+export type CloudStatusIndicator = 'none' | 'minor' | 'major' | 'critical' | 'maintenance' | 'unknown';
+export interface CloudStatusIncident {
+  id: string;
+  name: string;
+  status: string;
+  impact: string;
+  startedAt: string | null;
+  updatedAt: string | null;
+  latestUpdate: string;
+  url: string;
+}
+export interface CloudStatusSummary {
+  indicator: CloudStatusIndicator;
+  description: string;
+  components: { name: string; status: string }[];
+  incidents: CloudStatusIncident[];
+  updatedAt: string | null;
+  pageUrl: string;
+}
+export type NetbirdCloudStatus =
+  | { enabled: false }
+  | { enabled: true; summary: CloudStatusSummary | null; error: string | null; checkedAt: string };
 
 // ─── Automatic EDR bypass by OS (GET/PUT /api/edr-auto-bypass) ───
 // Per account (a tenant's rules act on the tenant's own devices). The five platforms a rule can
