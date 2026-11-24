@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.9.1] - 2026-11-24
+
 ### Added
 - **NetBird Cloud status on Troubleshoot.** The Troubleshoot page, which every user can open, now starts
   with NetBird Cloud's state: the same banner as the **Overview** while NetBird reports an incident or a
