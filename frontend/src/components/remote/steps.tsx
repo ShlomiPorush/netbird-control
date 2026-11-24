@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
 import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { GUAC, PORTAL_MESSAGE_CODES, type GuacStatus } from '@/lib/remoteAccess';
-import { Button } from '@/components/ui';
+import { Button, LinkButton } from '@/components/ui';
 import { FLOW_BUTTON } from './flow';
 
 // The connection steps a user sees, shared by the Remote Access page (the checks before a session,
@@ -165,8 +164,8 @@ export function FailureBox({ failure, onRetry, retryLabel = 'Try Again', onLeave
   const variant = (k: typeof main) => (k === main ? 'primary' : 'secondary');
   return (
     <div className="mt-5 flex flex-col gap-2">
-      {failure.requestLink && <Link to={failure.requestLink} onClick={onLeave} className="block"><Button variant={variant('request')} className={FLOW_BUTTON}>Request Access</Button></Link>}
-      {failure.troubleshoot && <Link to="/troubleshoot" onClick={onLeave} className="block"><Button variant={variant('troubleshoot')} className={FLOW_BUTTON}>Open Troubleshoot</Button></Link>}
+      {failure.requestLink && <LinkButton to={failure.requestLink} onClick={onLeave} variant={variant('request')} className={FLOW_BUTTON}>Request Access</LinkButton>}
+      {failure.troubleshoot && <LinkButton to="/troubleshoot" onClick={onLeave} variant={variant('troubleshoot')} className={FLOW_BUTTON}>Open Troubleshoot</LinkButton>}
       <Button variant={variant('retry')} className={FLOW_BUTTON} onClick={onRetry}>{retryLabel}</Button>
     </div>
   );

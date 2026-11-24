@@ -73,7 +73,7 @@ export default function GroupDetail() {
         <span className="grid place-items-center h-10 w-10 md:h-12 md:w-12 rounded-md bg-nb-gray-100 dark:bg-nb-gray-900 text-nb-gray-500 shrink-0">
           <FolderGit2 size={20} />
         </span>
-        <h1 className="min-w-0 text-xl md:text-2xl font-medium text-nb-gray-800 dark:text-nb-gray-100 flex items-center gap-2.5">
+        <h1 className="min-w-0 text-xl md:text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 flex items-center gap-2.5">
           <span className="truncate">{group.name}</span>
           {canRename && (
             <button onClick={() => setRenaming(true)} title="Rename Group"
@@ -589,12 +589,13 @@ function AssignModal<T extends { id: string }>({
             {filtered.length === 0 ? (
               <div className="py-6 text-center text-sm text-nb-gray-500">No matches.</div>
             ) : filtered.map((i) => (
-              <button type="button" key={i.id} onClick={() => toggle(i.id)}
-                className={cn('flex items-center gap-3 w-full text-left px-2.5 py-2 rounded-md border transition-colors',
+              // One control per row: the label makes the whole row toggle its checkbox.
+              <label key={i.id}
+                className={cn('flex items-center gap-3 w-full text-left px-2.5 py-2 rounded-md border transition-colors cursor-pointer',
                   selected.has(i.id) ? 'border-netbird/40 bg-netbird/6' : 'border-transparent hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900')}>
-                <span onClick={(e) => e.stopPropagation()}><Checkbox checked={selected.has(i.id)} onChange={() => toggle(i.id)} /></span>
+                <Checkbox checked={selected.has(i.id)} onChange={() => toggle(i.id)} />
                 <div className="min-w-0 flex-1">{renderRow(i)}</div>
-              </button>
+              </label>
             ))}
           </div>
         </div>

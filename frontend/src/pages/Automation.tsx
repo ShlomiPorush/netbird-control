@@ -58,7 +58,6 @@ export default function Automation() {
     return (id: string) => m.get(id) || id || '-';
   }, [networks]);
 
-  // Standard table chrome (same as every list page): search + sort + client pagination.
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
     if (!q) return list;
@@ -126,7 +125,6 @@ export default function Automation() {
         <EmptyState title="No Integrations" hint="Add an integration to start auto-provisioning resources from an external source." icon={<Workflow size={22} />} />
       ) : (
         <>
-          {/* Standard table chrome: search + rows-per-page, sortable columns, pagination. */}
           <div className="flex flex-wrap items-center gap-3 mb-4">
             <SearchInput value={search} onChange={setSearch} placeholder="Search name or network…" />
             <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
@@ -186,7 +184,6 @@ export default function Automation() {
                 </Table>
               </div>
 
-              {/* Mobile: cards instead of the wide table */}
               <div className="md:hidden flex flex-col gap-2.5">
                 {pageRows.map((a) => (
                   <div key={`m-${a.id}`} onClick={() => setModal({ automation: a })}
@@ -270,7 +267,6 @@ function dryRunCsv(automation: Automation, result: DryRunResult) {
 
 function DryRunModal({ automation, result, onClose }: { automation: Automation; result: DryRunResult; onClose: () => void }) {
   const noChanges = !result.belowFloor && result.actions.every((a) => a.action === 'skip' || a.action === 'keep' || a.action === 'unchanged');
-  // Click a summary badge to filter to that action; click again to clear.
   const [filter, setFilter] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
@@ -317,7 +313,6 @@ function DryRunModal({ automation, result, onClose }: { automation: Automation; 
                 <CheckCircle2 size={14} className="inline mr-1.5 -mt-0.5" />In sync - a run right now would change nothing.
               </p>
             )}
-            {/* Summary badges double as filters - click one to see only that action. */}
             <div className="flex flex-wrap items-center gap-1.5">
               {DRY_ACTION_ORDER.filter((k) => result.summary[k]).map((k) => (
                 <button key={k} onClick={() => { setFilter(filter === k ? null : k); setPage(1); }}
@@ -410,7 +405,6 @@ function toInput(a: Automation): AutomationInput {
   };
 }
 
-// Split an interval-in-minutes into a {value, unit} for the form.
 function splitInterval(min: number): { value: number; unit: 'm' | 'h' | 'd' } {
   if (min && min % 1440 === 0) return { value: min / 1440, unit: 'd' };
   if (min && min % 60 === 0) return { value: min / 60, unit: 'h' };
@@ -422,7 +416,8 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
   const save = useSaveAutomation();
   const test = useTestAutomation();
   const networks = useNetworks().data || [];
-  const sharedProfiles = (useAccessProfiles().data || []).filter((p) => p.shared);
+  const profilesQ = useAccessProfiles();
+  const sharedProfiles = (profilesQ.data || []).filter((p) => p.shared);
 
   const init: AutomationInput = automation ? toInput(automation) : EMPTY;
   const [f, setF] = useState<AutomationInput>(init);
@@ -433,7 +428,11 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
   const [preview, setPreview] = useState<AutomationTestResult | null>(null);
   const set = <K extends keyof AutomationInput>(k: K, v: AutomationInput[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  const payload = (): AutomationInput => ({ ...f, intervalMinutes: Math.max(0, Math.round(ivValue)) * UNIT_MIN[ivUnit] });
+  // A deleted profile isn't in the picker, so it couldn't be unselected; the server refuses it. Only a
+  // current list tells which ones are deleted.
+  const currentProfiles = profilesQ.isSuccess && !profilesQ.isFetching ? profilesQ.data : null;
+  const profileIds = currentProfiles ? f.profileIds.filter((id) => currentProfiles.some((p) => p.id === id)) : f.profileIds;
+  const payload = (): AutomationInput => ({ ...f, profileIds, intervalMinutes: Math.max(0, Math.round(ivValue)) * UNIT_MIN[ivUnit] });
 
   const runTest = async () => {
     setError(''); setPreview(null);
@@ -467,7 +466,6 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
       }
     >
       <div className="flex flex-col gap-5">
-        {/* Connection */}
         <Section title="Connection">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Field label="Name"><Input value={f.name} onChange={(e) => set('name', e.target.value)} placeholder="e.g. CMDB hosts" maxLength={60} /></Field>
@@ -498,7 +496,6 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
           </div>
         </Section>
 
-        {/* Response mapping */}
         <Section title="Response Mapping">
           <Field label="Source Format" hint="How the endpoint returns the addresses.">
             <SelectMenu value={f.sourceFormat} onChange={(v) => set('sourceFormat', v)} searchable={false}
@@ -532,7 +529,6 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
           {preview && <TestReport result={preview} />}
         </Section>
 
-        {/* Target */}
         <Section title="Target">
           <Field label="Network">
             <SelectMenu value={f.networkId} onChange={(v) => set('networkId', v)} placeholder="Select network…"
@@ -550,7 +546,6 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
           </Field>
         </Section>
 
-        {/* Schedule & removal */}
         <Section title="Schedule & Removal">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Field label="Run Every" hint="Set 0 for manual-only.">
@@ -584,7 +579,6 @@ function IntegrationModal({ automation, onClose }: { automation: Automation | nu
   );
 }
 
-// Recent runs for one integration - the friendly "log" for diagnosing failures.
 function RunHistory({ id }: { id: number }) {
   const { data, isLoading } = useAutomationRuns(id);
   if (isLoading) return <div className="flex justify-center py-6"><Spinner /></div>;
@@ -667,7 +661,6 @@ function TestReport({ result }: { result: AutomationTestResult }) {
       : { tone: 'green' as const, title: 'All good!', sub: readySub };
   const bannerCls = banner.tone === 'red' ? 'border-red-500/30 bg-red-500/5' : banner.tone === 'amber' ? 'border-amber-500/30 bg-amber-500/5' : 'border-green-500/30 bg-green-500/5';
   const bannerIcon = banner.tone === 'red' ? <XCircle size={20} className="text-red-500" /> : banner.tone === 'amber' ? <AlertTriangle size={20} className="text-amber-500" /> : <CheckCircle2 size={20} className="text-green-500" />;
-  // Suggest likely address fields when the mapping is off.
   const needsHelp = !!result.error || result.valid === 0 || !!result.invalid;
   const suggestions = needsHelp ? (result.availableFields || []).filter((f) => /ip|addr|host/i.test(f)).slice(0, 4) : [];
 

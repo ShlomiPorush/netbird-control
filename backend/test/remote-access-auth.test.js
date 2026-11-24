@@ -1,6 +1,6 @@
 // Browser remote sessions are authorized by the portal, not by NetBird (NetBird only sees the
-// gateway peer). These tests pin the fail-closed rules: only an enabled, posture-free accept
-// rule from the user's own groups to the approved resource on the requested TCP port grants,
+// gateway peer). These tests pin the fail-closed rules: only an enabled accept rule (its
+// policy's posture checks are not applied) from the user's own groups to the approved resource on the requested TCP port grants,
 // and the gateway must route the address through that resource and nothing else.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -69,10 +69,29 @@ test('ports and port_ranges are both honoured', () => {
     assert.equal(ruleOpensTcpPort({ protocol: 'tcp', ports: '3389' }, 3389), false, 'unknown shape never grants');
 });
 
-test('posture-checked policies do not count for browser sessions', () => {
+test('posture-checked policies count for browser sessions; their checks are not applied', () => {
+    for (const checks of [['pc1'], [{ id: 'pc1' }], [null], 'pc1']) {
+        const s = base();
+        s.policies[1].source_posture_checks = checks;
+        const r = ask(s);
+        assert.equal(r.ok, true, JSON.stringify(checks));
+        assert.deepEqual(r.policies, ['Staff RDP']);
+    }
+});
+
+test('a posture-checked policy still denies by its drop rule and on other ports', () => {
     const s = base();
     s.policies[1].source_posture_checks = ['pc1'];
-    assert.equal(ask(s).code, 'POSTURE_REQUIRED');
+    assert.equal(ask(s, { port: 22 }).code, 'PORT_NOT_ALLOWED');
+    s.policies[1].rules.push({ enabled: true, action: 'drop', protocol: 'tcp', ports: ['3389'], sources: [{ id: 'g-staff' }], destinations: [{ id: 'g-srv' }] });
+    assert.equal(ask(s).code, 'BLOCKED_BY_POLICY');
+});
+
+test('a posture-checked policy reaching the resource only through the gateway target group grants nothing', () => {
+    const s = base();
+    s.policies[1].source_posture_checks = ['pc1'];
+    s.policies[1].rules[0].destinations = [{ id: 'g-gwt' }];
+    assert.equal(ask(s).code, 'NO_ACCESS');
 });
 
 test('disabled policies, disabled rules and drop rules', () => {
@@ -193,6 +212,13 @@ test('an expired temporary grant whose cleanup failed does not grant', () => {
 
 test('a temporary grant with a revoke attempt does not grant, even before it expires', () => {
     assert.equal(ask(withTempGrant({ status: 'active', expires_at: LATER, revoke_requested_at: EARLIER })).ok, false);
+});
+
+test('a temporary grant that carries posture checks grants only while it is valid', () => {
+    const posture = (grant) => { const s = withTempGrant(grant); s.policies.at(-1).source_posture_checks = ['pc1']; return s; };
+    assert.equal(ask(posture({ status: 'active', expires_at: LATER })).ok, true);
+    assert.equal(ask(posture({ status: 'active', expires_at: EARLIER })).ok, false);
+    assert.equal(ask(posture({ status: 'active', expires_at: LATER, revoke_requested_at: EARLIER })).ok, false);
 });
 
 test('a temporary grant still being created does not grant', () => {

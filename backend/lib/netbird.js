@@ -14,26 +14,21 @@ const { pool, setSetting } = require('./core');
 const { noteNetbirdOk, httpJson } = require('./http');
 
 // ─── MSP tenant context ───
-// The NetBird Cloud MSP portal manages child tenants with the SAME token plus an
-// `account=<tenantId>` query param on every management call (exactly what the official
-// dashboard does). A request handled inside runWithTenant() transparently targets that
-// tenant: the three low-level callers below append the param, and every cache in this
-// module switches to a short-TTL per-tenant slot so tenant data NEVER mixes with the
-// main account's caches. Scheduler jobs run outside any context → always the main account.
+// A request handled inside runWithTenant() transparently targets that tenant: the three low-level
+// callers below use its credentials, and every cache in this module switches to a short-TTL
+// per-tenant slot so tenant data NEVER mixes with the main account's caches. Scheduler jobs run
+// outside any context → always the main account.
 const _tenantAls = new AsyncLocalStorage();
-// opts.authToken: explicit token override for this context - used by tenant PROVISIONING,
-// which must call NetBird with the MSP admin's user token (+ ?account=) before the tenant
-// has any token of its own.
+// opts.authToken: the MSP provisioning token, for the few actions the tenant's own token cannot do
+// (its first token, an invitation). It is a user of the main account, so in a tenant it is sent with
+// ?account=<tenantId>, as the official dashboard does.
 function runWithTenant(accountId, fn, opts) {
     return _tenantAls.run({ account: String(accountId), authToken: (opts && opts.authToken) || '' }, fn);
 }
 function currentTenantAccount() { const s = _tenantAls.getStore(); return (s && s.account) || ''; }
 
-// Per-tenant API tokens (PATs created INSIDE the tenant account). NetBird's permission
-// groups cannot contain service users, so the main service-user token often cannot switch
-// into tenants at all - a per-tenant token is the reliable path. When one exists for the
-// active tenant, requests authenticate WITH IT directly (no ?account= needed); without
-// one we fall back to main-token account switching. Loaded from app_settings on boot.
+// Per-tenant API tokens (PATs created INSIDE the tenant account), the only credentials of a
+// tenant's routine calls. Loaded from app_settings on boot.
 const _tenantTokens = new Map(); // tenant/account id → PAT
 // The MSP PROVISIONING token: a USER token (an MSP admin in the tenants' permission groups)
 // used ONLY to create each tenant's own service user + token - never for routine calls.
@@ -64,21 +59,70 @@ function setTenantTokenInMemory(ids, token) {
     }
 }
 function hasTenantToken(id) { return _tenantTokens.has(String(id)); }
-// The auth + url adjustments for the active tenant context, shared by the three callers.
-// Order: explicit override (provisioning, always with ?account=) → the tenant's own PAT
-// (no switch needed) → main token + ?account= switching as a fallback.
-function tenantAuth(url) {
-    const s = _tenantAls.getStore();
-    const tenant = (s && s.account) || '';
-    if (!tenant) return _nbApi.token;
-    if (s.authToken) {
-        url.searchParams.set('account', tenant);
-        return s.authToken;
-    }
-    const tok = _tenantTokens.get(tenant);
-    if (tok) return tok; // direct tenant PAT - no account switch needed
-    url.searchParams.set('account', tenant); // fall back to main-token switching
-    return _nbApi.token;
+// Read in one step and used for the whole call, so a setting saved meanwhile never mixes credentials.
+function contextCredentials() {
+    const { account = '', authToken = '' } = _tenantAls.getStore() || {};
+    return {
+        account, base: _nbApi.url, mainToken: _nbApi.token,
+        token: authToken || (account ? _tenantTokens.get(account) || '' : _nbApi.token),
+        switched: !!(account && authToken),
+    };
+}
+function contextUrl(cred, apiPath) {
+    const url = new URL(apiPath, cred.base);
+    if (cred.switched) url.searchParams.set('account', cred.account);
+    return url;
+}
+
+// ─── Tenant account check ───
+// A call in a tenant context is sent only once its very credentials were seen to answer from another
+// account than the main one. A tenant's own token always belongs to one account, so its answer is
+// kept. A switched call is checked every time, right before it is sent: NetBird decides the switch
+// anew on every request, and when it refuses it, it silently answers from the main account.
+const _tenantTokenChecks = new Map(); // tenant → { by, ok }
+async function readAccountId(cred) {
+    const url = contextUrl(cred, '/api/accounts');
+    const headers = { 'Authorization': `Token ${cred.token}`, 'Accept': 'application/json' };
+    const r = await netbirdWriteOnce(url.protocol === 'https:' ? https : http, url, 'GET', headers, null);
+    const list = r.status >= 200 && r.status < 300 ? r.value.body : null;
+    return { status: r.status, retryAfter: r.retryAfter, id: (Array.isArray(list) && list[0] && String(list[0].id || '')) || '' };
+}
+async function checkTenantAccount(cred) {
+    if (!cred.token) return { ok: false };
+    const by = JSON.stringify([cred.base, cred.mainToken, cred.token]);
+    const known = _tenantTokenChecks.get(cred.account);
+    if (!cred.switched && known && known.by === by) return { ok: known.ok };
+    // The tenant's answer comes last, so nothing is waited for between it and the call it allows.
+    const main = await readAccountId({ ...cred, token: cred.mainToken, switched: false });
+    if (!main.id) return { ...main, ok: false };
+    const here = await readAccountId(cred);
+    if (!here.id) return { ...here, ok: false };
+    const ok = here.id !== main.id;
+    if (!cred.switched) _tenantTokenChecks.set(cred.account, { by, ok });
+    if (!ok) console.warn('[MSP] tenant %s: NetBird answered from the main account - the call was not sent', cred.account);
+    return { ok };
+}
+function refusalOf(cred) {
+    if (cred.switched) return "NetBird did not confirm that the MSP Provisioning Token works in this tenant, so nothing was sent. Its user must be in one of the tenant's permission groups.";
+    if (!cred.token) return 'This tenant has no API token, so nothing was sent. An administrator can create one on the Tenants page (the key icon).';
+    return 'NetBird did not confirm that the API token of this tenant belongs to it, so nothing was sent. Try again. If this continues, an administrator can replace the token on the Tenants page (the key icon).';
+}
+function sendChecked(cred, method, label, attempt, from429, refused) {
+    const checked = async () => {
+        const c = await checkTenantAccount(cred);
+        if (c.ok) return attempt();
+        if (c.status === 429) return { status: 429, retryAfter: c.retryAfter, value: from429(nb429Answer()) };
+        return { status: 502, value: refused(refusalOf(cred)) };
+    };
+    return withNbRateLimitRetry(label, nbWaitFor(method), cred.account ? checked : attempt, from429);
+}
+// Why the tenant's own calls would not be sent, or '' when they are.
+function tenantAccessError(tenantId) {
+    if (!netbirdApiConfigured()) return Promise.resolve('The NetBird API is not connected');
+    return runWithTenant(tenantId, () => {
+        const cred = contextCredentials();
+        return sendChecked(cred, 'GET', 'account check', async () => ({ status: 200, value: '' }), () => refusalOf(cred), (error) => error);
+    });
 }
 // Per-tenant cache slots (groups/policies/gref/usage), 60s TTL - tenant admin views are
 // low-traffic, and short freshness beats cross-tenant staleness.
@@ -280,17 +324,18 @@ async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429) {
 }
 const nbWaitFor = (method) => (String(method).toUpperCase() === 'GET' ? NB_429_READ_WAIT_MS : NB_429_WRITE_WAIT_MS);
 const writeFrom429 = (a) => ({ status: 429, body: a.body, raw: a.raw });
+const refusedWrite = (error) => ({ status: 502, error, raw: error });
 
 
 // Generic authenticated GET to the NetBird API → parsed JSON (array/object) or null
 function netbirdGet(apiPath) {
     if (!netbirdApiConfigured()) return Promise.resolve(null);
-    const url = new URL(apiPath, _nbApi.url);
-    const auth = tenantAuth(url);
+    const cred = contextCredentials();
+    const url = contextUrl(cred, apiPath);
     const transport = url.protocol === 'https:' ? https : http;
-    return withNbRateLimitRetry(`GET ${apiPath}`, NB_429_READ_WAIT_MS, () => new Promise((resolve) => {
+    return sendChecked(cred, 'GET', `GET ${apiPath}`, () => new Promise((resolve) => {
         const req = transport.get(url.toString(), {
-            headers: { 'Authorization': `Token ${auth}`, 'Accept': 'application/json' },
+            headers: { 'Authorization': `Token ${cred.token}`, 'Accept': 'application/json' },
             timeout: 10000,
         }, (res) => {
             let data = '';
@@ -315,7 +360,7 @@ function netbirdGet(apiPath) {
         });
         req.on('error', (err) => { console.error('[NetBird GET %s] error:', apiPath, err.message); resolve({ status: 0, value: null }); });
         req.on('timeout', () => { console.error(`[NetBird GET ${apiPath}] timeout`); req.destroy(); resolve({ status: 0, value: null }); });
-    }), (a) => a.body);
+    }), (a) => a.body, () => null);
 }
 
 // One write call (POST/PUT/DELETE, or a GET through netbirdReq) → { status, retryAfter,
@@ -343,17 +388,17 @@ function netbirdWriteOnce(transport, url, method, headers, body) {
 function netbirdPost(apiPath, bodyObj) {
     if (NETBIRD_READONLY) return Promise.resolve(readOnlyResp());
     if (!netbirdApiConfigured()) return Promise.resolve({ status: 0, error: 'NetBird API not configured' });
-    const url = new URL(apiPath, _nbApi.url);
-    const auth = tenantAuth(url);
+    const cred = contextCredentials();
+    const url = contextUrl(cred, apiPath);
     const body = JSON.stringify(bodyObj);
     const transport = url.protocol === 'https:' ? https : http;
     const headers = {
-        'Authorization': `Token ${auth}`,
+        'Authorization': `Token ${cred.token}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
         'Content-Length': Buffer.byteLength(body),
     };
-    return withNbRateLimitRetry(`POST ${apiPath}`, NB_429_WRITE_WAIT_MS, () => netbirdWriteOnce(transport, url, 'POST', headers, body), writeFrom429);
+    return sendChecked(cred, 'POST', `POST ${apiPath}`, () => netbirdWriteOnce(transport, url, 'POST', headers, body), writeFrom429, refusedWrite);
 }
 
 // Authenticated PUT (thin wrapper over netbirdReq) - a named companion to netbirdPost for the
@@ -364,13 +409,13 @@ function netbirdPut(apiPath, bodyObj) { return netbirdReq('PUT', apiPath, bodyOb
 function netbirdReq(method, apiPath, bodyObj) {
     if (NETBIRD_READONLY && String(method).toUpperCase() !== 'GET') return Promise.resolve(readOnlyResp());
     if (!netbirdApiConfigured()) return Promise.resolve({ status: 0, error: 'NetBird API not configured' });
-    const url = new URL(apiPath, _nbApi.url);
-    const auth = tenantAuth(url);
+    const cred = contextCredentials();
+    const url = contextUrl(cred, apiPath);
     const body = bodyObj !== undefined ? JSON.stringify(bodyObj) : null;
     const transport = url.protocol === 'https:' ? https : http;
-    const headers = { 'Authorization': `Token ${auth}`, 'Accept': 'application/json' };
+    const headers = { 'Authorization': `Token ${cred.token}`, 'Accept': 'application/json' };
     if (body !== null) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(body); }
-    return withNbRateLimitRetry(`${method} ${apiPath}`, nbWaitFor(method), () => netbirdWriteOnce(transport, url, method, headers, body), writeFrom429);
+    return sendChecked(cred, method, `${method} ${apiPath}`, () => netbirdWriteOnce(transport, url, method, headers, body), writeFrom429, refusedWrite);
 }
 
 // In-memory caches for groups (id→name) and policies (id→{name,enabled})
@@ -752,6 +797,6 @@ module.exports = {
     getGroupRefMap, getUsageData, invalidateUsage, nbDirectGet, getReverseProxyStatus, bustReverseProxyCache,
     refreshBypassedPeers, peerIsBypassed, getBypassedPeerCount,
     runWithTenant, currentTenantAccount, getMspStatus, bustMspCache,
-    loadTenantTokens, setTenantTokenInMemory, hasTenantToken,
+    loadTenantTokens, setTenantTokenInMemory, hasTenantToken, tenantAccessError,
     getMspProvisioningToken, setMspProvisioningTokenInMemory,
 };

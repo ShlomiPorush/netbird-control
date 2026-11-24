@@ -196,3 +196,44 @@ test('an unknown /api/v1 path answers 404 JSON, not the login', async () => {
     assert.equal(r.status, 404);
     assert.equal(JSON.parse(r.text).code, 'NOT_FOUND');
 });
+
+test('createResource without its scope: 403 SCOPE_MISSING, before any other check', async () => {
+    const r = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '8.8.8.8', port: 3389, createResource: true } });
+    assert.equal(r.status, 403);
+    assert.equal(JSON.parse(r.text).code, 'SCOPE_MISSING');
+});
+
+test('the router answers 201 with `resource`, and passes resourceCreated through on a refusal', async () => {
+    const ra = require('../lib/remote-access');
+    const real = ra.issueLaunch;
+    try {
+        ra.issueLaunch = async () => ({ ticket: 't'.repeat(43), expiresAt: new Date().toISOString(), resource: { created: true, id: 'res-1', address: '8.8.8.8' } });
+        const ok = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '8.8.8.8', port: 3389 } });
+        assert.equal(ok.status, 201);
+        assert.deepEqual(JSON.parse(ok.text).resource, { created: true, id: 'res-1', address: '8.8.8.8' });
+        for (const flag of [true, 'unknown']) {
+            ra.issueLaunch = async () => { const e = new Error('No access.'); e.status = 403; e.code = 'NO_ACCESS'; e.resourceCreated = flag; throw e; };
+            const r = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '8.8.8.8', port: 3389 } });
+            assert.equal(r.status, 403);
+            assert.deepEqual(JSON.parse(r.text), { error: 'No access.', code: 'NO_ACCESS', resourceCreated: flag });
+        }
+        ra.issueLaunch = async () => { const e = new Error('Off.'); e.status = 403; e.code = 'DISABLED'; throw e; };
+        const plain = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '8.8.8.8', port: 3389 } });
+        assert.equal('resourceCreated' in JSON.parse(plain.text), false, 'no field when nothing was sent');
+    } finally {
+        ra.issueLaunch = real;
+    }
+});
+
+test('an unexpected failure after a create still says resourceCreated', async () => {
+    const ra = require('../lib/remote-access');
+    const real = ra.issueLaunch;
+    try {
+        ra.issueLaunch = async () => { const e = new Error('boom'); e.resourceCreated = true; throw e; };
+        const r = await post('/api/v1/remote-access/launch', { key: API_KEY, json: { protocol: 'rdp', address: '8.8.8.8', port: 3389 } });
+        assert.equal(r.status, 500);
+        assert.deepEqual(JSON.parse(r.text), { error: 'Internal server error', code: 'INTERNAL', resourceCreated: true });
+    } finally {
+        ra.issueLaunch = real;
+    }
+});

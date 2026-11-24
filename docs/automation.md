@@ -26,7 +26,7 @@ Connect an **external HTTP source** that returns IP addresses and **auto-provisi
    - **New key, new address** → **create** the resource (joined to the profile groups).
    - **On the blocklist** for the target network → **skip** (counted `blocked`).
    - **Name already taken** by a different resource → **conflict**, skipped.
-   - **Ours, not seen this run** → apply the **removal mode**.
+   - **Ours, not seen this run** → apply the **removal mode**. With `delete`, the ledger row goes only after the delete succeeded or NetBird confirmed the resource is gone (a 404 in the network the row recorded, which may differ from the automation's current target). A refused or unanswered delete keeps the row, counts as failed, and the next run tries again.
 4. Write an `automation_runs` row (created/adopted/updated/disabled/skipped/conflicts/blocked/failed) + audit `automation.run` (→ Telegram).
 
 **Key guarantee:** the automation only ever mutates resources in its **own ledger**, so it never touches manually-added resources it didn't create/adopt.
@@ -35,7 +35,8 @@ Connect an **external HTTP source** that returns IP addresses and **auto-provisi
 
 - **Test connection & mapping** - fetches + maps **without** creating anything; shows a preview of mapped items, marks invalid addresses and **blocklisted** ones, and flags duplicate keys.
 - **Sync now** - runs immediately and reports counts.
-- **Repair / Forget** - reconcile the ledger against reality / stop managing everything (leaves resources in NetBird as-is).
+- **Repair / Forget** - reconcile the ledger against reality / stop managing everything (leaves resources in NetBird as-is). The tracking list marks a row as an orphan the same way (an unreadable network shows as unknown, not orphan). Repair checks each row in the network it recorded; if a network's resource list can't be read, it changes nothing. Rows of a network that was deleted are removed as orphans.
+- An automation can only be saved with Access Profiles that exist, and a profile an automation uses can't be deleted.
 - Per-run history is kept for observability.
 
 ## Gotchas

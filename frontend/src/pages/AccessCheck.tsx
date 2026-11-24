@@ -9,7 +9,7 @@ import type {
   AccessDeviceBlocker, AccessPortsDesc, AccessRouterStatus, AccessQuery, AccessTargetInfo, UserAccessResult, WhoHasAccessResult,
   AccessCompactDevice, WhoHasAccessUser, AccessAuthorization, AccessAuthResource, WhoAuthorizedUser,
 } from '@/lib/types';
-import { Badge, Button, Field, Input, PillTabs, SelectMenu, Spinner, StatusDot, EmptyState, type SelectOption } from '@/components/ui';
+import { Badge, Button, Card, Field, Input, PillTabs, SelectMenu, Spinner, StatusDot, EmptyState, type SelectOption } from '@/components/ui';
 
 // Access Check: "does this user have access to that resource?" and "who has access to it?",
 // answered from a fresh read of NetBird. The backend (lib/access-check.js) owns every rule;
@@ -165,6 +165,7 @@ export default function AccessCheck() {
       <p className="text-sm text-nb-gray-500 dark:text-nb-gray-400 max-w-3xl">
         Check whether a user is authorized for a resource, or everyone who is - by the same rules Remote Access uses:
         the user's groups and their devices' groups against the policies, with blocking rules winning.
+        Remote Access doesn't run posture checks, so it allows what shows here as Authorized If Posture Checks Pass.
         The device details show what each device can reach right now.
       </p>
 
@@ -177,7 +178,7 @@ export default function AccessCheck() {
         ]}
       />
 
-      <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-4">
+      <Card className="p-4">
         <div className={cn('grid gap-4', p.mode === 'user' && 'md:grid-cols-2')}>
           {p.mode === 'user' && (
             <Field label="User" className="min-w-0">
@@ -208,7 +209,7 @@ export default function AccessCheck() {
         </div>
         {!portValid && <p className="mt-2 text-xs text-red-500">Enter a port from 1 to 65535, or leave it empty for any port.</p>}
         {opts.isError && <p className="mt-2 text-xs text-red-500">{(opts.error as Error).message}</p>}
-      </div>
+      </Card>
 
       {active.isError && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-4 text-sm text-red-600 dark:text-red-400">
@@ -311,13 +312,13 @@ function UserResult({ r }: { r: UserAccessResult }) {
         {gap && <p className="flex gap-1.5 items-start"><TriangleAlert size={14} className="text-netbird shrink-0 mt-0.5" />{gap}</p>}
       </Banner>
       {a.resources.length > 0 && (
-        <Panel className="p-4 flex flex-col gap-3">
-          <h3 className="text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Why</h3>
+        <Card className="p-4 flex flex-col gap-3">
+          <h3 className="text-base font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Why</h3>
           {a.resources.map((x) => <AuthResourceRow key={x.resource.id} x={x} q={r.query} single={a.resources.length === 1} />)}
           <p className="text-xs text-nb-gray-500">
             <span className="font-medium">User's groups:</span> {a.groups.length ? a.groups.join(', ') : 'none'} (plus All) - their own groups and their devices' groups.
           </p>
-        </Panel>
+        </Card>
       )}
       <Collapsible title="Device Details" badge={<VerdictBadge v={r.verdict} q={r.query} />}>
         <div className="flex flex-col gap-3">
@@ -391,14 +392,19 @@ function DeviceCard({ d, q, defaultOpen }: { d: AccessDevice; q: AccessQuery; de
   const [open, setOpen] = useState(defaultOpen);
   return (
     <Panel>
-      <button onClick={() => setOpen((o) => !o)} className="w-full flex flex-wrap items-center gap-x-3 gap-y-2 p-4 text-left">
-        {open ? <ChevronDown size={16} className="text-nb-gray-400" /> : <ChevronRight size={16} className="text-nb-gray-400" />}
+      {/* The toggle and the device link are siblings (no link inside a button). The toggle's
+          ::after covers the header, so a click anywhere but the name still opens or closes it. */}
+      <div className="relative w-full flex flex-wrap items-center gap-x-3 gap-y-2 p-4 text-left">
+        <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={`${open ? 'Hide' : 'Show'} details for ${d.name}`}
+          className="after:absolute after:inset-0">
+          {open ? <ChevronDown size={16} className="text-nb-gray-400" /> : <ChevronRight size={16} className="text-nb-gray-400" />}
+        </button>
         <Monitor size={16} className="text-nb-gray-500" />
-        <Link to={`/peers/${encodeURIComponent(d.id)}`} onClick={(e) => e.stopPropagation()} className="font-medium text-nb-gray-900 dark:text-nb-gray-100 hover:underline break-all">{d.name}</Link>
+        <Link to={`/peers/${encodeURIComponent(d.id)}`} className="relative z-10 font-medium text-nb-gray-900 dark:text-nb-gray-100 hover:underline break-all">{d.name}</Link>
         <span className="inline-flex items-center gap-1.5 text-xs text-nb-gray-500"><StatusDot on={d.connected} />{d.connected ? 'Online' : 'Offline'}</span>
         {d.infrastructure && <Badge tone="cyan" className="py-1 px-2">Infrastructure</Badge>}
         <span className="ml-auto"><VerdictBadge v={d.effective} q={q} /></span>
-      </button>
+      </div>
       {d.blockers.length > 0 && (
         <div className="px-4 pb-3 -mt-1 flex flex-col gap-1">
           {d.blockers.map((b) => <p key={b} className="flex gap-2 text-sm text-red-600 dark:text-red-400"><TriangleAlert size={14} className="shrink-0 mt-0.5" />{BLOCKER[b]}</p>)}

@@ -8,7 +8,7 @@ import { useViewer } from '@/contexts/ViewerContext';
 import { useTableSort } from '@/lib/useTableSort';
 import { useClientPagination, ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
 import type { GrantTarget, AccessRequest, AccessRequestStatus, Peer } from '@/lib/types';
-import { Badge, Button, Checkbox, EmptyState, LoadingState, IconButton, Table, THead, Th, SortTh, TBody, Tr, Td, PageHeader, Field, Textarea, Modal, Pagination } from '@/components/ui';
+import { Badge, Button, Card, Checkbox, EmptyState, LoadingState, IconButton, Table, THead, Th, SortTh, TBody, Tr, Td, PageHeader, Field, Textarea, Modal, Pagination } from '@/components/ui';
 import { DurationControl, DEFAULT_DURATION, durationPayload, type DurationState } from '@/components/access/DurationControl';
 import { TARGET_META, TargetChips } from '@/components/access/targets';
 import { TargetSearch } from '@/components/access/TargetSearch';
@@ -265,7 +265,7 @@ export default function RequestAccess() {
         </div>
       )}
 
-      <div className="max-w-3xl rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4 md:p-5 flex flex-col gap-4">
+      <Card className="max-w-3xl p-4 md:p-5 flex flex-col gap-4">
         <Field label="What Do You Need Access To?" hint="Start typing - pick one or more resources, networks or access profiles.">
           <TargetSearch chosen={targets} onPick={(t) => setTargets((p) => [...p, t])} />
           {targets.length > 0 && (
@@ -285,7 +285,7 @@ export default function RequestAccess() {
         {error && <p className="text-sm text-red-500">{error}</p>}
         {doneMsg && <p className="inline-flex items-center gap-1.5 text-sm text-green-600 dark:text-green-500"><CheckCircle2 size={15} /> {doneMsg}</p>}
         <div><Button variant="primary" onClick={submit} disabled={create.isPending || !targets.length || !reason.trim()}><KeyRound size={15} /> {create.isPending ? 'Submitting…' : 'Submit request'}</Button></div>
-      </div>
+      </Card>
 
       <div className="flex items-center justify-between gap-3 mt-8 mb-3">
         <h2 className="text-base font-semibold text-nb-gray-900 dark:text-nb-gray-50">My Requests</h2>

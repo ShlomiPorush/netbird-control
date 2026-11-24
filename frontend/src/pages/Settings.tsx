@@ -94,11 +94,11 @@ export default function Settings() {
           const on = section === t.key;
           return (
             <button key={t.key} onClick={() => selectTab(t.key)}
-              className={cn('flex items-center gap-2.5 whitespace-nowrap rounded-md px-4 py-2 text-[0.87rem] text-left transition-colors shrink-0',
+              className={cn('flex items-center gap-2.5 whitespace-nowrap rounded-lg px-4 py-2 text-[0.87rem] text-left transition-colors shrink-0',
                 on
-                  ? 'bg-nb-gray-200/70 dark:bg-nb-gray-920 text-nb-gray-900 dark:text-nb-gray-100'
+                  ? 'bg-white font-medium text-nb-gray-900 shadow-[0_1px_2px_rgba(0,0,0,0.06),0_4px_12px_-6px_rgba(0,0,0,0.12)] ring-1 ring-nb-gray-100 dark:bg-nb-gray-920 dark:text-nb-gray-50 dark:ring-nb-gray-900 dark:shadow-none'
                   : 'text-nb-gray-500 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900/50 hover:text-nb-gray-800 dark:hover:text-nb-gray-200')}>
-              <Icon size={14} className="shrink-0" /> {t.label}
+              <Icon size={14} className={cn('shrink-0', on && 'text-netbird')} /> {t.label}
             </button>
           );
         })}
@@ -111,7 +111,7 @@ export default function Settings() {
           <ActiveIcon size={14} className="text-netbird" />
           <span className="text-nb-gray-700 dark:text-nb-gray-200">{active.label}</span>
         </div>
-        <h1 className="text-2xl font-bold text-nb-gray-900 dark:text-nb-gray-50 mb-2">{active.label}</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 mb-2">{active.label}</h1>
         {/* Render by `active.key` (already restricted to TENANT_SECTIONS in tenant mode) so a
             stale ?tab can never mount a main-only section while managing a tenant. */}
         {active.key === 'general' ? <General />

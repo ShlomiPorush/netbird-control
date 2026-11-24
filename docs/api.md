@@ -4,6 +4,8 @@ NetBird Control has a versioned API for other systems under `/api/v1`. It is sep
 `/api` routes the app's own pages use, which can change between releases.
 
 For a step-by-step integration, see [Open remote sessions from another system](remote-launch-integration.md).
+Admins can also read this API in the app: **Settings → API Keys → API Documentation** opens the
+interactive reference (`/api/docs`), where **Public API (v1)** comes first and **Authorize** takes a key.
 
 ## API keys
 
@@ -33,6 +35,7 @@ An admin creates keys in **Settings → API Keys**, in the main account.
 | Scope | Allows |
 | --- | --- |
 | `remote-access:launch` | `POST /api/v1/remote-access/launch` |
+| `remote-access:create-resource` | `"createResource": true` on `POST /api/v1/remote-access/launch`: create a temporary resource for a missing server. The key needs `remote-access:launch` too. New keys don't get it unless an admin ticks it. |
 
 ## Authentication
 
@@ -85,6 +88,14 @@ Every error is JSON with a message for people and a stable code for programs:
 | 413 | `TOO_LARGE` | The body is over 64 KB. |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | The body is not sent as JSON. |
 | 429 | `TOO_MANY_FAILURES`, or no code | Too many failed attempts from this address (only a failed attempt gets this), or too many calls with this key. |
+| 403 | `CREATE_DISABLED` | `createResource: true`, but creating resources is turned off (or this instance is read-only). |
+| 403 | `ADDRESS_NOT_PUBLIC`, `NAME_NOT_PUBLIC`, `ADDRESS_BLOCKED` | `createResource: true` for an address that isn't public, a name with an answer that isn't public, or an address or name on the blocklist. Nothing was created. |
+| 403 | `NAME_NOT_FOUND` | The host name has no IPv4 address in the DNS. |
+| 409 | `CREATE_LIMIT` | Too many resources created by the API still exist (Settings > Remote Access sets the maximum). |
+| 409 | `CREATE_IN_PROGRESS` | Another request is creating a resource for this server right now. Try again in a minute. |
+| 502 | `RESOURCE_CREATE_FAILED` | NetBird refused the new resource. Nothing was created. |
+| 502, 503 | `CREATE_UNCONFIRMED` | NetBird didn't confirm the new resource (502, with `resourceCreated`), or an earlier request for this server is still unconfirmed (503). Try again in a few minutes. |
+| 503 | `NAME_LOOKUP_FAILED`, `TARGETS_SETTLING` | The DNS didn't answer, or Remote Access is getting ready after a change. Try again shortly. |
 | 503 | `BUSY`, `SNAPSHOT_FAILED`, `AUDIT_FAILED`, `UNAVAILABLE` | Try again shortly. |
 
 ## `POST /api/v1/remote-access/launch`
@@ -108,10 +119,11 @@ browser.
 | `domain` | string | no | RDP only. Up to 256 characters. A domain inside `username` (`CORP\admin`) works too. |
 | `privateKey` | string | no | SSH only. An OpenSSH or PEM private key, up to 16384 characters. |
 | `passphrase` | string | no | SSH only. The private key's passphrase. |
+| `createResource` | boolean | no | `true`: add the server as a temporary NetBird resource when NetBird has none for it. Needs the `remote-access:create-resource` scope. Default `false`. Any other type is refused with `400 INVALID_FIELD`. See [Creating a missing resource](#creating-a-missing-resource-createresource). |
 
 **With `user`:** the app finds the one NetBird user with that email address (letter case doesn't
 matter) and checks now that this user may reach the target, with the same rules as the **Remote
-Access** page. Only that user can open the link.
+Access** page (a policy's posture checks are not applied). Only that user can open the link.
 
 **Without `user`:** the app checks nothing at this point. Whoever opens the link first gets the
 session, if their own access allows the target when they open it. A link that reaches someone else
@@ -132,6 +144,8 @@ every minute while it stays open.
 }
 ```
 
+With `createResource: true` the answer also has `resource` (see below).
+
 Send the user's browser to `url`. The link:
 
 - works once, even if opening it fails (while remote access is getting ready after a change or a
@@ -149,3 +163,75 @@ curl -sS https://control.example.com/api/v1/remote-access/launch \
 	-H "Content-Type: application/json" \
 	-d '{"user":"tech@example.com","protocol":"rdp","address":"10.0.0.5","port":3389,"username":"admin","password":"..."}'
 ```
+
+### Creating a missing resource (`createResource`)
+
+With `"createResource": true`, and a key with the `remote-access:create-resource` scope, the app adds
+a server that NetBird has no resource for, so the person can connect without waiting for an
+administrator. An admin turns this on in **Settings > Remote Access > Servers From Launch Links**,
+creates the network the new resources go into (or chooses an existing empty one), and chooses a
+Shared Access Profile. The new resources join that profile's group, and the profile's policy (for
+example *CRM users -> that group*) decides who reaches the new servers. The app never creates or
+changes a policy.
+
+The key must have the scope first (`403 SCOPE_MISSING`, before any other check), and with `user`
+that user must exist, only once, and not be blocked. Then the app checks, in this order, and stops at the first refusal:
+
+1. **Does NetBird cover the target already?** For an IPv4 address: a resource or an enabled legacy
+   route covers it. For a host name: a domain resource or an enabled domain route covers the name;
+   otherwise the name is looked up and any of its addresses is covered. Then nothing is created and
+   the request goes on exactly as without `createResource`, whatever the settings below say and
+   whether or not the address is public. An integration can send `createResource: true` on every
+   launch: private servers that already have a resource keep working. When NetBird or the DNS can't
+   be read and creating resources is off, the request also goes on as without `createResource`.
+2. Creating resources is on, a network and an Access Profile are chosen, and the instance is not
+   read-only (`CREATE_DISABLED`).
+3. The target is public. An IPv4 address must not be in the IANA IPv4 Special-Purpose Address
+   Registry (every entry) or multicast (`ADDRESS_NOT_PUBLIC`). For a host name every IPv4 answer must be
+   public (`NAME_NOT_PUBLIC`), and the app uses the first one. A name with no IPv4 answer is
+   `NAME_NOT_FOUND`. Neither the address nor the name may be on the blocklist (`ADDRESS_BLOCKED`;
+   names compare without regard to letter case, a trailing dot or international spelling).
+4. Fewer than the maximum resources created by the API exist (`CREATE_LIMIT`), and no other request is
+   adding the same address.
+
+Addresses that are never a Remote Access target (loopback, NetBird peers, multicast, reserved) go
+on as without `createResource`, and the usual checks refuse them. A host name with such an answer
+next to a public one is `NAME_NOT_PUBLIC`.
+
+The new resource is a host resource (`x.x.x.x/32`) named after the address (or `name (address)`
+for a host name), in the chosen network and the Access Profile's group, with no policy. Then the usual checks follow:
+with `user`, that user's access to the address. The link connects to the address, also when the
+request sent a host name; it then keeps the name for the SSH host key set for it.
+
+The `201` answer then has:
+
+```json
+{
+	"url": "https://control.example.com/remote-access?launch=Xk9...",
+	"expiresAt": "2026-11-05T10:05:00.000Z",
+	"resource": { "created": true, "id": "d2l5...", "address": "203.0.113.10" }
+}
+```
+
+`created` is `true` only when this request made the resource. `false` means NetBird already had one
+(`id` is set when the app knows it).
+
+An error answered after the resource was sent to NetBird carries `resourceCreated`: `true` when the
+resource was made (for example the named user has no access, `403 NO_ACCESS`), or `"unknown"` when
+NetBird didn't answer clearly. The resource stays either way:
+
+```json
+{ "error": "You don't have access to this resource. Request access if you need it.", "code": "NO_ACCESS", "resourceCreated": true }
+```
+
+A refusal before anything was sent, or a definite refusal by NetBird, has no `resourceCreated`.
+
+The new resources are temporary. Once their **Keep Opened Servers Available For** time (10 hours
+by default) has passed since they were created and no session holds them, the app deletes them (the
+resource only; the group and its policies stay). A resource that someone changed, or that a policy
+names directly, is kept and left to an admin. See
+[Browser remote access](remote-access.md#resources-created-by-the-launch-api).
+
+The audit log records `resource.create_intent` before the write, then `resource.create`,
+`resource.create_unconfirmed` or `resource.create_failed`, and later `resource.delete`,
+`resource.delete_unconfirmed` or `resource.kept`.

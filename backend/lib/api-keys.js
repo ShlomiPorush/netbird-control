@@ -16,6 +16,8 @@ const { pool } = require('./core');
 
 const SCOPES = Object.freeze({
     'remote-access:launch': 'Open browser remote sessions (RDP / SSH) for a user from another system',
+    // Only together with remote-access:launch, and only while Settings > Remote Access allows it.
+    'remote-access:create-resource': 'Add a missing server as a temporary NetBird resource when opening a session',
 });
 const KEY_PREFIX = 'nbc_';
 const KEY_RE = /^nbc_[A-Za-z0-9_-]{43}$/;
@@ -44,11 +46,9 @@ async function writeAuditStrict(q, { actorId = '', actorEmail = '', actorName = 
     await (timeoutMs ? q.query({ text, values, query_timeout: timeoutMs }) : q.query(text, values));
 }
 
-// The audit actor for a change made by a signed-in admin.
 const viewerActor = (v) => ({
     actorId: (v && (v.user_id || v.oid)) || '', actorEmail: (v && v.email) || '', actorName: (v && v.name) || '',
 });
-// The audit actor for an action a key takes.
 const keyActor = (k) => ({ actorId: `apikey:${k.id}`, actorEmail: '', actorName: `API key "${k.name}"` });
 
 // "::ffff:10.0.0.1" -> "10.0.0.1", so an IPv4 client matches an IPv4 entry whatever socket it used.

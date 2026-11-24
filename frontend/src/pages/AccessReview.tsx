@@ -6,7 +6,7 @@ import { useConfirm } from '@/contexts/ConfirmContext';
 import { formatMaybeDate } from '@/lib/logfmt';
 import { ucLabel } from '@/lib/str';
 import type { RecertItem } from '@/lib/types';
-import { Badge, Button, EmptyState, LoadingState, Modal, Spinner } from '@/components/ui';
+import { Badge, Button, Card, EmptyState, LoadingState, Modal, Spinner } from '@/components/ui';
 
 // Section order on the page - security-heavy kinds first.
 const KIND_ORDER = ['bypass', 'perm_user', 'perm_group', 'auto_trusted', 'auto_rule', 'recurring'];
@@ -109,10 +109,10 @@ export default function AccessReview() {
       ) : (
         <div className="max-w-3xl flex flex-col gap-5">
           {/* Round header: progress + due date */}
-          <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
+          <Card className="p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm">
-                <span className="font-semibold text-nb-gray-900 dark:text-nb-gray-50">Round #{open.id}</span>
+                <span className="font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50">Round #{open.id}</span>
                 <span className="text-nb-gray-500"> · opened {formatMaybeDate(open.startedAt)} · </span>
                 <span className={overdue ? 'text-red-500 font-medium' : 'text-nb-gray-500'}>
                   due {formatMaybeDate(open.dueAt)}{overdue ? ' (overdue)' : ''}
@@ -129,7 +129,7 @@ export default function AccessReview() {
             <div className="mt-3 h-1.5 rounded-full bg-nb-gray-100 dark:bg-nb-gray-900 overflow-hidden">
               <div className="h-full bg-netbird transition-all" style={{ width: `${total ? Math.round((decided / total) * 100) : 0}%` }} />
             </div>
-          </div>
+          </Card>
 
           {grouped.map(([kind, items]) => (
             <div key={kind}>

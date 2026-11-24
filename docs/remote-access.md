@@ -7,7 +7,8 @@ NetBird client on their device, and the servers need no NetBird client either: s
 Network resources through their routing peers, like any other NetBird traffic.
 
 A user can connect only to a server that their own NetBird access already reaches, on a port
-their policies already open. Remote Access never grants new access.
+their policies already open. Remote Access never grants new access. The posture checks of those
+policies are not applied to browser sessions (see [Who may connect where](#who-may-connect-where), item 5).
 
 ## How it works
 
@@ -186,9 +187,10 @@ understand is refused.
    through a Browser Gateway target group (of this or another installation) never counts: a
    resource is in such a group only because some session opened it. A drop rule through one still
    refuses.
-5. **Policies with posture checks do not count.** A browser session cannot prove anything about
-   the user's device, and the portal is reachable from the internet. Those users connect with the
-   NetBird client instead.
+5. **Posture checks are not applied.** A policy with posture checks counts like any other policy,
+   but its checks are not run: they run on the NetBird client, and a browser session has none. A
+   policy that requires a country, an OS version or a network range therefore doesn't limit
+   browser sessions.
 6. A temporary grant counts only while it is active, not expired, and no revoke has started.
 7. The gateway reaches the target through that resource **only**:
    - on the IP gateway, no other route is as specific, and the gateway receives no domain-based
@@ -574,6 +576,10 @@ that the real end time is unknown.
 | guacd Address / Port | `remote-gateway` / 4822 | The IP gateway's guacd as the app reaches it. |
 | Names guacd Address / Port | `remote-names-gateway` / 4822 | The names gateway's guacd as the app reaches it. |
 | SSH Host Keys | None | Per IPv4 address or host name; enforced when present. |
+| Servers From Launch Links: the switch | Off | Lets launch links add a resource for a missing public server (see [Resources created by the launch API](#resources-created-by-the-launch-api)). Turn it on only after every instance runs this version. It turns on only once a network and an Access Profile are set. |
+| Servers From Launch Links: Network | None | Set in the **Choose Network** window (**Create New** or **Use Existing**), changed with **Change Network** and cleared with **Stop Using This Network** in the row's menu, never by **Save** (see [Resources created by the launch API](#resources-created-by-the-launch-api)). While creating is on, or servers launch links added are still in use there, the app changes its servers no other way; it stays open to the gateway while it is set. |
+| Servers From Launch Links: Who Can Reach Them | None | A Shared Access Profile. The servers join its group, and its policy decides who reaches them. Its ports must include 3389 for RDP and 22 for SSH. |
+| Servers From Launch Links: Limit | 50 | Up to this many servers at a time, 1 to 500. Resources added by launch links that still exist (or may). |
 
 The gateways' NetBird object ids are account-specific, so they are not part of the settings
 export.
@@ -587,3 +593,144 @@ browser never sees them. The person who opens the link goes through every check 
 for a manual connection. When the request names a user by email, only that user can open the link.
 When it names nobody, the first signed-in user whose access allows the target gets the session.
 See the [public API reference](api.md) and the [integration guide](remote-launch-integration.md).
+
+## Resources created by the launch API
+
+A launch request may ask the app to add a server that NetBird has no resource for
+(`"createResource": true`, with the API key scope `remote-access:create-resource`), so the person
+can connect without waiting for an administrator. The
+[public API reference](api.md#creating-a-missing-resource-createresource) describes the request and the
+answers.
+
+**Access stays with NetBird.** In **Settings > Remote Access > Servers From Launch Links** you
+choose a Shared [Access Profile](access-profiles.md), for example *CRM Users -> Linked Servers*. The
+new resources join that profile's group, and the profile's policy decides who reaches them. The app
+never creates or changes a policy and never grants access. A resource that a request added stays
+when the link is then refused (for example, the user has no access); the answer says so with
+`resourceCreated`. Posture checks of the profile apply to NetBird clients, not to browser sessions.
+
+The profile is checked when a save chooses it or turns adding servers on. It must be a Shared
+profile of the main account whose group exists in NetBird, and whose policy exists, is on, and has
+an enabled accept rule to that group. The group is taken from the profile; the page never sends it.
+Turning adding servers off, or changing the limit, never reads the profile or NetBird. Before every
+create the profile row is read again: when it is gone, no longer Shared or has another group (a
+settings import can reuse a profile id), nothing is created (`CREATE_DISABLED`). While a profile is
+chosen it is in use and can't be deleted (see
+[Deleting a profile](access-profiles.md#deleting-a-profile)). It can't be replaced while servers
+added by launch links are in use.
+
+**The network** is set in the same section, never by **Save**:
+
+- **Create New** (in the **Choose Network** window) creates `Remote Access Resources (<application name>)`
+  with the routing peers you choose (single peers and peer groups; masquerade on, metric 9999). The
+  network is stored right after NetBird creates it, then the routing peers are added, and the page
+  lists any that couldn't be. Check the Networks page before adding one again: a request without
+  an answer may have been saved.
+- **Use Existing** takes a network that has **no resources**. It keeps its name and routing
+  peers, and the app adds none. A network with resources shows **Clear In Networks**, a link to its
+  page, where selecting all rows and **Delete** clear it. Refused: a network an automation targets, a
+  network that a recurring access rule, a pending access request, an auto-approval rule or a live
+  temporary grant names ("Network Sales is used by recurring access for Dana. Remove it there
+  first."), and a network whose routing peers include a Browser Gateway or a group that holds one.
+  When it has no active routing peer, the page says so: add one in Networks.
+
+**The app never deletes a network here.** A failure leaves what exists and says what to do. With a
+network stored, **Change Network** (in the network row's menu) opens the same window and replaces
+it, and **Stop Using This Network** clears it (and turns adding servers off). Both change only this
+setting: nothing in NetBird is deleted or changed, and the old network stays among the networks open
+to the gateway. Both are refused while servers launch links added are still in use (`409
+CREATED_RESOURCES_EXIST`: kept ones can be deleted in Networks); servers of a network that was
+deleted in NetBird don't count. They are audited as `remote_access.network_attach` and
+`remote_access.network_release`. A read-only instance refuses both.
+
+**Only public IPv4 addresses.** Every address in the
+[IANA IPv4 Special-Purpose Address Registry](https://www.iana.org/assignments/iana-ipv4-special-registry/)
+(private, shared, loopback, link-local, documentation, benchmarking, reserved and the others) and
+multicast are refused. A host name is looked up here and used only when every IPv4 answer is
+public; the resource is a host resource for the first answer (`x.x.x.x/32`), never a domain
+resource. The session connects to that address and keeps the host name for the SSH host key set
+for it. The blocklist applies to the address and to the name, with no override (letter case, a
+trailing dot and international spelling don't matter). When a resource or an enabled legacy route
+already covers the target, nothing is created. Because only public servers are added, the app
+doesn't check whether a Browser Gateway can reach the group through a policy of its own: that would
+expose nothing that isn't public already.
+
+**Each create is recorded** in the `ra_created_resources` table, with a `resource.create_intent`
+audit record, before NetBird is called. The table holds one active row per address, so two requests
+for one server at the same moment add it once. The resource's description holds the request's id
+(`Created by the Remote Access API (<id>)`). When NetBird doesn't answer clearly (no answer, a
+server error, or "too many requests" to the end), the row is *unconfirmed*: the next sync adopts a
+resource that carries that id only when it is exactly as asked (name, address, description, enabled,
+group), and marks one that isn't *kept*. An administrator's resource at the same address is never
+adopted. With no such resource after 10 minutes, the row is marked failed.
+
+**Created resources are temporary.** The target sync on the leader instance deletes a created
+resource when all of these hold:
+
+- its hold has ended (or it never had one) and no session uses it, checked again under the target
+  lock right before the delete;
+- it was created more than **Keep Opened Servers Available For** ago (10 hours by default);
+- a fresh read shows it exactly as it was created (the marker in the description, the name, the
+  address, enabled, and its group; the Browser Gateway target group doesn't count), and no policy
+  names it directly.
+
+Only the resource is deleted: its group and the policies to the group stay. The audit log records
+`resource.delete` by *Remote Access*, or `resource.delete_unconfirmed` when NetBird didn't answer
+clearly; the next sync tries again. A resource that someone changed, that a policy names, or that
+NetBird refused to delete is marked *kept* (`resource.kept`) and never deleted by the app. One that
+is no longer in NetBird is marked *gone*. At most 20 resources are deleted per sync. Any instance may
+create resources for a launch link; only the leader recovers and deletes them. A read-only instance
+does neither.
+
+**The network is managed by the app while adding servers is on.** Any network is managed while servers
+launch links added are still in use there (active or kept). Otherwise it is an ordinary network. Turning it on
+checks the network again: no resources but the ones launch links added (else `409
+NETWORK_NOT_EMPTY`, "Clear it in Networks, or choose another one"), and the same refusals as **Use
+Existing**. While it is managed, every other write of the app to the resources of that network is
+refused:
+adding, editing, enabling or disabling, deleting, moving or merging them, deleting the network,
+using them as a Reverse Proxy target, and adding them, or the network, to temporary grants, access
+requests, and recurring access or auto-approval rules that are on. Request Access doesn't offer
+them, and an automation can't be pointed at the network. Policies, Access Profiles and Tidy Names
+work as everywhere else. Only an admin can change the network's name and description, or add and
+delete its routing peers, whatever network permissions someone else has. The Networks page shows it as **Managed By Remote Access**.
+
+The exception is an admin on the Networks pages. An admin may delete (never change) any resource
+there, also one Remote Access added and still manages, one by one or selected: only that resource
+is deleted, no policy that names it and no group. NetBird's confirmation finishes the row Remote
+Access kept for it ("Deleted by an admin in Networks."). The confirm says when someone is connected
+to the server through Remote Access (deleting it disconnects them). When NetBird refuses because a
+policy still uses it, the page shows NetBird's answer; delete or change that policy first.
+
+An admin may also delete the whole network. Adding servers is turned off first (audited as a
+settings change), then the network is deleted as any other (a failure stops it, and the setting then
+stays with adding servers off). Once NetBird confirms the network is deleted, the setting lets go of
+it and every server row of that network is finished. The
+confirm says that Remote Access uses the network, that its servers are removed and anyone using
+them is disconnected, and that adding servers is turned off. Anyone else is refused. A stored
+network that isn't managed at the moment is deleted like any network, and the setting lets go of it.
+
+**Settings import and backups.** A settings import or a backup restore never turns adding servers
+on. Turn it on with a save on this page, which checks the profile and the network. The internal
+(encrypted) backup carries the `ra_created_resources` table; the plaintext settings export doesn't.
+A restore adds the backup's rows that aren't there yet and never removes the rows tracked now.
+
+**The list.** Settings > Remote Access lists every resource created by the API that still exists (or may),
+and the latest 50 finished entries (failed, removed, gone), with a note when older ones were left
+out.
+
+**Turn it on only after every instance runs this version.** An older instance doesn't know the
+network is managed and would let its pages change it.
+
+### Accepted risks
+
+- **Changes made directly in NetBird** in the same seconds as a create or a delete are not detected
+  by that create or delete. The next sync reads the resource again and keeps one that changed.
+- **Two admins who change these settings at the same moment.** The last save wins.
+- **A delete and a session start at the same moment.** The session fails and the user connects again.
+- **A key revoked, or adding servers turned off, while a create waits for NetBird.** The server may
+  still be added. It is public and temporary, and the link is refused.
+- **More requests than the limit at the same moment** may add a few servers more than the limit.
+- **A Browser Gateway that reaches the group** through a policy of its own reaches every resource created
+  by the API, not only the ones a session opened. They are public servers, so this exposes nothing
+  that isn't public already; the app doesn't check for it.

@@ -1,4 +1,5 @@
 import { forwardRef, type ButtonHTMLAttributes } from 'react';
+import { Link, type LinkProps } from 'react-router-dom';
 import { cn } from '@/lib/cn';
 
 type Variant = 'primary' | 'secondary' | 'danger' | 'ghost';
@@ -33,12 +34,21 @@ const sizes: Record<Size, string> = {
   sm: 'text-xs py-2 px-3 h-[34px]',
 };
 
+const buttonClass = (variant: Variant, size: Size, className?: string) => cn(base, variants[variant], sizes[size], className);
+
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ variant = 'secondary', size = 'md', className, type = 'button', ...rest }, ref) => (
-    <button ref={ref} type={type} className={cn(base, variants[variant], sizes[size], className)} {...rest} />
+    <button ref={ref} type={type} className={buttonClass(variant, size, className)} {...rest} />
   ),
 );
 Button.displayName = 'Button';
+
+export const LinkButton = forwardRef<HTMLAnchorElement, LinkProps & { variant?: Variant; size?: Size }>(
+  ({ variant = 'secondary', size = 'md', className, ...rest }, ref) => (
+    <Link ref={ref} className={buttonClass(variant, size, className)} {...rest} />
+  ),
+);
+LinkButton.displayName = 'LinkButton';
 
 interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: number;
