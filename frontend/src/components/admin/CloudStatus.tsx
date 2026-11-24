@@ -5,7 +5,6 @@ import { formatTimestamp } from '@/lib/logfmt';
 import type { CloudStatusIncident, CloudStatusIndicator, CloudStatusSummary } from '@/lib/types';
 import { Badge, Card } from '@/components/ui';
 
-// ─── NetBird Cloud status (status.netbird.io) ───
 type Severity = 'ok' | 'warn' | 'bad' | 'unknown';
 
 const SEVERITY: Record<CloudStatusIndicator, Severity> = {
@@ -34,7 +33,8 @@ function componentStatus(status: string) {
 }
 
 function needsAttention(s: CloudStatusSummary): boolean {
-  return s.incidents.length > 0 || SEVERITY[s.indicator] === 'warn' || SEVERITY[s.indicator] === 'bad';
+  return s.incidents.length > 0 || s.components.some((c) => c.status !== 'operational')
+    || SEVERITY[s.indicator] === 'warn' || SEVERITY[s.indicator] === 'bad';
 }
 
 function ExternalA({ href, children, className }: { href: string; children: React.ReactNode; className?: string }) {
@@ -62,15 +62,14 @@ function IncidentRow({ incident }: { incident: CloudStatusIncident }) {
   );
 }
 
-/** Dashboard banner: shown only while NetBird Cloud reports an incident or a degraded service. */
-export function CloudStatusBanner({ className }: { className?: string }) {
+export function CloudStatusBanner() {
   const { data } = useNetbirdCloudStatus();
   if (!data?.enabled || !data.summary || !needsAttention(data.summary)) return null;
   const s = data.summary;
   const bad = SEVERITY[s.indicator] === 'bad';
   const affected = s.components.filter((c) => c.status !== 'operational');
   return (
-    <Card className={cn('p-4 md:p-5 border-l-4', bad ? 'border-l-red-500' : 'border-l-amber-500', className)}>
+    <Card className={cn('mb-6 p-4 md:p-5 border-l-4', bad ? 'border-l-red-500' : 'border-l-amber-500')}>
       <div className="flex items-start gap-3">
         <AlertTriangle size={18} className={cn('shrink-0 mt-0.5', bad ? 'text-red-500' : 'text-amber-500')} />
         <div className="min-w-0 flex-1">
@@ -96,7 +95,6 @@ export function CloudStatusBanner({ className }: { className?: string }) {
   );
 }
 
-/** System Health section: the overall state, every service and the open incidents. */
 export function CloudStatusSection() {
   const { data, isLoading } = useNetbirdCloudStatus();
   if (isLoading || !data?.enabled) return null;

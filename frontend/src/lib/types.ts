@@ -46,7 +46,6 @@ export interface SecurityConfig {
   recertIntervalDays: number;
 }
 
-// ─── NetBird Cloud status (GET /api/netbird-cloud-status, from status.netbird.io) ───
 export type CloudStatusIndicator = 'none' | 'minor' | 'major' | 'critical' | 'maintenance' | 'unknown';
 export interface CloudStatusIncident {
   id: string;
@@ -54,7 +53,6 @@ export interface CloudStatusIncident {
   status: string;
   impact: string;
   startedAt: string | null;
-  updatedAt: string | null;
   latestUpdate: string;
   url: string;
 }
@@ -63,7 +61,6 @@ export interface CloudStatusSummary {
   description: string;
   components: { name: string; status: string }[];
   incidents: CloudStatusIncident[];
-  updatedAt: string | null;
   pageUrl: string;
 }
 export type NetbirdCloudStatus =

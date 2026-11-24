@@ -1,7 +1,7 @@
 // NetBird Cloud status (status.netbird.io, hosted on incident.io). The page answers the
 // Statuspage v2 summary format, which incident.io does not document: parseSummary refuses any
-// answer without the components and incidents arrays, so a changed format reads as "unknown"
-// and never as "no incidents" (which would send a false "resolved" alert).
+// answer it cannot read in full, so a changed format reads as "unknown" and never as a change in
+// the open incidents (which would send false alerts).
 
 const { httpJson } = require('./http');
 const { getSetting, setSetting } = require('./core');
@@ -14,7 +14,6 @@ const BASELINE_KEY = 'netbird_cloud_incidents';
 const DISPLAY_TTL_MS = 60_000;
 const INDICATORS = new Set(['none', 'minor', 'major', 'critical', 'maintenance']);
 const INCIDENT_ID = /^[A-Za-z0-9_-]{1,64}$/;
-const MAX_ITEMS = 50;
 
 const text = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 
@@ -36,34 +35,28 @@ function latestUpdate(updates) {
 }
 
 function parseSummary(body) {
-    if (!body || typeof body !== 'object' || !Array.isArray(body.components) || !Array.isArray(body.incidents)) {
-        throw new Error('status.netbird.io sent an answer in an unexpected format');
-    }
+    const unexpected = () => new Error('status.netbird.io sent an answer in an unexpected format');
+    if (!body || typeof body !== 'object' || !Array.isArray(body.components) || !Array.isArray(body.incidents)) throw unexpected();
+    if (!body.incidents.every(i => i && typeof i === 'object' && INCIDENT_ID.test(String(i.id || '')))) throw unexpected();
     const status = body.status && typeof body.status === 'object' ? body.status : {};
     const components = body.components
         .filter(c => c && typeof c === 'object' && text(c.name, 120))
         .sort((a, b) => (Number(a.position) || 0) - (Number(b.position) || 0))
-        .slice(0, MAX_ITEMS)
         .map(c => ({ name: text(c.name, 120), status: text(c.status, 40) || 'unknown' }));
-    const incidents = body.incidents
-        .filter(i => i && typeof i === 'object' && INCIDENT_ID.test(String(i.id || '')) && text(i.name, 200))
-        .slice(0, MAX_ITEMS)
-        .map(i => ({
-            id: i.id,
-            name: text(i.name, 200),
-            status: text(i.status, 40),
-            impact: text(i.impact, 40),
-            startedAt: text(i.created_at, 40) || null,
-            updatedAt: text(i.updated_at, 40) || null,
-            latestUpdate: latestUpdate(i.incident_updates),
-            url: `${STATUS_ORIGIN}/incidents/${i.id}`,
-        }));
+    const incidents = body.incidents.map(i => ({
+        id: i.id,
+        name: text(i.name, 200) || 'Unnamed incident',
+        status: text(i.status, 40),
+        impact: text(i.impact, 40),
+        startedAt: text(i.created_at, 40) || null,
+        latestUpdate: latestUpdate(i.incident_updates),
+        url: `${STATUS_ORIGIN}/incidents/${i.id}`,
+    }));
     return {
         indicator: INDICATORS.has(status.indicator) ? status.indicator : 'unknown',
         description: text(status.description, 120),
         components,
         incidents,
-        updatedAt: text(body.page && body.page.updated_at, 40) || null,
         pageUrl: `${STATUS_ORIGIN}/`,
     };
 }
@@ -75,28 +68,14 @@ async function fetchSummaryFromNetbird() {
     return parseSummary(r.body);
 }
 
-function incidentWord(n) { return n === 1 ? 'incident' : 'incidents'; }
-
-function degradedComponents(summary) {
-    return summary.components.filter(c => c.status !== 'operational').map(c => `${c.name} (${c.status.replace(/_/g, ' ')})`);
-}
-
 function buildAlert(event, summary) {
     const inc = event.incident;
     const started = event.kind === 'started';
-    const affected = degradedComponents(summary);
     const heading = started ? 'NetBird Cloud Incident' : 'NetBird Cloud Incident Resolved';
+    const stillOpen = summary.incidents.length;
     const rows = started
-        ? [
-            ['Incident', inc.name],
-            inc.impact && ['Impact', inc.impact],
-            inc.status && ['Status', inc.status],
-            affected.length && ['Affected', affected.join(', ')],
-        ]
-        : [
-            ['Incident', inc.name],
-            summary.incidents.length && ['Still Open', `${summary.incidents.length} ${incidentWord(summary.incidents.length)}`],
-        ];
+        ? [['Incident', inc.name], inc.impact && ['Impact', inc.impact], inc.status && ['Status', inc.status]]
+        : [['Incident', inc.name], stillOpen && ['Still Open', `${stillOpen} ${stillOpen === 1 ? 'incident' : 'incidents'}`]];
     let tg = `${started ? '🚨' : '✅'} <b>${heading}</b>\n\n`;
     tg += rows.filter(Boolean).map(([k, v]) => `<b>${k}:</b> ${tgEsc(v)}`).join('\n');
     if (started && inc.latestUpdate) tg += `\n\n${tgEsc(inc.latestUpdate)}`;
@@ -134,9 +113,11 @@ function readBaseline(raw) {
     }
 }
 
+const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
 function sameIncidents(a, b) {
     const ka = Object.keys(a), kb = Object.keys(b);
-    return ka.length === kb.length && ka.every(k => Object.prototype.hasOwnProperty.call(b, k));
+    return ka.length === kb.length && ka.every(k => has(b, k));
 }
 
 function createCloudStatus({
@@ -165,31 +146,41 @@ function createCloudStatus({
         return inFlight;
     }
 
-    // The alert job. The last seen set of open incidents is kept in the database, so a restart or
-    // a new leader compares against it instead of alerting on what was already open. Without a
-    // stored set (first run, or the check was off) it only records the current one.
-    async function checkForChanges({ alertsEnabled, emails = [] }) {
-        const summary = await fetchSummary();
-        const previous = readBaseline(await store.get(BASELINE_KEY));
-        const current = Object.fromEntries(summary.incidents.map(i => [i.id, i.name]));
-        if (!previous || !sameIncidents(previous, current)) await store.set(BASELINE_KEY, JSON.stringify(current));
-        if (!previous || !alertsEnabled) return { started: 0, resolved: 0 };
-        const started = summary.incidents.filter(i => !Object.prototype.hasOwnProperty.call(previous, i.id));
-        const resolved = Object.keys(previous).filter(id => !Object.prototype.hasOwnProperty.call(current, id));
-        for (const incident of started) alert(buildAlert({ kind: 'started', incident }, summary), emails);
-        for (const id of resolved) {
-            const incident = { id, name: String(previous[id] || 'Unnamed incident'), url: `${STATUS_ORIGIN}/incidents/${id}` };
-            alert(buildAlert({ kind: 'resolved', incident }, summary), emails);
-        }
-        return { started: started.length, resolved: resolved.length };
-    }
-
     // Turning the check off forgets the stored set, so turning it on again starts silently.
     async function forgetIncidents() {
         if (await store.get(BASELINE_KEY)) await store.set(BASELINE_KEY, '');
     }
 
-    return { getDisplayStatus, checkForChanges, forgetIncidents };
+    // The alert job. The last seen set of open incidents is kept in the database, so a restart or
+    // a new leader compares against it instead of alerting on what was already open. Without a
+    // stored set (first run, or the check was off) it only records the current one. The settings
+    // are read again after the slow read, so switching alerts off stops an alert already on its way.
+    async function checkForChanges(readSettings) {
+        if (!readSettings().enabled) return forgetIncidents();
+        let summary;
+        try {
+            summary = await fetchSummary();
+        } catch {
+            // The page being down is not a change: the stored set stays, and System Health shows
+            // the read error. Throwing would raise the generic "Background Job Failing" alert.
+            return;
+        }
+        const settings = readSettings();
+        if (!settings.enabled) return forgetIncidents();
+        const previous = readBaseline(await store.get(BASELINE_KEY));
+        const current = Object.fromEntries(summary.incidents.map(i => [i.id, i.name]));
+        if (!previous || !sameIncidents(previous, current)) await store.set(BASELINE_KEY, JSON.stringify(current));
+        if (!previous || !settings.alertsEnabled) return;
+        for (const incident of summary.incidents.filter(i => !has(previous, i.id))) {
+            alert(buildAlert({ kind: 'started', incident }, summary), settings.emails);
+        }
+        for (const id of Object.keys(previous).filter(id => !has(current, id))) {
+            const incident = { id, name: String(previous[id] || 'Unnamed incident'), url: `${STATUS_ORIGIN}/incidents/${id}` };
+            alert(buildAlert({ kind: 'resolved', incident }, summary), settings.emails);
+        }
+    }
+
+    return { getDisplayStatus, checkForChanges };
 }
 
-module.exports = { createCloudStatus, parseSummary, usesNetbirdCloud, buildAlert, STATUS_ORIGIN };
+module.exports = { createCloudStatus, parseSummary, usesNetbirdCloud, buildAlert };

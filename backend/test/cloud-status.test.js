@@ -1,5 +1,3 @@
-// NetBird Cloud status: the summary parser, the incident alerts (sent only when the set of open
-// incidents changes against the stored one) and the cached read for the pages.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createCloudStatus, parseSummary, usesNetbirdCloud, buildAlert } = require('../lib/cloud-status');
@@ -35,6 +33,8 @@ function memoryStore(initial = null) {
     };
 }
 
+const on = (over = {}) => () => ({ enabled: true, alertsEnabled: true, emails: [], ...over });
+
 function harness({ stored = null } = {}) {
     let next = summaryBody();
     const store = memoryStore(stored);
@@ -60,18 +60,19 @@ test('the parser keeps the overall state, the services in page order and the ope
     assert.equal(s.incidents[0].latestUpdate, 'We have identified the cause.');
 });
 
-test('an answer without the components and incidents lists is refused, never read as "no incidents"', () => {
+test('an answer the parser cannot read in full is refused, never read as fewer incidents', () => {
     assert.throws(() => parseSummary(null));
     assert.throws(() => parseSummary({ status: { indicator: 'none' } }));
     assert.throws(() => parseSummary({ components: [], incidents: {} }));
+    assert.throws(() => parseSummary(summaryBody({ incidents: [incident('../../evil', 'Bad'), incident('ok-1', 'Good')] })));
 });
 
-test('an unknown overall state reads as unknown, and an incident with an unusable id is left out', () => {
-    const body = summaryBody({ incidents: [incident('../../evil', 'Bad'), incident('ok-1', 'Good')] });
+test('an unknown overall state reads as unknown, and an incident without a name keeps its place', () => {
+    const body = summaryBody({ incidents: [incident('i1', '')] });
     body.status.indicator = 'on_fire';
     const s = parseSummary(body);
     assert.equal(s.indicator, 'unknown');
-    assert.deepEqual(s.incidents.map(i => i.id), ['ok-1']);
+    assert.deepEqual(s.incidents.map(i => [i.id, i.name]), [['i1', 'Unnamed incident']]);
 });
 
 test('only NetBird Cloud management URLs use the cloud status', () => {
@@ -85,7 +86,7 @@ test('only NetBird Cloud management URLs use the cloud status', () => {
 test('the first check records the open incidents and sends nothing', async () => {
     const h = harness();
     h.answer(summaryBody({ incidents: [incident('i1', 'Signal service instability')] }));
-    assert.deepEqual(await h.cs.checkForChanges({ alertsEnabled: true }), { started: 0, resolved: 0 });
+    await h.cs.checkForChanges(on());
     assert.equal(h.alerts.length, 0);
     assert.deepEqual(JSON.parse(h.store.data.value), { i1: 'Signal service instability' });
 });
@@ -93,53 +94,60 @@ test('the first check records the open incidents and sends nothing', async () =>
 test('a new incident sends one alert, and its end sends one more', async () => {
     const h = harness({ stored: '{}' });
     h.answer(summaryBody({ incidents: [incident('i1', 'Signal service instability')] }));
-    await h.cs.checkForChanges({ alertsEnabled: true, emails: ['ops@example.com'] });
-    await h.cs.checkForChanges({ alertsEnabled: true, emails: ['ops@example.com'] });
+    await h.cs.checkForChanges(on({ emails: ['ops@example.com'] }));
+    await h.cs.checkForChanges(on({ emails: ['ops@example.com'] }));
     assert.equal(h.alerts.length, 1);
     assert.match(h.alerts[0].subject, /^NetBird Cloud incident: Signal service instability$/);
-    assert.match(h.alerts[0].telegram, /Signal Service \(partial outage\)/);
     assert.deepEqual(h.alerts[0].emails, ['ops@example.com']);
 
     h.answer(summaryBody());
-    await h.cs.checkForChanges({ alertsEnabled: true, emails: [] });
+    await h.cs.checkForChanges(on());
     assert.equal(h.alerts.length, 2);
     assert.match(h.alerts[1].subject, /^NetBird Cloud incident resolved: Signal service instability$/);
     assert.equal(h.store.data.value, '{}');
 });
 
-test('a failed read sends nothing and keeps the stored incidents', async () => {
+test('a failed or unreadable answer sends nothing, keeps the stored incidents and does not fail the job', async () => {
     const stored = JSON.stringify({ i1: 'Signal service instability' });
     const h = harness({ stored });
     h.answer(new Error('status.netbird.io did not answer (timeout)'));
-    await assert.rejects(h.cs.checkForChanges({ alertsEnabled: true }), /did not answer/);
+    await h.cs.checkForChanges(on());
     h.answer({ status: { indicator: 'none' } });
-    await assert.rejects(h.cs.checkForChanges({ alertsEnabled: true }), /unexpected format/);
+    await h.cs.checkForChanges(on());
     assert.equal(h.alerts.length, 0);
     assert.equal(h.store.data.value, stored);
     assert.equal(h.store.data.writes, 0);
 });
 
+test('switching alerts off during the read stops the alert', async () => {
+    const h = harness({ stored: '{}' });
+    h.answer(summaryBody({ incidents: [incident('i1', 'Signal service instability')] }));
+    let reads = 0;
+    await h.cs.checkForChanges(() => ({ enabled: true, alertsEnabled: reads++ === 0, emails: [] }));
+    assert.equal(h.alerts.length, 0);
+});
+
 test('with alerts off the stored incidents still follow the page, so turning alerts on is silent', async () => {
     const h = harness({ stored: '{}' });
     h.answer(summaryBody({ incidents: [incident('i1', 'Signal service instability')] }));
-    await h.cs.checkForChanges({ alertsEnabled: false });
-    await h.cs.checkForChanges({ alertsEnabled: true });
+    await h.cs.checkForChanges(on({ alertsEnabled: false }));
+    await h.cs.checkForChanges(on());
     assert.equal(h.alerts.length, 0);
 });
 
 test('the stored incidents are written only when they change', async () => {
     const h = harness({ stored: '{}' });
-    await h.cs.checkForChanges({ alertsEnabled: true });
-    await h.cs.checkForChanges({ alertsEnabled: true });
+    await h.cs.checkForChanges(on());
+    await h.cs.checkForChanges(on());
     assert.equal(h.store.data.writes, 0);
 });
 
 test('turning the check off forgets the incidents, so the next check is silent', async () => {
     const h = harness({ stored: JSON.stringify({ old: 'Old incident' }) });
-    await h.cs.forgetIncidents();
+    await h.cs.checkForChanges(on({ enabled: false }));
     assert.equal(h.store.data.value, '');
     h.answer(summaryBody({ incidents: [incident('i2', 'Management availability')] }));
-    await h.cs.checkForChanges({ alertsEnabled: true });
+    await h.cs.checkForChanges(on());
     assert.equal(h.alerts.length, 0);
 });
 

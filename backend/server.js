@@ -5271,11 +5271,10 @@ async function start() {
 
         // NetBird Cloud status: alerts admins when an incident opens or closes on status.netbird.io.
         // Main account only; reads a public page, so it runs in read-only mode too.
-        const cloudStatusTick = leaderOnly(() => tracked('netbirdCloudStatus', async () => {
-            if (!cloudStatusApplies()) return cloudStatus.forgetIncidents();
+        const cloudStatusTick = leaderOnly(() => tracked('netbirdCloudStatus', () => cloudStatus.checkForChanges(() => {
             const sec = getSecurityConfig();
-            await cloudStatus.checkForChanges({ alertsEnabled: sec.cloudStatusAlerts, emails: sec.cloudStatusEmails });
-        }));
+            return { enabled: cloudStatusApplies(), alertsEnabled: sec.cloudStatusAlerts, emails: sec.cloudStatusEmails };
+        })));
         setTimeout(cloudStatusTick, 60000);
         setInterval(cloudStatusTick, 5 * 60 * 1000);
 

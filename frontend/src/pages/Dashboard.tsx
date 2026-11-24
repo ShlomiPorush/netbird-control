@@ -177,7 +177,7 @@ function AdminDashboard() {
           <LinkButton to="/networks" variant="secondary" size="sm"><Layers3 size={14} /> Add Resource</LinkButton>
         </>} />
 
-      <CloudStatusBanner className="mb-6" />
+      <CloudStatusBanner />
 
       {/* Stat tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 mb-6">
