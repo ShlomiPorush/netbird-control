@@ -10,6 +10,13 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **NetBird Cloud status on Troubleshoot.** The Troubleshoot page, which every user can open, now starts
+  with NetBird Cloud's state: the same banner as the **Overview** while NetBird reports an incident or a
+  degraded service, and otherwise a short line that says there are no known issues, or that the status
+  page could not be read. Someone checking a connection problem sees right away whether NetBird itself
+  is the cause.
+
 ---
 
 ## [1.9.0] - 2026-11-24

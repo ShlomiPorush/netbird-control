@@ -13,6 +13,7 @@ import { requestAccessLink } from '@/lib/requestAccess';
 import type { DeviceDiagnosis, DiagCheck, GrantTarget, Network, TargetDiagnosis } from '@/lib/types';
 import { Badge, Button, Card, LinkButton, PageHeader, SelectMenu } from '@/components/ui';
 import { TargetSearch } from '@/components/access/TargetSearch';
+import { CloudStatusBanner } from '@/components/admin/CloudStatus';
 
 /* ─── Browser-side probes - these test the USER's network, which the server cannot see ─── */
 
@@ -416,6 +417,7 @@ export default function Troubleshoot() {
       />
 
       <div className="max-w-3xl flex flex-col gap-4">
+        <CloudStatusBanner showQuiet />
         {notices.length > 0 && (
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-nb-gray-900 dark:text-nb-gray-100">
