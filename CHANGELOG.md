@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.8.0] - 2026-11-24
+
 ### Added
 - **The public API in the app's API reference.** The interactive reference at `/api/docs` (admins
   only) now lists `POST /api/v1/remote-access/launch` first, with every field (`createResource`
