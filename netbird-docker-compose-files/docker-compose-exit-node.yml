@@ -1,3 +1,7 @@
+# Pinned project name: Compose commands for this file never touch the routing peer, whose
+# service is also called netbird, even if both folders have the same name.
+name: netbird-exit-node
+
 services:
   netbird:
     image: netbirdio/netbird:latest
@@ -7,11 +11,16 @@ services:
     volumes:
       - ./data:/var/lib/netbird
     # DELIBERATELY kept on a bridge network (do NOT switch to host mode): the LAN
-    # isolation below depends on the DOCKER-USER chain, which host networking would
-    # bypass entirely. Exit-node connections stay relayed - that is an accepted
-    # trade-off; the isolation matters more than browsing latency.
+    # isolation depends on firewall rules that match this network's bridge interface,
+    # which host networking would bypass entirely. Exit-node connections stay relayed -
+    # that is an accepted trade-off; the isolation matters more than browsing latency.
     networks:
       - netbird-exit-node
+    # Public DNS ON PURPOSE: without dns:, Docker can send the exit node's lookups from the VM
+    # to the VM's own DNS server, which is often internal and is outside the isolation rules.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     environment:
       - NB_SETUP_KEY=${SETUP_KEY}
     cap_add:
@@ -23,22 +32,19 @@ networks:
   netbird-exit-node:
     name: netbird-exit-node
     driver: bridge
+    # The isolation rules cover IPv4 only, so this network must never get IPv6.
+    enable_ipv6: false
+    driver_opts:
+      # Pinned bridge name ON PURPOSE - the isolation rules match this interface.
+      # Change it only together with BRIDGE in exit-node-isolation/netbird-exit-isolation.sh.
+      # Keep this network for the exit node alone.
+      com.docker.network.bridge.name: br-nb-exit
     ipam:
       config:
-        # Pinned subnet ON PURPOSE - the host isolation rule below is keyed to it,
-        # so it survives container/network recreation. Do not change one without
-        # the other.
         - subnet: 172.20.0.0/24
 
-# ─── REQUIRED companion rule on the VM (NOT enforced by this file!) ───
+# ─── REQUIRED companion rules on the VM (NOT enforced by this file!) ───
 # A user enabling this Exit Node routes 0.0.0.0/0 through a container that sits
-# inside your internal network - without the rule below they would implicitly reach
-# internal resources and bypass every NetBird policy:
-#
-#   iptables -I DOCKER-USER -s 172.20.0.0/24 -d 10.0.0.0/8 -j DROP
-#
-# (Internet egress keeps working - only traffic DESTINED to internal ranges is
-# dropped. Replace 10.0.0.0/8 with your internal ranges, one rule per range.)
-#
-# Manual iptables rules DO NOT survive a reboot - persist it (iptables-persistent /
-# a systemd unit), and after every VM reboot verify with:  iptables -S DOCKER-USER
+# inside your internal network - without the rules they would implicitly reach
+# internal resources and bypass every NetBird policy. Install exit-node-isolation/
+# on the VM before you start this file: see "Isolate the Exit Node" in README.md.
