@@ -22,13 +22,15 @@ const {
 } = require('./lib/events');
 // Pure, dependency-free helpers live in lib/pure.js (one-way dependency: db.js -> lib/pure.js,
 // never the reverse). Imported under their original names so all existing call sites are unchanged.
-const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName } = require('./lib/pure');
+const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO, postureIds, postureChecksFor, stableStringify, humanDuration, normAccessSpec, mergeAccessSpecs, accessSpecCombos, mergeProxyTargets, peerNetworkAddresses, tgFirstLine, isPlausibleEmail, routingPeerName, nbListBody } = require('./lib/pure');
 // Browser remote access (one-way: db.js -> lib/remote-access.js). Its standing policies and its
 // gateway and target groups are app-owned: exposure-mirroring code skips the policies, and resource
 // writes, grants and routers never add, remove or reuse the groups (helpers below).
 const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
+    API_NETWORK_MESSAGE, linkGuardNetworkIds, countCreatedInUse, createdInUseMessage, createdResourceIds, sessionResourceIds,
+    noteCreatedResourceDeleted, noteCreatedNetworkDeleted, storeCreateSection, launchNetworkName, importedRemoteAccessConfig,
 } = require('./lib/remote-access');
 // "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
 const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered, nameCovered: coverageNameCovered } = require('./lib/coverage');
@@ -183,15 +185,41 @@ function noteResourceWrite(resp) {
     if (raMain() && resp && resp.status === 0) noteUncertainTargetWrite();
     return resp;
 }
+// The network that holds the servers Remote Access launch links add is changed by
+// lib/remote-access.js alone: every other app write to its resources is refused, here for all of
+// them, and earlier in the few places that write something else first. The network's name, description
+// and routing peers are only an admin's to change. `linkWrite` passes the guard: an admin's delete or
+// change, the launch writer. Reading and policies are not guarded.
+function linkNetworkError() { const e = new Error(API_NETWORK_MESSAGE); e.status = 409; e.code = 'NETWORK_MANAGED'; return e; }
+const guardedLinkNetworks = async () => (raMain() ? linkGuardNetworkIds() : new Set());
+const isLinkNetwork = async (networkId) => (await guardedLinkNetworks()).has(String(networkId));
+async function refuseLinkNetwork(...networkIds) {
+    const nets = await guardedLinkNetworks();
+    if (networkIds.some(id => nets.has(String(id || '')))) throw linkNetworkError();
+}
+// Access targets (a grant, a recurring rule, a request, an auto-approval rule) or Reverse Proxy
+// targets that name that network or one of its servers.
+async function refuseLinkNetworkTargets(targets) {
+    const list = (Array.isArray(targets) ? targets : []).filter(t => t && typeof t === 'object');
+    if (!list.length || !raMain()) return;
+    const nets = await guardedLinkNetworks();
+    if (list.some(t => [t.type === 'network' ? t.id : '', t.networkId].some(id => nets.has(String(id || ''))))) throw linkNetworkError();
+    const servers = await createdResourceIds();
+    if (list.some(t => servers.has(String(t.id || t.target_id || '').trim()))) throw linkNetworkError();
+}
 // Every resource or network write and delete of the main account raises the Remote Access targets
 // generation right before it is sent: a session start that read NetBird before it gets no token and
 // tries again (lib/remote-access.js).
-function resourceReq(method, apiPath, body) {
+async function beforeResourceWrite(apiPath, linkWrite) {
+    if (!linkWrite) await refuseLinkNetwork(decodeURIComponent(apiPath.split('/')[3] || ''));
     if (raMain()) noteTargetsChanged();
+}
+async function resourceReq(method, apiPath, body, { linkWrite = false } = {}) {
+    await beforeResourceWrite(apiPath, linkWrite);
     return netbirdReq(method, apiPath, body);
 }
-function resourcePost(apiPath, body) {
-    if (raMain()) noteTargetsChanged();
+async function resourcePost(apiPath, body, { linkWrite = false } = {}) {
+    await beforeResourceWrite(apiPath, linkWrite);
     return netbirdPost(apiPath, body);
 }
 const sameIdSet = (a, b) => { const A = new Set(a), B = new Set(b); return A.size === B.size && [...A].every(x => B.has(x)); };
@@ -755,8 +783,15 @@ function getAutoApprovalConfig() {
 function withAutoApprovalLock(fn) {
     return withKeyLock('auto-approval', fn);
 }
+// Checked here and not in saveAutoApprovalLocked: an Access Review revoke saves without these checks,
+// so another rule's missing profile never blocks it.
 async function setAutoApprovalConfig(cfg) {
-    return withAutoApprovalLock(() => saveAutoApprovalLocked(cfg));
+    return withAutoApprovalLock(async () => {
+        const targets = (cfg && Array.isArray(cfg.rules) ? cfg.rules : []).filter(r => r && r.enabled !== false).flatMap(r => normTargetList(r.targets));
+        await assertProfilesExist(profileTargetIds(targets), { sharedOnly: true });
+        await refuseLinkNetworkTargets(targets);
+        return saveAutoApprovalLocked(cfg);
+    });
 }
 async function saveAutoApprovalLocked({ trusted, rules } = {}) {
     const next = {
@@ -1524,6 +1559,7 @@ function proxyAccessActionError(service) {
 // created - for ALL targets, before anything is written. materializeContainerTargets creates.
 async function planContainerTargets(rawTargets, canEdit) {
     const plan = [];
+    await refuseLinkNetworkTargets(rawTargets);
     for (const t of (rawTargets || [])) {
         const type = t && (t.type || t.target_type);
         if (type !== 'container') { plan.push({ t }); continue; }
@@ -1881,6 +1917,7 @@ async function exposeDockerService(cfg = {}, opts = {}) {
     const networkId = String(cfg.networkId || '').trim();
     if (!networkId) throw new Error('a network is required');
     if (!(await networkEditPredicate(opts)(networkId))) throw networkEditForbidden();
+    await refuseLinkNetwork(networkId);
     const address = String(cfg.containerDomain || '').trim().toLowerCase();
     if (!DOMAIN_RE.test(address)) throw new Error('the container address must be a domain name (e.g. app.internal)');
     const blocked = addressBlockedForNetwork(address, networkId, await getBlocklist());
@@ -1907,7 +1944,7 @@ async function exposeDockerService(cfg = {}, opts = {}) {
         return { service, resourceId, routerId };
     } catch (e) {
         if (resourceId) await deleteResource(networkId, resourceId).catch(() => { });
-        if (routerId) await deleteNetworkRouter(networkId, routerId).catch(() => { });
+        if (routerId) await deleteNetworkRouter(networkId, routerId, { linkWrite: true }).catch(() => { });
         throw e;
     }
 }
@@ -4109,6 +4146,27 @@ async function initializeDatabase() {
         `);
         // A database that ran a pre-release build of this table has no updated_at yet.
         await client.query(`ALTER TABLE remote_access_targets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
+        // See "Resources created by the launch API" in lib/remote-access.js.
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS ra_created_resources (
+            attempt_id TEXT PRIMARY KEY,
+            ip TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            network_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            key_id INTEGER,
+            state TEXT NOT NULL,
+            resource_id TEXT NOT NULL DEFAULT '',
+            expected_name TEXT NOT NULL,
+            expected_address TEXT NOT NULL,
+            expected_description TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+        `);
+        // Two requests for one address at the same moment add it once.
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ra_created_resources_active_ip ON ra_created_resources (ip) WHERE state IN ('creating', 'unknown', 'created')`);
 
         // API keys for the versioned public API (/api/v1), created by admins in Settings. Only the
         // SHA-256 of a key is stored; the key itself is shown once. See lib/api-keys.js.
@@ -5729,7 +5787,8 @@ async function setNetworkAllowDuplicates(networkId, allowed) {
 }
 
 // Rename / re-describe a network (NetBird PUT - same call the official dashboard makes).
-async function updateNetwork(id, { name, description }) {
+async function updateNetwork(id, { name, description }, { linkWrite = false } = {}) {
+    if (!linkWrite) await refuseLinkNetwork(id);
     const resp = await netbirdReq('PUT', '/api/networks/' + encodeURIComponent(id), { name, description: description || '' });
     if (!resp || resp.status >= 300 || !resp.body || !resp.body.id) {
         throw new Error('Failed to update network: ' + (resp && (resp.raw || resp.error || resp.status)));
@@ -5771,7 +5830,8 @@ async function refuseGatewayRouter(body) {
 }
 
 // Add a routing peer (router) to a network - either a single peer or one+ peer groups.
-async function createNetworkRouter(networkId, { peer, peerGroups, metric, masquerade, enabled }) {
+async function createNetworkRouter(networkId, { peer, peerGroups, metric, masquerade, enabled }, { linkWrite = false } = {}) {
+    if (!linkWrite) await refuseLinkNetwork(networkId);
     const body = {
         enabled: enabled !== false,
         masquerade: masquerade !== false,
@@ -5789,7 +5849,108 @@ async function createNetworkRouter(networkId, { peer, peerGroups, metric, masque
     return resp.body;
 }
 
-async function deleteNetworkRouter(networkId, routerId) {
+// ─── The network for Remote Access launch links ───
+// Settings > Remote Access creates it ("Remote Access Resources (<installation name>)", with the
+// chosen routing peers) or takes an existing network that has no resources. The app never deletes a
+// network here: a failure says what is left.
+const LAUNCH_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const launchError = (status, code, message) => Object.assign(new Error(message), { status, code });
+const launchActor = (viewer) => ({ actorId: (viewer && (viewer.user_id || viewer.oid)) || '', actorEmail: (viewer && viewer.email) || '', actorName: (viewer && viewer.name) || '' });
+async function launchRead(apiPath, what) {
+    const list = nbListBody(await netbirdReq('GET', apiPath));
+    if (!list) throw launchError(503, 'UNAVAILABLE', `Couldn't read ${what} from NetBird, so nothing was changed. Try again.`);
+    return list;
+}
+async function setUpLaunchNetwork(body, viewer) {
+    const b = body && typeof body === 'object' ? body : {};
+    const ids = (v) => (v === undefined ? [] : Array.isArray(v) && v.every(x => typeof x === 'string' && LAUNCH_ID_RE.test(x)) ? [...new Set(v)] : null);
+    const peers = ids(b.peers), peerGroups = ids(b.peerGroups), existing = b.networkId !== undefined;
+    if (existing ? !LAUNCH_ID_RE.test(String(b.networkId)) : (!peers || !peerGroups)) throw launchError(400, 'INVALID_REQUEST', "An id isn't valid. Reload the page and choose again.");
+    if (!existing && !peers.length && !peerGroups.length) throw launchError(400, 'INVALID_REQUEST', 'Choose at least one routing peer or peer group.');
+
+    const nets = await launchRead('/api/networks', 'the networks');
+    const current = getRemoteAccessConfig().createResources.networkId;
+    // Servers of a network that was deleted in NetBird are gone with it.
+    const missing = nets.some(n => n && n.id === current) ? '' : current;
+    const inUse = await countCreatedInUse(missing);
+    if (inUse) throw launchError(409, 'CREATED_RESOURCES_EXIST', createdInUseMessage(inUse));
+    const out = existing ? await chooseLaunchNetwork(String(b.networkId), nets) : await createLaunchNetwork(peers, peerGroups, nets);
+    const { network, routers } = out;
+    await recordAudit({
+        ...launchActor(viewer), action: 'remote_access.network_attach', target: network.name,
+        meta: {
+            networkId: network.id, name: network.name, mode: existing ? 'existing' : 'created', replaced: current || null,
+            ...(routers ? { added: routers.added.map(routerLabel), failed: routers.failed.map(routerLabel) } : {}),
+        },
+    });
+    bustNbCaches('usage');
+    return out;
+}
+const routerLabel = (it) => (it.peer ? it.peer : (it.peerGroups || []).join(', '));
+
+async function createLaunchNetwork(peers, peerGroups, nets) {
+    const { name, max } = await launchNetworkName();
+    if (name.length > max) throw launchError(400, 'NAME_TOO_LONG', `The Application Name (Settings > General) is too long for the network name "${name}". Shorten it, then try again.`);
+    if (nets.some(n => n && n.name === name)) {
+        throw launchError(409, 'NETWORK_NAME_TAKEN', `A network named "${name}" already exists, possibly from an earlier attempt. Delete or rename it in Networks, then try again.`);
+    }
+    const items = [...peers.map(peer => ({ peer })), ...(peerGroups.length ? [{ peerGroups }] : [])];
+    // createNetworkRouter checks again, but by then the network exists.
+    for (const it of items) await refuseGatewayRouter({ peer: it.peer, peer_groups: it.peerGroups });
+    let net;
+    try { net = await createNetwork({ name, description: 'Servers added by Remote Access launch links.' }); } catch (e) {
+        throw launchError(502, 'NETWORK_CREATE_FAILED', `${e.message}. Check Networks for a network named "${name}": if one appeared that no one else created, delete it, then try again.`);
+    }
+    // Before the routing peers: a failure there leaves a network that is already chosen.
+    let config;
+    try { config = await storeCreateSection({ networkId: net.id }); } catch (e) {
+        console.error('[remote-access] storing the new network:', e.message);
+        throw launchError(503, 'UNAVAILABLE', `The network was created but couldn't be saved. Delete network ${net.id} in Networks, then try again.`);
+    }
+    const routers = { added: [], failed: [] };
+    for (const it of items) {
+        try {
+            await createNetworkRouter(net.id, { ...it, metric: 9999, masquerade: true, enabled: true }, { linkWrite: true });
+            routers.added.push(it);
+        } catch (e) { routers.failed.push({ ...it, reason: e.message }); }
+    }
+    return { config, network: { id: net.id, name }, routers };
+}
+
+async function chooseLaunchNetwork(networkId, nets) {
+    const net = nets.find(n => n && n.id === networkId);
+    if (!net) throw launchError(404, 'NETWORK_NOT_FOUND', "That network wasn't found in NetBird. Reload the page and choose again.");
+    const routers = await checkLaunchNetwork(networkId, net.name || networkId);
+    const config = await storeCreateSection({ networkId });
+    return { config, network: { id: networkId, name: net.name || networkId }, enabledRouters: routers.filter(r => r && r.enabled !== false).length };
+}
+
+// Can launch links use this network? Choosing it, and turning adding servers on (it was an ordinary
+// network while that was off). Returns its routers.
+async function checkLaunchNetwork(networkId, name = '') {
+    const path = `/api/networks/${encodeURIComponent(networkId)}`;
+    const [resources, routers] = [await launchRead(`${path}/resources`, "the network's resources"), await launchRead(`${path}/routers`, "the network's routing peers")];
+    const ours = await createdResourceIds();
+    const foreign = resources.filter(r => r && !ours.has(String(r.id))).length;
+    if (foreign) throw launchError(409, 'NETWORK_NOT_EMPTY', `This network has ${foreign} resource${foreign === 1 ? '' : 's'}. Clear it in Networks, or choose another one.`);
+    for (const r of routers) await refuseGatewayRouter({ peer: r.peer, peer_groups: (r.peer_groups || []).map(gid).filter(Boolean) });
+    const uses = await networkTargetUses(networkId);
+    if (uses.length) throw launchError(409, 'NETWORK_NOT_USABLE', `Network ${name || networkId} is used by ${usesText(uses)}. Remove it there first.`);
+    return routers;
+}
+
+// Stop Using This Network: only the Remote Access setting changes, nothing in NetBird.
+async function releaseLaunchNetwork(viewer) {
+    const { networkId } = getRemoteAccessConfig().createResources;
+    const inUse = await countCreatedInUse();
+    if (inUse) throw launchError(409, 'CREATED_RESOURCES_EXIST', createdInUseMessage(inUse));
+    const config = await storeCreateSection({ networkId: '', enabled: false });
+    await recordAudit({ ...launchActor(viewer), action: 'remote_access.network_release', target: networkId, meta: { networkId } });
+    return { config };
+}
+
+async function deleteNetworkRouter(networkId, routerId, { linkWrite = false } = {}) {
+    if (!linkWrite) await refuseLinkNetwork(networkId);
     const resp = await netbirdReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/routers/${encodeURIComponent(routerId)}`);
     if (!resp || resp.status >= 300) throw new Error('Failed to delete routing peer: ' + (resp && (resp.raw || resp.error || resp.status)));
     bustNbCaches('usage');
@@ -5799,12 +5960,21 @@ async function deleteNetworkRouter(networkId, routerId) {
 // Delete a network (admin). Tears it down cleanly: each resource is removed via
 // deleteResource (which also cleans up its auto-created policy + group), routers are
 // removed, then the network itself is deleted.
-async function deleteNetwork(id) {
+// The network launch links use: only an admin, adding servers is turned off first, and the setting
+// lets go of it once NetBird confirms the delete.
+async function deleteNetwork(id, { admin = false, viewer = null } = {}) {
+    const chosen = raMain() && getRemoteAccessConfig().createResources.networkId === String(id);
+    const guarded = await isLinkNetwork(id);
+    if (guarded && !admin) throw linkNetworkError();
+    if (guarded && chosen) {
+        await storeCreateSection({ enabled: false });
+        await recordAudit({ ...launchActor(viewer), action: 'settings.remote_access', target: '', meta: { createResources: { enabled: false }, networkId: String(id), via: 'network.delete' } });
+    }
     const detail = await getNetworkDetail(id).catch(() => null);
     if (detail) {
         for (const r of (detail.resources || [])) {
             if (r && r.id) {
-                try { await deleteResource(id, r.id); } catch (e) {
+                try { await deleteResource(id, r.id, { linkWrite: guarded }); } catch (e) {
                     // Keep the network (and the resource's policies) unless NetBird confirms the resource is gone.
                     if (e.unconfirmed) throw new Error(`Couldn't remove resource "${r.name || r.id}", so the network was not deleted: ${e.message}`);
                     console.error('[deleteNetwork] resource:', e.message);
@@ -5813,18 +5983,23 @@ async function deleteNetwork(id) {
         }
         for (const rt of (detail.routers || [])) {
             if (rt && rt.id) {
-                try { await deleteNetworkRouter(id, rt.id); } catch (e) { console.error('[deleteNetwork] router:', e.message); }
+                try { await deleteNetworkRouter(id, rt.id, { linkWrite: guarded }); } catch (e) { console.error('[deleteNetwork] router:', e.message); }
             }
         }
     }
     // Under the target lock, like a resource delete: NetBird deletes the resources still in the
     // network with it, and a target sync must not write references to them back.
-    const resp = await withTargets(() => resourceReq('DELETE', '/api/networks/' + encodeURIComponent(id)));
-    if (!resp || (resp.status >= 300 && resp.status !== 404)) {
+    const resp = await withTargets(() => resourceReq('DELETE', '/api/networks/' + encodeURIComponent(id), undefined, { linkWrite: guarded }));
+    if (!nbWriteOk(resp, true)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'network may still be in use';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
     bustNbCaches('policies', 'gref', 'usage');
+    if (guarded) await noteCreatedNetworkDeleted(String(id));
+    if (chosen) {
+        await storeCreateSection({ networkId: '', enabled: false });
+        await recordAudit({ ...launchActor(viewer), action: 'remote_access.network_release', target: String(id), meta: { networkId: String(id), via: 'network.delete' } });
+    }
     return { ok: true };
 }
 
@@ -5832,6 +6007,7 @@ async function getNetworks() {
     const nets = await fetchNetworksFromApi();
     if (!nets) return [];
     const dupOk = new Set(await getDupAllowedNetworkIds());
+    const linkNets = await guardedLinkNetworks();
     return nets.map(n => ({
         id: n.id,
         name: n.name || '',
@@ -5842,6 +6018,7 @@ async function getNetworks() {
             : (Array.isArray(n.routers) ? n.routers.length : 0),
         policies: Array.isArray(n.policies) ? n.policies.length : 0,
         allowDuplicates: dupOk.has(String(n.id)),
+        managedByApi: linkNets.has(String(n.id)),
     })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -5880,6 +6057,12 @@ async function getNetworkDetail(id) {
         groups: Array.isArray(r.groups) ? r.groups.map(g => ({ id: (g && g.id) || g, name: (g && g.name) || g })) : [],
     }));
 
+    const managedByApi = await isLinkNetwork(id);
+    if (managedByApi) {
+        const inSession = await sessionResourceIds();
+        for (const r of resourceList) r.inSession = inSession.has(String(r.id));
+    }
+
     // Attach the policies that grant access to each resource. A policy is "direct"
     // when it targets the resource via destinationResource (the app manages these);
     // it is "inherited" when it targets a group the resource belongs to (shared,
@@ -5887,6 +6070,7 @@ async function getNetworkDetail(id) {
     const rawPolicies = await netbirdGet('/api/policies');
     const polArr = Array.isArray(rawPolicies) ? rawPolicies : [];
     const gidOf = x => (x && x.id) || x;
+    const profByPolicy = await profileNamesByPolicy();
     for (const r of resourceList) {
         const groupNames = {};
         for (const g of r.groups) groupNames[g.id] = g.name;
@@ -5914,6 +6098,7 @@ async function getNetworkDetail(id) {
                         : [],
                     inherited: !direct,
                     viaGroup: viaGid ? (groupNames[viaGid] || '') : '',
+                    ...(profByPolicy.has(p.id) ? { profileName: profByPolicy.get(p.id) } : {}),
                     // Several rules, an SSH / unmodeled rule, a Drop rule or a rule whose status
                     // differs: the resource editor can't reproduce it (Duplicate skips it, Save refuses).
                     ...((p.rules || []).length > 1 || (p.rules || []).some(ru => ruleHasUnmodeled(ru) || (ru.action || 'accept') !== 'accept' || (ru.enabled !== false) !== (p.enabled !== false))
@@ -5967,6 +6152,7 @@ async function getNetworkDetail(id) {
         routers: routerList,
         policies: policyList,
         allowDuplicates: (await getDupAllowedNetworkIds()).includes(String(id)),
+        managedByApi,
     };
 }
 
@@ -5985,18 +6171,23 @@ function resolveDestinationResource(rule, resMap) {
     return { id: String(id), name: (r && (r.name || r.address)) || String(id), type: (dr && dr.type) || (r && r.type) || '' };
 }
 
+// Labels only, so a failed read labels nothing. A profile's next save overwrites what was edited in its
+// policy directly and the profile doesn't hold (its description, status and other rules).
+async function profileNamesByPolicy() {
+    const m = new Map();
+    await pool.query(`SELECT name, policy_id FROM access_profiles WHERE shared IS NOT FALSE AND policy_id IS NOT NULL AND tenant = $1`, [tnt()])
+        .then(r => r.rows.forEach(x => m.set(x.policy_id, x.name)))
+        .catch(() => { });
+    return m;
+}
+
 async function getAllPolicies() {
     const raw = await netbirdGet('/api/policies');
     const arr = Array.isArray(raw) ? raw : [];
     const gmap = await getGroupRefMap();
     const usage = await getUsageData();
     const resMap = new Map((usage.resources || []).map(r => [r.id, r]));
-    // Policies owned by a shared Access Profile get labeled - they're managed from the
-    // profile (editing them directly would be overwritten on the next profile save).
-    const profByPolicy = new Map();
-    await pool.query(`SELECT name, policy_id FROM access_profiles WHERE shared IS NOT FALSE AND policy_id IS NOT NULL AND tenant = $1`, [tnt()])
-        .then(r => r.rows.forEach(x => profByPolicy.set(x.policy_id, x.name)))
-        .catch(() => { });
+    const profByPolicy = await profileNamesByPolicy();
     return arr.map(p => ({
         id: p.id || p.name || '',
         name: p.name || '',
@@ -6189,10 +6380,15 @@ async function updatePolicy(id, cfg) {
         body.rules = [carryRuleExtras(r0, body.rules[0])];
     }
     const resp = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(id), body);
-    if (!resp || resp.status >= 300) {
-        throw new Error('Failed to update policy: ' + (resp && (resp.raw || resp.error || resp.status)));
-    }
     bustNbCaches('policies', 'gref', 'usage');
+    if (!nbWriteOk(resp)) {
+        if (!nbUnclear(resp)) throw new Error('Failed to update policy: ' + (resp.raw || resp.error || resp.status));
+        throw Object.assign(new Error("NetBird didn't confirm the policy update. Check the policy and try again."), { status: 502, code: 'POLICY_UPDATE_UNCONFIRMED', unconfirmed: true });
+    }
+    try { await followProfilePolicy(id, body); } catch (err) {
+        console.error('[policies] profile row update error:', err.message);
+        throw Object.assign(new Error("The policy was saved, but its Access Profile couldn't be updated. Save it again."), { status: 502, unconfirmed: true });
+    }
     return { id };
 }
 
@@ -6356,6 +6552,7 @@ async function getAllNetworkDefaultProfiles() {
 
 async function setNetworkDefaultProfiles(networkId, profileIds) {
     const ids = [...new Set((profileIds || []).map(Number).filter(n => Number.isInteger(n)))];
+    await assertProfilesExist(ids);
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -6543,7 +6740,10 @@ async function updateAccessProfile(id, { name, sources, protocol, ports, posture
     if (shared !== false) {
         const rule = buildProfileRule(name, group_id, sources, protocol, ports);
         const resp = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(policy_id), { name: `${name} Access`, description: '', enabled: true, source_posture_checks: pc, rules: [rule] });
-        if (!resp || resp.status >= 300) throw new Error('Failed to update policy: ' + (resp && (resp.raw || resp.error || resp.status)));
+        if (!nbWriteOk(resp)) {
+            if (!nbUnclear(resp)) throw new Error('Failed to update policy: ' + (resp.raw || resp.error || resp.status));
+            throw new Error("NetBird didn't confirm the policy update, so the profile wasn't saved. Save it again.");
+        }
     }
     await pool.query(
         `UPDATE access_profiles SET name = $2, sources = $3, protocol = $4, ports = $5, posture_checks = $6 WHERE id = $1 AND tenant = $7`,
@@ -6585,17 +6785,189 @@ async function getCities(country) {
     return Array.isArray(arr) ? arr : [];
 }
 
+// ─── Access Profiles: existence checks, where they are used, delete ───
+const profileTargetIds = (targets) => (targets || []).filter(t => t && t.type === 'profile').map(t => t.id);
+async function assertProfilesExist(ids, { sharedOnly = false } = {}) {
+    const want = [...new Set((ids || []).map(String))];
+    if (!want.length) return;
+    const r = await pool.query(`SELECT id FROM access_profiles WHERE tenant = $1${sharedOnly ? ' AND shared IS NOT FALSE' : ''}`, [tnt()]);
+    const have = new Set(r.rows.map(x => String(x.id)));
+    const missing = want.find(id => !have.has(id));
+    if (missing !== undefined) {
+        const e = new Error(`Access Profile #${missing} no longer exists. Reload and choose again.`);
+        e.status = 400; e.code = 'PROFILE_NOT_FOUND';
+        throw e;
+    }
+}
+async function profileRefs() {
+    const r = await pool.query(`SELECT name, group_id, policy_id FROM access_profiles WHERE shared IS NOT FALSE`);
+    return r.rows;
+}
+const refId = (x) => (x && typeof x === 'object' ? x.id : x);
+const refIds = (a) => (Array.isArray(a) ? a.map(refId).filter(Boolean) : []);
+const targetsOf = (v) => (Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : []);
+// An Access Profile's row follows its policy, so temporary grants open what the policy allows now.
+// The posture checks are the policy's; the rest is copied only from a single rule that is clearly
+// the profile's (to its group, or to the resource it was pointed at).
+async function followProfilePolicy(policyId, body) {
+    const r = body.rules.length === 1 && (body.rules[0].action || 'accept') === 'accept' ? body.rules[0] : null;
+    const protocol = (r && r.protocol) || 'all';
+    const ports = r && (protocol === 'tcp' || protocol === 'udp') ? mergeRulePorts(r).join(',') : '';
+    const own = '(group_id = ANY($6::text[]) OR $7::boolean)';
+    await pool.query(
+        `UPDATE access_profiles SET posture_checks = $2,
+             protocol = CASE WHEN ${own} THEN $3 ELSE protocol END, ports = CASE WHEN ${own} THEN $4 ELSE ports END,
+             sources = CASE WHEN ${own} THEN $5::jsonb ELSE sources END
+         WHERE policy_id = $1 AND shared IS NOT FALSE AND tenant = $8`,
+        [policyId, JSON.stringify(postureIds(body.source_posture_checks)), protocol, ports, JSON.stringify(refIds(r && r.sources)),
+            refIds(r && r.destinations), !!(r && r.destinationResource), tnt()]);
+}
+
+// The access targets that are still live: recurring rules (enabled or not) and temporary grants of
+// the active account, pending requests and auto-approval rules of the main account.
+async function readLiveAccessTargets() {
+    const t = tnt();
+    const [recurring, grants, requests] = await Promise.all([
+        pool.query('SELECT user_id, user_label, targets FROM recurring_access WHERE tenant = $1', [t]),
+        pool.query(`SELECT user_id, user_label, targets FROM temporary_access_grants WHERE tenant = $1 AND status IN ('creating', 'active')`, [t]),
+        t ? { rows: [] } : pool.query(`SELECT requester_id, requester_name, requester_email, targets, approved_targets FROM access_requests WHERE status = 'pending'`),
+    ]);
+    const of = (kind, label, ...lists) => ({ kind, label, targets: lists.flatMap(targetsOf) });
+    return [
+        ...recurring.rows.map(r => of('recurring', `recurring access for ${r.user_label || r.user_id}`, r.targets)),
+        ...requests.rows.map(q => of('request', `a pending access request from ${q.requester_name || q.requester_email || q.requester_id}`, q.targets, q.approved_targets)),
+        ...(t ? [] : _autoApproval.rules.map(r => of('autoApproval', 'an auto-approval rule', r.targets))),
+        ...grants.rows.map(g => of('grant', `temporary access for ${g.user_label || g.user_id}`, g.targets)),
+    ];
+}
+async function networkTargetUses(networkId) {
+    const id = String(networkId);
+    const named = (await readLiveAccessTargets()).filter(u => u.targets.some(x => x.type === 'network' && String(x.id) === id));
+    const autos = await pool.query(`SELECT name FROM automations WHERE tenant = '' AND network_id = $1 ORDER BY name`, [id]);
+    return [...new Set([...autos.rows.map(a => `automation "${a.name}"`), ...named.map(u => u.label)])];
+}
+const usesText = (labels) => {
+    const shown = labels.length > 4 ? [...labels.slice(0, 3), `${labels.length - 3} more`] : labels;
+    return shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}` : shown[0];
+};
+
+// Where each Access Profile row is used: Map(String(id) -> { reasons: [{ kind, label }], groupName,
+// policyName }). Read fresh, never from a cache; any read that fails refuses.
+async function profilesUsage(rows) {
+    const t = tnt();
+    const read = async (path, { missingIsEmpty = false } = {}) => {
+        const r = await netbirdReq('GET', path);
+        const list = missingIsEmpty && r && r.status === 404 ? [] : nbListBody(r);
+        if (!list) {
+            const e = new Error("Couldn't read where this profile is used - nothing was deleted. Try again.");
+            e.status = 502; e.code = 'PROFILE_USAGE_UNREADABLE';
+            throw e;
+        }
+        return list;
+    };
+    const [defaults, automations, live] = await Promise.all([
+        pool.query('SELECT network_id, profile_id FROM network_default_profiles WHERE tenant = $1 AND profile_id = ANY($2::int[])', [t, rows.map(p => p.id)]),
+        pool.query('SELECT name, profile_ids FROM automations WHERE tenant = $1', [t]),
+        readLiveAccessTargets(),
+    ]);
+    const launchProfileId = t ? 0 : getRemoteAccessConfig().createResources.profileId;
+    // A default of a network that was deleted in NetBird can't be removed in the app: it doesn't count.
+    const networks = defaults.rows.length ? new Map((await read('/api/networks')).map(n => [String(n.id), n])) : new Map();
+
+    let nb = null;
+    if (rows.some(p => p.shared !== false && p.group_id)) {
+        // A 404 from the two optional ones: a NetBird without legacy routes or Reverse Proxy.
+        const [groups, policies, keys, routers, routes, nameservers, users, proxies] = await Promise.all([
+            read('/api/groups'), read('/api/policies'), read('/api/setup-keys'), read('/api/networks/routers'),
+            read('/api/routes', { missingIsEmpty: true }), read('/api/dns/nameservers'), read('/api/users'),
+            read('/api/reverse-proxies/services', { missingIsEmpty: true }),
+        ]);
+        nb = { groups, policies, keys, routers, routes, nameservers, users, proxies };
+    }
+
+    const out = new Map();
+    for (const p of rows) {
+        const u = { reasons: [], groupName: '', policyName: '' };
+        out.set(String(p.id), u);
+        const add = (kind, label) => { if (!u.reasons.some(x => x.kind === kind && x.label === label)) u.reasons.push({ kind, label }); };
+        const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+        const shared = p.shared !== false;
+        const gid = shared ? (p.group_id || '') : '';
+        if (gid) {
+            const g = nb.groups.find(x => x && x.id === gid);
+            if (g) {
+                u.groupName = g.name || '';
+                const resources = Math.max(Number(g.resources_count) || 0, Array.isArray(g.resources) ? g.resources.length : 0);
+                const peers = Math.max(Number(g.peers_count) || 0, Array.isArray(g.peers) ? g.peers.length : 0);
+                if (resources) add('resources', plural(resources, 'resource'));
+                if (peers) add('peers', plural(peers, 'peer'));
+            }
+            const pol = nb.policies.find(x => x && x.id === p.policy_id);
+            if (pol) {
+                u.policyName = pol.name || '';
+                if ((pol.rules || []).some(r => r && (r.destinationResource || refIds(r.destinations).some(d => d !== gid)))) {
+                    add('policyElsewhere', `its policy "${pol.name || p.policy_id}", which also grants other destinations`);
+                }
+            }
+            const has = (a) => refIds(a).includes(gid);
+            for (const k of nb.keys) if (has(k.auto_groups)) add('netbirdReference', `setup key "${k.name || k.id}"`);
+            for (const r of nb.routers) if (has(r.peer_groups)) add('netbirdReference', 'a network router');
+            for (const r of nb.routes) if (has(r.groups) || has(r.peer_groups) || has(r.access_control_groups)) add('netbirdReference', `route "${r.network_id || r.description || r.id}"`);
+            for (const n of nb.nameservers) if (has(n.groups)) add('netbirdReference', `DNS nameservers "${n.name || n.id}"`);
+            for (const x of nb.users) if (has(x.auto_groups)) add('netbirdReference', `the auto groups of user ${x.name || x.email || x.id}`);
+            for (const x of nb.proxies) {
+                if (has(x.access_groups) || has(x.auth && x.auth.bearer_auth && x.auth.bearer_auth.distribution_groups)) add('proxyService', `reverse proxy service "${x.name || x.domain || x.id}"`);
+            }
+            for (const x of nb.policies) {
+                if (x.id !== p.policy_id && (x.rules || []).some(r => r && (has(r.sources) || has(r.destinations)))) add('netbirdReference', `policy "${x.name || x.id}"`);
+            }
+        }
+        // A Direct profile is a preset: nothing can target it.
+        const hit = (x) => (shared && x.type === 'profile' && (String(x.id) === String(p.id) || x.groupId === gid)) || (gid && x.type === 'group' && x.id === gid);
+        for (const l of live) if (l.targets.some(hit)) add(l.kind, l.label);
+        for (const d of defaults.rows) {
+            const n = d.profile_id === p.id && networks.get(String(d.network_id));
+            if (n) add('networkDefault', `the default profiles of network ${n.name || n.id}`);
+        }
+        for (const a of automations.rows) {
+            if ((Array.isArray(a.profile_ids) ? a.profile_ids : []).some(x => Number(x) === Number(p.id))) add('automation', `automation "${a.name}"`);
+        }
+        if (launchProfileId && Number(p.id) === launchProfileId) add('remoteAccess', 'Remote Access launch links (choose another profile in Settings > Remote Access)');
+    }
+    return out;
+}
+
+async function getAccessProfileUsage() {
+    const r = await pool.query('SELECT id, name, group_id, policy_id, shared FROM access_profiles WHERE tenant = $1', [tnt()]);
+    return Object.fromEntries([...(await profilesUsage(r.rows))].map(([id, u]) => [id, { reasons: u.reasons }]));
+}
+
+// An unused profile's NetBird objects grant nothing, so one left behind is reported (`leftover`), not
+// undone.
 async function deleteAccessProfile(id) {
-    const r = await pool.query('SELECT group_id, policy_id, shared FROM access_profiles WHERE id = $1 AND tenant = $2', [id, tnt()]);
-    if (!r.rows.length) return;
-    const { group_id, policy_id, shared } = r.rows[0];
-    if (shared !== false) {
-        await netbirdReq('DELETE', '/api/policies/' + encodeURIComponent(policy_id)).catch(() => { });
-        await netbirdReq('DELETE', '/api/groups/' + encodeURIComponent(group_id)).catch(() => { });
+    const r = await pool.query('SELECT id, name, group_id, policy_id, shared FROM access_profiles WHERE id = $1 AND tenant = $2', [id, tnt()]);
+    if (!r.rows.length) return null;
+    const p = r.rows[0];
+    const usage = (await profilesUsage([p])).get(String(p.id));
+    if (usage.reasons.length) {
+        const e = new Error(`This profile is in use by ${usesText(usage.reasons.map(x => x.label))}. Remove it from them first.`);
+        e.status = 409; e.code = 'PROFILE_IN_USE'; e.reasons = usage.reasons;
+        throw e;
     }
     await pool.query('DELETE FROM network_default_profiles WHERE profile_id = $1 AND tenant = $2', [id, tnt()]);
     await pool.query('DELETE FROM access_profiles WHERE id = $1 AND tenant = $2', [id, tnt()]);
-    bustNbCaches('policies', 'gref', 'usage');
+    const leftover = [];
+    if (p.shared !== false) {
+        const drop = async (kind, oid, name, path) => {
+            if (!oid) return;
+            const resp = await netbirdReq('DELETE', path + encodeURIComponent(oid));
+            if (!nbWriteOk(resp, true)) leftover.push({ kind, id: oid, name: name || oid });
+        };
+        await drop('policy', p.policy_id, usage.policyName, '/api/policies/');
+        await drop('group', p.group_id, usage.groupName, '/api/groups/');
+        bustNbCaches('policies', 'gref', 'usage');
+    }
+    return { name: p.name, leftover };
 }
 
 // The event filter-rules block (the _filterCache + invalidateFilterCache, getFilterConfig,
@@ -6772,7 +7144,7 @@ function createOutcomeError(code, message, cause, resource) {
 // Create a resource: a NetBird group + a network resource in that group + one access
 // policy per provided entry (its source groups → the resource, with protocol/ports).
 // A resource with no policies is reachable by no one (NetBird's model).
-async function createClientResource(networkId, { name, address, description, groups, policies, allowBlocked }) {
+async function createClientResource(networkId, { name, address, description, groups, policies, allowBlocked }, { linkWrite = false } = {}) {
     let groupIds = Array.isArray(groups) ? groups.filter(Boolean) : [];
     // The managed Browser Gateway groups are never the caller's to set: dropped here, and the
     // target group is set by the rule (open network, address type) under the target lock.
@@ -6800,12 +7172,12 @@ async function createClientResource(networkId, { name, address, description, gro
             };
             // Not configured and read-only answer without sending anything.
             sent = netbirdApiConfigured() && !NETBIRD_READONLY;
-            return noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body));
+            return noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body, { linkWrite }));
         });
         // No answer, or a 5xx: NetBird can save the resource and then fail building its answer.
         if (sent && resp && (resp.status === 0 || resp.status >= 500)) throw createOutcomeError('RESOURCE_UNCONFIRMED', CREATE_UNCONFIRMED, resp.error || resp.raw || String(resp.status || 'no answer'));
         if (!nbWriteOk(resp)) {
-            throw new Error('Failed to create resource: ' + (resp && (resp.raw || resp.error || resp.status)));
+            throw Object.assign(new Error('Failed to create resource: ' + (resp && (resp.raw || resp.error || resp.status))), { nbStatus: resp && resp.status });
         }
         const resourceId = resp.body && resp.body.id;
         const resType = resp.body && resp.body.type;
@@ -6946,6 +7318,7 @@ async function mergeResourcesLocked(networkId, resourceIds, keepId) {
         if (!r) throw new Error('one of the selected resources no longer exists');
         chosen.push({ ...r, __netId: nid });
     }
+    await refuseLinkNetwork(...chosen.map(r => r.__netId));
     const survivor = chosen.find(r => r.id === String(keepId)) || chosen[0];
     const addr = String(survivor.address || '').trim().toLowerCase();
     const mismatch = chosen.find(r => String(r.address || '').trim().toLowerCase() !== addr);
@@ -7039,6 +7412,7 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
     const target = String(targetNetworkId || '').trim();
     if (!target) throw new Error('a target network is required');
     if (target === String(sourceNetworkId)) throw new Error('the resource is already in this network');
+    await refuseLinkNetwork(sourceNetworkId, target);
     const tgtNet = await netbirdGet('/api/networks/' + encodeURIComponent(target));
     if (!tgtNet || !tgtNet.id) throw new Error('the target network no longer exists');
 
@@ -7119,7 +7493,13 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
                 }
                 // Delete the original (its direct policies were re-pointed; groups now also
                 // hold the new resource, so group cleanup won't touch them).
-                await deleteResource(sourceNetworkId, rid);
+                try {
+                    await deleteResource(sourceNetworkId, rid);
+                } catch (de) {
+                    if (de.code !== 'RESOURCE_DELETE_UNCONFIRMED') throw de;
+                    // The delete may still land, so the copy stays: at worst a duplicate, never a lost resource.
+                    throw Object.assign(new Error('The move may be half done: the original may still be in its network. Check it before moving again.'), { keepCopy: true });
+                }
                 // The original name is free now - drop the temporary [moving] suffix.
                 const rn = await resourceReq('PUT', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`, {
                     name: r.name, address: r.address, description: r.description || '',
@@ -7134,8 +7514,10 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
                 // Roll back so nothing is left half-moved: first restore every policy we
                 // already re-pointed (or they'd target the resource we're about to delete),
                 // THEN drop the new resource.
-                await revertRepointedPolicies(repointed);
-                await resourceReq('DELETE', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`).catch(() => { });
+                if (!inner.keepCopy) {
+                    await revertRepointedPolicies(repointed);
+                    await resourceReq('DELETE', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`).catch(() => { });
+                }
                 throw inner;
             }
         } catch (e) {
@@ -8151,15 +8533,17 @@ async function scanResourceConflicts() {
     return conflicts;
 }
 
-// Replace the policies dedicated to a resource with the provided list (delete + recreate).
-// Replace the policies dedicated to a resource (every rule targets it directly via
-// destinationResource). Shared group-targeting policies are never touched.
-// The resource editor REPLACES a resource's dedicated policies: it deletes them and recreates one
-// single-rule Accept policy per form entry. That is only safe when every stored one is exactly what
-// the form can express - otherwise an SSH rule would come back as allow-all, a Drop rule as Accept,
-// a multi-rule policy as one rule, and unmodeled fields would be lost. Checked BEFORE any write
-// (the route calls it before saving the resource too); returns the dedicated policies.
-async function checkResourcePolicySync(resourceId, policies) {
+// Save the policies dedicated to a resource (every rule targets it directly via
+// destinationResource) from the resource editor's list. Shared group-targeting policies are never
+// touched. An entry with the id of a dedicated policy updates that policy in place, so an Access
+// Profile that owns it keeps it; a dedicated policy left out of the list is deleted; an entry without
+// an id is created as one single-rule Accept policy. That is only safe when every stored one
+// is exactly what the form can express - otherwise an SSH rule would come back as allow-all, a Drop
+// rule as Accept, a multi-rule policy as one rule, and unmodeled fields would be lost. Checked BEFORE
+// any write (the route calls it before saving the resource too). An Access Profile's policy is never
+// deleted here, and only an admin may change it. Returns the dedicated policies, with the profile-owned
+// ones in `profileOwned`.
+async function checkResourcePolicySync(resourceId, policies, { isAdmin = true, resourceName = 'resource' } = {}) {
     for (const p of (policies || [])) if (p) editorProtocol(p.protocol);
     await refuseManagedPolicySources(policies);
     const pols = await netbirdGet('/api/policies').catch(() => null);
@@ -8185,28 +8569,76 @@ async function checkResourcePolicySync(resourceId, policies) {
         e.status = 409;
         throw e;
     }
+    const refuse = (status, code, message) => { throw Object.assign(new Error(message), { status, code }); };
+    const sent = (policies || []).filter(editorPolicyId);
+    const sentById = new Map(sent.map(p => [editorPolicyId(p), p]));
+    if (sentById.size !== sent.length || [...sentById.keys()].some(id => !dedicated.some(p => p.id === id))) {
+        refuse(400, 'POLICY_NOT_OF_RESOURCE', "A policy in this list isn't one of this resource's own policies. Reload the resource and try again - nothing was changed.");
+    }
+    const owners = dedicated.length ? await profileRefs() : [];
+    dedicated.profileOwned = new Set();
+    for (const p of dedicated) {
+        const profile = owners.find(x => x.policy_id === p.id);
+        if (!profile) continue;
+        dedicated.profileOwned.add(p.id);
+        if (!sentById.has(p.id)) refuse(409, 'PROFILE_POLICY', `Policy "${p.name || p.id}" is also the policy of Access Profile "${profile.name}". Change or delete it in Access Profiles.`);
+        if (!isAdmin && !sameDirectPolicy(p, sentById.get(p.id), resourceName)) refuse(403, 'PROFILE_POLICY_ADMIN_ONLY', `Only an admin can change the policy of Access Profile ${profile.name}.`);
+    }
     return dedicated;
 }
-async function syncResourcePolicies(networkId, resourceId, policies) {
+const editorPolicyId = (p) => String((p && p.id) || '');
+function sameDirectPolicy(stored, sent, resourceName) {
+    const r0 = (stored.rules || [])[0] || {};
+    const shape = (p, protocol, ports, sources, bidirectional) => {
+        const tokens = splitPortTokens(protocol === 'tcp' || protocol === 'udp' ? ports : []);
+        return stableStringify({
+            name: String(p.name || '').trim() || `${resourceName} Policy`, description: String(p.description || ''), enabled: p.enabled !== false,
+            protocol, ports: [...tokens.ports, ...tokens.portRanges.map(x => `${x.start}-${x.end}`)].map(String).sort(),
+            sources: refIds(sources).map(String).sort(), bidirectional: !!bidirectional,
+        });
+    };
+    return shape(stored, r0.protocol || 'all', mergeRulePorts(r0), r0.sources, r0.bidirectional)
+        === shape(sent, editorProtocol(sent.protocol), sent.ports, sent.sources, sent.bidirectional)
+        && stableStringify(postureIds(stored.source_posture_checks)) === stableStringify(postureIds(sent.postureChecks));
+}
+async function syncResourcePolicies(networkId, resourceId, policies, { isAdmin = true } = {}) {
     const r = await getResourceInNetwork(networkId, resourceId);
     const name = (r && r.name) || 'resource';
     const resType = r && r.type;
-
+    const target = { id: resourceId, type: resType };
+    // Without isAdmin: the sources of a non-admin's entries were already rewritten (resolvePolicySources),
+    // and their profile policies are skipped below.
     const dedicated = await checkResourcePolicySync(resourceId, policies);
-    let changed = false; // any policy already deleted or created when a later step fails
+    const sentById = new Map((policies || []).filter(editorPolicyId).map(p => [editorPolicyId(p), p]));
+    let changed = false; // any policy already updated, deleted or created when a later step fails
     try {
         for (const p of dedicated) {
+            const sent = sentById.get(p.id);
+            if (sent) {
+                // An admin's save of a profile's policy is always sent: a retry after an unanswered one
+                // brings the profile's row up to date.
+                const profileOwned = dedicated.profileOwned.has(p.id);
+                if (profileOwned ? !isAdmin : sameDirectPolicy(p, sent, name)) continue;
+                await updatePolicy(p.id, {
+                    name: String(sent.name || '').trim() || `${name} Policy`, description: String(sent.description || ''), enabled: sent.enabled !== false,
+                    postureChecks: Array.isArray(sent.postureChecks) ? sent.postureChecks : [],
+                    protocol: sent.protocol, ports: sent.ports, bidirectional: !!sent.bidirectional,
+                    sources: Array.isArray(sent.sources) ? sent.sources : [], destinationResource: target,
+                });
+                changed = true;
+                continue;
+            }
             const d = await netbirdReq('DELETE', '/api/policies/' + encodeURIComponent(p.id));
             if (!d || !(d.status >= 200 && d.status < 300)) throw new Error(`NetBird refused to remove policy "${p.name || p.id}" (${(d && (d.status || d.error)) || 'no response'})`);
             changed = true;
         }
         for (const p of (policies || [])) {
-            if (!p || !Array.isArray(p.sources) || !p.sources.length) continue;
-            await createOneResourcePolicy(name, { id: resourceId, type: resType }, p);
+            if (!p || editorPolicyId(p) || !Array.isArray(p.sources) || !p.sources.length) continue;
+            await createOneResourcePolicy(name, target, p);
             changed = true;
         }
     } catch (e) {
-        e.partial = changed;
+        e.partial = changed || !!e.unconfirmed;
         throw e;
     } finally {
         bustNbCaches('policies');
@@ -8407,16 +8839,50 @@ async function getResourceInNetwork(networkId, resourceId) {
     return r;
 }
 
-// Delete a resource and best-effort clean up its auto-created policy + group
-async function deleteResource(networkId, resourceId) {
+// Is the resource confirmed gone from this network? Only an HTTP 404 on the resource's own path says
+// so: netbirdGet drops the status, and an error body with "code": 404 can come with another status.
+async function resourceGoneConfirmed(networkId, resourceId) {
+    const r = await netbirdReq('GET', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`);
+    return !!r && r.status === 404;
+}
+// Delete a resource and best-effort clean up its auto-created policy + group. In the network launch
+// links use, only with `linkAdminDelete` (an admin, from the Networks pages), and only the resource:
+// NetBird's refusal (a policy still uses it, say) is the answer. `linkWrite`: that network itself is
+// being deleted.
+async function deleteResource(networkId, resourceId, { linkAdminDelete = false, linkWrite = false } = {}) {
+    const send = async (opts) => {
+        // Under the target lock: a target sync that read the resources before this delete must not
+        // write its group list after it (NetBird would keep the reference to the deleted resource).
+        const del = await withTargets(() => resourceReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, undefined, opts));
+        if (nbWriteOk(del, true)) {
+            if (opts.linkWrite) await noteCreatedResourceDeleted(resourceId);
+            return;
+        }
+        if (nbUnclear(del)) {
+            bustNbCaches('policies', 'gref', 'usage');
+            throw Object.assign(new Error("NetBird didn't confirm the delete. Check the network and try again."), { status: 502, code: 'RESOURCE_DELETE_UNCONFIRMED', unconfirmed: true });
+        }
+        throw Object.assign(new Error('Failed to delete resource: ' + (del.raw || del.error || del.status)), { status: 502, code: 'RESOURCE_DELETE_FAILED' });
+    };
+    if (!linkWrite && await isLinkNetwork(networkId)) {
+        if (!linkAdminDelete) throw linkNetworkError();
+        await getResourceInNetwork(networkId, resourceId);
+        await send({ linkWrite: true });
+        bustNbCaches('policies', 'gref', 'usage');
+        return { status: 'ok' };
+    }
     // Fetch the resource first to learn its groups (and that it is in this network)
     const r = await getResourceInNetwork(networkId, resourceId);
     const groupIds = (r && Array.isArray(r.groups)) ? r.groups.map(g => (g && g.id) || g).filter(Boolean) : [];
+    // An Access Profile's group and policy (of any account) outlive its last resource.
+    const profiles = await profileRefs();
+    const profileGroups = new Set(profiles.map(x => x.group_id).filter(Boolean));
+    const profilePolicies = new Set(profiles.map(x => x.policy_id).filter(Boolean));
 
     // Delete policies that target this resource directly (NetBird blocks deleting a
     // resource still referenced by a policy's destinationResource).
     // The Browser Gateway's own policies and groups are never deleted here (main account).
-    const appOwnedPolicy = (p) => raMain() && isRemoteAccessManagedPolicy(p);
+    const appOwnedPolicy = (p) => (raMain() && isRemoteAccessManagedPolicy(p)) || profilePolicies.has(p.id);
     const polsBefore = await netbirdGet('/api/policies');
     if (Array.isArray(polsBefore)) {
         for (const p of polsBefore) {
@@ -8429,15 +8895,12 @@ async function deleteResource(networkId, resourceId) {
         }
     }
 
-    // Under the target lock: a target sync that read the resources before this delete must not
-    // write its group list after it (NetBird would keep the reference to the deleted resource).
-    const del = await withTargets(() => resourceReq('DELETE', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`));
-    if (!del || del.status >= 300) throw new Error('Failed to delete resource: ' + (del && (del.raw || del.error || del.status)));
+    await send({ linkWrite });
 
     // Clean up groups that are now empty (and the policies that targeted them)
     for (const gid of groupIds) {
         try {
-            if (raMain() && isRemoteAccessManagedGroup(gid, '')) continue;
+            if (profileGroups.has(gid) || (raMain() && isRemoteAccessManagedGroup(gid, ''))) continue;
             const g = await netbirdGet('/api/groups/' + encodeURIComponent(gid));
             // Only a confirmed read of THIS group (an error body is no group) may lead to a delete.
             if (raMain() && (!g || typeof g !== 'object' || g.id !== gid || isRemoteAccessManagedGroup(gid, g.name || ''))) continue;
@@ -9565,7 +10028,7 @@ const {
     getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations,
     getAutomationManaged, repairAutomation, forgetAutomation, dryRunAutomation,
 } = require('./lib/automations');
-initAutomations({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds });
+initAutomations({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds, assertProfilesExist, resourceGoneConfirmed, isLinkNetwork });
 
 
 // ─── Temporary access grants: time-boxed user→resource access, auto-revoked on expiry ───
@@ -9595,6 +10058,10 @@ function withNbUserLock(userId, fn) {
 function nbWriteOk(resp, missingOk = false) {
     return !!resp && ((resp.status >= 200 && resp.status < 300) || (missingOk && resp.status === 404));
 }
+
+// A write that may have landed. A 429 may stand for a retry that got no answer (lib/netbird.js); a
+// read-only instance sends nothing.
+const nbUnclear = (resp) => !NETBIRD_READONLY && (!resp || !resp.status || resp.status >= 500 || resp.status === 429);
 
 // The grantee's devices (peers) - used for the informational device count only.
 // Match on the NetBird user id (full or the IdP-subject tail) OR the owner email, since a
@@ -9739,6 +10206,8 @@ async function createGrantTracked(cfg, actor, run) {
     // The Browser Gateway groups are infrastructure: no grant (manual, approved, auto-approved or a
     // recurring window) puts anyone into them. Checked live, before anything is recorded.
     await refuseManagedGroupTargets(targets);
+    await refuseLinkNetworkTargets(targets);
+    await assertProfilesExist(profileTargetIds(targets), { sharedOnly: true });
 
     const peers = await getUserPeers(userId);
     const label = String(cfg.userLabel || (peers[0] && (peers[0].owner_name || peers[0].owner_email)) || userId);
@@ -10258,9 +10727,14 @@ async function listRecurringAccess() {
     const r = await pool.query('SELECT * FROM recurring_access WHERE tenant=$1 ORDER BY id', [tnt()]).catch(() => ({ rows: [] }));
     return r.rows.map(recurToApi);
 }
+async function refuseRecurringTargets(targets) {
+    await refuseManagedGroupTargets(targets);
+    await refuseLinkNetworkTargets(targets);
+    await assertProfilesExist(profileTargetIds(targets), { sharedOnly: true });
+}
 async function createRecurringAccess(cfg, actor) {
     const c = normRecurCfg(cfg);
-    await refuseManagedGroupTargets(c.targets);
+    await refuseRecurringTargets(c.targets);
     const r = await pool.query(`
         INSERT INTO recurring_access (user_id, user_label, user_email, targets, days, start_time, end_time, valid_until, enabled, note, created_by, tenant)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *
@@ -10295,7 +10769,7 @@ async function updateRecurringLocked(id, cfg, actor) {
     if (!old.rows.length) throw new Error('rule not found');
     const c = normRecurCfg(cfg);
     // A disabling save stays possible, so such a rule (from before) can always be switched off.
-    if (c.enabled) await refuseManagedGroupTargets(c.targets);
+    if (c.enabled) await refuseRecurringTargets(c.targets);
     const r = await pool.query(`
         UPDATE recurring_access SET user_id=$2, user_label=$3, user_email=$4, targets=$5, days=$6,
                start_time=$7, end_time=$8, valid_until=$9, enabled=$10, note=$11
@@ -10514,11 +10988,14 @@ async function searchRequestTargets(q) {
         for (const rid of (Array.isArray(n.resources) ? n.resources : [])) netOfResource.set(rid, n.id);
     }
     const polByResource = requestPortEntries(usage);
+    // The network launch links use, and its servers, can't be requested.
+    const linkNets = await guardedLinkNetworks();
 
     let hits = 0;
     for (const r of usage.resources || []) {
         if (hits >= CAP) break;
         const nid = netOfResource.get(r.id) || '';
+        if (linkNets.has(nid)) continue;
         const resourceMatch = has(r.name) || has(r.address) || has(r.description);
         if (resourceMatch) {
             results.push({ type: 'resource', id: r.id, name: r.name || r.address || r.id, subtitle: [r.address, netName.get(nid), r.description].filter(Boolean).join(' · '), networkId: nid, resourceType: r.type || '' });
@@ -10541,6 +11018,7 @@ async function searchRequestTargets(q) {
     hits = 0;
     for (const n of usage.networks || []) {
         if (hits >= CAP) break;
+        if (linkNets.has(n.id)) continue;
         if (has(n.name) || has(n.description)) {
             results.push({ type: 'network', id: n.id, name: n.name || n.id, subtitle: ['Whole network', n.description].filter(Boolean).join(' · ') });
             hits++;
@@ -10640,6 +11118,7 @@ async function createAccessRequest(cfg, requester) {
         const access = normAccessSpec(t.access);
         return { type: t.type, id: String(t.id), name: String(t.name || t.id), networkId: t.networkId, resourceType: t.resourceType, groupId: t.groupId, ...(access ? { access } : {}) };
     });
+    if (kind === 'access') await refuseLinkNetworkTargets(clean);
 
     // Insert one access_requests row for a subset of targets, auditing request.create.
     // opts: tempDev overrides the requester's checkbox (extension inherits the current
@@ -11294,6 +11773,9 @@ const EXPORT_TABLES = [
     { name: 'network_grants', idCol: null, strip: [], required: ['network_id', 'group_id'] }, // composite PK - no serial
     { name: 'templates', idCol: 'id', strip: [], required: ['name'] }, // global (no tenant column)
     { name: 'cleanup_ignores', idCol: 'id', strip: [], required: ['category', 'object_id'] },
+    // Runtime state: only in the encrypted backup, so a new server still removes these servers, and
+    // added to the live rows, which a restore on the same server must not forget.
+    { name: 'ra_created_resources', idCol: null, strip: [], required: ['attempt_id', 'ip', 'state'], fullOnly: true, merge: true },
 ];
 const EXPORT_TABLES_VERSION = 1;
 const EXPORT_TABLE_ROW_CAP = 50000; // bomb guard - config tables are tiny; a giant section means a bad file
@@ -11303,6 +11785,7 @@ const EXPORT_TABLE_ROW_CAP = 50000; // bomb guard - config tables are tiny; a gi
 async function exportConfigTables(full = false) {
     const tables = {};
     for (const t of EXPORT_TABLES) {
+        if (t.fullOnly && !full) continue;
         const order = t.idCol ? ` ORDER BY ${t.idCol}` : '';
         const r = await pool.query(`SELECT * FROM ${t.name}${order}`); // ALL rows, ALL tenants
         tables[t.name] = r.rows.map(row => {
@@ -11326,6 +11809,7 @@ async function tableColumnTypes(table) {
 // table untouched. results/skipped are filled in place (per-section kept vs dropped counts).
 async function importConfigTables(tables, results, skipped, full = false) {
     for (const t of EXPORT_TABLES) {
+        if (t.fullOnly && !full) continue;
         const rows = tables[t.name];
         if (!Array.isArray(rows)) continue; // section absent → do not touch the live table
         if (rows.length > EXPORT_TABLE_ROW_CAP) throw new Error(`section "${t.name}" has too many rows (${rows.length} > ${EXPORT_TABLE_ROW_CAP})`);
@@ -11345,7 +11829,7 @@ async function importConfigTables(tables, results, skipped, full = false) {
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
-            await client.query(`DELETE FROM ${t.name}`); // REPLACE: the file's rows become the whole table (all tenants)
+            if (!t.merge) await client.query(`DELETE FROM ${t.name}`); // REPLACE: the file's rows become the whole table (all tenants)
             for (const o of clean) {
                 const keys = Object.keys(o);
                 const vals = keys.map(k => {
@@ -11356,7 +11840,7 @@ async function importConfigTables(tables, results, skipped, full = false) {
                     return v;
                 });
                 const ph = keys.map((_, i) => `$${i + 1}`).join(', ');
-                await client.query(`INSERT INTO ${t.name} (${keys.join(', ')}) VALUES (${ph})`, vals);
+                await client.query(`INSERT INTO ${t.name} (${keys.join(', ')}) VALUES (${ph})${t.merge ? ' ON CONFLICT DO NOTHING' : ''}`, vals);
             }
             // Serial tables only: advance the sequence past the largest restored id so new inserts don't collide.
             if (t.idCol) {
@@ -11420,6 +11904,13 @@ async function importAppSettings(payload, actor) {
             if (smtpServer(imp) !== smtpServer(parseObject((await getSetting(k)) || '') || {})) {
                 skippedSettings.push({ key: k, reason: 'kept the current SMTP server - change it in Settings > Email (SMTP)' }); continue;
             }
+        }
+        if (k === 'remote_access_config') {
+            const imported = importedRemoteAccessConfig(v);
+            if (!imported) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
+            await setSetting(k, imported);
+            importedKeys.push(k);
+            continue;
         }
         if (isTelegramConfigKey(k)) {
             const imp = parseObject(v);
@@ -11662,7 +12153,9 @@ async function importInternalBackupPayload(payload) {
     for (const [k, v] of Object.entries(settings)) {
         if (typeof k !== 'string' || k.length > 100 || typeof v !== 'string') continue;
         if (BACKUP_KEY_SETTINGS.has(k)) continue; // keep this server's own backup keypair (see BACKUP_KEY_SETTINGS)
-        await setSetting(k, v);
+        const value = k === 'remote_access_config' ? importedRemoteAccessConfig(v) : v;
+        if (value === null) continue;
+        await setSetting(k, value);
         settingsCount++;
     }
     // Reload every config module so the restore applies without a restart.
@@ -12427,7 +12920,7 @@ module.exports = {
     addResourceGroups, removeResourceGroups, fetchUserGroupsFresh, // used by browser remote access (server.js)
     pool, initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
-    getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, refuseManagedGroupEdit, removeUserManagedGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter,
+    getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, refuseManagedGroupEdit, removeUserManagedGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, setUpLaunchNetwork, releaseLaunchNetwork, checkLaunchNetwork,
     loadAccessCheckSnapshot, loadAccessCheckRouters,
     getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, getResourceInNetwork, mergeResources, moveResources, scanResourceConflicts, scanCleanup, setCleanupIgnore, setResourceEnabled,
     setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups,
@@ -12461,7 +12954,7 @@ module.exports = {
     getNetbirdSettings, saveNetbirdSettings,
     getBuiltinNoise, setBuiltinNoise,
     netbirdGet, getGroupRefMap,
-    listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile,
+    listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getAccessProfileUsage,
     getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles,
     listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities,
     listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation,
@@ -12480,7 +12973,7 @@ module.exports = {
     runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound,
     isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation,
     // Pure helpers exposed ONLY for unit tests (backend/test) - not part of the app API.
-    _internal: { comboKey, combosForResource, ALL_COMBO, splitPortTokens, mergeRulePorts, normSecurityConfig, humanDuration, stableStringify, normDelegates, normEdrAutoBypass, edrOsKey, ruleForPut, carryRuleExtras, ruleHasUnmodeled, policiesSourcingResources, editorProtocol,
+    _internal: { resourceGoneConfirmed, editorPolicyId, comboKey, combosForResource, ALL_COMBO, splitPortTokens, mergeRulePorts, normSecurityConfig, humanDuration, stableStringify, normDelegates, normEdrAutoBypass, edrOsKey, ruleForPut, carryRuleExtras, ruleHasUnmodeled, policiesSourcingResources, editorProtocol,
         normalizeTenantDefaults, nbShapeFromSettings, nbSettingsFromProfile, dropUnsupportedNbSettings, proxyAccessActionError,
         normMspDigest, encryptPrivateKey, encryptBackup, decryptBackup, autoApproveTargets, loadAutoApproval },
     refreshAutoApprovalInventory,

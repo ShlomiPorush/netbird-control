@@ -134,3 +134,24 @@ test('the re-check on a read-only instance extends the holds of its open session
     assert.ok(new Date(holds.rows.get('r-open').expires_at).getTime() > Date.now() + 3 * HOUR - 5000);
     assert.deepEqual(writes, []);
 });
+
+const CREATE = { enabled: true, networkId: 'n1', profileId: 3, groupId: 'g-srv', max: 7 };
+test('a read-only instance never adds or deletes a server for a launch link', async () => {
+    await reset();
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: CREATE });
+    const key = { id: 7, name: 'Customer File', scopes: ['remote-access:launch', 'remote-access:create-resource'] };
+    // Creating is never allowed, so the launch goes on as without createResource.
+    const out = await ra.issueLaunch(key, { protocol: 'rdp', address: '8.8.8.8', port: 3389, createResource: true });
+    assert.equal(out.resource.created, false);
+    await ra.maintainCreatedResources();
+    assert.deepEqual(writes, []);
+});
+
+test('a save on a read-only instance never changes the settings for created resources', async () => {
+    await reset();
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: CREATE });
+    await ra.setRemoteAccessConfig({ idleTimeoutMin: 45, createResources: { enabled: false, profileId: 9, max: 1 } }).catch(() => { });
+    const saved = JSON.parse(settings.remote_access_config);
+    assert.deepEqual(saved.createResources, CREATE);
+    assert.equal(saved.idleTimeoutMin, 45);
+});

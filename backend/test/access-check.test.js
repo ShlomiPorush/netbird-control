@@ -676,20 +676,35 @@ const authz = (s, userId, target, query) => explainUserAccess(s, { userId, targe
 
 test('authorization agrees with the Remote Access policy check on every TCP port', () => {
     const s = authzSnap();
-    const map = { OK: 'granted', BLOCKED_BY_POLICY: 'denied', PORT_NOT_ALLOWED: 'port_blocked', POSTURE_REQUIRED: 'conditional', NO_ACCESS: 'denied' };
+    // Remote Access doesn't apply posture checks (a browser session has no NetBird client), so a
+    // grant Access Check calls 'conditional' is OK there.
+    const map = { OK: ['granted', 'conditional'], BLOCKED_BY_POLICY: ['denied'], PORT_NOT_ALLOWED: ['port_blocked'], NO_ACCESS: ['denied'] };
     let compared = 0;
+    let conditional = 0;
     for (const userId of ['u1', 'u2', 'u3']) {
         const src = userSourceGroups(s, userId, NOW);
         for (const res of s.resources) {
             for (const port of [22, 53, 443, 3389, 5050, 5900, 7000, 8050, 8080, 9000, 9100, 9200, 9300, 9400, 9500, 9600, 9700, 12345]) {
                 const ra = evaluatePolicies(s, { managedPolicyId: null }, src, res, port, NOW, {});
                 const a = authz(s, userId, { type: 'resource', id: res.id }, { protocol: 'tcp', port });
-                assert.equal(a.verdict, map[ra.code], `${userId} ${res.id}:${port} remote-access=${ra.code} access-check=${a.verdict}`);
+                assert.ok((map[ra.code] || []).includes(a.verdict), `${userId} ${res.id}:${port} remote-access=${ra.code} access-check=${a.verdict}`);
+                if (a.verdict === 'conditional') conditional++;
                 compared++;
             }
         }
     }
     assert.equal(compared, 216);
+    assert.ok(conditional > 0, 'the snapshot has posture-only grants');
+});
+
+test('a posture-only grant is OK in Remote Access and conditional in Access Check', () => {
+    const s = authzSnap();
+    for (const [resId, port] of [['r1', 443], ['r-x', 9500]]) {
+        const res = s.resources.find(r => r.id === resId);
+        const ra = evaluatePolicies(s, { managedPolicyId: null }, userSourceGroups(s, 'u1', NOW), res, port, NOW, {});
+        assert.equal(ra.ok, true, `${resId}:${port}`);
+        assert.equal(authz(s, 'u1', { type: 'resource', id: resId }, { protocol: 'tcp', port }).verdict, 'conditional', `${resId}:${port}`);
+    }
 });
 
 test('a Browser Gateway policy of any installation never grants, but its drop rule still denies', () => {

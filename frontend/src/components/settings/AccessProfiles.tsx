@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
-import { Plus, Pencil, Trash2, Share2, Layers3, ShieldCheck, Rows3 } from 'lucide-react';
-import { useAccessProfiles, useGroups, usePostureChecks } from '@/lib/queries';
+import { useMemo, useState, type ReactNode } from 'react';
+import { Plus, Pencil, Trash2, Share2, Layers3, ShieldCheck, Rows3, Info } from 'lucide-react';
+import { useAccessProfiles, useAccessProfileUsage, useGroups, usePostureChecks } from '@/lib/queries';
 import { useSaveAccessProfile, useDeleteAccessProfile } from '@/lib/mutations';
 import { useConfirm } from '@/contexts/ConfirmContext';
-import type { AccessProfile, AccessProfileInput } from '@/lib/types';
+import type { AccessProfile, AccessProfileInput, AccessProfileLeftover } from '@/lib/types';
 import {
   Badge, Button, IconButton, EmptyState, LoadingState, Table, THead, Th, SortTh, TBody, Tr, Td,
   Modal, Field, Input, SelectMenu, GroupMultiSelect, PortSelector, SearchInput, Pagination, ClearFiltersButton,
@@ -17,15 +17,24 @@ const PROTOCOLS = ['all', 'tcp', 'udp', 'icmp'];
 const protoPortsLabel = (p: AccessProfile) =>
   (p.protocol === 'all' || p.protocol === 'icmp' || !p.ports.length) ? 'all' : p.ports.join(', ');
 
+// "group Payroll and policy Payroll Access" - the NetBird objects a delete left behind.
+const leftoverText = (items: AccessProfileLeftover[]) => {
+  const names = items.map((l) => `${l.kind} ${l.name}`);
+  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+  return `The profile was deleted. NetBird didn't confirm removing ${list}; delete ${items.length > 1 ? 'them' : 'it'} in NetBird.`;
+};
+
 export function AccessProfiles() {
   const { data, isLoading } = useAccessProfiles();
+  const usage = useAccessProfileUsage();
   const del = useDeleteAccessProfile();
   const confirm = useConfirm();
   const [modal, setModal] = useState<{ profile: AccessProfile | null } | null>(null);
+  const [notice, setNotice] = useState<{ title: string; body: ReactNode } | null>(null);
   const [search, setSearch] = useState('');
   const profiles = data || [];
+  const reasonsOf = (p: AccessProfile) => usage.data?.[String(p.id)]?.reasons || [];
 
-  // Standard table chrome (same as every list page): search + sort + client pagination.
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
     if (!q) return profiles;
@@ -42,14 +51,35 @@ export function AccessProfiles() {
   const { pageRows, page, setPage, perPage, setPerPage, totalPages, total } = useClientPagination(sorted, 25, [search]);
 
   const onDelete = async (p: AccessProfile) => {
+    let reasons = reasonsOf(p);
+    // A use may have ended since the page was opened (an expired grant).
+    if (reasons.length) reasons = (await usage.refetch()).data?.[String(p.id)]?.reasons ?? [];
+    if (reasons.length) {
+      setNotice({
+        title: "Can't Delete Profile",
+        body: (
+          <>
+            <p>“{p.name}” is in use. Remove it from these first:</p>
+            <ul className="mt-2 list-disc pl-5">{reasons.map((r) => <li key={`${r.kind}:${r.label}`}>{r.label}</li>)}</ul>
+          </>
+        ),
+      });
+      return;
+    }
     const ok = await confirm({
-      title: 'Delete access profile',
+      title: 'Delete Access Profile',
       message: p.shared
-        ? `Delete “${p.name}”? Its group and shared policy are removed, and any resources using it lose this access.`
+        ? `Delete “${p.name}”? Its NetBird group and policy are removed.`
         : `Delete the Direct preset “${p.name}”? Policies already created from it are not affected.`,
       confirmText: 'Delete',
     });
-    if (ok) await del.mutateAsync(p.id);
+    if (!ok) return;
+    try {
+      const out = await del.mutateAsync(p.id);
+      if (out?.leftover?.length) setNotice({ title: 'Profile Deleted', body: leftoverText(out.leftover) });
+    } catch (e) {
+      setNotice({ title: 'Delete Failed', body: (e as Error).message });
+    }
   };
 
   return (
@@ -69,7 +99,6 @@ export function AccessProfiles() {
         <EmptyState title="No Access Profiles" hint="Create a profile to share one policy across resources, or a preset for per-resource policies." icon={<Share2 size={22} />} />
       ) : (
         <>
-          {/* Standard table chrome: search + rows-per-page, sortable columns, pagination. */}
           <div className="flex flex-wrap items-center gap-3 mb-4">
             <SearchInput value={search} onChange={setSearch} placeholder="Search name…" />
             <ToolbarMenu icon={<Rows3 size={15} />} label={`${perPage} rows per page`} value={String(perPage)} onChange={(v) => setPerPage(Number(v))} options={ROWS_PER_PAGE_OPTIONS} align="end" width={185} />
@@ -116,7 +145,9 @@ export function AccessProfiles() {
                 <Td className="text-right" onClick={(e) => e.stopPropagation()}>
                   <div className="inline-flex items-center gap-1.5">
                     <IconButton onClick={() => setModal({ profile: p })} title="Edit"><Pencil size={15} /></IconButton>
-                    <IconButton onClick={() => onDelete(p)} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
+                    {reasonsOf(p).length
+                      ? <IconButton onClick={() => onDelete(p)} title="In use - can't be deleted" aria-label="Delete (in use)" className="opacity-40"><Trash2 size={15} /></IconButton>
+                      : <IconButton onClick={() => onDelete(p)} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>}
                   </div>
                 </Td>
               </Tr>
@@ -130,6 +161,17 @@ export function AccessProfiles() {
       )}
 
       {modal && <ProfileModal profile={modal.profile} onClose={() => setModal(null)} />}
+
+      <Modal
+        open={!!notice}
+        onClose={() => setNotice(null)}
+        icon={<Info size={18} />}
+        title={notice?.title}
+        size="sm"
+        footer={<Button variant="primary" size="sm" onClick={() => setNotice(null)}>OK</Button>}
+      >
+        <div className="text-[0.9rem] leading-relaxed text-nb-gray-600 dark:text-nb-gray-400">{notice?.body}</div>
+      </Modal>
     </div>
   );
 }

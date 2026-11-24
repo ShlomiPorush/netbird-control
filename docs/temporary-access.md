@@ -10,10 +10,10 @@ A temporary grant **never opens more than the target already allows**. When the 
 
 - A **resource** whose only policy is, say, `TCP 39001` → the temporary policy is also `TCP 39001` (both direct policies and ones inherited via the resource's groups count).
 - Resources with **different** protocol/port combinations are split into separate destination groups + policies - each mirroring its own combo (a resource reachable by several combos gets all of them, and no more).
-- An **Access Profile** target mirrors the profile's own protocol/ports definition.
+- An **Access Profile** target mirrors the profile's own protocol/ports definition, as the app stores it.
 - A resource with **no policies at all** has nothing to mirror and gets `all` - otherwise the grant would be inert (such a resource is reachable by no one).
 - Other grants' temporary policies and disabled policies are **excluded** from the mirror, so one broad grant can't leak `all` into the next.
-- **Posture checks** are mirrored too: the temporary policy carries the profile's posture checks, or the `source_posture_checks` of the resource policy it mirrors, so a non-compliant device stays blocked during the grant. Exposures with different posture checks get separate temporary policies. When a self-service rule or a per-service request pins the ports, the grant keeps the posture checks of the existing policies that cover those ports (all of them if none does).
+- **Posture checks** are mirrored too: the temporary policy carries the profile's posture checks, or the `source_posture_checks` of the resource policy it mirrors, so a non-compliant device stays blocked during the grant. Browser sessions in Remote Access don't run posture checks, so the grant opens them whatever the checks. Exposures with different posture checks get separate temporary policies. When a self-service rule or a per-service request pins the ports, the grant keeps the posture checks of the existing policies that cover those ports (all of them if none does).
 - A grant with resource or network targets is **refused** when the app cannot read the existing policies or the resource list it mirrors, or when a chosen resource is gone. A profile target that no longer matches an Access Profile is refused too.
 - A grant created by an earlier version keeps its original temporary policy when it is extended. Revoke and re-grant it to apply posture checks.
 

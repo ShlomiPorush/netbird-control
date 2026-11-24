@@ -99,10 +99,49 @@ export interface RemoteAccessConfig {
   ssh: SshTerminal;
   /** What guacd accepts, for the settings form. */
   options?: { rdpLayouts: string[]; rdpColorDepths: number[]; sshColorSchemes: string[] };
-  managed?: { gatewayGroupId: string; targetGroupId: string; policyId: string };
+  managed?: { gatewayGroupId: string; targetGroupId: string; policyId: string; namesGroupId?: string; namesTargetGroupId?: string; namesPolicyId?: string };
+  /** Launch links may add a temporary resource for a missing public server to this network, in the chosen Access Profile's group. */
+  createResources?: CreateResourcesConfig;
   lastApply?: { at: string | null; error: string };
   ssoEnabled?: boolean;
   readonly?: boolean;
+}
+
+export interface CreateResourcesConfig {
+  enabled: boolean;
+  /** Set only by Choose Network, never by a settings save. */
+  networkId: string;
+  /** The Shared Access Profile that decides who reaches the servers (0: none chosen). */
+  profileId: number;
+  /** The chosen profile's group, set by the server when it checks the profile. */
+  groupId: string;
+  /** The most created resources that may exist at once (1-500). */
+  max: number;
+}
+
+export type CreatedResourceState = 'creating' | 'unknown' | 'created' | 'kept' | 'failed' | 'deleted' | 'gone';
+
+/** A temporary NetBird resource the launch API created for a server. */
+export interface CreatedResource {
+  id: string;
+  /** The IPv4 address. */
+  address: string;
+  /** The host name the other system sent ('' when it sent an IP). */
+  name: string;
+  resourceName: string;
+  resourceId: string;
+  state: CreatedResourceState;
+  reason: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface CreatedResources {
+  readonly: boolean;
+  /** Those still in use, then the latest finished ones. */
+  items: CreatedResource[];
+  /** Older finished ones were left out. */
+  finishedMore?: boolean;
 }
 
 export interface RemoteAccessStatus {
@@ -170,15 +209,30 @@ export const remoteApi = {
   lease: (id: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, {}),
   end: (id: string) => api.del<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
   config: () => api.get<RemoteAccessConfig>('/api/remote-access/config'),
-  saveConfig: (cfg: Partial<RemoteAccessConfig>) => api.put<{ config: RemoteAccessConfig; sync: { removed: number } | null }>('/api/remote-access/config', cfg),
+  saveConfig: (cfg: Omit<Partial<RemoteAccessConfig>, 'createResources'> & { createResources?: Partial<Pick<CreateResourcesConfig, 'enabled' | 'profileId' | 'max'>> }) => api.put<{ config: RemoteAccessConfig; sync: { removed: number } | null }>('/api/remote-access/config', cfg),
   status: () => api.get<RemoteAccessStatus>('/api/remote-access/status'),
+  createdResources: () => api.get<CreatedResources>('/api/remote-access/created-resources'),
+  releaseNetwork: () => api.del<Pick<LaunchNetworkResult, 'config'>>('/api/remote-access/create-resources/network'),
+  setUpNetwork: (body: { peers: string[]; peerGroups: string[] } | { networkId: string }) =>
+    api.post<LaunchNetworkResult>('/api/remote-access/create-resources/network', body),
   setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
   /** Open a launch link from another system. Only the ticket and the screen size are sent. */
   redeemLaunch: (body: { ticket: string; width: number; height: number; dpi: number; timezone: string }) =>
     api.post<LaunchSession>('/api/remote-access/launch/redeem', body),
 };
 
-/** A session opened from a launch link: the server sends what the browser needs to show it. */
+/** One routing peer (`peer`) or the peer groups (`peerGroups`) of a network the app created. */
+export interface LaunchRouter { peer?: string; peerGroups?: string[]; reason?: string }
+
+export interface LaunchNetworkResult {
+  config: { networks: string[]; createResources: CreateResourcesConfig };
+  network: { id: string; name: string };
+  /** A new network. */
+  routers?: { added: LaunchRouter[]; failed: LaunchRouter[] };
+  /** An existing network: its routing peers that are on. */
+  enabledRouters?: number;
+}
+
 export interface LaunchSession extends RemoteSession {
   protocol: RemoteProtocol;
   port: number;

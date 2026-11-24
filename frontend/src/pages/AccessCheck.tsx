@@ -165,6 +165,7 @@ export default function AccessCheck() {
       <p className="text-sm text-nb-gray-500 dark:text-nb-gray-400 max-w-3xl">
         Check whether a user is authorized for a resource, or everyone who is - by the same rules Remote Access uses:
         the user's groups and their devices' groups against the policies, with blocking rules winning.
+        Remote Access doesn't run posture checks, so it allows what shows here as Authorized If Posture Checks Pass.
         The device details show what each device can reach right now.
       </p>
 
