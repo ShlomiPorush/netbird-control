@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.8.0] - 2026-11-24
+
 ### Added
 - **The public API in the app's API reference.** The interactive reference at `/api/docs` (admins
   only) now lists `POST /api/v1/remote-access/launch` first, with every field (`createResource`
@@ -65,6 +69,8 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   uses public DNS servers, so its lookups never reach an internal DNS server. If you run the
   reference exit node, stop it, install the rules and start it again as described in
   `netbird-docker-compose-files/README.md`.
+- **Dependency updates** since 1.7.0: `ws` and `nodemailer` in the backend, and `lucide-react` in the
+  frontend.
 
 ### Fixed
 - **A bulk resource delete that fails for some rows says so.** On a network's page, **Delete** of
@@ -91,6 +97,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   resource is gone in the network the automation recorded; Repair changes nothing when it can't
   read a network. A move whose delete got no answer is never rolled back: it keeps the copy and
   says to check whether the original is still there.
+
+### Security
+- **A browser session can no longer exhaust the server's memory with Pings.** `ws` 8.23.0 fixes a
+  denial of service: a peer that sent Ping frames without reading the answers made the server keep
+  them in memory until the process stopped. Opening a Remote Access session takes a signed-in user,
+  so an anonymous client could not reach it. Update if you use Remote Access.
 
 ---
 
