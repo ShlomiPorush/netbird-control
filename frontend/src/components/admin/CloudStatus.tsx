@@ -2,7 +2,7 @@ import { AlertTriangle, CloudOff, ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useNetbirdCloudStatus } from '@/lib/queries';
 import { formatTimestamp } from '@/lib/logfmt';
-import type { CloudStatusIncident, CloudStatusIndicator, CloudStatusSummary } from '@/lib/types';
+import type { CloudStatusIncident, CloudStatusIndicator } from '@/lib/types';
 import { Badge, Card } from '@/components/ui';
 
 type Severity = 'ok' | 'warn' | 'bad' | 'unknown';
@@ -32,10 +32,7 @@ function componentStatus(status: string) {
   return COMPONENT_STATUS[status] || { label: titleCase(status || 'unknown'), severity: 'unknown' as Severity };
 }
 
-function needsAttention(s: CloudStatusSummary): boolean {
-  return s.incidents.length > 0 || s.components.some((c) => c.status !== 'operational')
-    || SEVERITY[s.indicator] === 'warn' || SEVERITY[s.indicator] === 'bad';
-}
+const isImpaired = (severity: Severity) => severity === 'warn' || severity === 'bad';
 
 function ExternalA({ href, children, className }: { href: string; children: React.ReactNode; className?: string }) {
   return (
@@ -64,10 +61,12 @@ function IncidentRow({ incident }: { incident: CloudStatusIncident }) {
 
 export function CloudStatusBanner() {
   const { data } = useNetbirdCloudStatus();
-  if (!data?.enabled || !data.summary || !needsAttention(data.summary)) return null;
-  const s = data.summary;
-  const bad = SEVERITY[s.indicator] === 'bad';
-  const affected = s.components.filter((c) => c.status !== 'operational');
+  const s = data?.enabled ? data.summary : null;
+  if (!s) return null;
+  const affected = s.components.filter((c) => isImpaired(componentStatus(c.status).severity));
+  const overallImpaired = isImpaired(SEVERITY[s.indicator]);
+  if (!s.incidents.length && !affected.length && !overallImpaired) return null;
+  const bad = SEVERITY[s.indicator] === 'bad' || affected.some((c) => componentStatus(c.status).severity === 'bad');
   return (
     <Card className={cn('mb-6 p-4 md:p-5 border-l-4', bad ? 'border-l-red-500' : 'border-l-amber-500')}>
       <div className="flex items-start gap-3">
@@ -75,7 +74,7 @@ export function CloudStatusBanner() {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <h2 className="text-base font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50">
-              NetBird Cloud: {s.description || 'Service Issue'}
+              NetBird Cloud: {(overallImpaired && s.description) || 'Service Issue'}
             </h2>
             <ExternalA href={s.pageUrl} className="text-sm">status.netbird.io</ExternalA>
           </div>

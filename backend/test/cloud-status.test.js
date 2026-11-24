@@ -65,6 +65,7 @@ test('an answer the parser cannot read in full is refused, never read as fewer i
     assert.throws(() => parseSummary({ status: { indicator: 'none' } }));
     assert.throws(() => parseSummary({ components: [], incidents: {} }));
     assert.throws(() => parseSummary(summaryBody({ incidents: [incident('../../evil', 'Bad'), incident('ok-1', 'Good')] })));
+    assert.throws(() => parseSummary(summaryBody({ incidents: [incident(['ok-1'], 'Array id')] })));
 });
 
 test('an unknown overall state reads as unknown, and an incident without a name keeps its place', () => {
@@ -117,6 +118,18 @@ test('a failed or unreadable answer sends nothing, keeps the stored incidents an
     assert.equal(h.alerts.length, 0);
     assert.equal(h.store.data.value, stored);
     assert.equal(h.store.data.writes, 0);
+});
+
+test('an incident that gets its name later is resolved under that name', async () => {
+    const h = harness({ stored: '{}' });
+    h.answer(summaryBody({ incidents: [incident('i1', '')] }));
+    await h.cs.checkForChanges(on());
+    h.answer(summaryBody({ incidents: [incident('i1', 'Signal service instability')] }));
+    await h.cs.checkForChanges(on());
+    h.answer(summaryBody());
+    await h.cs.checkForChanges(on());
+    assert.equal(h.alerts.length, 2);
+    assert.match(h.alerts[1].subject, /resolved: Signal service instability$/);
 });
 
 test('switching alerts off during the read stops the alert', async () => {

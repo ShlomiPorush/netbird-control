@@ -37,7 +37,7 @@ function latestUpdate(updates) {
 function parseSummary(body) {
     const unexpected = () => new Error('status.netbird.io sent an answer in an unexpected format');
     if (!body || typeof body !== 'object' || !Array.isArray(body.components) || !Array.isArray(body.incidents)) throw unexpected();
-    if (!body.incidents.every(i => i && typeof i === 'object' && INCIDENT_ID.test(String(i.id || '')))) throw unexpected();
+    if (!body.incidents.every(i => i && typeof i === 'object' && typeof i.id === 'string' && INCIDENT_ID.test(i.id))) throw unexpected();
     const status = body.status && typeof body.status === 'object' ? body.status : {};
     const components = body.components
         .filter(c => c && typeof c === 'object' && text(c.name, 120))
@@ -115,11 +115,6 @@ function readBaseline(raw) {
 
 const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
-function sameIncidents(a, b) {
-    const ka = Object.keys(a), kb = Object.keys(b);
-    return ka.length === kb.length && ka.every(k => has(b, k));
-}
-
 function createCloudStatus({
     fetchSummary = fetchSummaryFromNetbird,
     store = { get: getSetting, set: setSetting },
@@ -169,7 +164,8 @@ function createCloudStatus({
         if (!settings.enabled) return forgetIncidents();
         const previous = readBaseline(await store.get(BASELINE_KEY));
         const current = Object.fromEntries(summary.incidents.map(i => [i.id, i.name]));
-        if (!previous || !sameIncidents(previous, current)) await store.set(BASELINE_KEY, JSON.stringify(current));
+        const stored = JSON.stringify(current);
+        if (!previous || JSON.stringify(previous) !== stored) await store.set(BASELINE_KEY, stored);
         if (!previous || !settings.alertsEnabled) return;
         for (const incident of summary.incidents.filter(i => !has(previous, i.id))) {
             alert(buildAlert({ kind: 'started', incident }, summary), settings.emails);
