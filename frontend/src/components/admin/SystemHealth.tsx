@@ -5,6 +5,7 @@ import type { SystemHealth } from '@/lib/types';
 import { useTableSort } from '@/lib/useTableSort';
 import { formatTimestamp } from '@/lib/logfmt';
 import { Badge, LoadingState, Table, THead, SortTh, TBody, Tr, Td } from '@/components/ui';
+import { CloudStatusSection } from './CloudStatus';
 
 // ─── System Health - schedulers, database, integrations, retention ───
 const SCHED_LABELS: Record<string, string> = {
@@ -23,6 +24,7 @@ const SCHED_LABELS: Record<string, string> = {
   trafficPull: 'Traffic Events API Pull',
   auditPull: 'Audit Events API Pull',
   retentionPurge: 'Event Retention Purge',
+  netbirdCloudStatus: 'NetBird Cloud Status',
   mspDigest: 'Weekly MSP Digest',
   internalBackup: 'Internal Encrypted Backup',
   tenantTokenRotation: 'Tenant Token Rotation',
@@ -48,6 +50,7 @@ const SCHED_DESCRIPTIONS: Record<string, string> = {
   proxyLogsSync: "Every 5 minutes: copies new reverse-proxy access logs from NetBird Cloud (which keeps only 7 days) into the app's database, where Data Retention governs them.",
   trafficPull: 'Every 5 minutes: for accounts that opted in (Settings → Webhook), reads traffic events from the NetBird API and stores them like streamed webhook events. A no-op for accounts that leave it off.',
   auditPull: 'Every 5 minutes: for accounts that opted in (Settings → Webhook), reads audit events from the NetBird API and stores them like webhook events. A no-op for accounts that leave it off.',
+  netbirdCloudStatus: 'Every 5 minutes: reads status.netbird.io and alerts admins when a NetBird Cloud incident opens or closes (Settings → Security). Only for accounts on NetBird Cloud.',
   mspDigest: "Hourly check: on the configured day and hour, sends the weekly snapshot of every MSP tenant to main's Telegram and/or email. Off by default.",
   remoteAccessRecheck: "Every 60s while browser sessions are open: reads NetBird again and closes any session whose user lost access, was blocked or lost the permission. Sessions also close when access can't be verified for 2.5 minutes.",
   remoteAccessSync: 'Every 10 minutes while Remote Access is on: keeps the Browser Gateway policy in place and adds new resources of the selected networks to the gateway target group.',
@@ -146,6 +149,8 @@ export function SystemHealthTab() {
         <HealthCard label="Open Exposure" value={`${data.activeGrants + data.bypassedPeers}`}
           sub={`${data.activeGrants} active grants · ${data.bypassedPeers} bypassed devices · ${data.pendingRequests} pending requests`} />
       </div>
+
+      <CloudStatusSection />
 
       {/* Schedulers */}
       <div>

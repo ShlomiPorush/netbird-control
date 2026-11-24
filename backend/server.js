@@ -14,6 +14,7 @@ const { withCancelOnClose, DB_CONNECTION } = require('./lib/core');
 const { Client: PgClient } = require('pg');
 const { createLeader } = require('./lib/leader');
 const { settleTelegramQueue } = require('./lib/telegram');
+const { createCloudStatus, usesNetbirdCloud } = require('./lib/cloud-status');
 const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats, syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions, getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, getUserDetail, deleteUser, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, setUpLaunchNetwork, releaseLaunchNetwork, checkLaunchNetwork, getAllGrants, setNetworkGrants, getAdGroups, createClientResource, editResource, deleteResource, mergeResources, moveResources, scanResourceConflicts, setResourceEnabled, setResourcePolicy, syncResourcePolicies, getNetbirdGroups, resolveGrantGroups, getTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, getFilterConfig, getFilterRules, createFilterRule, updateFilterRule, deleteFilterRule, scanEvents, deleteEventsByIds, getSetting, setSetting, getNbApiConfig, setNbApiConfig, getWebhookConfig, getNetbirdWebhookStatus, setWebhookConfig, getWebhookToken, getTelegramConfig, setTelegramConfig, getTelegramQueueStats, getAdminEventTypes, getBillingSummary, telegramTest, telegramCreateTopics, getTelegramWebhookSecret, telegramSetWebhook, telegramDeleteWebhook, handleTelegramCallback, getSmtpConfig, setSmtpConfig, smtpTest, getFeaturePermsConfig, setFeaturePermsConfig, resolveFeaturePerms, getAutoApprovalConfig, setAutoApprovalConfig, getApproverConfig, setApproverConfig, getApproverGroupIds, searchRequestTargets, createAccessRequest, listAccessRequests, countPendingRequests, approveAccessRequest, denyAccessRequest, cancelAccessRequest, backfillApprovedDurations, recordAudit, getAuditLog, listAccessProfiles, createAccessProfile, updateAccessProfile, deleteAccessProfile, getAccessProfileUsage, getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles, listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities, listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation, getAutomationRuns, runAutomation, testAutomation, runDueAutomations, getAutomationManaged, repairAutomation, forgetAutomation, getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork, scanBlockedResources, enforceBlockedResources, listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant, revokeExpiredGrants, reconcileActiveGrants, resetAllStuckRuns, reloadConfigCaches, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies, purgeOldEvents, getRetentionStatus, getSystemStats, exportAppSettings, importAppSettings, getInternalBackupStatus, setBackupPassphrase, getInternalBackupConfig, setInternalBackupConfig, runInternalBackup, restoreInternalBackup, readBackupFile, backupFilePath, internalBackupTick, BACKUP_DIR, runRecertification, openRecertRound, getRecertification, decideRecertItem, cancelRecertRound, listRecertRounds, getRecertRound, isActiveDelegate, setPeerMeta, getAllPeerTags, bulkTagPeers, dryRunAutomation, listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess, getSecurityConfig, setSecurityConfig, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, ensurePeersFresh, ensureUsersFresh, resetNbCaches, resolveViewer, getUserPeerGroupIds, netbirdApiConfigured, fetchUserGroups, graphGroupDiag, NETBIRD_READONLY } = require('./db');
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
@@ -753,6 +754,8 @@ const TENANT_CTX_PREFIXES = [
     '/api/setup-keys',
     '/api/networks', '/api/policies', '/api/posture-checks',
     '/api/blocklist', '/api/filter-rules', '/api/system-health',
+    // NetBird Cloud status is the same for every account; the dashboard shows it in tenant mode too.
+    '/api/netbird-cloud-status',
     '/api/cleanup-scan', '/api/access-profiles',
     '/api/network-default-profiles', '/api/resource-conflicts',
     '/api/reverse-proxy-status', '/api/reverse-proxy-domains',
@@ -1962,6 +1965,7 @@ app.put('/api/security-config', requireAdmin, async (req, res) => {
             review: out.reviewEnabled ? `day ${out.reviewDay} @ ${out.reviewHour}:00` : 'off',
             anomalies: out.anomalyEnabled ? 'on' : 'off',
             jobAlerts: out.schedAlertsEnabled ? 'on' : 'off',
+            cloudStatus: !out.cloudStatusEnabled ? 'off' : out.cloudStatusAlerts ? 'on with alerts' : 'on without alerts',
             retention: out.retentionDays ? `${out.retentionDays} days` : 'off',
         });
         res.json(out);
@@ -3631,6 +3635,20 @@ async function canDiagnosePeer(viewer, peerId) {
     return !!(ownsByOid || ownsById);
 }
 
+// NetBird Cloud status for the dashboard banner and System Health. Public information, so every
+// signed-in viewer may read it. Off when the setting is off or the account is not on NetBird Cloud.
+const cloudStatus = createCloudStatus();
+const cloudStatusApplies = () => getSecurityConfig().cloudStatusEnabled && usesNetbirdCloud(getNbApiConfig().url);
+app.get('/api/netbird-cloud-status', async (req, res) => {
+    try {
+        if (!cloudStatusApplies()) return res.json({ enabled: false });
+        res.json({ enabled: true, ...(await cloudStatus.getDisplayStatus()) });
+    } catch (err) {
+        console.error('Error loading NetBird Cloud status:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Known-issue notices (routing peers down; integration sync problems for admins) -
 // shown as a banner on Troubleshoot and in the dashboard's Needs Attention.
 app.get('/api/diagnostics/notices', async (req, res) => {
@@ -5250,6 +5268,15 @@ async function start() {
         const auditPullTick = leaderOnly(() => tracked('auditPull', () => forEachTenant(syncAuditEvents)));
         setTimeout(auditPullTick, 35000);
         setInterval(auditPullTick, 5 * 60 * 1000);
+
+        // NetBird Cloud status: alerts admins when an incident opens or closes on status.netbird.io.
+        // Main account only; reads a public page, so it runs in read-only mode too.
+        const cloudStatusTick = leaderOnly(() => tracked('netbirdCloudStatus', () => cloudStatus.checkForChanges(() => {
+            const sec = getSecurityConfig();
+            return { enabled: cloudStatusApplies(), alertsEnabled: sec.cloudStatusAlerts, emails: sec.cloudStatusEmails };
+        })));
+        setTimeout(cloudStatusTick, 60000);
+        setInterval(cloudStatusTick, 5 * 60 * 1000);
 
         // Event retention purge - once per account (main + each tenant), each self-gating to once
         // per day and to ITS OWN configured window. Only touches the app's own DB (read-only safe);

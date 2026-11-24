@@ -10,6 +10,16 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **NetBird Cloud status.** The app reads [status.netbird.io](https://status.netbird.io/) for accounts on
+  NetBird Cloud. While NetBird reports an incident or a degraded service, the **Overview** shows a banner
+  with the affected services, NetBird's latest update and a link to the incident. **Operations > System
+  Health** shows the overall state, every service and the open incidents, or says when the page can't be
+  read. Admins get an alert when an incident opens and when it closes, in the Security Alerts Telegram
+  topic and to optional email recipients. The first check after an update only records what is already
+  open, so it sends nothing. **Settings > Security > NetBird Cloud Status** turns the check and the
+  alerts on or off (both on by default) and holds the email recipients.
+
 ---
 
 ## [1.8.0] - 2026-11-24

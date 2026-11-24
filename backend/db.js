@@ -11728,7 +11728,7 @@ async function getRetentionStatus() {
 // take effect immediately, no restart needed.
 const SETTINGS_EXPORT_EXCLUDE = new Set([
     'netbird_api_token', 'webhook_auth_token', 'webhook_notif_token', 'telegram_bot_token', 'smtp_pass', // secrets - never leave the server
-    'access_review_last', 'retention_purge_last', 'internal_backup_last', 'traffic_pull_last', // transient scheduler markers
+    'access_review_last', 'retention_purge_last', 'internal_backup_last', 'traffic_pull_last', 'netbird_cloud_incidents', // transient scheduler markers
     // Envelope-backup keypair: backup_private_key_enc is passphrase-encrypted ciphertext and
     // backup_public_key is harmless on its own, but BOTH are kept out of the PLAINTEXT export -
     // defense in depth, and they are meaningless outside the internal-backup file that carries them.
