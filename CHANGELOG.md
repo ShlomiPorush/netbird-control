@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.7.0] - 2026-11-24
+
 ### Added
 - **Add a missing server as a resource.** When the Remote Access check finds that nothing in
   NetBird covers the address, and the user may edit a network that Remote Access uses, the page
