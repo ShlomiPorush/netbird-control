@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { Shield, FolderGit2, Lock, Network, MonitorSmartphone, AlertTriangle, X, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import type { NetbirdNbSettings } from '@/lib/types';
-import { Field, Input, Select } from '@/components/ui';
+import { Card, Field, Input, Select } from '@/components/ui';
 
 // ─── Shared NetBird account-settings field UI ───
 // The category cards + row/panel/input helpers that render the full official NetBird account-settings
@@ -99,7 +99,7 @@ export function CategoryHeader({ icon: Icon, title, description }: { icon: Lucid
         <Icon size={16} />
       </div>
       <div className="min-w-0">
-        <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">{title}</div>
+        <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">{title}</div>
         <p className="text-[0.8rem] text-nb-gray-500 mt-0.5">{description}</p>
       </div>
     </div>
@@ -130,7 +130,7 @@ export function DurationPicker({ seconds, onChange, disabled }: { seconds: numbe
   );
 }
 
-export const CARD = 'rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4 flex flex-col gap-4';
+export const CARD = 'p-4 flex flex-col gap-4';
 // Rows within a category: divided like the official settings and set off from the header by a top rule.
 export const ROWS = 'divide-y divide-nb-gray-100 dark:divide-nb-gray-800 border-t border-nb-gray-100 dark:border-nb-gray-800 pt-1';
 
@@ -169,7 +169,7 @@ export function NetbirdCategoryCards({ nb, setNb, off, mfaSupported, variant }: 
   return (
     <>
       {/* Authentication */}
-      <div className={CARD}>
+      <Card className={CARD}>
         <CategoryHeader icon={Shield} title="Authentication"
           description={isDefaults ? 'Sign-in and session policy defaults for every new tenant.' : "This account's sign-in and session policy."} />
         <div className={ROWS}>
@@ -216,10 +216,10 @@ export function NetbirdCategoryCards({ nb, setNb, off, mfaSupported, variant }: 
             )}
           </SettingRow>
         </div>
-      </div>
+      </Card>
 
       {/* Groups */}
-      <div className={CARD}>
+      <Card className={CARD}>
         <CategoryHeader icon={FolderGit2} title="Groups"
           description={isDefaults ? 'Group propagation and JWT sync defaults for new tenants.' : "This account's group propagation and JWT sync."} />
         <div className={ROWS}>
@@ -248,10 +248,10 @@ export function NetbirdCategoryCards({ nb, setNb, off, mfaSupported, variant }: 
             )}
           </SettingRow>
         </div>
-      </div>
+      </Card>
 
       {/* Permissions */}
-      <div className={CARD}>
+      <Card className={CARD}>
         <CategoryHeader icon={Lock} title="Permissions"
           description={isDefaults ? 'Dashboard access defaults for regular users in new tenants.' : "Dashboard access for this account's regular users."} />
         <div className={ROWS}>
@@ -259,10 +259,10 @@ export function NetbirdCategoryCards({ nb, setNb, off, mfaSupported, variant }: 
             help="Access to the dashboard will be limited and regular users will not be able to view any peers."
             checked={nb.regular_users_view_blocked} disabled={off} onChange={(v) => setNb({ regular_users_view_blocked: v })} />
         </div>
-      </div>
+      </Card>
 
       {/* Networks */}
-      <div className={CARD}>
+      <Card className={CARD}>
         <CategoryHeader icon={Network} title="Networks"
           description={isDefaults ? 'Networking and traffic-logging defaults for new tenants.' : "This account's networking and traffic logging."} />
         <div className="border-t border-nb-gray-100 dark:border-nb-gray-800 pt-4 flex flex-col gap-4">
@@ -320,10 +320,10 @@ export function NetbirdCategoryCards({ nb, setNb, off, mfaSupported, variant }: 
             )}
           </SettingRow>
         </div>
-      </div>
+      </Card>
 
       {/* Clients */}
-      <div className={CARD}>
+      <Card className={CARD}>
         <CategoryHeader icon={MonitorSmartphone} title="Clients"
           description={isDefaults ? 'Client connection defaults for new tenants.' : "This account's client connection settings."} />
         <div className="border-t border-nb-gray-100 dark:border-nb-gray-800 pt-4 flex flex-col gap-3">
@@ -393,7 +393,7 @@ export function NetbirdCategoryCards({ nb, setNb, off, mfaSupported, variant }: 
               onChange={(v) => setNb({ peer_hostname_collision_rejected: v })} />
           )}
         </div>
-      </div>
+      </Card>
     </>
   );
 }

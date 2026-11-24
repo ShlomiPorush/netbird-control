@@ -6,7 +6,7 @@ import { useSaveWebhook, useAutoConfigureNbNotifications, useAutoConfigureNbEven
 import type { AutoConfigureNbResult, NetbirdFeatureStatus } from '@/lib/types';
 import { useConfirm } from '@/contexts/ConfirmContext';
 import { formatTimestamp } from '@/lib/logfmt';
-import { Button, LoadingState, Input, Field } from '@/components/ui';
+import { Button, Card, LoadingState, Input, Field } from '@/components/ui';
 
 // One pill shape, four palettes - kept on ONE line (shrink-0 + whitespace-nowrap) so a narrow card
 // never wraps it like the old badge did.
@@ -109,7 +109,7 @@ function TokenSection({ label, hint, locked, lockedHint, hasToken, authEnabled, 
               onChange={(e) => setToken(e.target.value)}
               placeholder={locked ? '•••• from environment' : hasToken ? '•••• configured' : 'set a token…'}
               disabled={locked}
-              className={cn('font-mono text-[0.82rem]', token && !locked && 'pr-16', locked && 'opacity-60 cursor-not-allowed')}
+              className={cn('w-full font-mono text-[0.82rem]', token && !locked && 'pr-16', locked && 'opacity-60 cursor-not-allowed')}
             />
             {token && !locked && (
               <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-2 text-nb-gray-400">
@@ -222,10 +222,10 @@ function TrafficPullCard({ className }: { className: string }) {
   };
 
   return (
-    <div className={className}>
+    <Card className={className}>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Traffic Events API Pull</div>
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Traffic Events API Pull</div>
           <p className="text-[0.82rem] text-nb-gray-500 mt-0.5">
             A fallback for accounts whose plan has no event streaming - the app reads the traffic events straight
             from the NetBird API on a schedule.
@@ -279,7 +279,7 @@ function TrafficPullCard({ className }: { className: string }) {
           )}
         </>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -298,10 +298,10 @@ function AuditPullCard({ className }: { className: string }) {
   };
 
   return (
-    <div className={className}>
+    <Card className={className}>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Audit Events API Pull</div>
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Audit Events API Pull</div>
           <p className="text-[0.82rem] text-nb-gray-500 mt-0.5">
             A fallback for accounts whose plan has no event streaming - the app reads NetBird&apos;s audit/admin
             events straight from the API on a schedule.
@@ -356,7 +356,7 @@ function AuditPullCard({ className }: { className: string }) {
           )}
         </>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -388,7 +388,7 @@ export function Webhook() {
       : 'The events ingest token is regenerated, unless it is managed by the WEBHOOK_AUTH_TOKEN environment variable (in which case the existing token is reused).');
   const notifConfirm = 'This (re)generates the notifications ingest token and creates or updates the Account Notifications webhook channel in the current NetBird account, subscribed to all event types and pointed at this app. An existing channel is updated in place.';
 
-  const CARD = 'rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4 flex flex-col gap-4';
+  const CARD = 'p-4 flex flex-col gap-4';
 
   return (
     <div className="max-w-2xl">
@@ -401,10 +401,10 @@ export function Webhook() {
       </p>
       {isLoading || !data ? <LoadingState /> : (
         <div className="flex flex-col gap-4">
-          <div className={CARD}>
+          <Card className={CARD}>
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Activity Events</div>
+                <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Activity Events</div>
                 <p className="text-[0.82rem] text-nb-gray-500 mt-0.5">
                   Traffic + admin activity. Point NetBird → Settings → Event Streaming (Generic HTTP) here.
                 </p>
@@ -434,12 +434,12 @@ export function Webhook() {
               onSave={async (t) => { await save.mutateAsync({ token: t }); }}
               onClear={async () => { await save.mutateAsync({ clear: true }); }}
             />
-          </div>
+          </Card>
 
-          <div className={CARD}>
+          <Card className={CARD}>
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Account Notifications</div>
+                <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Account Notifications</div>
                 <p className="text-[0.82rem] text-nb-gray-500 mt-0.5">
                   Routing peer down/deleted, pending approvals, IdP/EDR sync problems - they reach the Telegram
                   alerts topic, the Troubleshoot page and the dashboard. Point NetBird → Settings → Notifications →
@@ -469,7 +469,7 @@ export function Webhook() {
               onSave={async (t) => { await save.mutateAsync({ notifToken: t }); }}
               onClear={async () => { await save.mutateAsync({ clearNotif: true }); }}
             />
-          </div>
+          </Card>
 
           <TrafficPullCard className={CARD} />
           <AuditPullCard className={CARD} />

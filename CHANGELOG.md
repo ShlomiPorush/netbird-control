@@ -41,6 +41,14 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   it on only after every instance runs this version. A settings import never turns it on.
 
 ### Changed
+- **A more polished look across the app.** Dialogs, Home, the Settings tabs and the panels on
+  the other pages now use the finish of the Remote Access page: softer corners, soft shadows and
+  an orange icon tile. Page titles use one bold style, the side menus of Settings, Operations and
+  Access Management show the open section more clearly, and empty lists show their icon in a tile.
+  Tables and the page layout are unchanged. Links that look like buttons are now one control each,
+  so the keyboard stops on them once. A few narrow-screen overflows (the Network tabs, the Admin
+  audit cards on phones, the Blocklist header) and three secret fields that were too narrow are
+  fixed.
 - **Browser sessions count policies with posture checks.** Remote Access and the launch API now
   accept a policy that has posture checks like any other policy. The checks themselves are not
   applied to a browser session, because they run on the NetBird client and a browser session has

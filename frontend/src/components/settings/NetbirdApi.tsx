@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { cn } from '@/lib/cn';
 import { useNetbirdApiConfig, useMspStatus } from '@/lib/queries';
 import { useSaveNetbirdApi, useSetProvisioningToken } from '@/lib/mutations';
-import { Button, LoadingState, Input, Field } from '@/components/ui';
+import { Button, Card, LoadingState, Input, Field } from '@/components/ui';
 
 export function NetbirdApi() {
   const { data, isLoading } = useNetbirdApiConfig();
@@ -43,7 +43,7 @@ export function NetbirdApi() {
         The token is stored on the server and never shown again.
       </p>
       {isLoading ? <LoadingState /> : (
-        <div className="flex flex-col gap-4">
+        <Card className="flex flex-col gap-4 p-5 sm:p-6">
           <Field
             label="Management API URL"
             hint={urlLocked ? ENV_HINT : 'Your NetBird management URL, e.g. https://api.netbird.io or https://netbird.example.com'}
@@ -92,7 +92,7 @@ export function NetbirdApi() {
           </div>
 
           <MspProvisioningSection />
-        </div>
+        </Card>
       )}
     </div>
   );

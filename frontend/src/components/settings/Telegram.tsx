@@ -5,7 +5,7 @@ import { getTenantMode } from '@/lib/api';
 import { useTelegramConfig } from '@/lib/queries';
 import { useSaveTelegram, useTestTelegram, useCreateTelegramTopics } from '@/lib/mutations';
 import type { TelegramCategory, TelegramInput, AdminEventType } from '@/lib/types';
-import { Button, LoadingState, Input, Field } from '@/components/ui';
+import { Button, Card, LoadingState, Input, Field } from '@/components/ui';
 
 const TG_CATEGORIES: { key: string; label: string }[] = [
   { key: 'resources', label: 'Resources & routing' },
@@ -123,7 +123,7 @@ export function Telegram() {
         </div>
       )}
       {isLoading ? <LoadingState /> : (
-        <div className="flex flex-col gap-5">
+        <Card className="flex flex-col gap-5 p-5 sm:p-6">
           <label className="flex items-center gap-3 p-3.5 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-50 dark:bg-nb-gray-900/30 cursor-pointer">
             <input type="checkbox" className="h-4 w-4 accent-netbird" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
             <span className="text-sm">
@@ -152,7 +152,7 @@ export function Telegram() {
                 onChange={(e) => setToken(e.target.value)}
                 placeholder={tokenLocked ? '•••••••••••• (from environment)' : data?.hasToken ? '•••••••••••• (configured)' : '123456789:ABCdef…'}
                 disabled={tokenLocked}
-                className={cn('font-mono text-[0.82rem]', token && !tokenLocked && 'pr-10', tokenLocked && 'opacity-60 cursor-not-allowed')}
+                className={cn('w-full font-mono text-[0.82rem]', token && !tokenLocked && 'pr-10', tokenLocked && 'opacity-60 cursor-not-allowed')}
               />
               {token && !tokenLocked && (
                 <button type="button" onClick={() => setShowToken((s) => !s)} title={showToken ? 'Hide' : 'Show'}
@@ -238,7 +238,7 @@ export function Telegram() {
             {testMsg && <span className="text-sm text-nb-gray-600 dark:text-nb-gray-300">{testMsg}</span>}
             {error && <span className="text-sm text-red-500">{error}</span>}
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );

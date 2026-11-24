@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useFeaturePerms, useAdGroups, useUsers } from '@/lib/queries';
 import { useSaveFeaturePerms } from '@/lib/mutations';
 import type { FeaturePermKey, FeaturePermsConfig, FeaturePermUser } from '@/lib/types';
-import { Button, LoadingState, Field, GroupMultiSelect } from '@/components/ui';
+import { Button, Card, LoadingState, Field, GroupMultiSelect } from '@/components/ui';
 
 // The grantable capabilities, in display order. Keys must match backend PERMISSION_KEYS.
 const FEATURE_PERMS: { key: FeaturePermKey; label: string; description: string }[] = [
@@ -84,8 +84,8 @@ export function Permissions() {
         {FEATURE_PERMS.map(({ key, label, description }) => {
           const s = sel[key] || { userIds: [], groupIds: [] };
           return (
-            <div key={key} className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
-              <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">{label}</div>
+            <Card key={key} className="p-4">
+              <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">{label}</div>
               <p className="text-nb-gray-500 text-[0.82rem] mt-0.5 mb-3">{description}</p>
               <div className="flex flex-col gap-3">
                 <Field label="Users">
@@ -97,7 +97,7 @@ export function Permissions() {
                     placeholder="Select groups…" searchPlaceholder="Search groups…" />
                 </Field>
               </div>
-            </div>
+            </Card>
           );
         })}
 

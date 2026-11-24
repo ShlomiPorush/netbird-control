@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { lockBodyScroll, unlockBodyScroll } from '@/lib/useScrollLock';
+import { ICON_TILE_BOX, ICON_TILE_TONE } from './IconTile';
 
 // Everything Tab can land on inside the dialog (for the focus trap).
 const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -100,8 +101,9 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
         className={cn(
-          'w-full flex flex-col max-h-[86vh] rounded-xl border shadow-2xl',
-          'bg-white border-nb-gray-200 dark:bg-nb-gray-950 dark:border-nb-gray-900',
+          'w-full flex flex-col max-h-[86vh] rounded-2xl border',
+          'shadow-[0_1px_2px_rgba(0,0,0,0.06),0_24px_64px_-20px_rgba(0,0,0,0.4)] dark:shadow-[0_24px_64px_-20px_rgba(0,0,0,0.85)]',
+          'bg-white border-nb-gray-100 dark:bg-nb-gray-940 dark:border-nb-gray-900',
           widthClass || sizes[size],
         )}
       >
@@ -114,7 +116,7 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
           )}>
             <div className="flex items-center gap-3 min-w-0">
               {icon && (
-                <div className={cn('flex items-center justify-center h-10 w-10 rounded-md shrink-0', iconWrapClass || 'bg-netbird-950 border border-netbird text-netbird shadow-xs')}>
+                <div className={cn(ICON_TILE_BOX, iconWrapClass || ICON_TILE_TONE.brand)}>
                   {icon}
                 </div>
               )}

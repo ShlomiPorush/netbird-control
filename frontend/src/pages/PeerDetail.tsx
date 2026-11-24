@@ -16,7 +16,7 @@ import { useConfirm } from '@/contexts/ConfirmContext';
 import { useDebounced } from '@/lib/useDebounced';
 import { useServerSort } from '@/lib/useTableSort';
 import type { GroupRef, LogEvent, UserRef } from '@/lib/types';
-import { Badge, Breadcrumbs, Button, EmptyState, LoadingState, Pagination, IconButton, SearchInput, Tabs, Copyable, ClearFiltersButton, Input, Textarea, FlagIcon } from '@/components/ui';
+import { Badge, Breadcrumbs, Button, Card, EmptyState, LoadingState, Pagination, IconButton, SearchInput, Tabs, Copyable, ClearFiltersButton, Input, Textarea, FlagIcon } from '@/components/ui';
 import type { TabItem } from '@/components/ui';
 import type { Crumb } from '@/components/ui/PageHeader';
 import { Segmented, ToolbarMenu } from '@/components/logs/toolbar';
@@ -86,7 +86,7 @@ export default function PeerDetail() {
         <div className="min-w-0">
           <div className="flex items-center gap-3 min-w-0">
             <span className={cn('h-2.5 w-2.5 rounded-full shrink-0', peer.connected ? 'bg-green-500' : 'bg-nb-gray-400 dark:bg-nb-gray-600')} />
-            <h1 className="min-w-0 text-2xl font-medium text-nb-gray-800 dark:text-nb-gray-100 truncate">{title}</h1>
+            <h1 className="min-w-0 text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 truncate">{title}</h1>
             {peer.login_expired && <Badge tone="red" className="shrink-0">Login Required</Badge>}
             {peer.ephemeral && <Badge tone="gray" className="shrink-0">Ephemeral</Badge>}
           </div>
@@ -135,7 +135,7 @@ export default function PeerDetail() {
       ) : (
       <div className="grid lg:grid-cols-2 gap-8 items-start max-w-6xl">
         {/* Left: information card */}
-        <div className="rounded-md border border-nb-gray-200 dark:border-nb-gray-900 bg-white dark:bg-nb-gray-940 divide-y divide-nb-gray-100 dark:divide-nb-gray-900/70">
+        <Card className="divide-y divide-nb-gray-100 dark:divide-nb-gray-900/70">
           <InfoRow icon={<MapPin size={16} />} label="NetBird IP Address" value={<Copyable value={peer.ip || ''}><Mono>{peer.ip || '-'}</Mono></Copyable>} />
           <InfoRow icon={<Hash size={16} />} label="Public IP Address" value={<Copyable value={peer.connection_ip || ''}><Mono>{peer.connection_ip || '-'}</Mono></Copyable>} />
           {peer.ipv6 && <InfoRow icon={<Network size={16} />} label="IPv6 Address" value={<Copyable value={peer.ipv6}><Mono>{peer.ipv6}</Mono></Copyable>} />}
@@ -177,7 +177,7 @@ export default function PeerDetail() {
           <InfoRow icon={<History size={16} />} label="Last Seen" value={peer.connected ? 'Connected now' : formatMaybeDate(peer.last_seen)} />
           <InfoRow icon={<Network size={16} />} label="Agent Version" value={peer.version || '-'} />
           <InfoRow icon={<Network size={16} />} label="UI Version" value={peer.ui_version || '-'} />
-        </div>
+        </Card>
 
         {/* Right: session settings + assigned groups */}
         <div className="flex flex-col gap-4">
@@ -193,9 +193,9 @@ export default function PeerDetail() {
           />
 
           <div className="mt-2">
-            <h2 className="text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Assigned Groups</h2>
+            <h2 className="text-base font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Assigned Groups</h2>
             <p className="text-nb-gray-500 text-sm mb-3">Groups control what this peer can access.</p>
-            <div className="rounded-md border border-nb-gray-200 dark:border-nb-gray-900 bg-white dark:bg-nb-gray-940 p-3">
+            <Card className="p-3">
               {peer.groups.length ? (
                 <div className="flex flex-wrap gap-1.5">
                   {peer.groups.map((g) => <GroupChip key={g.id || g.name} group={g} linkable={!restricted && !!g.id} />)}
@@ -203,7 +203,7 @@ export default function PeerDetail() {
               ) : (
                 <p className="text-sm text-nb-gray-500">Not assigned to any group.</p>
               )}
-            </div>
+            </Card>
           </div>
 
           <PeerMetaCard key={peer.id} peerId={peer.id} tags={peer.tags || []} note={peer.note || ''} editable={isAdmin} />
@@ -252,9 +252,9 @@ function PeerMetaCard({ peerId, tags: initialTags, note: initialNote, editable }
 
   return (
     <div className="mt-2">
-      <h2 className="text-base font-semibold text-nb-gray-800 dark:text-nb-gray-100">Notes & Tags</h2>
+      <h2 className="text-base font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Notes & Tags</h2>
       <p className="text-nb-gray-500 text-sm mb-3">Operational metadata stored in this app - whose device it is, why it exists.</p>
-      <div className="rounded-md border border-nb-gray-200 dark:border-nb-gray-900 bg-white dark:bg-nb-gray-940 p-3 flex flex-col gap-3">
+      <Card className="p-3 flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-1.5">
           {tags.map((t) => (
             <span key={t} className="inline-flex items-center gap-1 rounded-md border border-nb-gray-200 dark:border-nb-gray-800/60 bg-nb-gray-100 dark:bg-nb-gray-930/60 px-2 py-0.5 text-[0.78rem] text-nb-gray-700 dark:text-nb-gray-200">
@@ -296,7 +296,7 @@ function PeerMetaCard({ peerId, tags: initialTags, note: initialNote, editable }
           </>
         )}
         {!editable && initialNote && <p className="text-sm text-nb-gray-600 dark:text-nb-gray-300 whitespace-pre-wrap">{initialNote}</p>}
-      </div>
+      </Card>
     </div>
   );
 }

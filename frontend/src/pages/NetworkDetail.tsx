@@ -18,7 +18,7 @@ import { ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
 import { useUrlTab } from '@/lib/useUrlTab';
 import type { Resource, Router, Policy } from '@/lib/types';
 import { bulkDeleteMessage } from '@/lib/bulkDelete';
-import { SearchInput, Badge, EmptyState, LoadingState, Button, IconButton, Copyable, Modal, Input, GroupMultiSelect, Tabs, PillTabs, Label, FieldHint, Pagination, ClearFiltersButton, SortTh, SelectMenu } from '@/components/ui';
+import { SearchInput, Badge, Card, EmptyState, LoadingState, Button, IconButton, Copyable, Modal, Input, GroupMultiSelect, Tabs, PillTabs, Label, FieldHint, Pagination, ClearFiltersButton, SortTh, SelectMenu } from '@/components/ui';
 import { ResourceModal } from '@/components/networks/ResourceModal';
 import { AddFromNetworkModal } from '@/components/settings/Blocklist';
 import { NetworkModal } from '@/components/networks/NetworkModal';
@@ -208,7 +208,7 @@ export default function NetworkDetail() {
         </div>
         <div className="min-w-0">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-nb-gray-900 dark:text-nb-gray-50 truncate">{name}</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 truncate">{name}</h1>
             {canManage && canChangeNetwork && (
               <IconButton onClick={() => setEditNet(true)} title="Edit network"><Pencil size={15} /></IconButton>
             )}
@@ -225,7 +225,7 @@ export default function NetworkDetail() {
         </div>
       </div>
 
-      <div className="max-w-md rounded-md border border-nb-gray-200 dark:border-nb-gray-900 bg-white dark:bg-nb-gray-940 mb-6">
+      <Card className="max-w-md mb-6">
         <div className="flex items-center justify-between px-4 py-3 border-b border-nb-gray-100 dark:border-nb-gray-900/70">
           <span className="inline-flex items-center gap-2.5 text-[0.85rem] font-semibold text-nb-gray-800 dark:text-nb-gray-100">
             <Server size={16} className="text-nb-gray-400" /> High Availability
@@ -251,14 +251,14 @@ export default function NetworkDetail() {
             Go to Policies <ExternalLink size={13} />
           </button>
         </div>
-      </div>
+      </Card>
 
-      <div className="flex items-end gap-1 border-b border-nb-gray-200 dark:border-nb-gray-900 mb-5">
+      <div className="flex items-end gap-1 border-b border-nb-gray-200 dark:border-nb-gray-900 mb-5 overflow-x-auto nb-scroll">
         {tabs.map((t) => {
           const active = tab === t.key;
           return (
             <button key={t.key} onClick={() => setTab(t.key)}
-              className={cn('relative inline-flex items-center gap-2 px-3 pt-1.5 pb-3 text-sm transition-colors',
+              className={cn('relative inline-flex shrink-0 items-center gap-2 whitespace-nowrap px-3 pt-1.5 pb-3 text-sm transition-colors',
                 active ? 'text-netbird' : 'text-nb-gray-600 hover:text-nb-gray-900 dark:text-nb-gray-400 dark:hover:text-nb-gray-200')}>
               <t.icon size={15} /> {t.label}
               <span className={cn('absolute left-0 right-0 bottom-0 h-[1.5px]', active ? 'bg-netbird' : 'bg-transparent')} />
