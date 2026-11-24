@@ -4,7 +4,7 @@ import { cn } from '@/lib/cn';
 import { useSmtpConfig } from '@/lib/queries';
 import { useSaveSmtp, useTestSmtp } from '@/lib/mutations';
 import type { SmtpConfigInput } from '@/lib/types';
-import { Button, LoadingState, Input, Field } from '@/components/ui';
+import { Button, Card, LoadingState, Input, Field } from '@/components/ui';
 
 const SMTP_ENV_HINT = 'Managed by SMTP_* environment variables - edit them in your deployment config, not here.';
 
@@ -65,7 +65,7 @@ export function Smtp() {
       {envManaged && (
         <p className="mb-4 text-[0.82rem] rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-50 dark:bg-nb-gray-900/40 px-3 py-2 text-nb-gray-600 dark:text-nb-gray-300">{SMTP_ENV_HINT}</p>
       )}
-      <div className="flex flex-col gap-4">
+      <Card className="flex flex-col gap-4 p-5 sm:p-6">
         <label className={cn('flex items-center gap-3 p-3.5 rounded-md border border-nb-gray-200 dark:border-nb-gray-800 bg-nb-gray-50 dark:bg-nb-gray-900/30', envManaged ? 'cursor-not-allowed' : 'cursor-pointer')}>
           <input type="checkbox" className="h-4 w-4 accent-netbird" checked={enabled} disabled={envManaged} onChange={(e) => setEnabled(e.target.checked)} />
           <span className="text-sm">
@@ -101,7 +101,7 @@ export function Smtp() {
           <div className="relative">
             <Input type={showPass && !envManaged ? 'text' : 'password'} autoComplete="new-password" value={envManaged ? '' : pass} onChange={(e) => setPass(e.target.value)}
               placeholder={envManaged ? '•••••••••••• (from environment)' : data?.hasPass ? '•••••••••••• (configured)' : 'app password…'}
-              disabled={envManaged} className={cn(pass && !envManaged && 'pr-10', lockCls)} />
+              disabled={envManaged} className={cn('w-full', pass && !envManaged && 'pr-10', lockCls)} />
             {pass && !envManaged && (
               <button type="button" onClick={() => setShowPass((s) => !s)} title={showPass ? 'Hide' : 'Show'}
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-nb-gray-400 hover:text-nb-gray-700 dark:hover:text-nb-gray-100">
@@ -144,7 +144,7 @@ export function Smtp() {
             {data?.enabled && data?.host ? 'Configured' : 'Not configured'}
           </span>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }

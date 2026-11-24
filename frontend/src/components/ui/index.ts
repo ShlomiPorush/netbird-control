@@ -1,4 +1,4 @@
-export { Button, IconButton } from './Button';
+export { Button, LinkButton, IconButton } from './Button';
 export { Badge, StatusDot } from './Badge';
 export { SearchInput } from './SearchInput';
 export { Tabs, PillTabs } from './Tabs';
@@ -11,7 +11,8 @@ export type { SelectOption } from './SelectMenu';
 export { CopyButton, Copyable } from './CopyButton';
 export { PortSelector } from './PortSelector';
 export { Table, THead, Th, TBody, Tr, Td, SortTh } from './Table';
-export { Spinner, LoadingState, EmptyState, PageHeading } from './Misc';
+export { Spinner, LoadingState, EmptyState } from './Misc';
+export { Card } from './Card';
 export { LogLoader, useSettledDelay } from './LogLoader';
 export { TopProgress } from './TopProgress';
 export { PageHeader, Breadcrumbs, InlineLink } from './PageHeader';

@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
-import type { PolicyInput, PolicyEditInput, Template, FilterRule, FilterRuleInput, AccessProfileInput, PostureCheckInput, AutomationInput, AutomationTestResult, AutomationRunResult, DryRunResult, TidyNamesPlan, TidyNamesResult, CreateProxyServiceInput, ExposeDockerInput, UpdateProxyServiceInput, BlocklistInput, BulkBlocklistInput, BulkBlocklistResult, BlockedMatchesResult, EnforceBlocklistResult, MatchingEventsResult, TelegramInput, SmtpConfigInput, ApproverConfigInput, AutoApprovalConfigInput, FeaturePermsConfig, RecurringAccessInput, EdrAutoBypassConfig, SecurityConfig, GrantTarget, TemporaryAccessGrantInput, ExtendGrantInput, CreateAccessRequestInput, CreateAccessRequestResult, ApplyTenantDefaultsResult, AutoConfigureNbResult, TenantDefaultsProfile, NetbirdNbSettings, NetbirdSettingsResponse, MspDigestConfig, MspDigestSendResult, InternalBackupConfig, InternalBackupRunResult, InternalBackupRestoreResult, InviteUserInput, InviteDefaultGroups, NbUser, SetupKeyResult, CreateSetupKeyInput, TrafficPullStatus, AuditPullStatus } from './types';
+import type { PolicyInput, PolicyEditInput, Template, FilterRule, FilterRuleInput, AccessProfileInput, DeleteAccessProfileResult, PostureCheckInput, AutomationInput, AutomationTestResult, AutomationRunResult, DryRunResult, TidyNamesPlan, TidyNamesResult, CreateProxyServiceInput, ExposeDockerInput, UpdateProxyServiceInput, BlocklistInput, BulkBlocklistInput, BulkBlocklistResult, BlockedMatchesResult, EnforceBlocklistResult, MatchingEventsResult, TelegramInput, SmtpConfigInput, ApproverConfigInput, AutoApprovalConfigInput, FeaturePermsConfig, RecurringAccessInput, EdrAutoBypassConfig, SecurityConfig, GrantTarget, TemporaryAccessGrantInput, ExtendGrantInput, CreateAccessRequestInput, CreateAccessRequestResult, ApplyTenantDefaultsResult, AutoConfigureNbResult, TenantDefaultsProfile, NetbirdNbSettings, NetbirdSettingsResponse, MspDigestConfig, MspDigestSendResult, InternalBackupConfig, InternalBackupRunResult, InternalBackupRestoreResult, InviteUserInput, InviteDefaultGroups, NbUser, SetupKeyResult, CreateSetupKeyInput, TrafficPullStatus, AuditPullStatus } from './types';
 
 export interface ResourcePayload {
   name: string;
@@ -12,7 +12,6 @@ export interface ResourcePayload {
   enabled?: boolean;
 }
 
-// Enable / disable a resource (the dashboard's Disable action).
 export function useToggleResource(networkId: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -118,7 +117,6 @@ export function useCreateNetwork() {
   });
 }
 
-// Rename/re-describe a network; allowDuplicates toggles the app's duplicate-address guard.
 export function useUpdateNetwork() {
   const qc = useQueryClient();
   return useMutation({
@@ -174,7 +172,6 @@ export function useSaveGrants() {
   });
 }
 
-// Per-network default Access Profiles (pre-selected when adding a resource).
 export function useSaveNetworkDefaultProfiles() {
   const qc = useQueryClient();
   return useMutation({
@@ -219,8 +216,9 @@ export function useSaveAccessProfile() {
 export function useDeleteAccessProfile() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => api.del(`/api/access-profiles/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['access-profiles'] }),
+    mutationFn: (id: number) => api.del<DeleteAccessProfileResult>(`/api/access-profiles/${id}`),
+    // A refusal (in use) is new information about its uses too.
+    onSettled: () => qc.invalidateQueries({ queryKey: ['access-profiles'] }),
   });
 }
 
@@ -390,7 +388,7 @@ export function useSaveBlocklist() {
   });
 }
 
-// Bulk add - addresses picked from a network's existing resources; duplicates are skipped.
+// Duplicates are skipped.
 export function useBulkAddBlocklist() {
   const qc = useQueryClient();
   return useMutation({
@@ -508,8 +506,7 @@ export function useSaveSecurity() {
   });
 }
 
-// Save the per-account automatic EDR bypass rules. Peers are re-read because the next sync may
-// bypass devices right away.
+// Peers are re-read because the next sync may bypass devices right away.
 export function useSaveEdrAutoBypass() {
   const qc = useQueryClient();
   return useMutation({
@@ -521,7 +518,7 @@ export function useSaveEdrAutoBypass() {
   });
 }
 
-// Save the per-account data-retention window (days; 0 = keep forever). Tenant-aware endpoint.
+// days: 0 = keep forever. Tenant-aware endpoint.
 export function useSaveRetention() {
   const qc = useQueryClient();
   return useMutation({
@@ -533,14 +530,14 @@ export function useSaveRetention() {
   });
 }
 
-// Automation dry-run: preview exactly what a sync would do right now (no writes, no cache impact).
+// No writes, so no cache is invalidated.
 export function useDryRunAutomation() {
   return useMutation({
     mutationFn: (id: number) => api.post<DryRunResult>(`/api/automations/${id}/dry-run`, {}),
   });
 }
 
-// Device tags & notes (operational metadata, app-side; admin only).
+// Admin only.
 export function useSavePeerMeta() {
   const qc = useQueryClient();
   return useMutation({
@@ -554,7 +551,7 @@ export function useSavePeerMeta() {
   });
 }
 
-// Bulk-add tags to many devices (merge - existing tags and notes stay).
+// Merges: existing tags and notes stay.
 export function useBulkTagPeers() {
   const qc = useQueryClient();
   return useMutation({
@@ -567,8 +564,6 @@ export function useBulkTagPeers() {
   });
 }
 
-// Access recertification: open a round on demand / decide one item (keep or revoke).
-// A revoke performs the actual removal, so the affected caches are invalidated too.
 export function useStartRecert() {
   const qc = useQueryClient();
   return useMutation({
@@ -590,6 +585,7 @@ export function useDecideRecertItem() {
       api.post(`/api/recertification/items/${id}/${decision}`, {}),
     onSuccess: (_r, vars) => {
       qc.invalidateQueries({ queryKey: ['recertification'] });
+      // A revoke performs the actual removal, so the affected caches are invalidated too.
       if (vars.decision === 'revoke') {
         qc.invalidateQueries({ queryKey: ['peers'] });
         qc.invalidateQueries({ queryKey: ['feature-permissions'] });
@@ -719,9 +715,7 @@ export function useBulkDeleteGroups() {
   });
 }
 
-// Replace a group's PEER membership. The frontend computes the FULL desired peer id list (for both
-// add and remove); the server PUTs it to NetBird (which replaces the set). The group detail and the
-// groups/peers lists all reflect membership, so all three are invalidated.
+// `peers` is the FULL desired peer id list: the server PUTs it to NetBird, which replaces the set.
 export function useSetGroupPeers() {
   const qc = useQueryClient();
   return useMutation({
@@ -735,8 +729,8 @@ export function useSetGroupPeers() {
   });
 }
 
-// Add/remove USERS to/from a group. Group membership for users lives in each user's auto_groups, so
-// the server does one PUT per user (best-effort) - here we just pass add/remove user-id deltas.
+// Group membership for users lives in each user's auto_groups, so the server does one PUT per user
+// (best-effort).
 export interface AssignGroupUsersResult {
   ok: boolean;
   added: number;
@@ -756,9 +750,7 @@ export function useAssignGroupUsers() {
   });
 }
 
-// ── Users: invite / resend invitation ──
-// The invite goes through our backend, which posts to NetBird in the CURRENT account
-// Create an empty NetBird group (official parity). Works in tenant context too.
+// Works in tenant context too.
 export function useCreateGroup() {
   const qc = useQueryClient();
   return useMutation({
@@ -770,7 +762,7 @@ export function useCreateGroup() {
   });
 }
 
-// Rename a group (API-created groups only; the "All" and IdP-issued groups are rejected server-side).
+// API-created groups only; the "All" and IdP-issued groups are rejected server-side.
 export function useRenameGroup(id: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -783,8 +775,10 @@ export function useRenameGroup(id: string) {
   });
 }
 
-// context - so it works while managing an MSP tenant too. The server force-refreshes the
-// users mirror, so invalidating ['users'] already shows the new user as Invited.
+// ── Users: invite / resend invitation ──
+// The invite goes through our backend, which posts to NetBird in the CURRENT account context - so it
+// works while managing an MSP tenant too. The server force-refreshes the users mirror, so
+// invalidating ['users'] already shows the new user as Invited.
 export function useInviteUser() {
   const qc = useQueryClient();
   return useMutation({
@@ -796,7 +790,6 @@ export function useInviteUser() {
   });
 }
 
-// Save the current Auto-Assigned Groups selection as this account's invite default.
 // Per account server-side, so an MSP tenant's defaults never touch the main account's.
 export function useSaveInviteDefaultGroups() {
   const qc = useQueryClient();
@@ -819,8 +812,7 @@ export function useResendInvite() {
   });
 }
 
-// Delete a user. NetBird deletes the user's peers along with them, so the peers list is
-// invalidated too - it is stale the moment this succeeds.
+// NetBird deletes the user's peers along with them, so the peers list is stale the moment this succeeds.
 export function useDeleteUser() {
   const qc = useQueryClient();
   return useMutation({
@@ -832,8 +824,7 @@ export function useDeleteUser() {
   });
 }
 
-// Block / unblock a user. The Users list and the user-detail page both reflect is_blocked, so
-// both are invalidated on success.
+// The Users list and the user-detail page both reflect is_blocked.
 export function useSetUserBlocked() {
   const qc = useQueryClient();
   return useMutation({
@@ -846,7 +837,7 @@ export function useSetUserBlocked() {
   });
 }
 
-// Reset a user's MFA methods. Only the user-detail view carries MFA state, so it alone is refreshed.
+// Only the user-detail view carries MFA state, so it alone is refreshed.
 export function useResetUserMfa() {
   const qc = useQueryClient();
   return useMutation({
@@ -985,17 +976,13 @@ export function useCreateTelegramTopics() {
   });
 }
 
-// ── Manual "Refresh": bust + re-pull the server-side NetBird caches, then refetch every active
-// query. `onSettled` fires on success OR error, so the UI still refetches even if the bust call
-// fails (e.g. an older backend) - the button never silently does nothing. ──
-// Send the weekly review digest right now (skips the schedule; admin only).
+// Skips the schedule; admin only.
 export function useSendReviewDigest() {
   return useMutation({
     mutationFn: () => api.post<{ telegram: boolean; emails: number }>('/api/security-config/send-digest', {}),
   });
 }
 
-// Mark / unmark a Cleanup finding as deliberately ignored.
 export function useSetCleanupIgnore() {
   const qc = useQueryClient();
   return useMutation({
@@ -1026,7 +1013,7 @@ export function useDeleteTenant() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['msp-tenants'] }),
   });
 }
-// MSP provisioning token (write-only; empty string clears it).
+// Write-only; an empty string clears it.
 export function useSetProvisioningToken() {
   const qc = useQueryClient();
   return useMutation({
@@ -1042,7 +1029,7 @@ export function useProvisionTenant() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['msp-tenants'] }),
   });
 }
-// Per-tenant API token (write-only; empty string clears it).
+// Write-only; an empty string clears it.
 export function useSetTenantToken() {
   const qc = useQueryClient();
   return useMutation({
@@ -1052,8 +1039,7 @@ export function useSetTenantToken() {
   });
 }
 // REAL BILLING ACTION: subscribe a tenant to a paid plan, billed to the MSP account. The server
-// picks POST (free/trial) or PUT (already paying) against NetBird itself. Invalidating the tenant
-// list refreshes the Plan column.
+// picks POST (free/trial) or PUT (already paying) against NetBird itself.
 export function useChangeTenantPlan() {
   const qc = useQueryClient();
   return useMutation({
@@ -1074,8 +1060,7 @@ export function useApplyTenantDefaults() {
     },
   });
 }
-// Save the Tenant Defaults profile (admin, main only) - what new tenants are seeded with and what
-// "Apply Defaults" applies. Returns the saved profile; invalidates the query.
+// Admin, main account only.
 export function useSaveTenantDefaults() {
   const qc = useQueryClient();
   return useMutation({
@@ -1083,8 +1068,7 @@ export function useSaveTenantDefaults() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tenant-defaults'] }),
   });
 }
-// Save the CURRENT account's live NetBird settings (admin) - main in main mode, the managed tenant's
-// account in tenant mode. Returns the account's merged/normalized settings; invalidates the query.
+// Admin. Saves the CURRENT account: main in main mode, the managed tenant's account in tenant mode.
 export function useSaveNetbirdSettings() {
   const qc = useQueryClient();
   return useMutation({
@@ -1100,7 +1084,7 @@ export function useSaveMspDigest() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['msp-digest'] }),
   });
 }
-// Send the MSP digest right now (skips the schedule). Returns what it actually reached.
+// Skips the schedule.
 export function useSendMspDigest() {
   return useMutation({
     mutationFn: () => api.post<MspDigestSendResult>('/api/msp-digest/send', {}),
@@ -1127,12 +1111,13 @@ export function useNetbirdRefresh() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.post('/api/refresh'),
+    // POST /api/refresh busts and re-pulls the server-side NetBird caches. onSettled, so the UI still
+    // refetches when it fails (e.g. an older backend) - the button never silently does nothing.
     onSettled: () => qc.invalidateQueries(),
   });
 }
 
 // ── Purge stored events matching the filters (EVENT_PURGE_ADMINS only) ──
-// Scan returns a count + sample; purge deletes them and refreshes the traffic log.
 export function useScanMatchingEvents() {
   return useMutation({ mutationFn: () => api.get<MatchingEventsResult>('/api/filter-rules/matching') });
 }
@@ -1145,7 +1130,7 @@ export function usePurgeMatchingEvents() {
 }
 
 // ─── Internal envelope-encrypted backup (tier 2) ───
-// Set / change / reset the encryption passphrase. The passphrase is sent once and never stored.
+// The passphrase is sent once and never stored.
 export function useSetBackupPassphrase() {
   const qc = useQueryClient();
   return useMutation({

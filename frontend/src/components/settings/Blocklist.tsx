@@ -87,15 +87,15 @@ export function Blocklist() {
 
   return (
     <div>
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between mb-5 gap-3">
-        <div>
+      <div className="flex flex-wrap items-start justify-between mb-5 gap-3">
+        <div className="min-w-0 flex-1 basis-80">
           <p className="text-nb-gray-500 text-sm max-w-2xl">
             Addresses that may <b>not</b> be added as resources - by anyone (admins and editors) or by automations.
             Scope each entry to specific networks (or all but some). Set an entry to <b>Disable</b> or <b>Delete existing</b> to
             also act on resources that already exist, then run <b>Enforce on existing</b> to apply it.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
           {canPropagate && (
             <Button variant="secondary" onClick={onPropagate} disabled={propagate.isPending} title="Replace every tenant's blocklist with this one">
               <Building2 size={15} /> Apply To All Tenants

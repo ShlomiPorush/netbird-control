@@ -3,7 +3,7 @@ import { Plus, X } from 'lucide-react';
 import { useApproverConfig, useAdGroups, useUsers } from '@/lib/queries';
 import { useSaveApproverConfig } from '@/lib/mutations';
 import type { ApproverDelegate, TelegramApprover } from '@/lib/types';
-import { Badge, Button, LoadingState, Input, SelectMenu, Field, IconButton, GroupMultiSelect } from '@/components/ui';
+import { Badge, Button, Card, LoadingState, Input, SelectMenu, Field, IconButton, GroupMultiSelect } from '@/components/ui';
 
 export function Approvals() {
   const { data, isLoading } = useApproverConfig();
@@ -80,18 +80,18 @@ export function Approvals() {
       </p>
 
       <div className="flex flex-col gap-4">
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">In-App Approvers (Entra Group)</div>
+        <Card className="p-4">
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">In-App Approvers (Entra Group)</div>
           <p className="text-nb-gray-500 text-[0.82rem] mt-0.5 mb-3">
             Members of these Entra (Azure AD) groups can approve/deny requests in the app - no admin rights needed.
           </p>
           <Field label="Approver Groups" hint="Members of these groups can approve/deny requests. Requires the app's Microsoft Graph group-read permission (see docs/permissions).">
             <GroupMultiSelect groups={adGroups || []} value={groupIds} onChange={setGroupIds} placeholder="Select groups…" />
           </Field>
-        </div>
+        </Card>
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Telegram Approvals</div>
+        <Card className="p-4">
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Telegram Approvals</div>
           <p className="text-nb-gray-500 text-[0.82rem] mt-0.5 mb-3">
             Post Approve/Deny buttons to Telegram. Only the mapped Telegram users below may act on them, and each approval
             is attributed to the system user you map it to. The bot receives presses via a webhook (registered when
@@ -127,10 +127,10 @@ export function Approvals() {
           <div className="mt-2 text-[0.78rem] text-nb-gray-500">
             Webhook: {data?.webhookConfigured ? <span className="text-green-600 dark:text-green-500">registered</span> : <span className="text-nb-gray-400">not registered - enable Telegram (Telegram tab) and Save; requires a public BASE_URL.</span>}
           </div>
-        </div>
+        </Card>
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Approval Delegation</div>
+        <Card className="p-4">
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Approval Delegation</div>
           <p className="text-nb-gray-500 text-[0.82rem] mt-0.5 mb-3">
             Cover an approver's absence: give a user <b>time-boxed</b> approval rights (in-app - the Access Requests
             page and its actions). Active from the start date through the end date (inclusive), then expires by itself.
@@ -162,7 +162,7 @@ export function Approvals() {
             ))}
             <div><Button variant="secondary" size="sm" onClick={addDeleg}><Plus size={14} /> Add Delegation</Button></div>
           </div>
-        </div>
+        </Card>
 
         <div className="flex items-center gap-3">
           <Button variant="primary" onClick={onSave} disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save'}</Button>

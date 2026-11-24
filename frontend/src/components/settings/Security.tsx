@@ -4,7 +4,7 @@ import { cn } from '@/lib/cn';
 import { useEdrAutoBypass, useSecurityConfig } from '@/lib/queries';
 import { useSaveEdrAutoBypass, useSaveSecurity, useSendReviewDigest } from '@/lib/mutations';
 import type { EdrAutoBypassConfig, EdrBypassOs, SecurityConfig } from '@/lib/types';
-import { Button, Checkbox, LoadingState, Input, SelectMenu, Field } from '@/components/ui';
+import { Button, Card, Checkbox, LoadingState, Input, SelectMenu, Field } from '@/components/ui';
 
 // ─── Security & alerts: session limits, request escalation, review digest, anomaly alerts ───
 const DAY_OPTIONS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -65,9 +65,9 @@ function AutoEdrBypass() {
   };
 
   return (
-    <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
+    <Card className="p-4">
       <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Automatic EDR Bypass</div>
+        <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Automatic EDR Bypass</div>
         <label className="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-nb-gray-600 dark:text-nb-gray-300">
           <Checkbox checked={cfg.enabled} onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} /> Enabled
         </label>
@@ -136,7 +136,7 @@ function AutoEdrBypass() {
         {saved && <span className="text-sm text-green-600 dark:text-green-500">Saved</span>}
         {error && <span className="text-sm text-red-500">{error}</span>}
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -181,8 +181,8 @@ export function Security() {
       </p>
 
       <div className="flex flex-col gap-4">
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Session Limits</div>
+        <Card className="p-4">
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Session Limits</div>
           <p className="text-nb-gray-500 text-[0.82rem] mt-0.5 mb-3">
             Shorter sessions reduce exposure. The absolute caps count from the actual sign-in - activity doesn't extend them.
           </p>
@@ -191,10 +191,10 @@ export function Security() {
             <NumField label="User Session Cap" suffix="hours" hint="Absolute cap for regular users." value={cfg.sessionMaxHours} onChange={(n) => patch({ sessionMaxHours: n })} />
             <NumField label="Admin Session Cap" suffix="hours" hint="Stricter absolute cap for admins." value={cfg.adminSessionMaxHours} onChange={(n) => patch({ adminSessionMaxHours: n })} />
           </div>
-        </div>
+        </Card>
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
-          <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Access-Request Escalation</div>
+        <Card className="p-4">
+          <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Access-Request Escalation</div>
           <p className="text-nb-gray-500 text-[0.82rem] mt-0.5 mb-3">
             Keep requests from sitting forever: one Telegram reminder, then automatic expiry (the requester is emailed).
           </p>
@@ -202,11 +202,11 @@ export function Security() {
             <NumField label="Reminder After" suffix="minutes" hint="One reminder per pending request." value={cfg.requestReminderMinutes} onChange={(n) => patch({ requestReminderMinutes: n })} />
             <NumField label="Expire After" suffix="hours" hint="Undecided requests expire." value={cfg.requestExpireHours} onChange={(n) => patch({ requestExpireHours: n })} />
           </div>
-        </div>
+        </Card>
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
+        <Card className="p-4">
           <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Weekly Access Review</div>
+            <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Weekly Access Review</div>
             <label className="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-nb-gray-600 dark:text-nb-gray-300">
               <Checkbox checked={cfg.reviewEnabled} onChange={(e) => patch({ reviewEnabled: e.target.checked })} /> Enabled
             </label>
@@ -231,11 +231,11 @@ export function Security() {
             </Button>
             {sendMsg && <span className="text-sm text-nb-gray-500">{sendMsg}</span>}
           </div>
-        </div>
+        </Card>
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
+        <Card className="p-4">
           <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Anomaly Alerts</div>
+            <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Anomaly Alerts</div>
             <label className="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-nb-gray-600 dark:text-nb-gray-300">
               <Checkbox checked={cfg.anomalyEnabled} onChange={(e) => patch({ anomalyEnabled: e.target.checked })} /> Enabled
             </label>
@@ -269,11 +269,11 @@ export function Security() {
             <NumField label="Traffic Spike Multiplier" suffix="× hourly average" hint="Alert when a device exceeds this times its own 7-day hourly average." value={cfg.trafficMult} onChange={(n) => patch({ trafficMult: n })} />
             <NumField label="Traffic Spike Floor" suffix="MB/hour" hint="…and moved at least this much in the hour." value={cfg.trafficFloorMb} onChange={(n) => patch({ trafficFloorMb: n })} />
           </div>
-        </div>
+        </Card>
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4">
+        <Card className="p-4">
           <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Background Job Alerts</div>
+            <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Background Job Alerts</div>
             <label className="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-nb-gray-600 dark:text-nb-gray-300">
               <Checkbox checked={cfg.schedAlertsEnabled !== false} onChange={(e) => patch({ schedAlertsEnabled: e.target.checked })} /> Enabled
             </label>
@@ -283,15 +283,15 @@ export function Security() {
             and ✅ once it recovers - one alert per breakage, not per failing run. Uses the same Security
             Alerts topic; job details live in Operations → System Health.
           </p>
-        </div>
+        </Card>
 
         {/* ── Automatic EDR bypass by OS (its own endpoint + Save) ── */}
         <AutoEdrBypass />
 
         {/* ── Access recertification ── */}
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4 flex flex-col gap-4">
+        <Card className="p-4 flex flex-col gap-4">
           <div>
-            <div className="text-sm font-semibold text-nb-gray-900 dark:text-nb-gray-50">Access Recertification</div>
+            <div className="text-sm font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50">Access Recertification</div>
             <p className="text-[0.82rem] text-nb-gray-500 mt-0.5">
               Periodically open a review round on the <b>Access Review</b> page: every standing item
               (unlimited bypasses, feature permissions, auto-approval rules, recurring access) must be
@@ -308,7 +308,7 @@ export function Security() {
                 value={cfg.recertIntervalDays} onChange={(n) => patch({ recertIntervalDays: n })} />
             </div>
           )}
-        </div>
+        </Card>
 
         <div className="flex items-center gap-3">
           <Button variant="primary" onClick={onSave} disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save'}</Button>

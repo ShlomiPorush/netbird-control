@@ -338,7 +338,7 @@ export default function Peers() {
           peer works while managing an MSP tenant too - the API call carries the tenant context. */}
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="text-2xl font-bold text-nb-gray-900 dark:text-nb-gray-50">{heading}</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50">{heading}</h1>
           <p className="mt-1 mb-5 text-sm text-nb-gray-500 dark:text-nb-gray-400 max-w-2xl">
             {limited ? 'Your devices connected to the network.' : meta.desc}
           </p>

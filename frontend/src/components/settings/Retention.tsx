@@ -4,7 +4,7 @@ import { getTenantMode } from '@/lib/api';
 import { useRetention, useSystemHealth } from '@/lib/queries';
 import { useSaveRetention } from '@/lib/mutations';
 import { formatMaybeDate } from '@/lib/logfmt';
-import { Button, Checkbox, Field, FieldHint, Input, LoadingState } from '@/components/ui';
+import { Button, Card, Checkbox, Field, FieldHint, Input, LoadingState } from '@/components/ui';
 
 // Below this the UI shows a compliance warning (~24 months). Advisory only - the
 // admin's choice always wins (matches RETENTION_WARN_DAYS on the server).
@@ -51,8 +51,8 @@ export function Retention() {
       <div className="flex flex-col gap-4">
         {/* Current data volume - decide with the real numbers in front of you. */}
         {health && (
-          <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4 text-sm">
-            <div className="font-semibold text-nb-gray-900 dark:text-nb-gray-50 mb-1.5">Currently Stored</div>
+          <Card className="p-4 text-sm">
+            <div className="font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 mb-1.5">Currently Stored</div>
             <p className="text-nb-gray-500">
               Traffic events: <b className="text-nb-gray-700 dark:text-nb-gray-200">~{fmtCount(health.db.events.rows)}</b>
               {health.db.events.oldest && <> (oldest {formatMaybeDate(health.db.events.oldest)})</>}
@@ -67,10 +67,10 @@ export function Retention() {
             {health.retention.last?.error && (
               <p className="mt-1 text-red-500">Last purge failed: {health.retention.last.error}</p>
             )}
-          </div>
+          </Card>
         )}
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 p-4 flex flex-col gap-4">
+        <Card className="p-4 flex flex-col gap-4">
           <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
             <Checkbox checked={enabled}
               onChange={(e) => setDays(e.target.checked ? (days || WARN_DAYS) : 0)} />
@@ -100,7 +100,7 @@ export function Retention() {
               )}
             </>
           )}
-        </div>
+        </Card>
 
         <div className="flex items-center gap-3">
           <Button variant="primary" onClick={onSave} disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save'}</Button>

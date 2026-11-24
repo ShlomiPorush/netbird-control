@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Download, Play, X, MonitorSmartphone, Globe, Route, History, Check, Loader2, ChevronDown, ChevronUp, AlertTriangle, Plus } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -11,7 +11,7 @@ import { useViewer } from '@/contexts/ViewerContext';
 import { formatTimestamp } from '@/lib/logfmt';
 import { requestAccessLink } from '@/lib/requestAccess';
 import type { DeviceDiagnosis, DiagCheck, GrantTarget, Network, TargetDiagnosis } from '@/lib/types';
-import { Badge, Button, PageHeader, SelectMenu } from '@/components/ui';
+import { Badge, Button, Card, LinkButton, PageHeader, SelectMenu } from '@/components/ui';
 import { TargetSearch } from '@/components/access/TargetSearch';
 
 /* ─── Browser-side probes - these test the USER's network, which the server cannot see ─── */
@@ -97,12 +97,12 @@ function CheckRow({ c }: { c: DiagCheck }) {
 
 function Section({ icon, title, children }: { icon: React.JSX.Element; title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-4">
-      <div className="flex items-center gap-2 text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100 mb-1">
+    <Card className="p-4">
+      <div className="flex items-center gap-2 text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100 mb-1">
         {icon}{title}
       </div>
       {children}
-    </div>
+    </Card>
   );
 }
 
@@ -445,7 +445,7 @@ export default function Troubleshoot() {
           </div>
         )}
 
-        <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-4 flex flex-col gap-3">
+        <Card className="p-4 flex flex-col gap-3">
           <div className="grid sm:grid-cols-2 gap-3">
             <div>
               <div className="text-[0.8rem] font-medium text-nb-gray-700 dark:text-nb-gray-200 mb-1.5">Device</div>
@@ -492,10 +492,10 @@ export default function Troubleshoot() {
             )}
           </div>
           {error && <div className="text-sm text-red-500">{error}</div>}
-        </div>
+        </Card>
 
         {running && steps && (
-          <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-4">
+          <Card className="p-4">
             <div className="h-1.5 rounded-full bg-nb-gray-100 dark:bg-nb-gray-900 overflow-hidden mb-3">
               <div className="h-full rounded-full bg-netbird transition-all duration-500"
                 style={{ width: `${Math.max(6, (steps.filter((s) => s.done).length / steps.length) * 100)}%` }} />
@@ -510,7 +510,7 @@ export default function Troubleshoot() {
                 </span>
               </div>
             ))}
-          </div>
+          </Card>
         )}
 
         {ran && verdict && (
@@ -522,7 +522,7 @@ export default function Troubleshoot() {
             <p className="text-sm text-nb-gray-700 dark:text-nb-gray-200 mt-1">{verdict.todo}</p>
             {verdict.button && !inTenant && (
               <div className="mt-3">
-                <Link to={verdict.button.to}><Button variant="primary">{verdict.button.label}</Button></Link>
+                <LinkButton to={verdict.button.to} variant="primary">{verdict.button.label}</LinkButton>
               </div>
             )}
             {addShown && verdict.coverage && (

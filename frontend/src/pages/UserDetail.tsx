@@ -12,7 +12,7 @@ import { useNetbirdRefresh, useDeleteUser, useSetUserBlocked, useResetUserMfa } 
 import { useViewer } from '@/contexts/ViewerContext';
 import { useConfirm } from '@/contexts/ConfirmContext';
 import type { UserDetail as UserDetailT, GroupRef, DetailPeer } from '@/lib/types';
-import { Badge, Breadcrumbs, Button, EmptyState, LoadingState, SearchInput, IconButton, Pagination } from '@/components/ui';
+import { Badge, Breadcrumbs, Button, Card, EmptyState, LoadingState, SearchInput, IconButton, Pagination } from '@/components/ui';
 import type { Crumb } from '@/components/ui/PageHeader';
 import { Segmented, ToolbarMenu } from '@/components/logs/toolbar';
 import { ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
@@ -115,7 +115,7 @@ export default function UserDetail() {
           style={{ color: avatarColor(name) }}>
           {initials(name)}
         </div>
-        <h1 className="min-w-0 text-xl md:text-2xl font-medium text-nb-gray-800 dark:text-nb-gray-100 flex items-center gap-2.5">
+        <h1 className="min-w-0 text-xl md:text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 flex items-center gap-2.5">
           <span className="truncate">{name}</span>
           {user.is_service_user && <Badge tone="gray" className="shrink-0">Service User</Badge>}
         </h1>
@@ -161,7 +161,7 @@ export default function UserDetail() {
 
       {/* Top: info card (left) + auto-assigned groups & role (right) */}
       <div className="grid lg:grid-cols-2 gap-10 items-start mb-10">
-        <div className="rounded-md border border-nb-gray-200 dark:border-nb-gray-900 bg-white dark:bg-nb-gray-940 divide-y divide-nb-gray-100 dark:divide-nb-gray-900/70">
+        <Card className="divide-y divide-nb-gray-100 dark:divide-nb-gray-900/70">
           <InfoRow icon={<User2 size={16} />} label="Name" value={user.name || user.id} />
           <InfoRow icon={<Mail size={16} />} label="E-Mail" value={user.email || '-'} />
           <InfoRow icon={<ActivityIcon size={16} />} label="Status" value={
@@ -171,13 +171,13 @@ export default function UserDetail() {
             </span>
           } />
           <InfoRow icon={<History size={16} />} label="Last Login" value={formatMaybeDate(user.last_login) || 'Never'} />
-        </div>
+        </Card>
 
         <div className="flex flex-col gap-8">
           <div>
-            <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Auto-Assigned Groups</div>
+            <div className="text-sm font-bold tracking-tight text-nb-gray-800 dark:text-nb-gray-100">Auto-Assigned Groups</div>
             <p className="text-nb-gray-500 text-[0.8rem] mb-3">Groups assigned to peers added by this user.</p>
-            <div className="rounded-md border border-nb-gray-200 dark:border-nb-gray-900 bg-white dark:bg-nb-gray-940 p-3 min-h-[52px]">
+            <Card className="p-3 min-h-[52px]">
               {user.groups.length ? (
                 <div className="flex flex-wrap gap-1.5">
                   {user.groups.map((g) => <GroupChip key={g.id} group={g} linkable={!restricted && !!g.id} />)}
@@ -185,7 +185,7 @@ export default function UserDetail() {
               ) : (
                 <p className="text-sm text-nb-gray-500">Not a member of any group.</p>
               )}
-            </div>
+            </Card>
           </div>
 
           <div className="flex items-start justify-between gap-4">

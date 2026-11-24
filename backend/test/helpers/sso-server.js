@@ -112,10 +112,10 @@ function ssoServer() {
         return cookie;
     }
 
-    async function call(sub, method, path, body) {
+    async function call(sub, method, path, body, headers = {}) {
         const res = await fetch(BASE + path, {
             method,
-            headers: { accept: 'application/json', 'content-type': 'application/json', cookie: await signIn(sub) },
+            headers: { accept: 'application/json', 'content-type': 'application/json', cookie: await signIn(sub), ...headers },
             body: body === undefined ? undefined : JSON.stringify(body),
             redirect: 'manual',
         });

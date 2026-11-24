@@ -267,7 +267,7 @@ function AuditCard({ ev, netName }: { ev: AuditEvent; netName: (a: string, t?: s
   const meta = ev.meta && typeof ev.meta === 'object' ? Object.entries(ev.meta) : [];
   return (
     <div className="rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 bg-white dark:bg-nb-gray-950 p-3.5">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <Badge tone={actionTone(ev.action)}>{ACTION_LABELS[ev.action] || ev.action}</Badge>
         <span className="text-[0.72rem] text-nb-gray-500 whitespace-nowrap shrink-0">{formatTimestamp(ev.timestamp)}</span>
       </div>
