@@ -59,16 +59,32 @@ function IncidentRow({ incident }: { incident: CloudStatusIncident }) {
   );
 }
 
-export function CloudStatusBanner() {
+function QuietStatusLine({ known, className }: { known: boolean; className?: string }) {
+  return (
+    <div className={cn('flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border border-nb-gray-200 dark:border-nb-gray-800 px-4 py-2.5 text-sm', className)}>
+      <span className="flex min-w-0 items-start gap-2">
+        <span className={cn('mt-1.5 h-2 w-2 rounded-full shrink-0', known ? DOT.ok : DOT.unknown)} />
+        <span className="min-w-0 text-nb-gray-800 dark:text-nb-gray-100">
+          {known ? 'NetBird Cloud: No Known Issues' : 'NetBird Cloud: Status Unknown (the status page could not be read)'}
+        </span>
+      </span>
+      <ExternalA href="https://status.netbird.io/" className="text-[0.8rem]">status.netbird.io</ExternalA>
+    </div>
+  );
+}
+
+export function CloudStatusBanner({ className, showQuiet = false }: { className?: string; showQuiet?: boolean }) {
   const { data } = useNetbirdCloudStatus();
-  const s = data?.enabled ? data.summary : null;
-  if (!s) return null;
-  const affected = s.components.filter((c) => isImpaired(componentStatus(c.status).severity));
-  const overallImpaired = isImpaired(SEVERITY[s.indicator]);
-  if (!s.incidents.length && !affected.length && !overallImpaired) return null;
+  if (!data?.enabled) return null;
+  const s = data.summary;
+  const affected = s ? s.components.filter((c) => isImpaired(componentStatus(c.status).severity)) : [];
+  const overallImpaired = !!s && isImpaired(SEVERITY[s.indicator]);
+  if (!s || (!s.incidents.length && !affected.length && !overallImpaired)) {
+    return showQuiet ? <QuietStatusLine known={!!s} className={className} /> : null;
+  }
   const bad = SEVERITY[s.indicator] === 'bad' || affected.some((c) => componentStatus(c.status).severity === 'bad');
   return (
-    <Card className={cn('mb-6 p-4 md:p-5 border-l-4', bad ? 'border-l-red-500' : 'border-l-amber-500')}>
+    <Card className={cn('p-4 md:p-5 border-l-4', bad ? 'border-l-red-500' : 'border-l-amber-500', className)}>
       <div className="flex items-start gap-3">
         <AlertTriangle size={18} className={cn('shrink-0 mt-0.5', bad ? 'text-red-500' : 'text-amber-500')} />
         <div className="min-w-0 flex-1">
