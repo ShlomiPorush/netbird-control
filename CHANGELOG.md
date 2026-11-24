@@ -10,6 +10,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+---
+
+## [1.9.0] - 2026-11-24
+
 ### Added
 - **NetBird Cloud status.** The app reads [status.netbird.io](https://status.netbird.io/) for accounts on
   NetBird Cloud. While NetBird reports an incident or a degraded service, the **Overview** shows a banner
