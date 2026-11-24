@@ -39,21 +39,6 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   peers. The app changes that network's servers no other way,
   and the Networks page labels it **Managed By Remote Access**. Off by default: turn
   it on only after every instance runs this version. A settings import never turns it on.
-- **Add a missing server as a resource.** When the Remote Access check finds that nothing in
-  NetBird covers the address, and the user may edit a network that Remote Access uses, the page
-  offers **Add As Resource** on the failed step. It opens a modal: the network (when there is more
-  than one to choose from), then the same Add Resource form as the Networks page, filled in with the
-  address. After the save, the page checks the server
-  again and shows **Ready To Connect**; it never opens a session by itself. Troubleshoot offers the
-  same button for an address that nothing in NetBird covers. The save uses the network's own
-  permission, blocklist and duplicate checks.
-- **Clear answers when a new resource is only partly saved.** If the resource was added but not all
-  of its access rules were, or NetBird didn't confirm the save, or the answer never reached the
-  browser, the Add Resource form says so, keeps **Create** off and links to the network. A resource
-  whose access rules failed is recorded in the audit log as created, with `policiesSaved: false`.
-- **Service status on the connect page.** One line shows whether NetBird and the Browser Gateways
-  are online (one item for all gateways: Online, Offline or Partly Online), with a refresh button. It is checked when the page opens, when a check starts and
-  when you press refresh, never on a timer.
 
 ### Changed
 - **Browser sessions count policies with posture checks.** Remote Access and the launch API now
@@ -62,14 +47,16 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   none. The `POSTURE_REQUIRED` refusal is gone. Sign-in, an unblocked user, a policy that opens the
   port and drop rules still apply. Access Check still shows such access as **Authorized If Posture
   Checks Pass**, which is what the NetBird client gets.
-- **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
-  **Network**, **Access** and **Administration**. A group with no page you may open is not shown.
-- **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**
-  and **Connecting To Server**.
-- **Clearer error messages when a connection fails.** Remote Access says in plain words what went
-  wrong and what to do next, for example "NetBird has no resource for this address. Check the
-  address, or ask an administrator to add it as a resource." A launch link that failed now says to
-  start the connection again from the system that sent you, since the link is used up.
+- **The exit node's isolation survives reboots and covers all private ranges.** The reference
+  exit node (`netbird-docker-compose-files`) now comes with a script and a `docker.service`
+  drop-in in `exit-node-isolation/` instead of one manual `iptables` rule, which was lost on
+  reboot. The rules block the exit node from the private IPv4 ranges (RFC 1918), the shared
+  address space and 9 other reserved ranges listed in the script, and from its own VM. They
+  match its bridge interface (now pinned as `br-nb-exit`, with IPv6 off), and are in place
+  every time before Docker starts. The Compose project name is pinned too, and the exit node
+  uses public DNS servers, so its lookups never reach an internal DNS server. If you run the
+  reference exit node, stop it, install the rules and start it again as described in
+  `netbird-docker-compose-files/README.md`.
 
 ### Fixed
 - **A bulk resource delete that fails for some rows says so.** On a network's page, **Delete** of
@@ -96,11 +83,50 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   resource is gone in the network the automation recorded; Repair changes nothing when it can't
   read a network. A move whose delete got no answer is never rolled back: it keeps the copy and
   says to check whether the original is still there.
+
+---
+
+## [1.7.0] - 2026-11-24
+
+### Added
+- **Add a missing server as a resource.** When the Remote Access check finds that nothing in
+  NetBird covers the address, and the user may edit a network that Remote Access uses, the page
+  offers **Add As Resource** on the failed step. It opens a modal: the network (when there is more
+  than one to choose from), then the same Add Resource form as the Networks page, filled in with the
+  address. After the save, the page checks the server
+  again and shows **Ready To Connect**; it never opens a session by itself. Troubleshoot offers the
+  same button for an address that nothing in NetBird covers. The save uses the network's own
+  permission, blocklist and duplicate checks.
+- **Clear answers when a new resource is only partly saved.** If the resource was added but not all
+  of its access rules were, or NetBird didn't confirm the save, or the answer never reached the
+  browser, the Add Resource form says so, keeps **Create** off and links to the network. A resource
+  whose access rules failed is recorded in the audit log as created, with `policiesSaved: false`.
+- **Service status on the connect page.** One line shows whether NetBird and the Browser Gateways
+  are online (one item for all gateways: Online, Offline or Partly Online), with a refresh button. It is checked when the page opens, when a check starts and
+  when you press refresh, never on a timer.
+
+### Changed
+- **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
+  **Network**, **Access** and **Administration**. A group with no page you may open is not shown.
+- **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**
+  and **Connecting To Server**.
+- **Clearer error messages when a connection fails.** Remote Access says in plain words what went
+  wrong and what to do next, for example "NetBird has no resource for this address. Check the
+  address, or ask an administrator to add it as a resource." A launch link that failed now says to
+  start the connection again from the system that sent you, since the link is used up.
+
+### Fixed
 - **A session limit reached at the last moment now shows a sentence, not a code.** The page showed
   `TOO_MANY`, and also used it when the limit for all users was full. It now says which limit was
   reached. A host name whose resource was removed while a session opened showed
   `NO_DOMAIN_MATCH`; it now says that NetBird has no resource for the name. An answer without a
   message (such as a proxy's 502) no longer shows as `HTTP 502`.
+- **Actions in a tenant use the tenant's own API token.** The MSP Provisioning Token is used in a
+  tenant only to create or renew that token and to send invitations. The main API token is no longer
+  used in a tenant: a tenant without its own token can't be managed until an administrator creates one
+  (Tenants, the key icon). Each token is checked against the account it answers from before it is
+  used. When the check fails, nothing is sent and the action says why. The data-retention purge now
+  also runs for a tenant without a token.
 
 ---
 

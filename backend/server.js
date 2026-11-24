@@ -18,7 +18,7 @@ const { initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, ad
 
 // Later additions to db.js's API - kept as a separate require so the huge destructure
 // above stays untouched (require() returns the same cached module instance).
-const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, refuseManagedGroupEdit, removeUserManagedGroups, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
+const { getOutboundLog, getOutboundBody, scanCleanup, setCleanupIgnore, notifySchedJobAlert, diagHosts, diagWhoAmI, diagnoseDevice, diagnoseTarget, diagnoseAddress, ingestNbNotification, getNbNotices, dismissNbNotification, getNotifWebhookToken, runWithTenant, currentTenantAccount, getMspStatus, listMspTenants, listMspSwitcher, createMspTenant, updateMspTenant, deleteMspTenant, verifyMspTenantDomain, getMspTenantOverview, getMspBillingPlans, setMspTenantSubscription, tenantAccessError, setMspTenantToken, setMspProvisioningToken, provisionTenantServiceUser, rotateTenantTokens, getMspProvisioningToken, netbirdGet, getGroupRefMap, forEachTenant, listActiveTenantIds, getRetentionDays, setRetentionDays, getBuiltinNoise, setBuiltinNoise, propagateFilterRules, propagateBlocklist, seedTenantDefaults, computeTenantDrift, autoConfigureNbNotifications, autoConfigureNbEventStreaming, tenantNameOf, getTenantDefaults, setTenantDefaults, deriveDefaultsFromMain, mfaSupported, getNetbirdSettings, saveNetbirdSettings, getFleetReport, getMspDigestConfig, setMspDigestConfig, sendMspDigest, inviteUser, resendUserInvite, setUserBlocked, resetUserMfa, setGroupPeers, addUsersToGroup, removeUsersFromGroup, USER_ROLES, createSetupKey, refuseManagedGroupEdit, removeUserManagedGroups, getInviteDefaultGroups, setInviteDefaultGroups, isNoiseTraffic, eventMatchesFilters, syncTrafficEvents, setTrafficPullConfig, getTrafficPullStatus, syncAuditEvents, setAuditPullConfig, getAuditPullStatus, getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS, getResourceInNetwork } = require('./db');
 
 // AD group whose members are treated as admins (in addition to NetBird owner/admin)
 const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID || '';
@@ -738,7 +738,7 @@ if (AUTH_ENABLED) {
 // ─── MSP tenant-mode middleware ───
 // A request carrying X-Tenant-Account (sent by the frontend while "managing" an MSP tenant)
 // runs its whole handler inside runWithTenant(): every NetBird API call transparently targets
-// that tenant via ?account=, with per-tenant cache slots. Admin-only; the id must be a real
+// that tenant with its own token, with per-tenant cache slots. Admin-only; the id must be a real
 // active tenant. TENANT_CTX_PREFIXES are the routes allowed to run IN tenant context - live
 // NetBird management PLUS the now per-tenant stateful features (blocklist, event filtering,
 // system health, cleanup, access profiles, network default profiles, resource conflicts,
@@ -812,7 +812,6 @@ const TENANT_CTX_PREFIXES = [
 // proxy rules) - served without tenant context so the pickers work while managing a tenant.
 const TENANT_PLAIN_PREFIXES = ['/api/msp', '/api/msp-digest', '/api/me', '/api/app-config', '/api/peer-tags', '/api/ad-groups', '/api/tenant-defaults', '/api/locations'];
 let _tenantIds = { at: 0, ids: new Set() };
-const _tenantOk = new Map(); // tenant id → last time the account switch was VERIFIED honored
 app.use('/api', async (req, res, next) => {
     const tenantId = String(req.headers['x-tenant-account'] || '').trim();
     if (!tenantId) return next();
@@ -850,25 +849,9 @@ app.use('/api', async (req, res, next) => {
             _tenantIds = { at: Date.now(), ids };
         }
         if (!_tenantIds.ids.has(tenantId)) return res.status(403).json({ error: 'Unknown or inactive tenant' });
-        // NetBird may silently IGNORE ?account= (e.g. the token's service user has no
-        // permission group on the tenant) and answer with MAIN-account data - which would
-        // render your own network under a tenant banner. Verify the switch is actually
-        // honored once per tenant (10-min cache): the account answering inside the tenant
-        // context must differ from the main account.
-        if ((_tenantOk.get(tenantId) || 0) < Date.now() - 10 * 60_000) {
-            const [tenantAcc, mainAcc] = await Promise.all([
-                runWithTenant(tenantId, () => netbirdGet('/api/accounts')).catch(() => null),
-                netbirdGet('/api/accounts').catch(() => null),
-            ]);
-            const gotId = (Array.isArray(tenantAcc) && tenantAcc[0] && String(tenantAcc[0].id || '')) || '';
-            const mainId = (Array.isArray(mainAcc) && mainAcc[0] && String(mainAcc[0].id || '')) || '';
-            if (!gotId || gotId === mainId) {
-                return res.status(502).json({
-                    error: 'NetBird did not switch to the tenant account - the main API token has no access to this tenant (service users cannot join permission groups). Set a per-tenant API token: switch into the tenant in the official dashboard, create a service user + access token there, and save it on the tenant row (key icon) in the Tenants page.',
-                });
-            }
-            _tenantOk.set(tenantId, Date.now());
-        }
+        // The calls of this request would be refused one by one (lib/netbird.js); this says why first.
+        const denied = await tenantAccessError(tenantId);
+        if (denied) return res.status(502).json({ error: denied });
         return runWithTenant(tenantId, () => next());
     } catch (err) {
         console.error('Tenant middleware error:', err.message);
@@ -1633,8 +1616,7 @@ app.post('/api/msp/tenants', requireAdmin, async (req, res) => {
         // Point NetBird at OUR receivers for the new tenant. Both run AFTER creation (they need the
         // tenant id + BASE_URL) inside runWithTenant so every NetBird call targets the tenant. Each is
         // its own try/catch, best-effort - a webhook failure must never fail creation. They depend on
-        // the tenant's credentials: if provisioning was skipped/failed they fall back to the main token's
-        // ?account= switch, which may not be honored - a failure there is reported, not fatal.
+        // the tenant's own token: if provisioning was skipped/failed they fail, which is reported, not fatal.
         const base = (process.env.BASE_URL || '').replace(/\/$/, '');
         // Account Notifications receiver (checked by default). null = not requested; bool = attempted.
         let notifications = null;
@@ -5272,7 +5254,7 @@ async function start() {
         // Event retention purge - once per account (main + each tenant), each self-gating to once
         // per day and to ITS OWN configured window. Only touches the app's own DB (read-only safe);
         // per-account DELETEs are scoped to that account's rows.
-        const retentionTick = leaderOnly(() => tracked('retentionPurge', () => forEachTenant(purgeOldEvents)));
+        const retentionTick = leaderOnly(() => tracked('retentionPurge', () => forEachTenant(purgeOldEvents, { needsNetbird: false })));
         setTimeout(retentionTick, 30000);
         setInterval(retentionTick, 10 * 60 * 1000);
 

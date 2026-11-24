@@ -1,2 +1,4 @@
 # Shell scripts must keep LF line endings, or bash fails on Windows checkouts.
 *.sh text eol=lf
+# The systemd drop-in is installed on a Linux host as is.
+netbird-docker-compose-files/exit-node-isolation/netbird-exit-isolation.conf text eol=lf

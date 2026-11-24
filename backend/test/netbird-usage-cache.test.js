@@ -9,14 +9,16 @@ const crypto = require('crypto');
 
 const nb = require('../lib/netbird');
 
+const TENANT_TOKEN = crypto.randomBytes(16).toString('hex');
 // A fake NetBird: answers by path, counts the reads of the resources list, and can hold them.
 const st = { reads: { main: 0, t1: 0 }, version: { main: 1, t1: 1 }, holds: [], fail503: null, failRoutes: false };
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
-    const account = url.searchParams.get('account') || 'main';
+    const account = req.headers.authorization === `Token ${TENANT_TOKEN}` ? 't1' : 'main';
     const send = (status, body) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(body)); };
     if (st.fail503 === url.pathname) return send(503, []);
     if (url.pathname === '/api/routes' && st.failRoutes) return send(500, { message: 'unavailable' });
+    if (url.pathname === '/api/accounts') return send(200, [{ id: account }]);
     if (url.pathname !== '/api/networks/resources') return send(200, []);
     st.reads[account]++;
     const answer = [{ id: `${account}-v${st.version[account]}`, address: '10.0.0.1/32' }];
@@ -32,9 +34,11 @@ test.before(async () => {
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     nb._nbApi.url = `http://127.0.0.1:${server.address().port}`;
     nb._nbApi.token = crypto.randomBytes(16).toString('hex');
+    nb.setTenantTokenInMemory(['t1'], TENANT_TOKEN);
 });
 test.after(async () => {
     nb._nbApi.url = ''; nb._nbApi.token = '';
+    nb.setTenantTokenInMemory(['t1'], null);
     server.closeAllConnections?.();
     await new Promise((r) => server.close(r));
 });
