@@ -96,7 +96,7 @@ before(async () => {
     db.isActiveDelegate = async () => false;
     db.listMspSwitcher = async () => [{ id: TENANT }];
     db.listMspTenants = async () => [];
-    db.netbirdGet = async (p) => (p === '/api/accounts' ? [{ id: db.currentTenantAccount() || 'main-account' }] : []);
+    db.tenantAccessError = async () => '';
     db.getAllPolicies = async () => { policyReads++; return [{ id: `policy-of-${db.currentTenantAccount() || 'main'}` }]; };
     appServer.on('request', require('../server').app);
 });
