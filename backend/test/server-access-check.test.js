@@ -112,7 +112,7 @@ before(async () => {
     db.getApproverGroupIds = () => [];
     db.listMspSwitcher = async () => [{ id: TENANT }];
     db.listMspTenants = async () => [];
-    db.netbirdGet = async (p) => (p === '/api/accounts' ? [{ id: db.currentTenantAccount() || 'main-account' }] : []);
+    db.tenantAccessError = async () => '';
     db.loadAccessCheckSnapshot = async () => {
         reads.push(db.currentTenantAccount() || 'main');
         if (snapshotFails) { const e = new Error("Couldn't read peers from NetBird"); e.code = 'NETBIRD_READ_FAILED'; throw e; }

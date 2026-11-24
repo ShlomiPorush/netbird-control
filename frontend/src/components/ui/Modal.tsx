@@ -101,7 +101,6 @@ export function Modal({ open, onClose, title, subtitle, icon, children, footer, 
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
         className={cn(
-          // The Remote Access card's finish: soft corners and a soft, deep shadow.
           'w-full flex flex-col max-h-[86vh] rounded-2xl border',
           'shadow-[0_1px_2px_rgba(0,0,0,0.06),0_24px_64px_-20px_rgba(0,0,0,0.4)] dark:shadow-[0_24px_64px_-20px_rgba(0,0,0,0.85)]',
           'bg-white border-nb-gray-100 dark:bg-nb-gray-940 dark:border-nb-gray-900',

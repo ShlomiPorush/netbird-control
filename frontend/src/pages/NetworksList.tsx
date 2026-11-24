@@ -12,6 +12,7 @@ import {
   SearchInput, Badge, Button, EmptyState, LoadingState, Table, THead, Th, SortTh, TBody, Tr, Td, PageHeader, Pagination, RowMenu, MenuItem,
 } from '@/components/ui';
 import { NetworkModal } from '@/components/networks/NetworkModal';
+import { ManagedByApiBadge } from '@/components/networks/ManagedByApiBadge';
 import { ToolbarMenu } from '@/components/logs/toolbar';
 import { ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
 import { Rows3 } from 'lucide-react';
@@ -27,9 +28,9 @@ export default function NetworksList() {
   const nq = useNetworks();
   const refresh = useNetbirdRefresh();
   const { isAdmin, can } = useViewer();
-  // Network-level management (create/edit/delete): admins or 'Manage All Networks' holders.
   const canManage = isAdmin || can('networks.manage');
   const conflictsData = useResourceConflicts(canManage).data?.conflicts || [];
+  const canChange = (n: Network) => !n.managedByApi || isAdmin;
   const navigate = useNavigate();
   const del = useDeleteNetwork();
   const confirm = useConfirm();
@@ -40,7 +41,6 @@ export default function NetworksList() {
   const [creating, setCreating] = useState(false);
   const [editingNet, setEditingNet] = useState<Network | null>(null);
 
-  // Networks with same-address resource conflicts get a prominent warning marker.
   const conflictsByNet = useMemo(() => {
     const m = new Map<string, number>();
     for (const c of conflictsData) {
@@ -56,9 +56,13 @@ export default function NetworksList() {
     if (n.resources) parts.push(`${n.resources} resource${n.resources === 1 ? '' : 's'}`);
     if (n.routingPeers) parts.push(`${n.routingPeers} routing peer${n.routingPeers === 1 ? '' : 's'}`);
     const extra = parts.length ? ` This also removes ${parts.join(' and ')} and the access policies created for them.` : '';
+    // The network Remote Access launch links use (only an admin gets here).
+    const launch = n.managedByApi
+      ? ' Remote Access uses this network for servers added by launch links. Deleting it removes the servers it added, disconnects anyone using them, and turns adding servers off.'
+      : '';
     const ok = await confirm({
       title: 'Delete network?',
-      message: `"${n.name || n.id}" will be permanently deleted.${extra} This can't be undone.`,
+      message: `"${n.name || n.id}" will be permanently deleted.${launch || extra} This can't be undone.`,
       confirmText: 'Delete network',
     });
     if (ok) {
@@ -142,6 +146,7 @@ export default function NetworksList() {
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="text-sm text-nb-gray-800 dark:text-nb-gray-200 truncate">{n.name || n.id}</span>
+                            {n.managedByApi && <ManagedByApiBadge className="shrink-0" />}
                             {(conflictsByNet.get(n.id) || 0) > 0 && (
                               <span title={`${conflictsByNet.get(n.id)} address conflict${conflictsByNet.get(n.id) === 1 ? '' : 's'} - duplicate resources with overlapping users. Open the network to fix.`}
                                 className="inline-flex items-center gap-1 rounded-md border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400 shrink-0">
@@ -156,8 +161,8 @@ export default function NetworksList() {
                     <Td onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-2">
                         {n.resources ? <Badge tone="gray" icon={<Layers size={12} />}>{n.resources}</Badge> : null}
-                        {n.canEdit && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
-                        {!n.resources && !n.canEdit && <span className="text-nb-gray-500 text-sm">-</span>}
+                        {n.canEdit && !n.managedByApi && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
+                        {!n.resources && !(n.canEdit && !n.managedByApi) && <span className="text-nb-gray-500 text-sm">-</span>}
                       </div>
                     </Td>
                     <Td>
@@ -168,15 +173,15 @@ export default function NetworksList() {
                         {active && (
                           <span className="inline-flex items-center gap-1.5 rounded-md text-[0.75rem] py-1 pl-2.5 pr-1 border border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-500">
                             <span className="h-2 w-2 rounded-full bg-green-500" /> {n.routingPeers} Peer{n.routingPeers === 1 ? '' : 's'}
-                            {n.canEdit && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-sm text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
+                            {n.canEdit && canChange(n) && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-sm text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
                           </span>
                         )}
-                        {n.canEdit && <AddChip onClick={(e) => goTab(n, 'routers', e)} />}
-                        {!active && !n.canEdit && <span className="text-nb-gray-500 text-sm">-</span>}
+                        {n.canEdit && canChange(n) && <AddChip onClick={(e) => goTab(n, 'routers', e)} />}
+                        {!active && !(n.canEdit && canChange(n)) && <span className="text-nb-gray-500 text-sm">-</span>}
                       </div>
                     </Td>
                     <Td className="text-right" onClick={(e) => e.stopPropagation()}>
-                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage ? () => setEditingNet(n) : undefined} onDelete={canManage ? () => onDelete(n) : undefined} />
+                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage && canChange(n) ? () => setEditingNet(n) : undefined} onDelete={canManage && canChange(n) ? () => onDelete(n) : undefined} />
                     </Td>
                   </Tr>
                 );
@@ -185,7 +190,6 @@ export default function NetworksList() {
           </Table>
           </div>
 
-          {/* Mobile: cards instead of a horizontally-scrolling table */}
           <div className="md:hidden flex flex-col gap-2.5">
             {pageRows.map((n) => {
               const active = (n.routingPeers || 0) > 0;
@@ -202,10 +206,11 @@ export default function NetworksList() {
                       {n.description && <div className="text-[0.8rem] text-nb-gray-500 line-clamp-2">{n.description}</div>}
                     </div>
                     <div className="shrink-0 -mt-1 -mr-1" onClick={(e) => e.stopPropagation()}>
-                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage ? () => setEditingNet(n) : undefined} onDelete={canManage ? () => onDelete(n) : undefined} />
+                      <NetMenu onOpen={() => goEdit(n)} onEdit={canManage && canChange(n) ? () => setEditingNet(n) : undefined} onDelete={canManage && canChange(n) ? () => onDelete(n) : undefined} />
                     </div>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                    {n.managedByApi && <ManagedByApiBadge />}
                     {(conflictsByNet.get(n.id) || 0) > 0 && (
                       <span className="inline-flex items-center gap-1 rounded-md border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">
                         <AlertTriangle size={11} /> Address Conflict
@@ -216,11 +221,11 @@ export default function NetworksList() {
                     {active && (
                       <span className="inline-flex items-center gap-1.5 rounded-md text-[0.75rem] py-1 pl-2.5 pr-1 border border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-500">
                         <span className="h-2 w-2 rounded-full bg-green-500" /> {n.routingPeers} Peer{n.routingPeers === 1 ? '' : 's'}
-                        {n.canEdit && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-sm text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
+                        {n.canEdit && canChange(n) && <button onClick={(e) => goTab(n, 'routers', e)} title="Manage routing peers" className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-sm text-green-600/80 dark:text-green-500/80 hover:bg-green-500/15"><Gear size={12} /></button>}
                       </span>
                     )}
-                    {n.canEdit && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
-                    {!n.resources && !n.policies && !active && !n.canEdit && <span className="text-nb-gray-500 text-sm">-</span>}
+                    {n.canEdit && !n.managedByApi && <AddChip onClick={(e) => goTab(n, 'resources', e)} />}
+                    {!n.resources && !n.policies && !active && !n.canEdit && !n.managedByApi && <span className="text-nb-gray-500 text-sm">-</span>}
                   </div>
                 </div>
               );

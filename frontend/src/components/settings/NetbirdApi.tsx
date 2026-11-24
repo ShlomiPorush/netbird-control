@@ -125,9 +125,9 @@ function MspProvisioningSection() {
       <div>
         <h3 className="text-sm font-semibold text-nb-gray-900 dark:text-nb-gray-50">MSP Provisioning Token</h3>
         <p className="mt-1 text-sm text-nb-gray-500">
-          A token of a REAL user (an MSP admin who is in the tenants' permission groups) - service-user tokens
-          cannot access tenants. Used only to create a managed service user + token inside each tenant; day-to-day
-          tenant calls use the tenant's own token. Rotation of tenant tokens is automatic.
+          A token of a REAL user (an MSP admin who is in the tenants' permission groups) - a service user of
+          your account cannot access tenants. Inside a tenant it is used only to create a managed service user + token and to send
+          user invitations; everything else uses the tenant's own token. Rotation of tenant tokens is automatic.
         </p>
       </div>
       <Field label="User Token (PAT)"

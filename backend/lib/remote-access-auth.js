@@ -357,8 +357,8 @@ function standingPolicyProblem(snap, { policyId, gatewayGroupId, targetGroupId }
 }
 
 // Policies: an enabled accept rule from one of the user's groups to this resource that opens
-// the TCP port. Posture-checked policies cannot be evaluated for a browser session and do not
-// count. A matching drop rule wins.
+// the TCP port. A policy's posture checks are not applied: they run on a NetBird client, and a
+// browser session has none. A matching drop rule wins.
 // An accept rule that reaches the resource only through an app-managed target group (this
 // installation's by id, any installation's by name) grants nothing: those groups exist for the
 // gateways, and a resource is in one only because some session opened to it. A drop rule still
@@ -369,14 +369,12 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
     const targetGroups = managedTargetGroupIds(snap, cfg);
     const grantById = new Map(arr(snap.grants).map(g => [String(g.id), g]));
     const granting = [];
-    let postureOnly = false;
     let portMismatch = false;
     for (const p of arr(snap.policies)) {
         if (!p || p.enabled === false) continue;
         const infra = managed.has(p.id) || isManagedGatewayName(p.name, 'policy');
         const tm = TEMP_POLICY_RE.exec(p.name || '');
         if (tm && !grantIsValid(grantById.get(tm[1]), now)) continue;
-        const posture = arr(p.source_posture_checks).length > 0;
         for (const rule of arr(p.rules)) {
             if (!ruleIsUsable(rule)) continue;
             if (!rule.sources.some(s => src.groups.has(idOf(s)))) continue;
@@ -390,12 +388,10 @@ function evaluatePolicies(snap, cfg, src, res, port, now, where) {
             }
             if (action !== 'accept' || infra) continue;
             if (!opens) { portMismatch = true; continue; }
-            if (posture) { postureOnly = true; continue; }
             granting.push(p.name || p.id);
         }
     }
     if (granting.length) return { ok: true, code: 'OK', ...where, policies: [...new Set(granting)] };
-    if (postureOnly) return deny('POSTURE_REQUIRED');
     if (portMismatch) return deny('PORT_NOT_ALLOWED');
     return deny('NO_ACCESS');
 }

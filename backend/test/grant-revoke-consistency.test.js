@@ -92,3 +92,15 @@ test('a membership removal that never reached NetBird keeps the grant active wit
     assert.ok(grant.last_error);
     assert.ok(nbUser.auto_groups.includes('g-target'));
 });
+
+test('in a tenant, a revoke takes a missing user as deleted only when the token may read all users', async () => {
+    reset();
+    const own = { id: 'own-service-user', is_blocked: false, is_service_user: true, is_current: true, auto_groups: [] };
+    const revoke = () => nb.runWithTenant('t1', () => revokeTemporaryAccessGrant(7));
+    nbUser = { ...own, role: 'user' };
+    await revoke();
+    assert.equal(grant.status, 'active', 'a list of only the own user of a limited token proves nothing');
+    nbUser = { ...own, role: 'admin' };
+    await revoke();
+    assert.equal(grant.status, 'revoked', 'also when no other user is left in the tenant');
+});

@@ -27,7 +27,6 @@ export default function Dashboard() {
 
 /* ─── Shared pieces ─── */
 
-// A row inside a section card (Needs Attention); the caller adds its border tone.
 const ROW = 'flex items-center gap-3 rounded-lg border px-3 py-2 transition-colors';
 const ROW_NEUTRAL = 'border-nb-gray-100 dark:border-nb-gray-900 hover:border-netbird/40 dark:hover:border-netbird/40';
 const ROW_DANGER = 'border-red-500/30 bg-red-500/5 hover:border-red-500/60';
@@ -37,7 +36,6 @@ function StatTile({ icon, label, value, sub, to }: {
 }) {
   const body = (
     <Card hoverable={!!to} className="p-3 md:p-4 h-full">
-      {/* A long label wraps to a second line instead of being cut off. */}
       <div className="flex items-start gap-1.5 md:gap-2 text-[0.76rem] md:text-[0.8rem] leading-4 font-medium text-nb-gray-500 dark:text-nb-gray-400 min-w-0">
         <span className="text-netbird shrink-0 mt-px">{icon}</span><span className="min-w-0 break-words">{label}</span>
       </div>

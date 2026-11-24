@@ -35,11 +35,8 @@ export function Breadcrumbs({ items }: { items: Crumb[] }) {
   );
 }
 
-/** The one page title style (pages that draw their own h1 use the same classes). */
 const PAGE_TITLE = 'text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50';
 
-/** Consistent page header: breadcrumb + h1 title + description, with an optional icon tile
- *  beside the title and optional actions (on the right; under the title on narrow screens). */
 export function PageHeader({ breadcrumb, title, description, icon, actions, className }: {
   breadcrumb?: Crumb[]; title: ReactNode; description?: ReactNode; icon?: ReactNode; actions?: ReactNode; className?: string;
 }) {
@@ -51,7 +48,6 @@ export function PageHeader({ breadcrumb, title, description, icon, actions, clas
       )}
     </>
   );
-  // Without an icon or actions the title and description sit directly in the header, as before.
   const heading = icon ? (
     <div className="flex min-w-0 items-start gap-3.5">
       <IconTile icon={icon} className="mt-0.5" />

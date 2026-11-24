@@ -1,9 +1,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 
-// The icon tile from the Remote Access cards, for the rest of the app. The brand gradient is a
-// shade darker than the Remote Access one, so a white icon keeps at least 3:1 contrast on it.
-// (remote/flow.tsx keeps its own FlowTile.)
+// Brand is a shade darker than the Remote Access tile, so a white icon keeps at least 3:1 contrast.
 type IconTileTone = 'brand' | 'neutral';
 
 export const ICON_TILE_TONE: Record<IconTileTone, string> = {

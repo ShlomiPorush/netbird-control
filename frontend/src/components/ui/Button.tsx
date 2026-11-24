@@ -43,8 +43,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
 );
 Button.displayName = 'Button';
 
-/** A router link that looks exactly like a Button - one control, not a button inside a link.
- *  Every Link prop (onClick included, which runs before the navigation) goes to the Link. */
 export const LinkButton = forwardRef<HTMLAnchorElement, LinkProps & { variant?: Variant; size?: Size }>(
   ({ variant = 'secondary', size = 'md', className, ...rest }, ref) => (
     <Link ref={ref} className={buttonClass(variant, size, className)} {...rest} />

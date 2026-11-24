@@ -81,7 +81,7 @@ test('a domain resource grants through its own policies, with NetBird semantics'
     assert.deepEqual(r.policies, ['Safe RDP']);
     assert.equal(ask(base(), { port: 22 }).code, 'PORT_NOT_ALLOWED');
     let s = base(); s.policies[2].source_posture_checks = ['pc1'];
-    assert.equal(ask(s).code, 'POSTURE_REQUIRED');
+    assert.equal(ask(s).ok, true, 'posture checks are not applied to browser sessions');
     s = base(); s.policies.push({ id: 'pol-drop', name: 'Block', enabled: true, rules: [{ enabled: true, action: 'drop', protocol: 'all', sources: [{ id: 'g-all' }], destinations: [{ id: 'g-web' }] }] });
     assert.equal(ask(s).code, 'BLOCKED_BY_POLICY');
     s = base(); s.resources[0].enabled = false;

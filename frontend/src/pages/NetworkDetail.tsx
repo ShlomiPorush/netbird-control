@@ -17,10 +17,12 @@ import { useTableSort } from '@/lib/useTableSort';
 import { ROWS_PER_PAGE_OPTIONS } from '@/lib/useClientPagination';
 import { useUrlTab } from '@/lib/useUrlTab';
 import type { Resource, Router, Policy } from '@/lib/types';
+import { bulkDeleteMessage } from '@/lib/bulkDelete';
 import { SearchInput, Badge, Card, EmptyState, LoadingState, Button, IconButton, Copyable, Modal, Input, GroupMultiSelect, Tabs, PillTabs, Label, FieldHint, Pagination, ClearFiltersButton, SortTh, SelectMenu } from '@/components/ui';
 import { ResourceModal } from '@/components/networks/ResourceModal';
 import { AddFromNetworkModal } from '@/components/settings/Blocklist';
 import { NetworkModal } from '@/components/networks/NetworkModal';
+import { ManagedByApiBadge } from '@/components/networks/ManagedByApiBadge';
 import { PolicyTable, type PolicyRow } from '@/components/networks/PolicyTable';
 
 type Tab = 'resources' | 'routers' | 'policies';
@@ -33,15 +35,19 @@ export default function NetworkDetail() {
 
   const net = (useNetworks().data || []).find((n) => n.id === id);
   const canEdit = !!net?.canEdit;
-  // Network-level management (rename/delete, bulk ops): admins or 'Manage All Networks' holders.
-  // Regular per-network editors still get per-row edit/delete via canEdit.
   const { isAdmin, can } = useViewer();
   const canManage = isAdmin || can('networks.manage');
-  const canBulk = canManage;
   const [editNet, setEditNet] = useState(false);
   const { data: detail, isLoading } = useNetworkDetail(id);
+  // The network Remote Access launch links add servers to: the server refuses every change to its
+  // resources but an admin's delete.
+  const linkManaged = !!(detail?.managedByApi ?? net?.managedByApi);
+  const canEditResources = canEdit && !linkManaged;
+  const canChangeNetwork = !linkManaged || isAdmin;
+  const canBulk = canManage && canChangeNetwork;
   const del = useDeleteResource(id);
   const bulkDel = useBulkDeleteResources(id);
+  const [bulkFailure, setBulkFailure] = useState('');
   const toggleRes = useToggleResource(id);
 
   const onToggleEnabled = async (r: Resource) => {
@@ -50,7 +56,6 @@ export default function NetworkDetail() {
   };
 
   const [searchParams] = useSearchParams();
-  // Deep-linkable tab (?tab=routers) that also UPDATES the URL on switch, like Settings.
   const [tab, setTab] = useUrlTab<Tab>(['resources', 'routers', 'policies'], 'resources');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusF>('all');
@@ -59,7 +64,6 @@ export default function NetworkDetail() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // duplicate: true = `resource` is the SOURCE to copy; the modal opens prefilled and saving creates a NEW resource.
   const [modal, setModal] = useState<{ resource: Resource | null; tab: 'resource' | 'access'; duplicate?: boolean } | null>(null);
-  // "Add To Blocklist" for the selected rows - same modal as Operations → Blocklist, prefilled.
   const [blockOpen, setBlockOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
@@ -86,10 +90,9 @@ export default function NetworkDetail() {
   useEffect(() => {
     if (!resourceParam || !resources.length || openedRef.current === resourceParam) return;
     const r = resources.find((x) => x.id === resourceParam);
-    if (r) { setModal({ resource: r, tab: 'resource' }); openedRef.current = resourceParam; }
-  }, [resourceParam, resources]);
+    if (r && !linkManaged) { setModal({ resource: r, tab: 'resource' }); openedRef.current = resourceParam; }
+  }, [resourceParam, resources, linkManaged]);
 
-  // Distinct groups present across the network's resources (drives the Groups filter).
   const availableGroups = useMemo(() => {
     const m = new Map<string, string>();
     for (const r of resources) for (const g of (r.groups || [])) m.set(g.id, g.name || g.id);
@@ -132,11 +135,14 @@ export default function NetworkDetail() {
     () => sortedResources.slice((clampedPage - 1) * perPage, clampedPage * perPage),
     [sortedResources, clampedPage, perPage],
   );
-  // Back to page 1 whenever the result set changes (search / filters / page size).
   useEffect(() => { setPage(1); }, [search, statusFilter, policyFilter, groupFilter, perPage]);
 
+  const SESSION_NOTE = 'Someone is connected to this server through Remote Access. Deleting it disconnects them.';
   const onDelete = async (r: Resource) => {
-    const ok = await confirm({ title: 'Delete resource', message: `Delete resource "${r.name}"? This also removes its access policy and group.`, confirmText: 'Delete' });
+    const message = linkManaged
+      ? `Delete resource "${r.name}"? Only the resource is deleted.${r.inSession ? ` ${SESSION_NOTE}` : ''}`
+      : `Delete resource "${r.name}"? This also removes its access policy and group.`;
+    const ok = await confirm({ title: 'Delete resource', message, confirmText: 'Delete' });
     if (ok) await del.mutateAsync(r.id);
   };
 
@@ -160,12 +166,22 @@ export default function NetworkDetail() {
     if (!ids.length) return;
     const ok = await confirm({
       title: `Delete ${ids.length} resource${ids.length > 1 ? 's' : ''}?`,
-      message: `This permanently deletes ${ids.length} resource${ids.length > 1 ? 's' : ''} and their access policies. This cannot be undone.`,
+      message: linkManaged
+        ? `This permanently deletes ${ids.length} resource${ids.length > 1 ? 's' : ''}. Only the resources are deleted.${resources.some((r) => selected.has(r.id) && r.inSession) ? ' Someone is connected to one of them through Remote Access. Deleting it disconnects them.' : ''} This cannot be undone.`
+        : `This permanently deletes ${ids.length} resource${ids.length > 1 ? 's' : ''} and their access policies. This cannot be undone.`,
       confirmText: 'Delete',
     });
     if (!ok) return;
-    await bulkDel.mutateAsync(ids);
-    setSelected(new Set());
+    setBulkFailure('');
+    const sent = resources.filter((r) => selected.has(r.id)).map((r) => ({ id: r.id, name: r.name || r.address || r.id }));
+    let out;
+    try { out = await bulkDel.mutateAsync(ids); } catch (e) {
+      await confirm({ title: 'Delete Failed', message: (e as Error).message, confirmText: 'OK' });
+      return;
+    }
+    const failed = out.failed || [];
+    setSelected(new Set(failed.map((f) => f.id)));
+    setBulkFailure(bulkDeleteMessage(sent, failed));
   };
 
   const tabs: { key: Tab; label: string; icon: typeof Layers }[] = [
@@ -176,7 +192,6 @@ export default function NetworkDetail() {
 
   return (
     <div>
-      {/* Breadcrumb */}
       <div className="flex items-center gap-1.5 text-sm mb-5">
         <GitFork size={15} className="text-nb-gray-400" />
         <Link to="/networks" className="text-netbird hover:underline">Networks</Link>
@@ -184,7 +199,6 @@ export default function NetworkDetail() {
         <span className="text-nb-gray-700 dark:text-nb-gray-200">{name}</span>
       </div>
 
-      {/* Header */}
       <div className="flex items-center gap-4 mb-5">
         <div className="relative flex items-center justify-center h-12 w-12 rounded-md bg-nb-gray-100 dark:bg-nb-gray-800 text-nb-gray-700 dark:text-nb-gray-100 text-lg font-medium uppercase">
           {initials(name)}
@@ -195,22 +209,22 @@ export default function NetworkDetail() {
         <div className="min-w-0">
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold tracking-tight text-nb-gray-900 dark:text-nb-gray-50 truncate">{name}</h1>
-            {canManage && (
+            {canManage && canChangeNetwork && (
               <IconButton onClick={() => setEditNet(true)} title="Edit network"><Pencil size={15} /></IconButton>
             )}
-            {!canEdit && !canBulk && (
+            {!canEdit && !canManage && (
               <span title="You have view-only access to this network" className="inline-flex items-center gap-1.5 rounded-md border border-nb-gray-200 dark:border-nb-gray-700 bg-nb-gray-100 dark:bg-nb-gray-900 px-2.5 py-1 text-[0.72rem] font-medium text-nb-gray-500 dark:text-nb-gray-400">
                 <Eye size={12} /> Read-only
               </span>
             )}
           </div>
+          {linkManaged && <div className="mt-1"><ManagedByApiBadge /></div>}
           {(detail?.description || net?.description) && (
             <p className="mt-0.5 text-sm text-nb-gray-500 dark:text-nb-gray-400 truncate">{detail?.description || net?.description}</p>
           )}
         </div>
       </div>
 
-      {/* Summary card */}
       <Card className="max-w-md mb-6">
         <div className="flex items-center justify-between px-4 py-3 border-b border-nb-gray-100 dark:border-nb-gray-900/70">
           <span className="inline-flex items-center gap-2.5 text-[0.85rem] font-semibold text-nb-gray-800 dark:text-nb-gray-100">
@@ -239,7 +253,6 @@ export default function NetworkDetail() {
         </div>
       </Card>
 
-      {/* Tabs */}
       <div className="flex items-end gap-1 border-b border-nb-gray-200 dark:border-nb-gray-900 mb-5 overflow-x-auto nb-scroll">
         {tabs.map((t) => {
           const active = tab === t.key;
@@ -259,7 +272,9 @@ export default function NetworkDetail() {
           {tab === 'resources' && (
             <div>
               <p className="text-[0.95rem] text-nb-gray-500 dark:text-nb-gray-400 mb-5">
-                Add resources to this network to control what peers can access.
+                {linkManaged
+                  ? 'Remote Access adds and removes servers in this network for launch links. Only admins can delete them.'
+                  : 'Add resources to this network to control what peers can access.'}
               </p>
 
               {canManage && conflicts.map((c, i) => {
@@ -280,11 +295,13 @@ export default function NetworkDetail() {
                           : <>Address Conflict: {shown} all point at <span className="font-mono">{c.address}</span></>;
                       })()}
                     </span>
-                    <Button variant="primary" size="sm" className="ml-auto"
-                      title={c.crossNetwork ? 'Merges across the networks - after it, all traffic to this address routes via the surviving network' : undefined}
-                      onClick={() => setMergeRows(rowsOf())}>
-                      <Combine size={13} /> Merge Into One
-                    </Button>
+                    {!linkManaged && (
+                      <Button variant="primary" size="sm" className="ml-auto"
+                        title={c.crossNetwork ? 'Merges across the networks - after it, all traffic to this address routes via the surviving network' : undefined}
+                        onClick={() => setMergeRows(rowsOf())}>
+                        <Combine size={13} /> Merge Into One
+                      </Button>
+                    )}
                   </div>
                   <div className="px-4 py-3 flex flex-col gap-3 text-[0.84rem]">
                     <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
@@ -343,7 +360,7 @@ export default function NetworkDetail() {
                   active={!!search || anyFilter}
                   onClear={() => { setSearch(''); setStatusFilter('all'); setPolicyFilter('all'); setGroupFilter([]); }}
                 />
-                {canEdit && (
+                {canEditResources && (
                   <Button variant="primary" className="ml-auto" onClick={() => setModal({ resource: null, tab: 'resource' })}>
                     <Plus size={15} /> Add
                   </Button>
@@ -359,6 +376,13 @@ export default function NetworkDetail() {
                 </div>
               )}
 
+              {bulkFailure && (
+                <div role="alert" className="flex items-start gap-2 mb-3 px-3.5 py-2.5 rounded-md border border-red-500/40 bg-red-500/5 text-sm text-nb-gray-700 dark:text-nb-gray-200">
+                  <AlertTriangle size={15} className="mt-0.5 shrink-0 text-red-500" />
+                  <span className="min-w-0 flex-1 break-words">{bulkFailure}</span>
+                  <button onClick={() => setBulkFailure('')} aria-label="Dismiss" className="shrink-0 text-nb-gray-500 hover:text-nb-gray-800 dark:hover:text-nb-gray-200"><X size={15} /></button>
+                </div>
+              )}
               {canBulk && selected.size > 0 && (
                 <div className="flex items-center gap-3 mb-4 px-3.5 py-2.5 rounded-md border border-netbird/30 bg-netbird/5">
                   <span className="text-sm font-medium text-nb-gray-700 dark:text-nb-gray-200">{selected.size} selected</span>
@@ -370,16 +394,18 @@ export default function NetworkDetail() {
                       <Ban size={14} /> Add To Blocklist
                     </Button>
                   )}
-                  {selected.size >= 2 && (
+                  {selected.size >= 2 && !linkManaged && (
                     <Button variant="secondary" size="sm" onClick={() => setMergeOpen(true)}
                       title="Merge duplicates sharing one address into a single resource (policies move with them)">
                       <Combine size={14} /> Merge Into One
                     </Button>
                   )}
-                  <Button variant="secondary" size="sm" onClick={() => setMoveOpen(true)}
-                    title="Move the selected resources to another network - access policies follow them">
-                    <ArrowRight size={14} /> Move To Network
-                  </Button>
+                  {!linkManaged && (
+                    <Button variant="secondary" size="sm" onClick={() => setMoveOpen(true)}
+                      title="Move the selected resources to another network - access policies follow them">
+                      <ArrowRight size={14} /> Move To Network
+                    </Button>
+                  )}
                   <button onClick={() => setSelected(new Set())} className="ml-auto text-sm text-nb-gray-500 hover:text-nb-gray-800 dark:hover:text-nb-gray-200">Clear</button>
                 </div>
               )}
@@ -411,7 +437,7 @@ export default function NetworkDetail() {
                     {sortedResources.length === 0 ? (
                       <tr><td colSpan={canBulk ? 6 : 5} className="px-6 py-8"><EmptyState title={search || anyFilter ? 'No Resources Match' : 'No Resources Yet'} /></td></tr>
                     ) : pageResources.map((r) => (
-                      <ResourceRow key={r.id} r={r} canEdit={canEdit} canSelect={canBulk}
+                      <ResourceRow key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && isAdmin)} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}
@@ -422,14 +448,13 @@ export default function NetworkDetail() {
                 </table>
               </div>
 
-              {/* Mobile: cards instead of the wide table */}
               <div className="md:hidden">
                 {filteredResources.length === 0 ? (
                   <EmptyState title={search || anyFilter ? 'No Resources Match' : 'No Resources Yet'} />
                 ) : (
                   <div className="flex flex-col gap-2.5">
                     {pageResources.map((r) => (
-                      <ResourceCard key={r.id} r={r} canEdit={canEdit} canSelect={canBulk}
+                      <ResourceCard key={r.id} r={r} canEdit={canEditResources} canDelete={canEditResources || (linkManaged && isAdmin)} canSelect={canBulk}
                         selected={selected.has(r.id)} onToggle={toggleSelect}
                         onEdit={(t) => setModal({ resource: r, tab: t })}
                         onDuplicate={() => setModal({ resource: r, tab: 'resource', duplicate: true })}
@@ -440,14 +465,13 @@ export default function NetworkDetail() {
                 )}
               </div>
 
-              {/* Pagination - the page-size selector lives up in the filters toolbar. */}
               {filteredResources.length > perPage && (
                 <Pagination page={clampedPage} totalPages={totalPages} onPage={setPage} total={filteredResources.length} label="resources" />
               )}
             </div>
           )}
 
-          {tab === 'routers' && <RoutersTable routers={routers} networkId={id} canEdit={canEdit} name={name} />}
+          {tab === 'routers' && <RoutersTable routers={routers} networkId={id} canEdit={canEdit && canChangeNetwork} name={name} />}
           {tab === 'policies' && <PoliciesPanel policies={policies} />}
         </>
       )}
@@ -658,7 +682,6 @@ function MergeResourcesModal({ networkId, resources, onDone, onClose }: {
   );
 }
 
-// Resources toolbar filter - a Filters button with Status / Groups / Policies submenus.
 function ResourceFilters({ status, setStatus, policy, setPolicy, groups, groupSel, setGroupSel }: {
   status: StatusF; setStatus: (v: StatusF) => void;
   policy: PolicyF; setPolicy: (v: PolicyF) => void;
@@ -776,8 +799,8 @@ function FilterChip({ onClear, children }: { onClear: () => void; children: Reac
   );
 }
 
-function ResourceRow({ r, canEdit, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
-  r: Resource; canEdit: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
+function ResourceRow({ r, canEdit, canDelete, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
+  r: Resource; canEdit: boolean; canDelete?: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
   onEdit: (tab: 'resource' | 'access') => void; onDuplicate: () => void; onToggleEnabled: () => void; onDelete: () => void;
 }) {
   const pc = r.policies?.length || 0;
@@ -845,14 +868,16 @@ function ResourceRow({ r, canEdit, canSelect, selected, onToggle, onEdit, onDupl
             <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
           </div>
         )}
+        {!canEdit && canDelete && (
+          <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
+        )}
       </td>
     </tr>
   );
 }
 
-// Mobile (md:hidden) card equivalent of ResourceRow.
-function ResourceCard({ r, canEdit, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
-  r: Resource; canEdit: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
+function ResourceCard({ r, canEdit, canDelete, canSelect, selected, onToggle, onEdit, onDuplicate, onToggleEnabled, onDelete }: {
+  r: Resource; canEdit: boolean; canDelete?: boolean; canSelect?: boolean; selected?: boolean; onToggle?: (id: string) => void;
   onEdit: (tab: 'resource' | 'access') => void; onDuplicate: () => void; onToggleEnabled: () => void; onDelete: () => void;
 }) {
   const pc = r.policies?.length || 0;
@@ -882,6 +907,11 @@ function ResourceCard({ r, canEdit, canSelect, selected, onToggle, onEdit, onDup
               className={r.enabled === false ? 'hover:text-green-500 hover:border-green-500/30 hover:bg-green-500/10' : 'hover:text-amber-500 hover:border-amber-500/30 hover:bg-amber-500/10'}>
               <Power size={15} />
             </IconButton>
+            <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
+          </div>
+        )}
+        {!canEdit && canDelete && (
+          <div className="shrink-0 -mr-1" onClick={(e) => e.stopPropagation()}>
             <IconButton onClick={onDelete} title="Delete" className="hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10"><Trash2 size={15} /></IconButton>
           </div>
         )}
@@ -924,9 +954,8 @@ function ResourceCard({ r, canEdit, canSelect, selected, onToggle, onEdit, onDup
   );
 }
 
-// The router target as CLICKABLE names: a single peer links to its peer page, group routers
-// link to each group's page. Falls back to plain text when the viewer can't open the target
-// (group pages are admin-only) or when no id came back (deleted objects).
+// Plain text when the viewer can't open the target (group pages are admin-only) or when no id came
+// back (deleted objects).
 function RouterTargetLinks({ r }: { r: Router }) {
   const { isAdmin, can } = useViewer();
   const canOpenPeer = isAdmin || can('networks.manage') || can('peers.all');
@@ -957,7 +986,6 @@ function RoutersTable({ routers, networkId, canEdit, name }: { routers: Router[]
   const confirm = useConfirm();
   const delRouter = useDeleteRouter(networkId);
   const [adding, setAdding] = useState(false);
-  // Standard table chrome, same as every other list in the app.
   const targetOf = (r: Router) => r.peer || (r.peerGroups || []).join(', ') || '-';
   const { sorted, state } = useTableSort(routers, {
     peer: (r) => targetOf(r),
@@ -1021,7 +1049,6 @@ function RoutersTable({ routers, networkId, canEdit, name }: { routers: Router[]
           <Pagination page={Math.min(page, totalPages)} totalPages={totalPages} onPage={setPage} total={sorted.length} label="routing peers" />
         </div>
 
-        {/* Mobile: cards instead of the wide table */}
         <div className="md:hidden flex flex-col gap-2.5">
           {pageRows.map((r, i) => {
             return (
@@ -1182,7 +1209,6 @@ function SettingCard({ icon, title, desc, children }: { icon: React.ReactNode; t
 }
 
 function PoliciesPanel({ policies }: { policies: Policy[] }) {
-  // Standard client pagination (default 25), same chrome as the admin Policies page.
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(25);
   useEffect(() => { setPage(1); }, [perPage]);

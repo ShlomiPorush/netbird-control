@@ -11,6 +11,92 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Added
+- **The public API in the app's API reference.** The interactive reference at `/api/docs` (admins
+  only) now lists `POST /api/v1/remote-access/launch` first, with every field (`createResource`
+  included), the API key sign-in (**Authorize**) and the answers and error codes. **Settings > API
+  Keys** links to it (**API Documentation**).
+- **The launch API can create a missing resource.** A launch request with `"createResource": true` and the
+  new API key permission **Create Missing Resources** (`remote-access:create-resource`) adds a public
+  server that NetBird has no resource for, as a temporary host resource. In **Settings > Remote
+  Access > Servers From Launch Links**, the **Choose Network** window creates the network for them
+  (**Create New**: `Remote Access Resources (<application name>)`, with the routing peers you
+  choose), or takes a network that has no resources (**Use Existing**; **Clear In Networks** links to
+  a network that still has some). The app never deletes such a network: a failure says what to do. You also
+  choose a Shared **Access Profile**: the servers join its group, and its policy decides who reaches
+  them; the app never creates a policy. While chosen it can't be deleted. While creating is on, or servers
+  launch links added are still in use, the stored network stays open to the gateway and out of
+  access requests, recurring access, auto-approval and automations. **Change Network** and **Stop
+  Using This Network** replace or clear it while none are in use; they change only this setting,
+  never anything in NetBird.
+  Only public IPv4 addresses (a host name
+  only when every address it resolves to is public), never one on the blocklist, and at most the
+  configured number at a time (50 by default). The answer says whether the request made the
+  resource (`resource.created`), and a refusal after the resource was made says so
+  (`resourceCreated`). The leader removes such a resource once its hold time has passed and no
+  session uses it, and keeps one that someone changed. An admin can delete any of them (the resource
+  only), or the whole network (adding servers is turned off first, and the setting lets go of it),
+  from the Networks pages, and only an admin can change the network's name, description and routing
+  peers. The app changes that network's servers no other way,
+  and the Networks page labels it **Managed By Remote Access**. Off by default: turn
+  it on only after every instance runs this version. A settings import never turns it on.
+
+### Changed
+- **A more polished look across the app.** Dialogs, Home, the Settings tabs and the panels on
+  the other pages now use the finish of the Remote Access page: softer corners, soft shadows and
+  an orange icon tile. Page titles use one bold style, the side menus of Settings, Operations and
+  Access Management show the open section more clearly, and empty lists show their icon in a tile.
+  Tables and the page layout are unchanged. Links that look like buttons are now one control each,
+  so the keyboard stops on them once. A few narrow-screen overflows (the Network tabs, the Admin
+  audit cards on phones, the Blocklist header) and three secret fields that were too narrow are
+  fixed.
+- **Browser sessions count policies with posture checks.** Remote Access and the launch API now
+  accept a policy that has posture checks like any other policy. The checks themselves are not
+  applied to a browser session, because they run on the NetBird client and a browser session has
+  none. The `POSTURE_REQUIRED` refusal is gone. Sign-in, an unblocked user, a policy that opens the
+  port and drop rules still apply. Access Check still shows such access as **Authorized If Posture
+  Checks Pass**, which is what the NetBird client gets.
+- **The exit node's isolation survives reboots and covers all private ranges.** The reference
+  exit node (`netbird-docker-compose-files`) now comes with a script and a `docker.service`
+  drop-in in `exit-node-isolation/` instead of one manual `iptables` rule, which was lost on
+  reboot. The rules block the exit node from the private IPv4 ranges (RFC 1918), the shared
+  address space and 9 other reserved ranges listed in the script, and from its own VM. They
+  match its bridge interface (now pinned as `br-nb-exit`, with IPv6 off), and are in place
+  every time before Docker starts. The Compose project name is pinned too, and the exit node
+  uses public DNS servers, so its lookups never reach an internal DNS server. If you run the
+  reference exit node, stop it, install the rules and start it again as described in
+  `netbird-docker-compose-files/README.md`.
+
+### Fixed
+- **A bulk resource delete that fails for some rows says so.** On a network's page, **Delete** of
+  selected resources used to clear the selection even when NetBird refused some of them. Now the
+  rows that couldn't be deleted stay selected, and the page names them with the
+  reason, for example "2 resources couldn't be deleted: Web: used by a policy".
+- **An Access Profile in use can no longer be deleted, and its NetBird group and policy are no
+  longer destroyed by other changes.** Delete used to remove the profile's group and policy
+  whatever used them. Now a profile that has resources or peers, is referenced in NetBird, or is
+  used by a grant, a recurring rule, a pending request, an auto-approval rule, a network default,
+  an automation or Remote Access launch links can't be deleted: the Delete button is muted and **Can't Delete Profile** lists
+  the uses. When NetBird doesn't confirm removing an unused profile's group or policy, the page says
+  which one to delete in NetBird. Deleting a profile's last resource no longer deletes the profile's
+  group and policy. Saving a resource's Access Control tab updates its existing policies in place
+  instead of deleting and recreating them, so a profile's policy keeps its id; removing a profile's
+  policy there is refused, and the profile follows a change made to it there or on the Policies page.
+  Saving a
+  network default, an automation, a recurring rule, an auto-approval rule, a grant or a request
+  with a profile that no longer exists is refused. See
+  [Access Profiles](docs/access-profiles.md#deleting-a-profile).
+- **Deletes that NetBird doesn't answer are no longer counted as done.** A resource, network or
+  policy change without an answer (or with a server error) says NetBird didn't confirm it. An
+  automation keeps tracking a resource until the delete succeeded or NetBird confirmed the
+  resource is gone in the network the automation recorded; Repair changes nothing when it can't
+  read a network. A move whose delete got no answer is never rolled back: it keeps the copy and
+  says to check whether the original is still there.
+
+---
+
+## [1.7.0] - 2026-11-24
+
+### Added
 - **Add a missing server as a resource.** When the Remote Access check finds that nothing in
   NetBird covers the address, and the user may edit a network that Remote Access uses, the page
   offers **Add As Resource** on the failed step. It opens a modal: the network (when there is more
@@ -28,14 +114,6 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   when you press refresh, never on a timer.
 
 ### Changed
-- **A more polished look across the app.** Dialogs, Home, the Settings tabs and the panels on
-  the other pages now use the finish of the Remote Access page: softer corners, soft shadows and
-  an orange icon tile. Page titles use one bold style, the side menus of Settings, Operations and
-  Access Management show the open section more clearly, and empty lists show their icon in a tile.
-  Tables and the page layout are unchanged. Links that look like buttons are now one control each,
-  so the keyboard stops on them once. A few narrow-screen overflows (the Network tabs, the Admin
-  audit cards on phones, the Blocklist header) and three secret fields that were too narrow are
-  fixed.
 - **The sidebar is grouped by topic.** Under Home and Activity, pages sit in **Identity**,
   **Network**, **Access** and **Administration**. A group with no page you may open is not shown.
 - **Shorter connection step names.** The steps read **Checking Path**, **Opening Route To Server**
@@ -51,6 +129,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   reached. A host name whose resource was removed while a session opened showed
   `NO_DOMAIN_MATCH`; it now says that NetBird has no resource for the name. An answer without a
   message (such as a proxy's 502) no longer shows as `HTTP 502`.
+- **Actions in a tenant use the tenant's own API token.** The MSP Provisioning Token is used in a
+  tenant only to create or renew that token and to send invitations. The main API token is no longer
+  used in a tenant: a tenant without its own token can't be managed until an administrator creates one
+  (Tenants, the key icon). Each token is checked against the account it answers from before it is
+  used. When the check fails, nothing is sent and the action says why. The data-retention purge now
+  also runs for a tenant without a token.
 
 ---
 

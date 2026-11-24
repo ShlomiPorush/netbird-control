@@ -130,7 +130,6 @@ export function DurationPicker({ seconds, onChange, disabled }: { seconds: numbe
   );
 }
 
-// Inner layout of a category <Card> (the Card itself draws the border, background and shadow).
 export const CARD = 'p-4 flex flex-col gap-4';
 // Rows within a category: divided like the official settings and set off from the header by a top rule.
 export const ROWS = 'divide-y divide-nb-gray-100 dark:divide-nb-gray-800 border-t border-nb-gray-100 dark:border-nb-gray-800 pt-1';

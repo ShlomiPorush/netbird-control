@@ -388,7 +388,7 @@ export function Webhook() {
       : 'The events ingest token is regenerated, unless it is managed by the WEBHOOK_AUTH_TOKEN environment variable (in which case the existing token is reused).');
   const notifConfirm = 'This (re)generates the notifications ingest token and creates or updates the Account Notifications webhook channel in the current NetBird account, subscribed to all event types and pointed at this app. An existing channel is updated in place.';
 
-  const CARD = 'p-4 flex flex-col gap-4'; // inner layout; the Card draws the border, background and shadow
+  const CARD = 'p-4 flex flex-col gap-4';
 
   return (
     <div className="max-w-2xl">
