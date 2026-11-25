@@ -1,0 +1,17 @@
+# Applies netbird-control-gateway-isolation.sh before Docker starts, so the Browser Gateways are
+# isolated before their containers run. Installation: docs/remote-access.md.
+[Unit]
+Description=Isolate the NetBird Control Browser Gateways from internal networks
+Before=docker.service
+# These can replace the whole rule set when they start.
+After=ufw.service netfilter-persistent.service nftables.service firewalld.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/netbird-control-gateway-isolation.sh
+# Docker waits for this unit at boot; a stuck firewall lock must not hold it back for long.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=docker.service

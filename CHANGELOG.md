@@ -10,6 +10,24 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **The Browser Gateways' host isolation rules come as a script and a systemd unit.**
+  `netbird-docker-compose-files/remote-access-isolation` holds a script that sets the rules and a
+  unit that runs it before Docker starts, so the rules survive a reboot. They now block the
+  private and special-purpose IPv4 ranges and the host's other Docker bridges, not only the ranges
+  you listed by hand, and touch only the gateways' own subnets. They are in the `mangle` table,
+  which Docker and ufw (with its default settings) leave alone, and every run ends with a check of
+  the active rules. **Before you install them:** they also block a self-hosted NetBird server at an
+  internal address, even if an `ACCEPT` rule of yours allows it. Requirements, installation and
+  checks: docs/remote-access.md.
+
+### Changed
+- **autoheal can recover guacd after its gateway restarts.** A restarted gateway leaves guacd in the
+  old network namespace, unhealthy and unreachable until it restarts too. Both guacd services now
+  carry the label `autoheal=true`, so a host that runs
+  [autoheal](https://github.com/willfarrell/docker-autoheal) with its default label restarts them.
+  Without autoheal the label does nothing.
+
 ---
 
 ## [1.9.1] - 2026-11-24

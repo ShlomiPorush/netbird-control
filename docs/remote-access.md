@@ -358,7 +358,7 @@ peers: it uses the copy as it is.
   not the address it resolves to there. That is why wildcard domain resources are refused: keep
   the DNS records of exact domain resources in hands you trust.
 - **Main account only.** MSP tenants are not supported.
-- **Connections go through NetBird relays.** The host firewall rules below block direct
+- **Connections go through NetBird relays.** The host isolation rules below block direct
   connections to routing peers on the local network, as for the exit nodes.
 - **guacd has no authentication of its own.** It listens only on its gateway's address on an
   internal Docker network that only the app shares, and the gateways run with `--block-inbound`.
@@ -437,10 +437,11 @@ peers: it uses the copy as it is.
    A gateway needs its key at every start: it refuses to start without one, and NetBird uses the
    key only when the peer still has to enroll. A used key can't enroll anything else. If a
    gateway's peer is deleted in NetBird, create a new key for it.
-5. **Add the host firewall rules** (next section), then start the gateways:
+5. **Install the host isolation rules** ([next section](#host-isolation-rules-required)), then
+   start the gateways. The command starts them only when the rules are in place:
 
    ```bash
-   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-names up -d
+   sudo /usr/local/sbin/netbird-control-gateway-isolation.sh check && docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-names up -d
    ```
 
    Leave out `--profile remote-names` to run without the names gateway; host names of domain
@@ -488,36 +489,138 @@ Each gateway container runs a short start script (in
 - **The peer's identity** (its NetBird private key) is kept in a Docker volume
   (`remote-gateway-state`, `remote-names-gateway-state`), never in the work tree.
 
-If a gateway container is re-created, re-create its guacd too: guacd joins the gateway's network
-namespace when it starts.
+guacd joins its gateway's network namespace when it starts, so it has to follow the gateway:
 
-## Host firewall rules (required)
+- **A gateway restarted:** restart its guacd. Until then guacd stays in the old namespace, its
+  container is unhealthy and **Settings → Remote Access** shows "guacd Not Reachable". Both guacd
+  services carry the label `autoheal=true`, so a host that runs
+  [autoheal](https://github.com/willfarrell/docker-autoheal) with its default label restarts them.
+  Without autoheal the label does nothing. If the gateway is still down when autoheal restarts
+  guacd, guacd cannot join its network and stays stopped. Once the gateway is healthy, run
+  `docker restart netbird-control-remote-guacd` (or `netbird-control-remote-names-guacd`).
+- **A gateway container re-created:** re-create its guacd too.
 
-`docker-compose.yml` cannot enforce these. They keep the gateways from reaching anything except
-through NetBird. Replace `10.0.0.0/8` with your internal ranges (one rule per range).
+## Host isolation rules (required)
 
-```bash
-# 1. The gateways' way out may not reach internal addresses directly - only through NetBird.
-iptables -I DOCKER-USER -s 172.31.251.0/24 -d 10.0.0.0/8 -j DROP
-# 2. The gateways (172.31.250.2 and .3) may not open connections to the app or anything else on
-#    the internal network (replies to the app's connections to guacd are still allowed).
-iptables -I DOCKER-USER -s 172.31.250.0/25 -m conntrack --ctstate NEW -j DROP
-# 3. The gateways may not reach the Docker host itself.
-iptables -I INPUT -s 172.31.251.0/24 -j DROP
-iptables -I INPUT -s 172.31.250.0/25 -j DROP
+The Compose files cannot enforce these rules. They keep the gateways from reaching anything
+except through NetBird. Without them, a gateway reaches internal addresses directly through
+Docker's network, where neither NetBird's policies nor NetBird Control's checks apply.
+
+[`netbird-control-gateway-isolation.sh`](../netbird-docker-compose-files/remote-access-isolation/netbird-control-gateway-isolation.sh)
+sets them, and
+[`netbird-control-gateway-isolation.service`](../netbird-docker-compose-files/remote-access-isolation/netbird-control-gateway-isolation.service)
+runs it at every boot before Docker starts. The rules match the gateways' own subnets, so the other
+containers on the Docker host are not affected:
+
+- **The gateways' way out** (`172.31.251.0/24`) may not reach another Docker network on the host
+  (`docker0` or `br-<id>`, the bridge names Docker gives), whatever addresses it uses, or any
+  private or reserved IPv4 address: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, the shared
+  address space `100.64.0.0/10`, loopback, link-local, multicast and the other special-purpose
+  ranges.
+- **The Docker host itself** accepts nothing from the gateways, on either network.
+
+On the internal network, guacd cannot open connections to the app: the gateway's start script
+locks guacd's TCP to NetBird (see above).
+
+The rules are in the `mangle` table, in the chains `NBC-GATEWAY-FORWARD` and `NBC-GATEWAY-INPUT`,
+which are the first rules of its `FORWARD` and `INPUT` chains. These run after Docker's address
+translation, so they see the address a packet is really delivered to, and neither Docker nor ufw
+changes them. Each run replaces the rules of both chains in one transaction, so running the
+script again is safe.
+
+If the script fails at boot, Docker still starts, because the host may run other services. The
+gateways then run without these rules, with guacd's lock in place. The failure shows in
+`systemctl --failed`, and the check below reports it.
+
+Requirements:
+
+- **The gateways run in the Docker that systemd starts as `docker.service`**, not in rootless Docker,
+  Docker Desktop or the Docker snap. The install block checks that `docker.service` runs.
+- **Nothing else uses `172.31.250.0/24` or `172.31.251.0/24`**, on the host or in your networks. The
+  subnets are fixed: the Compose file, these rules and the app's own target check all use them. The
+  rules would block another network that has the same addresses.
+- **The gateways reach NetBird and DNS at public addresses outside this host.** The rules block a
+  self-hosted NetBird management, signal, relay or STUN server at an internal address or on this
+  host, including one that an `ACCEPT` rule from an earlier version of this page allowed. They also
+  block DNS servers at internal addresses that Docker queries from the gateway's own network. These
+  are the `dns` servers in Docker's `daemon.json`, or else the host's own servers (with
+  systemd-resolved, the ones in `/run/systemd/resolve/resolv.conf`). If this does not fit your
+  setup, do not install these rules, and keep the ones you added by hand.
+- **ufw, if used, keeps `MANAGE_BUILTINS=no`** (its default) in `/etc/default/ufw` and
+  `/etc/ufw/ufw.conf`. With `yes`, a ufw reload can remove the jumps. The install block checks it.
+- **Only Docker's bridges are named `br-*`.** The rules drop everything the gateways send to an
+  interface named `br-*`, so if the host's own way out to the internet were named like that (such
+  as `br-ex`), the gateways would lose NetBird.
+
+What the rules do not cover:
+
+- **Internal servers at public addresses**, such as a server that the office router publishes
+  through a port forward.
+- **A gateway whose NetBird process is taken over.** The gateway has `NET_ADMIN` and could change
+  its own addresses. guacd, which handles the remote sessions, has no such right.
+- **Docker networks with a custom bridge name** (`com.docker.network.bridge.name`) at public
+  addresses.
+- **A tool that loads a saved rule set or clears every table**, such as `netfilter-persistent
+  reload` with a saved `mangle` table, firewalld with its `iptables` backend, or an nftables
+  configuration that starts with `flush ruleset`. Do not save these rules with
+  `iptables-persistent`; the unit applies them at every boot. After such a reload, run
+  `systemctl restart netbird-control-gateway-isolation` and the check below.
+
+### Install
+
+Check the requirements above. Then copy the
+`netbird-docker-compose-files/remote-access-isolation` folder to the Docker host, and in that folder
+run:
+
+```sh
+sudo sh -e <<'EOF_INSTALL'
+builtins=$( for f in /etc/default/ufw /etc/ufw/ufw.conf; do [ ! -f "$f" ] || . "$f"; done; echo "${MANAGE_BUILTINS:-no}" )
+if [ "$builtins" = yes ]; then echo "ufw has MANAGE_BUILTINS=yes, so every ufw reload could remove the rules. Nothing was installed." >&2; exit 1; fi
+if ! systemctl is-active --quiet docker.service; then echo "docker.service is not running, so the unit would not run before Docker at boot. Nothing was installed." >&2; exit 1; fi
+settings() { grep -E '^(EGRESS|GATEWAYS|RANGES)=' "$1"; }
+installed=/usr/local/sbin/netbird-control-gateway-isolation.sh
+if [ -f "$installed" ] && [ "$(settings "$installed")" != "$(settings ./netbird-control-gateway-isolation.sh)" ]; then
+  echo "The installed script has other settings than this one. EGRESS and GATEWAYS must match the subnets that the running gateways use. Set the values you need in both scripts, then run this block again. Nothing was changed. The installed settings:" >&2
+  settings "$installed" >&2
+  exit 1
+fi
+timeout 60 sh ./netbird-control-gateway-isolation.sh
+put() {
+  tmp=$(mktemp "$(dirname "$3")/.netbird-control-gateway-isolation.XXXXXX")
+  install -m "$1" "$2" "$tmp"
+  mv -f "$tmp" "$3"
+}
+put 0755 netbird-control-gateway-isolation.sh "$installed"
+put 0644 netbird-control-gateway-isolation.service /etc/systemd/system/netbird-control-gateway-isolation.service
+systemctl enable netbird-control-gateway-isolation.service
+systemctl restart netbird-control-gateway-isolation.service
+echo "Installed: the isolation rules are active and are applied again at every boot."
+EOF_INSTALL
 ```
 
-If your NetBird management, signal or relay servers are reachable only at internal addresses, add
-an `ACCEPT` rule for exactly those addresses and ports **before** rule 1, for example
-`iptables -I DOCKER-USER -s 172.31.251.0/24 -d 10.0.0.20 -p tcp --dport 443 -j ACCEPT`.
+The block stops at the first error. It changes nothing when an installed script has other settings,
+so an update does not replace values you adapted. It applies the rules from the copied script before
+it installs anything, so a script that fails never replaces the installed one. Each file is written
+under a temporary name next to its final name and then renamed in one step, so an interrupted update
+leaves the previous file in place. The rules take effect right away, without restarting Docker or
+the gateways.
 
-These rules do not survive a reboot on their own. Save them with `iptables-persistent` or a systemd
-unit, and check them after every reboot:
+Rules added by hand from an earlier version of this page are no longer needed. Remove each of them
+with `iptables -D` and the same arguments it was added with, and remove them from
+`iptables-persistent` if you saved them there.
 
-```bash
-iptables -S DOCKER-USER
-iptables -S INPUT | grep 172.31.25
+### Check
+
+After setup and after every reboot:
+
+```sh
+systemctl is-active netbird-control-gateway-isolation           # active
+sudo /usr/local/sbin/netbird-control-gateway-isolation.sh check # OK: the isolation rules are in place
 ```
+
+The check changes nothing. It compares the active rules with the script's own, and prints each
+part that differs. Running the script again restores missing rules. If it still says that a chain is
+not the first rule, another tool put a rule before it. Keep that rule, and move it below the jump.
 
 ## Verify the isolation
 
@@ -537,8 +640,11 @@ done
 # As guacd's user, a public address that is not a NetBird resource is refused (expect "blocked").
 docker exec -u 1000 netbird-control-remote-guacd sh -c 'nc -z -w5 1.1.1.1 443 && echo OPEN || echo blocked'
 docker exec -u 1000 netbird-control-remote-names-guacd sh -c 'nc -z -w5 1.1.1.1 443 && echo OPEN || echo blocked'
-# A direct connection from the gateway to a LAN host fails (expect a timeout).
-docker exec netbird-control-remote-gateway sh -c 'timeout 5 nc -zv 10.0.0.1 22' || echo blocked
+# A direct connection from the gateway to a LAN address fails (expect "blocked"). Use an address
+# and port that you know are open from the Docker host, such as another server's SSH, and that is
+# not a NetBird resource open to browser access: "blocked" also appears for a closed port or a
+# NetBird policy.
+docker exec netbird-control-remote-gateway sh -c 'command -v nc >/dev/null || { echo "nc is missing"; exit 1; }; nc -z -w5 10.0.0.1 22 && echo OPEN || echo blocked'
 ```
 
 From another NetBird peer, a connection to a gateway's NetBird IP on port 4822 must fail.
