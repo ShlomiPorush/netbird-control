@@ -15,8 +15,15 @@ RUN apt-get update \
       ulogd2-json \
       iproute2 \
  && rm -rf /var/lib/apt/lists/*
+RUN for slot in $(seq 0 999); do \
+      uid=$((62000 + slot)); \
+      echo "chromium-${slot}:x:${uid}:${uid}::/nonexistent:/usr/sbin/nologin" >> /etc/passwd; \
+    done \
+ && chmod 0755 /var/tmp /run/lock \
+ && mkdir -m 0711 /var/lib/browser-files
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY policies/managed.json /etc/chromium/policies/managed/managed.json
+COPY --chmod=0644 policies/files.json /etc/chromium/policies/managed/files.json
 COPY ulogd.conf /etc/ulogd.conf
 COPY --chmod=0755 hebrew-keymap.sh /usr/local/bin/hebrew-keymap
 COPY --chmod=0755 collector.sh /usr/local/bin/collector

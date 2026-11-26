@@ -1,18 +1,19 @@
 import { useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CheckCircle2, Globe, KeyRound, ShieldCheck, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, FolderDown, Globe, KeyRound, ShieldCheck, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { useGroups } from '@/lib/queries';
 import { apiText, remoteApi, type BrowserConfig, type BrowserStatus, type RemoteAccessConfig } from '@/lib/remoteAccess';
 import { Badge, Button, Card, CopyButton, Field, Input, Modal, SelectMenu, type SelectOption } from '@/components/ui';
 import { StepRow } from './LaunchNetworkPanel';
-import { Toggle } from './NetbirdFields';
+import { SettingRow, Toggle } from './NetbirdFields';
 
-const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '' };
+const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', files: false, transfer: false, filesLimitGb: 2 };
 const DEFAULT_ROUTER_GROUP = 'Office Peers';
 const MAX_SESSIONS = { min: 1, max: 50 };
 const MAX_PER_USER = { min: 1, max: 10 };
 const KEEP_ALIVE = { min: 1, max: 120 };
+const FILES_LIMIT = { min: 1, max: 10 };
 const muted = 'text-sm text-nb-gray-500 dark:text-nb-gray-400';
 
 const inRange = (value: string, r: { min: number; max: number }) => /^\d+$/.test(value) && Number(value) >= r.min && Number(value) <= r.max;
@@ -55,7 +56,7 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
   const [modalError, setModalError] = useState('');
   const [setupKey, setSetupKey] = useState('');
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', maxPerUser: '', keepAliveMin: '', startPage: '' });
+  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', maxPerUser: '', keepAliveMin: '', startPage: '', files: false, transfer: false, filesLimitGb: '' });
 
   const groups = groupsQ.data || [];
   const groupOptions: SelectOption[] = useMemo(() => groups
@@ -90,15 +91,21 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
 
   const openEditor = () => {
     const preset = saved.routerGroupId || groups.find((g) => g.name === DEFAULT_ROUTER_GROUP)?.id || '';
-    setDraft({ routerGroupId: preset, maxSessions: String(saved.maxSessions), maxPerUser: String(saved.maxPerUser), keepAliveMin: String(saved.keepAliveMin), startPage: saved.startPage || '' });
+    setDraft({
+      routerGroupId: preset, maxSessions: String(saved.maxSessions), maxPerUser: String(saved.maxPerUser), keepAliveMin: String(saved.keepAliveMin), startPage: saved.startPage || '',
+      files: !!saved.files, transfer: !!saved.files && !!saved.transfer, filesLimitGb: String(saved.filesLimitGb || BROWSER_DEFAULTS.filesLimitGb),
+    });
     setModalError('');
     setEditing(true);
   };
-  const draftValid = !!draft.routerGroupId && inRange(draft.maxSessions, MAX_SESSIONS) && inRange(draft.maxPerUser, MAX_PER_USER) && inRange(draft.keepAliveMin, KEEP_ALIVE) && validStartPage(draft.startPage);
+  const draftValid = !!draft.routerGroupId && inRange(draft.maxSessions, MAX_SESSIONS) && inRange(draft.maxPerUser, MAX_PER_USER) && inRange(draft.keepAliveMin, KEEP_ALIVE) && validStartPage(draft.startPage) && inRange(draft.filesLimitGb, FILES_LIMIT);
   const saveDraft = async () => {
     if (!draftValid) return;
     setBusy('save'); setModalError('');
-    const message = await store({ ...saved, routerGroupId: draft.routerGroupId, maxSessions: Number(draft.maxSessions), maxPerUser: Number(draft.maxPerUser), keepAliveMin: Number(draft.keepAliveMin), startPage: draft.startPage.trim() });
+    const message = await store({
+      ...saved, routerGroupId: draft.routerGroupId, maxSessions: Number(draft.maxSessions), maxPerUser: Number(draft.maxPerUser), keepAliveMin: Number(draft.keepAliveMin), startPage: draft.startPage.trim(),
+      files: draft.files, transfer: draft.files && draft.transfer, filesLimitGb: Number(draft.filesLimitGb),
+    });
     setBusy('');
     if (message) setModalError(message); else setEditing(false);
   };
@@ -187,6 +194,25 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
         </div>
       </StepRow>
 
+      <StepRow n={4} done label="Files" actions={(
+        <Button size="sm" onClick={openEditor} disabled={readonly || !!busy}>Change</Button>
+      )}>
+        <div className="flex items-start gap-2">
+          <FolderDown size={16} className={saved.files ? 'mt-0.5 shrink-0 text-netbird' : 'mt-0.5 shrink-0 text-nb-gray-400'} />
+          <div className="min-w-0">
+            <div className="text-sm text-nb-gray-700 dark:text-nb-gray-200">
+              {!saved.files ? 'Downloads and uploads are blocked in the browser'
+                : saved.transfer ? 'Files In The Browser, and transfers to and from computers' : 'Files In The Browser, without transfers to computers'}
+            </div>
+            {saved.files && (
+              <div className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
+                Up to {saved.filesLimitGb} GB per browser. Files are deleted when the browser closes.
+              </div>
+            )}
+          </div>
+        </div>
+      </StepRow>
+
       {error && <p role="alert" className="border-t border-nb-gray-100 dark:border-nb-gray-900 px-4 py-3 sm:px-5 text-sm text-red-500 break-words">{error}</p>}
 
       <Modal
@@ -231,6 +257,18 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
           <Field label="Start Page" hint="The page a new browser opens on. Leave it empty for a blank page.">
             <Input inputMode="url" placeholder="https://portal.example.com" value={draft.startPage} aria-invalid={!validStartPage(draft.startPage) || undefined}
               onChange={(e) => setDraft((d) => ({ ...d, startPage: e.target.value }))} />
+          </Field>
+          <div className="border-t border-nb-gray-100 pt-4 dark:border-nb-gray-900">
+            <SettingRow title="Files In The Browser" checked={draft.files}
+              help="Users can download files in the browser and upload them to websites. The files are deleted when the browser closes."
+              onChange={(v) => setDraft((d) => ({ ...d, files: v, transfer: v && d.transfer }))} />
+            <SettingRow title="Transfer Files To And From Computers" checked={draft.files && draft.transfer} disabled={!draft.files}
+              help={draft.files ? "Users can copy the browser's files to their computer, and files from their computer into the browser." : 'Turn on Files In The Browser first.'}
+              onChange={(v) => setDraft((d) => ({ ...d, transfer: v }))} />
+          </div>
+          <Field label="Storage Per Browser (GB)" hint="How much one browser's files may take, 1 to 10. The server's disk needs about this much for each browser at a time.">
+            <Input inputMode="numeric" value={draft.filesLimitGb} aria-invalid={!inRange(draft.filesLimitGb, FILES_LIMIT) || undefined}
+              onChange={(e) => setDraft((d) => ({ ...d, filesLimitGb: e.target.value.replace(/\D/g, '') }))} />
           </Field>
           {modalError && <p role="alert" className="text-sm text-red-500 break-words">{modalError}</p>}
         </div>

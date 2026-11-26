@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -135,6 +135,26 @@ export function BarMenu({ title, icon, container, width = 248, pressed, onOpenCh
 }
 
 /** One row of a bar menu: an action, with its keys or a check mark on the right. */
+const BELOW_BAR = 64;
+
+export function useBarPanelPosition(anchor: RefObject<HTMLElement | null>, maxWidth: number, shown = true) {
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!shown) return;
+    const place = () => {
+      const r = anchor.current?.getBoundingClientRect();
+      const viewport = document.documentElement.clientWidth;
+      const width = Math.min(maxWidth, viewport - 16);
+      if (!r || !r.width) setPos({ left: Math.max(8, (viewport - width) / 2), top: BELOW_BAR, width });
+      else setPos({ left: Math.max(8, Math.min(r.right - width, viewport - width - 8)), top: r.bottom + 10, width });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [anchor, maxWidth, shown]);
+  return pos;
+}
+
 export function MenuRow({ icon, label, hint, checked, disabled, onClick, className }: {
   icon?: ReactNode; label: string; hint?: string; checked?: boolean; disabled?: boolean; onClick: () => void; className?: string;
 }) {

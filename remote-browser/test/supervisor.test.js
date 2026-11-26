@@ -4,48 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Supervisor } = require('../supervisor/supervisor');
 const { memoryStore } = require('../supervisor/state');
+const { deferred, fakeRuntime } = require('./fake-runtime');
 
 const FAR = 10 ** 13;
 const INSTANCE = 'instance-1';
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-function fakeRuntime() {
-  const runtime = {
-    calls: [],
-    exits: new Map(),
-    busy: new Set(),
-    teardownResult: true,
-    launchGate: null,
-    launchError: null,
-    async launch({ ids, onExit }) {
-      runtime.calls.push(`launch ${ids.slot}`);
-      runtime.exits.set(ids.slot, onExit);
-      if (runtime.launchGate) await runtime.launchGate.promise;
-      if (runtime.launchError) throw runtime.launchError;
-      return { password: `pw${ids.slot}` };
-    },
-    async teardown(ids) {
-      runtime.calls.push(`teardown ${ids.slot}`);
-      return runtime.teardownResult;
-    },
-    async slotIsFree(ids) {
-      return !runtime.busy.has(ids.slot);
-    },
-    async ready() {
-      return { netns: 1, gateway: null, table7120: [] };
-    },
-  };
-  return runtime;
-}
+const STOPPED = { ok: true, state: 'stopped', files: [], code: null };
 
 function setup(options = {}) {
   const runtime = fakeRuntime();
@@ -89,7 +52,7 @@ test('a terminal session is refused', async () => {
 test('stop tears the session down and leaves a tombstone', async () => {
   const { startOf, renewOf, supervisor, runtime } = setup();
   await startOf('a');
-  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped' });
+  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), STOPPED);
   assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
   assert.equal((await startOf('a')).error, 'ENDED');
   assert.equal((await renewOf('a')).error, 'ENDED');
@@ -98,7 +61,7 @@ test('stop tears the session down and leaves a tombstone', async () => {
 
 test('stop of an unknown session succeeds and still refuses a later start', async () => {
   const { startOf, supervisor, runtime } = setup();
-  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'x' }), { ok: true, state: 'stopped' });
+  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'x' }), STOPPED);
   assert.equal((await startOf('x')).error, 'ENDED');
   assert.deepEqual(runtime.calls, []);
 });
@@ -136,7 +99,7 @@ test('requests for one session run in arrival order', async () => {
   assert.deepEqual(runtime.calls, ['launch 0']);
   runtime.launchGate.resolve();
   assert.equal((await started).ok, true);
-  assert.deepEqual(await stopped, { ok: true, state: 'stopped' });
+  assert.deepEqual(await stopped, STOPPED);
   assert.equal((await renewed).error, 'ENDED');
   assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
 });
@@ -209,7 +172,7 @@ test('a teardown that leaves processes keeps the slot and reports STOP_FAILED un
   await startOf('b');
   assert.equal((await startOf('c')).error, 'CAPACITY');
   runtime.teardownResult = true;
-  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped' });
+  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), STOPPED);
   assert.equal((await startOf('c')).error, 'CAPACITY');
   advance(10 * 60_000);
   assert.equal((await startOf('c')).uid, 62000);
@@ -242,7 +205,8 @@ test('list shows each session with its state, uid, port and start time', async (
   assert.deepEqual(await supervisor.handle({ op: 'list' }), {
     ok: true,
     instance: INSTANCE,
-    sessions: [{ session: 'a', state: 'running', uid: 62000, port: 5901, startedAt: 1_000 }],
+    sessions: [{ session: 'a', state: 'running', uid: 62000, port: 5901, startedAt: 1_000, files: [] }],
+    ended: [],
   });
 });
 
@@ -453,4 +417,221 @@ test('credentials report when the session started', async () => {
   await startOf('a');
   advance(5_000);
   assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: FAR })).startedAt, 1_000);
+});
+
+const GIB = 1024 ** 3;
+const filesOp = (supervisor, fields) => supervisor.handle({ op: 'files', enabled: true, transfer: true, rev: 0, ...fields });
+const poll = async (supervisor) => {
+  supervisor.pollFiles();
+  await flush();
+  await flush();
+};
+const settleStops = async () => {
+  for (let step = 0; step < 5; step += 1) await flush();
+};
+
+test('the files policy is written only when it changes, and an older rev is ignored', async () => {
+  const { supervisor, runtime } = setup();
+  assert.deepEqual(await filesOp(supervisor, { rev: 0 }), { ok: true, rev: 0 });
+  assert.deepEqual(await filesOp(supervisor, { rev: 1, transfer: false }), { ok: true, rev: 1 });
+  assert.deepEqual(runtime.policyWrites, [true]);
+  assert.deepEqual(supervisor.filesPolicy, { enabled: true, transfer: false, rev: 1 });
+  assert.deepEqual(await filesOp(supervisor, { rev: 0, enabled: false }), { ok: true, rev: 1 });
+  assert.deepEqual(runtime.policyWrites, [true]);
+  assert.deepEqual(await filesOp(supervisor, { rev: 1, enabled: false }), { ok: true, rev: 1 });
+  assert.deepEqual(runtime.policyWrites, [true, false]);
+  assert.deepEqual(await filesOp(supervisor, { rev: 3, enabled: false, transfer: true }), { ok: true, rev: 3 });
+  assert.deepEqual(supervisor.filesPolicy, { enabled: false, transfer: false, rev: 3 }, 'transfer counts only with files');
+  assert.deepEqual(runtime.policyWrites, [true, false]);
+});
+
+test('a policy write that fails is retried by the next files op', async () => {
+  const { supervisor, runtime } = setup();
+  runtime.writeFilesPolicy = () => {
+    throw new Error('read-only');
+  };
+  await assert.rejects(filesOp(supervisor, { rev: 0 }), /read-only/);
+  const written = [];
+  runtime.writeFilesPolicy = (enabled) => written.push(enabled);
+  await filesOp(supervisor, { rev: 0 });
+  assert.deepEqual(written, [true]);
+});
+
+test('the files limit of a start reaches the launch and defaults to 2 GiB', async () => {
+  const { startOf, runtime } = setup();
+  await startOf('a', { filesLimit: 3 * GIB });
+  await startOf('b');
+  assert.deepEqual(runtime.launches.map((launch) => launch.filesLimit), [3 * GIB, 2 * GIB]);
+});
+
+test('the poll journals each new complete file once, without partial or hidden ones', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  const folder = runtime.folder(0);
+  folder.set('firmware.out.crdownload', Buffer.alloc(5));
+  folder.set('.upload-x', Buffer.alloc(2));
+  await poll(supervisor);
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions[0].files, []);
+  folder.delete('firmware.out.crdownload');
+  folder.set('firmware.out', Buffer.alloc(5));
+  await poll(supervisor);
+  await poll(supervisor);
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions[0].files, [{ seq: 1, name: 'firmware.out', size: 5 }]);
+  folder.delete('firmware.out');
+  await poll(supervisor);
+  folder.set('firmware.out', Buffer.alloc(7));
+  await poll(supervisor);
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions[0].files.map((entry) => entry.seq), [1, 2], 'a file that returns is new again');
+});
+
+test('acked journal entries are dropped and acks for unknown sessions are ignored', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  runtime.folder(0).set('one', Buffer.alloc(1));
+  await poll(supervisor);
+  runtime.folder(0).set('two', Buffer.alloc(2));
+  await poll(supervisor);
+  const listed = await supervisor.handle({ op: 'list', ack: { a: 1, nobody: 4 } });
+  assert.deepEqual(listed.sessions[0].files, [{ seq: 2, name: 'two', size: 2 }]);
+  assert.deepEqual((await supervisor.handle({ op: 'list', ack: { a: 2 } })).sessions[0].files, []);
+});
+
+test('the poll stops a session whose files pass its limit, with FILES_FULL recorded before the teardown', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a', { filesLimit: GIB });
+  runtime.folder(0).set('big.iso', Buffer.alloc(10));
+  runtime.padding = GIB - 10;
+  await poll(supervisor);
+  assert.deepEqual(runtime.calls, ['launch 0'], 'exactly at the limit is allowed');
+  const seenAtTeardown = [];
+  runtime.onTeardown = () => seenAtTeardown.push(supervisor.status('a'));
+  runtime.padding += 1;
+  await poll(supervisor);
+  await settleStops();
+  assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
+  assert.deepEqual(seenAtTeardown, [{ ok: false, error: 'ENDED', message: 'The session is ending.', code: 'FILES_FULL' }]);
+  assert.deepEqual(supervisor.status('a'), { ok: false, error: 'ENDED', message: 'The session has ended.', code: 'FILES_FULL' });
+  const listed = await supervisor.handle({ op: 'list' });
+  assert.deepEqual(listed.sessions, []);
+  assert.deepEqual(listed.ended, [{ session: 'a', code: 'FILES_FULL', files: [{ seq: 1, name: 'big.iso', size: 10 }] }]);
+  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped', files: [{ seq: 1, name: 'big.iso', size: 10 }], code: 'FILES_FULL' });
+});
+
+test('the poll counts the rest of an active upload as reserved', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a', { filesLimit: GIB });
+  const record = supervisor.sessions.get('a');
+  record.upload = { id: 'u', name: 'x', size: 100, received: 40, temporary: '.upload-u' };
+  runtime.folder(0).set('.upload-u', Buffer.alloc(40));
+  runtime.padding = GIB - 100;
+  await poll(supervisor);
+  assert.deepEqual(runtime.calls, ['launch 0']);
+  runtime.padding += 1;
+  await poll(supervisor);
+  await settleStops();
+  assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
+});
+
+test('the poll runs whatever the files setting, skips a session without its folder and never overlaps itself', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  await filesOp(supervisor, { enabled: false });
+  await poll(supervisor);
+  assert.equal(runtime.scans, 1);
+  runtime.folders.delete(0);
+  await poll(supervisor);
+  assert.deepEqual(runtime.calls, ['launch 0']);
+  const gate = deferred();
+  const scanned = [];
+  runtime.scanFiles = async () => {
+    scanned.push(1);
+    await gate.promise;
+    return null;
+  };
+  supervisor.pollFiles();
+  supervisor.pollFiles();
+  await flush();
+  assert.equal(scanned.length, 1);
+  gate.resolve();
+  await flush();
+  await poll(supervisor);
+  assert.equal(scanned.length, 2);
+});
+
+test('a failed scan neither stops the session nor breaks later polls', async () => {
+  const logged = [];
+  const { startOf, supervisor, runtime } = setup({ log: (line) => logged.push(line) });
+  await startOf('a');
+  const scanFiles = runtime.scanFiles;
+  runtime.scanFiles = async () => {
+    throw new Error('find timed out');
+  };
+  await poll(supervisor);
+  assert.ok(logged.some((line) => /files poll failed: find timed out/.test(line)));
+  runtime.scanFiles = scanFiles;
+  runtime.folder(0).set('late', Buffer.alloc(1));
+  await poll(supervisor);
+  assert.equal((await supervisor.handle({ op: 'list' })).sessions[0].files.length, 1);
+});
+
+test('the final scan at teardown journals files the poll has not seen yet, and stop returns them', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  runtime.folder(0).set('last.bin', Buffer.alloc(3));
+  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped', files: [{ seq: 1, name: 'last.bin', size: 3 }], code: null });
+  const listed = await supervisor.handle({ op: 'list' });
+  assert.deepEqual(listed.ended, [{ session: 'a', code: null, files: [{ seq: 1, name: 'last.bin', size: 3 }] }]);
+  assert.deepEqual(supervisor.status('a'), { ok: false, error: 'ENDED', message: 'The session has ended.' }, 'no code for a plain stop');
+});
+
+test('an ended record is dropped once its files are acked and it has no code, or after 10 minutes', async () => {
+  const { startOf, supervisor, runtime, advance } = setup();
+  await startOf('a');
+  runtime.folder(0).set('a.bin', Buffer.alloc(1));
+  await supervisor.handle({ op: 'stop', session: 'a' });
+  assert.deepEqual((await supervisor.handle({ op: 'list', ack: { a: 1 } })).ended, []);
+
+  await startOf('b', { filesLimit: GIB });
+  runtime.padding = GIB + 1;
+  await poll(supervisor);
+  await settleStops();
+  assert.deepEqual((await supervisor.handle({ op: 'list', ack: { b: 5 } })).ended, [{ session: 'b', code: 'FILES_FULL', files: [] }]);
+  advance(10 * 60_000 - 1);
+  assert.equal((await supervisor.handle({ op: 'list' })).ended.length, 1);
+  advance(1);
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).ended, []);
+  assert.deepEqual(supervisor.status('b'), { ok: false, error: 'ENDED', message: 'The session has ended.' });
+});
+
+test('an ended session still tearing down is listed under ended, and its files only there', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  runtime.folder(0).set('a.bin', Buffer.alloc(1));
+  await poll(supervisor);
+  runtime.teardownResult = false;
+  assert.equal((await supervisor.handle({ op: 'stop', session: 'a' })).error, 'STOP_FAILED');
+  const listed = await supervisor.handle({ op: 'list' });
+  assert.deepEqual(listed.sessions.map((s) => [s.state, s.files]), [['stopping', []]]);
+  assert.deepEqual(listed.ended, [{ session: 'a', code: null, files: [{ seq: 1, name: 'a.bin', size: 1 }] }]);
+});
+
+test('a start that fails leaves no ended record behind', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  runtime.launchError = new Error('Xvnc exited during start');
+  await startOf('a');
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).ended, []);
+});
+
+test('files access needs a running session with a live lease and the held settings', async () => {
+  const { startOf, supervisor, advance } = setup();
+  assert.deepEqual(supervisor.filesAccess('a', false), { refusal: 'NO_SESSION' });
+  await startOf('a');
+  assert.deepEqual(supervisor.filesAccess('a', false), { refusal: 'FILES_OFF' });
+  await filesOp(supervisor, { transfer: false });
+  assert.equal(supervisor.filesAccess('a', false).record, supervisor.sessions.get('a'));
+  assert.deepEqual(supervisor.filesAccess('a', true), { refusal: 'TRANSFER_OFF' });
+  await filesOp(supervisor, { rev: 1 });
+  assert.equal(supervisor.filesAccess('a', true).record, supervisor.sessions.get('a'));
+  advance(150_000);
+  assert.deepEqual(supervisor.filesAccess('a', true), { refusal: 'NO_SESSION' });
 });

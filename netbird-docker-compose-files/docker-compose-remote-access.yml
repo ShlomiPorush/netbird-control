@@ -382,7 +382,10 @@ services:
   # chroots inside them, which Docker's default seccomp profile refuses without CAP_SYS_ADMIN and
   # CAP_SYS_CHROOT: remote-browser/seccomp.json is that default profile with only clone, unshare
   # and chroot allowed without those capabilities, which this container does not have. The image
-  # tag follows the app's (TAG), so both always run the same release.
+  # tag follows the app's (TAG), so both always run the same release. The files volume holds what each
+  # session downloads or receives from the portal, in a folder per session that is wiped when the
+  # session ends; it needs about the maximum number of sessions times the files limit of free disk.
+  # For a hard bound, mount a fixed-size filesystem there instead (root-owned, mode 0711).
   remote-browser:
     profiles: [ "remote-browser" ]
     image: ghcr.io/shlomiporush/nbcontrol-browser:${TAG}
@@ -411,6 +414,7 @@ services:
     volumes:
       - remote-browser-control:/run/nbc-control
       - remote-browser-status:/run/nbc-status:ro
+      - remote-browser-files:/var/lib/browser-files
       - ./remote-browser/resolv.conf:/etc/resolv.conf:ro
     mem_limit: 8g
     cpus: 2
@@ -452,6 +456,7 @@ volumes:
   remote-browser-control:
   remote-browser-connections:
   remote-browser-status:
+  remote-browser-files:
 
 # Both subnets are pinned, so do not change them: guacd binds to the gateways' fixed addresses, the
 # host's isolation rules (remote-access-isolation/netbird-control-gateway-isolation.sh) are keyed to

@@ -4,10 +4,16 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { SLOT_COUNT, slotIds } = require('./protocol');
 
 const SESSIONS_DIR = '/run/browser';
+const FILES_ROOT = '/var/lib/browser-files';
+const TMP_DIR = '/tmp';
 const X_SOCKET_DIR = '/tmp/.X11-unix';
 const SHM_DIR = '/dev/shm';
+const POLICY_FILE = '/etc/chromium/policies/managed/files.json';
+const POLICY_TEMPORARY = '/etc/chromium/policies/files.json.tmp';
+const FILEIO = path.join(__dirname, 'fileio.js');
 const GATEWAY_STATUS = '/run/nbc-status/gateway.json';
 const KEYMAP_SCRIPT = '/usr/local/bin/hebrew-keymap';
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
@@ -16,6 +22,16 @@ const PASSWORD_LENGTH = 8;
 const START_TIMEOUT_MS = 15_000;
 const KILL_TIMEOUT_MS = 10_000;
 const DISK_CACHE_BYTES = 64 * 1024 * 1024;
+const HEADER_MAX_BYTES = 256;
+
+const BLOCKED_POLICY = { DownloadRestrictions: 3, AllowFileSelectionDialogs: false };
+const ENABLED_POLICY = {
+  DownloadRestrictions: 0,
+  AllowFileSelectionDialogs: true,
+  DownloadDirectory: `${FILES_ROOT}/\${user_name}`,
+  DefaultFileSystemReadGuardSetting: 2,
+  DefaultFileSystemWriteGuardSetting: 2,
+};
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -106,10 +122,43 @@ const sessionDirs = ({ slot, displayUid, chromiumUid }) => [
   { dir: path.join(SESSIONS_DIR, `chromium-${slot}`), uid: chromiumUid },
 ];
 
+const filesEntry = ({ slot, chromiumUid }) => ({ dir: path.join(FILES_ROOT, `chromium-${slot}`), uid: chromiumUid });
+
+const ownedDirs = (ids) => [filesEntry(ids), ...sessionDirs(ids)];
+
 const xFiles = (display) => [`/tmp/.X${display}-lock`, path.join(X_SOCKET_DIR, `X${display}`)];
 
 function removeIfPresent(file) {
   fs.rmSync(file, { force: true });
+}
+
+function ownedEntryUnder(root, uids) {
+  let names;
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    const file = path.join(root, name);
+    let stat;
+    try {
+      stat = fs.lstatSync(file);
+    } catch {
+      continue;
+    }
+    if (uids.includes(stat.uid)) return true;
+    if (stat.isDirectory() && ownedEntryUnder(file, uids)) return true;
+  }
+  return false;
+}
+
+const temporaryLeftovers = (uids, roots = [TMP_DIR, SHM_DIR]) => roots.some((root) => ownedEntryUnder(root, uids));
+
+function writeFilesPolicy(enabled, file = POLICY_FILE, temporary = POLICY_TEMPORARY) {
+  fs.writeFileSync(temporary, `${JSON.stringify(enabled ? ENABLED_POLICY : BLOCKED_POLICY)}\n`, { mode: 0o644 });
+  fs.chmodSync(temporary, 0o644);
+  fs.renameSync(temporary, file);
 }
 
 function createOwnedDir(dir, uid, files) {
@@ -183,7 +232,11 @@ function xvncArgs({ display, port, dir, width, height }) {
   ];
 }
 
-async function launch({ ids, width, height, scale, startPage = '', onExit }) {
+function chromiumCommand(filesLimit, args) {
+  return ['prlimit', [`--fsize=${filesLimit}`, '--', 'sh', '-c', 'trap "" XFSZ; exec chromium "$@"', 'chromium', ...args]];
+}
+
+async function launch({ ids, width, height, scale, startPage = '', filesLimit, onExit }) {
   const { display, port, displayUid, chromiumUid } = ids;
   const [displayDir, chromiumDir] = sessionDirs(ids);
   xFiles(display).forEach(removeIfPresent);
@@ -194,6 +247,7 @@ async function launch({ ids, width, height, scale, startPage = '', onExit }) {
   const auth = await xauthority(display, cookie);
   createOwnedDir(displayDir.dir, displayUid, { passwd: vncPassword, xauth: auth });
   createOwnedDir(chromiumDir.dir, chromiumUid, { xauth: auth });
+  createOwnedDir(filesEntry(ids).dir, chromiumUid, {});
 
   const displayEnv = { DISPLAY: `:${display}`, XAUTHORITY: path.join(displayDir.dir, 'xauth'), HOME: displayDir.dir };
   const xvnc = spawnAs(displayUid, 'Xvnc', xvncArgs({ display, port, dir: displayDir.dir, width, height }), displayEnv);
@@ -211,7 +265,7 @@ async function launch({ ids, width, height, scale, startPage = '', onExit }) {
   const windowManager = spawnAs(displayUid, 'matchbox-window-manager', ['-use_titlebar', 'no'], displayEnv);
   watchChild(windowManager, 'the window manager', onExit);
 
-  const chromium = spawnAs(chromiumUid, 'chromium', [
+  const chromium = spawnAs(chromiumUid, ...chromiumCommand(filesLimit, [
     `--user-data-dir=${path.join(chromiumDir.dir, 'profile')}`,
     '--start-maximized',
     '--no-first-run',
@@ -220,7 +274,7 @@ async function launch({ ids, width, height, scale, startPage = '', onExit }) {
     `--force-device-scale-factor=${scale}`,
     `--disk-cache-size=${DISK_CACHE_BYTES}`,
     ...(startPage ? [startPage] : []),
-  ], {
+  ]), {
     DISPLAY: `:${display}`,
     XAUTHORITY: path.join(chromiumDir.dir, 'xauth'),
     HOME: chromiumDir.dir,
@@ -243,14 +297,15 @@ async function killAll(uids) {
   return true;
 }
 
-function removeShmOf(uids) {
-  for (const name of fs.readdirSync(SHM_DIR)) {
-    const file = path.join(SHM_DIR, name);
-    try {
-      if (uids.includes(fs.lstatSync(file).uid)) fs.rmSync(file, { force: true });
-    } catch {
-      continue;
-    }
+const SWEEP_SCRIPT = [
+  'find "$@" -xdev -user "$(id -u)" -type d -exec chmod u+rwx {} \\; 2>/dev/null',
+  'find "$@" -xdev -depth -user "$(id -u)" -delete 2>/dev/null',
+  'exit 0',
+].join('\n');
+
+async function sweepTemporary(uids) {
+  for (const uid of uids) {
+    await runAs(uid, 'sh', ['-c', SWEEP_SCRIPT, 'sweep', TMP_DIR, SHM_DIR]);
   }
 }
 
@@ -260,23 +315,116 @@ async function wipe({ dir, uid }) {
   fs.rmdirSync(dir);
 }
 
-async function teardown(ids) {
+const ignoreFailure = () => {};
+
+async function teardown(ids, afterKill = async () => {}) {
   const uids = [ids.chromiumUid, ids.displayUid];
   const killed = await killAll(uids);
+  await afterKill();
+  await wipe(filesEntry(ids)).catch(ignoreFailure);
+  await sweepTemporary(uids).catch(ignoreFailure);
   xFiles(ids.display).forEach(removeIfPresent);
-  removeShmOf(uids);
   for (const entry of sessionDirs(ids)) {
-    await wipe(entry);
+    await wipe(entry).catch(ignoreFailure);
   }
-  return killed && processesOf(uids).length === 0 && sessionDirs(ids).every(({ dir }) => !fs.existsSync(dir));
+  return killed
+    && processesOf(uids).length === 0
+    && ownedDirs(ids).every(({ dir }) => !fs.existsSync(dir))
+    && !temporaryLeftovers(uids);
 }
 
 async function slotIsFree(ids) {
   const uids = [ids.chromiumUid, ids.displayUid];
   return processesOf(uids).length === 0
-    && sessionDirs(ids).every(({ dir }) => !fs.existsSync(dir))
+    && ownedDirs(ids).every(({ dir }) => !fs.existsSync(dir))
+    && !temporaryLeftovers(uids)
     && !abstractSocketBound(ids.display)
     && !portInUse(ids.port);
+}
+
+const SCAN_FORMAT = '%d\\t%y\\t%s\\t%b\\t%T@\\t%f\\0';
+const SCAN_FIELDS = 5;
+
+function parseScan(text) {
+  let used = 0;
+  let sawRoot = false;
+  const files = [];
+  for (const entry of text.split('\0')) {
+    const fields = [];
+    let rest = entry;
+    while (fields.length < SCAN_FIELDS && rest.includes('\t')) {
+      const tab = rest.indexOf('\t');
+      fields.push(rest.slice(0, tab));
+      rest = rest.slice(tab + 1);
+    }
+    if (fields.length < SCAN_FIELDS) continue;
+    const [depth, type, size, blocks, mtime] = fields;
+    used += Number(blocks) * 512;
+    if (depth === '0') sawRoot = true;
+    if (depth === '1' && type === 'f' && !rest.startsWith('.')) {
+      files.push({ name: rest, size: Number(size), mtime: Math.round(Number(mtime) * 1000), partial: rest.endsWith('.crdownload') });
+    }
+  }
+  files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return sawRoot ? { used, files } : null;
+}
+
+async function scanFiles(ids) {
+  const { dir, uid } = filesEntry(ids);
+  if (!fs.existsSync(dir)) return null;
+  const out = await runAs(uid, 'sh', ['-c', 'find "$1" -printf "$2" 2>/dev/null; exit 0', 'scan', dir, SCAN_FORMAT]);
+  return parseScan(out.toString());
+}
+
+async function fileio(ids, op, args, input) {
+  const { dir, uid } = filesEntry(ids);
+  const out = await runAs(uid, process.execPath, [FILEIO, op, dir, ...args], { input });
+  return JSON.parse(out.toString());
+}
+
+const deleteFile = (ids, name) => fileio(ids, 'delete', [name]);
+const createUpload = (ids, temporary, name) => fileio(ids, 'create', [temporary, name]);
+const appendUpload = (ids, temporary, offset, chunk) => fileio(ids, 'append', [temporary, String(offset)], chunk);
+const publishUpload = (ids, temporary, name) => fileio(ids, 'publish', [temporary, name]);
+const dropUpload = (ids, temporary) => fileio(ids, 'drop', [temporary]);
+
+function readFile(ids, name) {
+  const { dir, uid } = filesEntry(ids);
+  const child = spawn('setpriv', [...asUser(uid), process.execPath, FILEIO, 'read', dir, name], {
+    env: { PATH: PATH_ENV },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const exited = new Promise((resolve) => child.on('close', (code) => resolve(code)));
+  return new Promise((resolve, reject) => {
+    let head = Buffer.alloc(0);
+    const fail = (error) => {
+      child.kill('SIGKILL');
+      reject(error);
+    };
+    const onData = (chunk) => {
+      head = Buffer.concat([head, chunk]);
+      const newline = head.indexOf(10);
+      if (newline === -1) {
+        if (head.length > HEADER_MAX_BYTES) fail(new Error('the file helper sent no header'));
+        return;
+      }
+      child.stdout.off('data', onData);
+      child.stdout.pause();
+      const rest = head.subarray(newline + 1);
+      if (rest.length > 0) child.stdout.unshift(rest);
+      let header;
+      try {
+        header = JSON.parse(head.subarray(0, newline).toString());
+      } catch {
+        fail(new Error('the file helper sent a malformed header'));
+        return;
+      }
+      resolve({ ...header, stream: child.stdout, exited, stop: () => child.kill('SIGKILL') });
+    };
+    child.stdout.on('data', onData);
+    child.on('error', reject);
+    exited.then(() => reject(new Error('the file helper ended before its header')));
+  });
 }
 
 function readGateway() {
@@ -304,10 +452,60 @@ async function ready() {
   };
 }
 
-function prepareHost() {
+function leftoverSlot(name) {
+  const match = /^chromium-(\d{1,4})$/.exec(name);
+  const slot = match ? Number(match[1]) : -1;
+  return slot >= 0 && slot < SLOT_COUNT ? slot : null;
+}
+
+async function wipeLeftoverFiles(root = FILES_ROOT, wipeEntry = wipe) {
+  const problems = [];
+  for (const name of fs.readdirSync(root)) {
+    const slot = leftoverSlot(name);
+    if (slot === null) {
+      problems.push(`${root}/${name} is not a session's files folder; left as it is`);
+      continue;
+    }
+    try {
+      await wipeEntry({ dir: path.join(root, name), uid: slotIds(slot).chromiumUid });
+    } catch (error) {
+      problems.push(`${root}/${name} could not be wiped: ${error.message}`);
+    }
+  }
+  return problems;
+}
+
+async function prepareHost() {
+  writeFilesPolicy(false);
   fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o711 });
   fs.mkdirSync(X_SOCKET_DIR, { recursive: true });
   fs.chmodSync(X_SOCKET_DIR, 0o1777);
+  fs.mkdirSync(FILES_ROOT, { recursive: true, mode: 0o711 });
+  return wipeLeftoverFiles();
 }
 
-module.exports = { launch, teardown, slotIsFree, ready, prepareHost, randomPassword, watchChild, exited, xvncArgs };
+module.exports = {
+  BLOCKED_POLICY,
+  ENABLED_POLICY,
+  appendUpload,
+  chromiumCommand,
+  createUpload,
+  deleteFile,
+  dropUpload,
+  exited,
+  launch,
+  parseScan,
+  prepareHost,
+  publishUpload,
+  randomPassword,
+  readFile,
+  ready,
+  scanFiles,
+  slotIsFree,
+  teardown,
+  temporaryLeftovers,
+  watchChild,
+  wipeLeftoverFiles,
+  writeFilesPolicy,
+  xvncArgs,
+};

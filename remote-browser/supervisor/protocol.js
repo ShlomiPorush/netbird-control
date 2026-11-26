@@ -10,6 +10,9 @@ const DISPLAY_UID_BASE = 61000;
 const CHROMIUM_UID_BASE = 62000;
 const VNC_PORT_BASE = 5900;
 const START_PAGE_MAX = 2048;
+const GIB = 1024 ** 3;
+const FILES_LIMIT = { min: GIB, max: 10 * GIB, fallback: 2 * GIB };
+const FILE_NAME_MAX_BYTES = 255;
 
 class RequestError extends Error {
   constructor(code, message) {
@@ -20,8 +23,12 @@ class RequestError extends Error {
 
 const failure = (code, message) => ({ ok: false, error: code, message });
 
+function isSessionId(value) {
+  return typeof value === 'string' && SESSION_ID.test(value);
+}
+
 function sessionId(value) {
-  if (typeof value !== 'string' || !SESSION_ID.test(value)) {
+  if (!isSessionId(value)) {
     throw new RequestError('BAD_REQUEST', 'session must be 1-64 characters of A-Z, a-z, 0-9, _ or -.');
   }
   return value;
@@ -31,6 +38,18 @@ function positiveInteger(value, name) {
   if (!Number.isInteger(value) || value <= 0) {
     throw new RequestError('BAD_REQUEST', `${name} must be a positive integer.`);
   }
+  return value;
+}
+
+function nonNegativeInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RequestError('BAD_REQUEST', `${name} must be a non-negative integer.`);
+  }
+  return value;
+}
+
+function boolean(value, name) {
+  if (typeof value !== 'boolean') throw new RequestError('BAD_REQUEST', `${name} must be true or false.`);
   return value;
 }
 
@@ -53,6 +72,35 @@ function startPage(value) {
   return url.href;
 }
 
+function filesLimit(value) {
+  if (value === undefined) return FILES_LIMIT.fallback;
+  if (!Number.isInteger(value) || value < FILES_LIMIT.min || value > FILES_LIMIT.max) {
+    throw new RequestError('BAD_REQUEST', `filesLimit must be an integer number of bytes from ${FILES_LIMIT.min} to ${FILES_LIMIT.max}.`);
+  }
+  return value;
+}
+
+function acks(value) {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RequestError('BAD_REQUEST', 'ack must map session ids to sequence numbers.');
+  }
+  const result = {};
+  for (const [session, seq] of Object.entries(value)) {
+    result[sessionId(session)] = nonNegativeInteger(seq, 'Each ack');
+  }
+  return result;
+}
+
+function isFileName(name) {
+  return typeof name === 'string'
+    && name.length > 0
+    && !name.startsWith('.')
+    && !name.includes('/')
+    && !name.includes('\0')
+    && Buffer.byteLength(name) <= FILE_NAME_MAX_BYTES;
+}
+
 function scaleFactor(dpi) {
   const raw = positiveInteger(dpi, 'dpi') / BASE_DPI;
   return Math.round(clamp(raw, SCALE.min, SCALE.max) * 100) / 100;
@@ -69,20 +117,17 @@ function parseRequest(line) {
     throw new RequestError('BAD_REQUEST', 'The request must be a JSON object.');
   }
   switch (request.op) {
-    case 'start': {
-      if (typeof request.terminal !== 'boolean') {
-        throw new RequestError('BAD_REQUEST', 'terminal must be true or false.');
-      }
+    case 'start':
       return {
         op: 'start',
         session: sessionId(request.session),
         ...screenSize(request.width, request.height),
         scale: scaleFactor(request.dpi),
-        terminal: request.terminal,
+        terminal: boolean(request.terminal, 'terminal'),
         until: positiveInteger(request.until, 'until'),
         startPage: startPage(request.startPage),
+        filesLimit: filesLimit(request.filesLimit),
       };
-    }
     case 'renew':
     case 'credentials':
       return { op: request.op, session: sessionId(request.session), until: positiveInteger(request.until, 'until') };
@@ -90,10 +135,18 @@ function parseRequest(line) {
     case 'stop':
       return { op: request.op, session: sessionId(request.session) };
     case 'list':
+      return { op: 'list', ack: acks(request.ack) };
     case 'ready':
-      return { op: request.op };
+      return { op: 'ready' };
+    case 'files':
+      return {
+        op: 'files',
+        enabled: boolean(request.enabled, 'enabled'),
+        transfer: boolean(request.transfer, 'transfer'),
+        rev: nonNegativeInteger(request.rev, 'rev'),
+      };
     default:
-      throw new RequestError('BAD_REQUEST', 'op must be start, renew, status, credentials, stop, list or ready.');
+      throw new RequestError('BAD_REQUEST', 'op must be start, renew, status, credentials, stop, list, ready or files.');
   }
 }
 
@@ -111,11 +164,14 @@ function slotIds(slot) {
 }
 
 module.exports = {
+  FILES_LIMIT,
   MAX_LINE_BYTES,
   SCREEN,
   SLOT_COUNT,
   RequestError,
   failure,
+  isFileName,
+  isSessionId,
   parseRequest,
   scaleFactor,
   screenSize,

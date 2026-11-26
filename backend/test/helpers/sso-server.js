@@ -113,10 +113,12 @@ function ssoServer() {
     }
 
     async function call(sub, method, path, body, headers = {}) {
+        const raw = body instanceof Uint8Array || body instanceof ReadableStream;
         const res = await fetch(BASE + path, {
             method,
             headers: { accept: 'application/json', 'content-type': 'application/json', cookie: await signIn(sub), ...headers },
-            body: body === undefined ? undefined : JSON.stringify(body),
+            body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
+            ...(body instanceof ReadableStream ? { duplex: 'half' } : {}),
             redirect: 'manual',
         });
         const text = await res.text();
@@ -125,7 +127,7 @@ function ssoServer() {
         return { status: res.status, text, json, headers: res.headers };
     }
 
-    return { start, stop, call, netbird };
+    return { start, stop, call, netbird, signIn, url: (path) => BASE + path };
 }
 
 module.exports = { ssoServer };

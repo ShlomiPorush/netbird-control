@@ -20,6 +20,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   connection is recorded. Anyone with the Remote Access permission may open one.
   Pasting Hebrew text is not supported yet. Needs the new `remote-browser` Compose profile and
   image: setup in docs/remote-access.md.
+- **Files in the remote browser.** Two settings, both off by default: **Files In The Browser** lets
+  the browser download files and upload them to websites, and **Transfer Files To And From
+  Computers** adds Download and Upload in the session bar's new **Files** panel. Each browser has
+  2 GB for its files (a setting, 1 to 10 GB), and its files are deleted when it closes. Files that
+  land in the browser and every transfer and delete are recorded. A reverse proxy must allow 1 MiB
+  request bodies on the upload route (8 MiB recommended): see docs/remote-access.md.
 - **The Browser Gateways' host isolation rules come as a script and a systemd unit.**
   `netbird-docker-compose-files/remote-access-isolation` holds a script that sets the rules and a
   unit that runs it before Docker starts, so the rules survive a reboot. They now block the

@@ -117,6 +117,7 @@ function browserTable() {
         if (/^SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY\(\$1\) AND state = ANY\(\$2\)$/.test(s)) {
             return many(p[0].map(id => rows.get(id)).filter(r => r && p[1].includes(r.state)));
         }
+        if (/^SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY\(\$1\)$/.test(s)) return many(p[0].map(id => rows.get(id)).filter(Boolean));
         if (/^SELECT conn_count FROM browser_sessions WHERE id = \$1 FOR UPDATE$/.test(s)) return one(rows.get(p[0]));
         if (/^UPDATE browser_sessions SET conn_count = conn_count \+ 1 WHERE id = \$1$/.test(s)) {
             const r = rows.get(p[0]);

@@ -2,13 +2,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { MAX_LINE_BYTES, parseRequest, scaleFactor, slotIds } = require('../supervisor/protocol');
+const { MAX_LINE_BYTES, isFileName, parseRequest, scaleFactor, slotIds } = require('../supervisor/protocol');
 
 const start = (fields) => JSON.stringify({ op: 'start', session: 'abc', width: 1280, height: 720, dpi: 96, terminal: false, until: 2_000_000, ...fields });
+const GIB = 1024 ** 3;
 const rejects = (line, code = 'BAD_REQUEST') => assert.throws(() => parseRequest(line), (error) => error.code === code);
 
 test('a start request is parsed with its screen and scale', () => {
-  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000, startPage: '' });
+  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000, startPage: '', filesLimit: 2 * GIB });
 });
 
 test('the screen is capped at 1920x1080 and raised to the minimum', () => {
@@ -51,7 +52,7 @@ test('renew, status, credentials, stop, list and ready keep only what they need'
   assert.deepEqual(parseRequest('{"op":"status","session":"s1","until":5000}'), { op: 'status', session: 's1' });
   assert.deepEqual(parseRequest('{"op":"credentials","session":"s1","until":5000}'), { op: 'credentials', session: 's1', until: 5000 });
   assert.deepEqual(parseRequest('{"op":"stop","session":"s1"}'), { op: 'stop', session: 's1' });
-  assert.deepEqual(parseRequest('{"op":"list","session":"ignored"}'), { op: 'list' });
+  assert.deepEqual(parseRequest('{"op":"list","session":"ignored"}'), { op: 'list', ack: {} });
   assert.deepEqual(parseRequest('{"op":"ready"}'), { op: 'ready' });
   rejects('{"op":"renew","until":5000}');
   rejects('{"op":"status"}');
@@ -67,7 +68,7 @@ test('start, renew and credentials require until as a positive integer', () => {
 });
 
 test('an unknown op names every op', () => {
-  assert.throws(() => parseRequest('{"op":"explode"}'), { message: 'op must be start, renew, status, credentials, stop, list or ready.' });
+  assert.throws(() => parseRequest('{"op":"explode"}'), { message: 'op must be start, renew, status, credentials, stop, list, ready or files.' });
 });
 
 test('malformed requests are refused', () => {
@@ -94,5 +95,36 @@ test('a start page is an http or https address, never a switch, a file or a sign
   assert.equal(parseRequest(start({ startPage: '' })).startPage, '');
   for (const bad of ['--remote-debugging-port=9222', 'file:///etc/passwd', 'javascript:alert(1)', 'chrome://settings', 'https://user:pass@example.com/', 'example.com', 42, `https://example.com/${'a'.repeat(2048)}`]) {
     assert.throws(() => parseRequest(start({ startPage: bad })), { code: 'BAD_REQUEST' });
+  }
+});
+
+test('the files limit of a start is a whole number of bytes from 1 to 10 GiB', () => {
+  assert.equal(parseRequest(start({ filesLimit: GIB })).filesLimit, GIB);
+  assert.equal(parseRequest(start({ filesLimit: 10 * GIB })).filesLimit, 10 * GIB);
+  for (const filesLimit of [GIB - 1, 10 * GIB + 1, 1.5 * GIB + 0.5, '2147483648', null, 0]) {
+    rejects(start({ filesLimit }));
+  }
+});
+
+test('a files request carries enabled, transfer and a non-negative rev', () => {
+  assert.deepEqual(parseRequest('{"op":"files","enabled":true,"transfer":false,"rev":0,"extra":1}'), { op: 'files', enabled: true, transfer: false, rev: 0 });
+  for (const fields of [{ enabled: 'true' }, { transfer: 1 }, { rev: -1 }, { rev: 1.5 }, { rev: '3' }, { rev: undefined }]) {
+    rejects(JSON.stringify({ op: 'files', enabled: true, transfer: true, rev: 1, ...fields }));
+  }
+});
+
+test('list acks map session ids to sequence numbers', () => {
+  assert.deepEqual(parseRequest('{"op":"list","ack":{"s1":3,"s2":0}}'), { op: 'list', ack: { s1: 3, s2: 0 } });
+  for (const ack of [[], null, 'x', { s1: -1 }, { s1: 1.5 }, { 'a b': 1 }]) {
+    rejects(JSON.stringify({ op: 'list', ack }));
+  }
+});
+
+test('a file name is one visible path segment of at most 255 bytes', () => {
+  for (const name of ['firmware.out', 'FGT_60F-v7.4.4.out', 'קובץ.pdf', 'a b', 'x'.repeat(255), 'ü'.repeat(127)]) {
+    assert.equal(isFileName(name), true, name);
+  }
+  for (const name of ['', '.', '..', '.hidden', '.upload-1', 'a/b', '/', 'a\0b', 'x'.repeat(256), 'ü'.repeat(128), null, 7]) {
+    assert.equal(isFileName(name), false, String(name));
   }
 });

@@ -144,11 +144,34 @@ export function PeerCell({ name, addr, fields, icon, peerId }: { name: string; a
   );
 }
 
-function webConnectionRecord(raw: unknown): { kind?: string; missed?: number } {
+interface WebConnectionRecord { kind?: string; missed?: number; action?: string; name?: string; size?: number; complete?: boolean }
+
+function webConnectionRecord(raw: unknown): WebConnectionRecord {
   const remoteAccess = raw && typeof raw === 'object' ? (raw as { remoteAccess?: unknown }).remoteAccess : undefined;
   if (!remoteAccess || typeof remoteAccess !== 'object') return {};
-  const { kind, missed } = remoteAccess as { kind?: unknown; missed?: unknown };
-  return { kind: typeof kind === 'string' ? kind : undefined, missed: typeof missed === 'number' && missed > 0 ? missed : undefined };
+  const { kind, missed, action, name, size, complete } = remoteAccess as Record<string, unknown>;
+  return {
+    kind: typeof kind === 'string' ? kind : undefined,
+    missed: typeof missed === 'number' && missed > 0 ? missed : undefined,
+    action: typeof action === 'string' ? action : undefined,
+    name: typeof name === 'string' ? name : undefined,
+    size: typeof size === 'number' ? size : undefined,
+    complete: complete === false ? false : undefined,
+  };
+}
+
+const FILE_ACTIONS: Record<string, string> = {
+  saved: 'saved',
+  downloaded: 'copied to a computer',
+  uploaded: 'received from a computer',
+  deleted: 'deleted',
+};
+
+function webFileDescription(record: WebConnectionRecord) {
+  const file = <span className="text-netbird font-medium">{record.name || 'a file'}</span>;
+  const size = record.size !== undefined ? <> ({formatBytes(record.size)})</> : null;
+  const action = record.action === 'downloaded' && record.complete === false ? 'partly copied to a computer' : FILE_ACTIONS[record.action || ''] || 'changed';
+  return <>Remote Browser {action} {file}{size}</>;
 }
 
 export function EventDescription({ ev }: { ev: LogEvent }) {
@@ -165,6 +188,7 @@ export function EventDescription({ ev }: { ev: LogEvent }) {
     if (record.kind === 'gap') {
       return <>Remote Browser connections not recorded{record.missed ? ` (${record.missed} missed)` : ''}</>;
     }
+    if (record.kind === 'file') return webFileDescription(record);
     const site = <span className="text-netbird font-medium">{dstName || dstAddr || 'unknown'}</span>;
     return <>Remote Browser connected to {site}{dstName && dstAddr && dstName !== dstAddr ? <> ({dstAddr})</> : null}</>;
   }

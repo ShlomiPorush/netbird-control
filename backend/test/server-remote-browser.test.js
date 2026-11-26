@@ -51,7 +51,10 @@ test('info offers web sessions only while they are on, with the keep-alive', asy
     config({ enabled: true, routerGroupId: 'g-office', keepAliveMin: 25 });
     let r = await h.call('remote', 'GET', '/api/remote-access/info');
     assert.equal(r.status, 200, r.text);
-    assert.deepEqual(r.json.browser, { keepAliveMin: 25 });
+    assert.deepEqual(r.json.browser, { keepAliveMin: 25, files: false, transfer: false });
+    config({ enabled: true, routerGroupId: 'g-office', files: true, transfer: true });
+    r = await h.call('remote', 'GET', '/api/remote-access/info');
+    assert.deepEqual(r.json.browser, { keepAliveMin: 15, files: true, transfer: true });
     r = await h.call('plain', 'GET', '/api/remote-access/info');
     assert.equal(r.json.browser, undefined, 'not for a user without Remote Access');
     config({ enabled: false, routerGroupId: 'g-office' });

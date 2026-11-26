@@ -328,7 +328,7 @@ export function RemoteAccessSettings() {
         <input type="checkbox" className="mt-1 accent-netbird" checked={form.clipboard} onChange={(e) => set('clipboard', e.target.checked)} />
         <div>
           <div className="text-sm font-semibold text-nb-gray-800 dark:text-nb-gray-100">Allow Clipboard</div>
-          <div className="text-[0.8rem] text-nb-gray-500">Copy and paste text between the browser and the remote session. File transfer is always off.</div>
+          <div className="text-[0.8rem] text-nb-gray-500">Copy and paste text between the browser and RDP or SSH sessions. RDP and SSH sessions never transfer files.</div>
         </div>
       </label>
 

@@ -131,4 +131,26 @@ async function setSetting(key, value) {
     _onSettingChange();
 }
 
-module.exports = { pool, DB_CONNECTION, getSetting, setSetting, onSettingChange, cappedCount, capTotal, withCancelOnClose, COUNT_CAP };
+async function updateSetting(key, update) {
+    const client = await pool.connect();
+    let value;
+    try {
+        await client.query('BEGIN');
+        const row = (await client.query('SELECT value FROM app_settings WHERE key = $1 FOR UPDATE', [key])).rows[0];
+        value = String(update(row ? row.value : null));
+        await client.query(
+            `INSERT INTO app_settings (key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+            [key, value]);
+        await client.query('COMMIT');
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => { });
+        throw e;
+    } finally {
+        client.release();
+    }
+    _onSettingChange();
+    return value;
+}
+
+module.exports = { pool, DB_CONNECTION, getSetting, setSetting, updateSetting, onSettingChange, cappedCount, capTotal, withCancelOnClose, COUNT_CAP };

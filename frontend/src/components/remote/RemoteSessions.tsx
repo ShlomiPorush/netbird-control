@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '@/lib/api';
-import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Expand, Globe, Hand, Keyboard, Loader2, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, MousePointer2, Pin, PinOff, Plus, Power, Smartphone, Terminal, Unplug, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
+import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Expand, FolderOpen, Globe, Hand, Keyboard, Loader2, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, MousePointer2, Pin, PinOff, Plus, Power, Smartphone, Terminal, Unplug, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useScrollLock } from '@/lib/useScrollLock';
 import { apiText, remoteApi, GUAC, PORTAL_MESSAGE_CODES, type GuacStatus, type RemoteProtocol, type WebSessionInfo } from '@/lib/remoteAccess';
@@ -11,7 +11,8 @@ import { Button, Field, Input, PasswordInput, Textarea } from '@/components/ui';
 import { GuacScreen, coarsePointer, deviceSize, isPhone, phoneDesktop, remoteScreen, type PointerMode, type ScreenApi, type ViewerEvent } from './GuacScreen';
 import { ARG_LABELS, FailureBox, StepList, StepSummary, explain, handoffSteps, usePacedSteps, withStep, type Failure, type Step } from './steps';
 import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from './flow';
-import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN, KEY_ROW_HEIGHT, KeyRow, MenuRow, SPECIAL_KEYS, ScreenKeyboard, hasTouch, saveScreenshot } from './SessionTools';
+import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN, KEY_ROW_HEIGHT, KeyRow, MenuRow, SPECIAL_KEYS, ScreenKeyboard, hasTouch, saveScreenshot, useBarPanelPosition } from './SessionTools';
+import { FilesPanel } from './FilesPanel';
 
 // Open browser sessions live here, above the routes: moving to another page of the portal keeps
 // them running, and they show as tabs in one full-screen session view. Closing the browser tab
@@ -183,6 +184,8 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const [clips, setClips] = useState<Record<string, string>>({});
   const [clipOpen, setClipOpen] = useState(false);
   const clipButton = useRef<HTMLButtonElement>(null);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const filesButton = useRef<HTMLButtonElement>(null);
   const active = sessions.find((s) => s.sessionId === activeId) || sessions[sessions.length - 1];
   const activeApi = () => (active ? apis.current[active.sessionId]?.current ?? null : null);
   // The bar's tools: an open menu keeps the bar in sight; the on-screen keyboard and the device
@@ -246,7 +249,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const handleLeave = () => window.clearTimeout(dwellTimer.current);
   useEffect(() => { if (open) reveal(); }, [open, activeId, scheduleHide]);
   useEffect(() => () => { window.clearTimeout(hideTimer.current); window.clearTimeout(dwellTimer.current); }, []);
-  const keepBar = pinned || clipOpen || menuOpen;
+  const keepBar = pinned || clipOpen || filesOpen || menuOpen;
   const barVisible = barShown || keepBar;
   // The tab of the session in front stays in sight when the tab list scrolls: when it comes to the
   // front, and when the list gets narrower (a smaller window).
@@ -329,8 +332,15 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
     if (sessions.find((s) => s.sessionId === id)?.protocol === 'web') detach(id); else endSession(id);
   };
   const webActive = active?.protocol === 'web';
+  const info = useQuery({ queryKey: ['remote-access-info'], queryFn: ({ signal }) => remoteApi.info(signal), enabled: open && webActive, staleTime: 60_000 });
+  const filesOn = webActive && !!info.data?.browser?.files;
+  const transferOn = filesOn && !!info.data?.browser?.transfer;
+  useEffect(() => setFilesOpen(false), [activeId]);
+  const toggleFiles = () => { setClipOpen(false); setFilesOpen((v) => !v); };
+  const toggleClipboard = () => { setFilesOpen(false); setClipOpen((v) => !v); };
   const leave = () => {
     setClipOpen(false);
+    setFilesOpen(false);
     setOskOpen(false);
     deviceKeys.current?.close();
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => { });
@@ -480,7 +490,10 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
               </BarMenu>
             )}
             {active.clipboard && (
-              <BarButton buttonRef={clipButton} onClick={() => setClipOpen((v) => !v)} title="Clipboard" pressed={clipOpen}><ClipboardPaste size={16} /></BarButton>
+              <BarButton buttonRef={clipButton} onClick={toggleClipboard} title="Clipboard" pressed={clipOpen}><ClipboardPaste size={16} /></BarButton>
+            )}
+            {filesOn && (
+              <BarButton buttonRef={filesButton} className="hidden sm:flex" onClick={toggleFiles} title="Files" pressed={filesOpen}><FolderOpen size={16} /></BarButton>
             )}
             <BarButton className={coarse ? 'hidden min-[400px]:flex' : 'hidden sm:flex'} onClick={fullscreen} title="Full Screen"><Maximize2 size={16} /></BarButton>
             <BarButton className="hidden sm:flex" onClick={togglePin} title={pinned ? 'Let The Bar Hide' : 'Keep The Bar Open'} pressed={pinned}>{pinned ? <PinOff size={16} /> : <Pin size={16} />}</BarButton>
@@ -524,6 +537,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                     <MenuRow className={coarse ? 'min-[400px]:hidden' : undefined} icon={<Maximize2 size={15} />} label="Full Screen" onClick={() => { close(); fullscreen(); }} />
                     <MenuRow icon={<Pin size={15} />} label="Keep The Bar Open" checked={pinned}
                       onClick={() => { togglePin(); close(); }} />
+                    {filesOn && <MenuRow icon={<FolderOpen size={15} />} label="Files" checked={filesOpen} onClick={() => { close(); toggleFiles(); }} />}
                     <MenuRow icon={<Plus size={15} />} label="New Session" onClick={() => { close(); newSession(); }} />
                     {webActive && <MenuRow icon={<Power size={15} />} label="Close Browser" onClick={() => { close(); closeBrowser(active.sessionId); }} />}
                   </div>
@@ -568,6 +582,16 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           onClose={() => { setClipOpen(false); if (!pinned) scheduleHide(1500); }}
         />
       )}
+      {filesOn && active && (
+        <FilesPanel
+          key={active.sessionId}
+          sessionId={current.current[active.sessionId] || active.sessionId}
+          transfer={transferOn}
+          anchor={filesButton}
+          open={filesOpen}
+          onClose={() => { setFilesOpen(false); if (!pinned) scheduleHide(1500); }}
+        />
+      )}
       </div>
     </div>,
     document.body,
@@ -598,19 +622,7 @@ function ProtocolIcon({ protocol, size }: { protocol: RemoteProtocol; size: numb
 function ClipboardPanel({ initial, anchor, note, onSend, onClose }: {
   initial: string; anchor: RefObject<HTMLButtonElement | null>; note?: string; onSend: (t: string) => void; onClose: () => void;
 }) {
-  // Right under its button, like the bar's menus, and inside the window.
-  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
-  useLayoutEffect(() => {
-    const place = () => {
-      const r = anchor.current?.getBoundingClientRect();
-      if (!r) return;
-      const width = Math.min(CLIP_WIDTH, window.innerWidth - 16);
-      setPos({ left: Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8)), top: r.bottom + 10, width });
-    };
-    place();
-    window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
-  }, [anchor]);
+  const pos = useBarPanelPosition(anchor, CLIP_WIDTH);
   const [text, setText] = useState(initial);
   useEffect(() => setText(initial), [initial]);
   return (
