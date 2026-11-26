@@ -97,7 +97,7 @@ function answer(req) {
             if (!Number.isInteger(req.until)) return { ok: false, error: 'BAD_REQUEST' };
             if (sup.renewAnswer) return sup.renewAnswer;
             if (!sup.sessions.has(req.session)) return gone(req.session);
-            if (expired(req)) { sup.sessions.delete(req.session); sup.tombstones.add(req.session); return { ok: false, error: 'EXPIRED' }; }
+            if (expired(req)) return { ok: false, error: 'EXPIRED' };
             return { ok: true };
         case 'status':
             return sup.sessions.has(req.session) ? { ok: true, state: 'running' } : gone(req.session);
@@ -105,7 +105,7 @@ function answer(req) {
             if (!Number.isInteger(req.until)) return { ok: false, error: 'BAD_REQUEST' };
             const s = sup.sessions.get(req.session);
             if (!s) return gone(req.session);
-            if (expired(req)) { sup.sessions.delete(req.session); sup.tombstones.add(req.session); return { ok: false, error: 'EXPIRED' }; }
+            if (expired(req)) return { ok: false, error: 'EXPIRED' };
             return { ok: true, port: s.port, password: s.password, uid: s.uid, instance: sup.instance, startedAt: s.startedAt };
         }
         case 'stop':
@@ -125,6 +125,7 @@ function answer(req) {
 
 let guacdSeen = [];
 let guacdNoDisplay = false;
+let onSelect = null;
 const guacdSockets = [];
 const guacd = net.createServer((sock) => {
     guacdSockets.push(sock);
@@ -133,6 +134,7 @@ const guacd = net.createServer((sock) => {
     sock.on('data', (d) => {
         for (const ins of parser.push(d.toString('utf8'))) {
             guacdSeen.push(ins);
+            if (ins.opcode === 'select' && onSelect) onSelect();
             if (ins.opcode === 'select') sock.write(encodeInstruction('args', 'VERSION_1_5_0', 'hostname', 'port', 'password', 'color-depth', 'disable-copy', 'disable-paste', 'enable-sftp', 'enable-audio', 'disable-display-resize', 'clipboard-encoding'));
             if (ins.opcode === 'connect') sock.write(encodeInstruction('ready', '$vnc-1') + (guacdNoDisplay ? encodeInstruction('nop') + encodeInstruction('error', 'Aborted. See logs.', '519') : encodeInstruction('size', '0', '1280', '720')));
         }
@@ -186,6 +188,7 @@ async function reset({ maxSessions = 5, keepAliveMin = 15 } = {}) {
     recorded.length = 0;
     guacdSeen = [];
     guacdNoDisplay = false;
+    onSelect = null;
     Object.assign(sup, { requests: [], failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, clock: () => Date.now() });
     sup.delays.clear();
     insertedIds.clear();
@@ -441,7 +444,13 @@ test('the leader loop renews, detaches an expired viewer lease, ends after the k
     Object.assign(leaseGone, { state: 'active', lease_expires_at: new Date(Date.now() - 1000), detached_at: null });
     keepAliveGone.detached_at = new Date(Date.now() - 16 * 60_000);
     unverified.last_auth_ok_at = new Date(Date.now() - 151_000);
-    await rb._internal.maintainWebSessions();
+    const readSnapshot = ra.readSnapshotNow;
+    ra.readSnapshotNow = async () => { throw new Error('NetBird is not answering'); };
+    try {
+        await rb._internal.superviseWebSessions();
+    } finally {
+        ra.readSnapshotNow = readSnapshot;
+    }
     assert.equal(renewed.state, 'detached');
     assert.ok(sup.requests.some(r => r.op === 'renew' && r.session === renewed.id));
     assert.equal(leaseGone.state, 'detached');
@@ -450,7 +459,7 @@ test('the leader loop renews, detaches an expired viewer lease, ends after the k
     assert.equal(unverified.state, 'ended');
     assert.equal(unverified.end_code, rb.CODE.denied);
     sup.sessions.delete(renewed.id);
-    await rb._internal.maintainWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(renewed.state, 'ended');
     assert.equal(renewed.end_reason, 'The browser was closed.');
 });
@@ -463,7 +472,7 @@ test('a stop that fails keeps the slot until a later stop succeeds', async () =>
     assert.equal(table.rows.get(out.sessionId).state, 'ending');
     await rejects(rb.createWebSession(USER, {}, ''), 429, 'BROWSER_CAPACITY');
     sup.failStop = false;
-    await rb._internal.maintainWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(table.rows.get(out.sessionId).state, 'ended');
     assert.equal(recorded.filter(e => e.Message === 'TYPE_END').length, 1);
 });
@@ -514,10 +523,10 @@ test('the re-check ends sessions whose exit node entitlement is gone, and refres
     await reset();
     const out = await rb.createWebSession(USER, {}, '');
     table.rows.get(out.sessionId).last_auth_ok_at = new Date(Date.now() - 100_000);
-    await rb._internal.recheckWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.ok(Date.now() - table.rows.get(out.sessionId).last_auth_ok_at < 5000);
     snapshot['/api/peers'][0].login_expired = true;
-    await rb._internal.recheckWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(table.rows.get(out.sessionId).state, 'ended');
     assert.equal(table.rows.get(out.sessionId).end_code, 0x0303);
 });
@@ -526,7 +535,7 @@ test('the re-check stops every web session when the gate closes', async () => {
     await reset();
     const out = await rb.createWebSession(USER, {}, '');
     snapshot['/api/groups'][3].peers.push({ id: 'laptop' });
-    await rb._internal.recheckWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(table.rows.get(out.sessionId).state, 'ended');
     assert.match(table.rows.get(out.sessionId).end_reason, /browser gateway isn't ready/);
 });
@@ -568,7 +577,7 @@ test('an attached tab whose viewer lease lapsed is disconnected, and its keep-al
     await c.opened;
     await until(() => table.rows.get(out.sessionId).state === 'active');
     table.rows.get(out.sessionId).lease_expires_at = new Date(Date.now() - 1000);
-    await rb._internal.maintainWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(table.rows.get(out.sessionId).state, 'detached');
     await rb.watchAttached();
     await c.closed;
@@ -615,7 +624,7 @@ test('the leader renews each browser only until its last authorization plus 150 
     const row = table.rows.get(out.sessionId);
     row.last_auth_ok_at = new Date(Date.now() - 100_000);
     sup.requests.length = 0;
-    await rb._internal.maintainWebSessions();
+    await rb._internal.superviseWebSessions();
     const renew = sup.requests.find(r => r.op === 'renew');
     assert.equal(renew.until, row.last_auth_ok_at.getTime() + 150_000);
     const c = connect((await rb.resumeWebSession(USER, out.sessionId, {})).token);
@@ -655,7 +664,7 @@ test('a guacd the app cannot reach keeps new sessions closed with a clear reason
     assert.equal(check.steps[0].code, 'GATEWAY_NOT_READY');
     assert.match(check.steps[0].message, /display service/);
     assert.equal((await rb.getBrowserStatus()).code, 'GUACD_UNREACHABLE');
-    await rb._internal.recheckWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(table.rows.get(out.sessionId).state, 'detached');
 });
 
@@ -714,7 +723,7 @@ test('a supervisor restart ends the old sessions as restarted, and their connect
     assert.equal(table.rows.get(old.sessionId).end_reason, 'The remote browser restarted, so the session ended.');
     const record = (port) => JSON.stringify({ 'oob.uid': uid, 'ip.protocol': 6, src_ip: '100.92.0.7', src_port: port, dest_ip: '93.184.215.14', dest_port: 443 });
     rb._internal.handleRecord(record(41000));
-    await rb._internal.lookupPendingUids(Date.now() + 31_000);
+    rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     assert.equal(recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'connection').length, 0);
     assert.equal(recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'gap').length, 1);
@@ -742,7 +751,7 @@ test('a record whose uid maps to no open session becomes a gap with the number m
     rb._internal.handleRecord(record(42000));
     rb._internal.handleRecord(record(42001));
     rb._internal.handleRecord(JSON.stringify({ 'oob.uid': 62777, 'ip.protocol': 17, dest_ip: '1.1.1.1', dest_port: 53 }));
-    await rb._internal.lookupPendingUids(Date.now() + 31_000);
+    rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     assert.equal(recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'connection').length, 0);
     const gaps = recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'gap');
@@ -768,7 +777,6 @@ test('connection ids are the same on every leader, and the cap is counted in the
     await rb._internal.reconcileWithSupervisor();
     await rb._internal.eventsIdleForTest();
     rb._internal.handleRecord(record(43000));
-    await rb._internal.lookupPendingUids();
     await rb._internal.eventsIdleForTest();
     const conns = recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'connection');
     assert.equal(attemptedIds.filter(id => id === conns[0].ID).length, 2, 'the second leader writes the same id');
@@ -806,7 +814,7 @@ test('the authorization time is one value: stored at create and resume, and sent
     assert.ok(stored() >= before && stored() <= credentials.at, 'resume stores the time of its own authorization, from before the supervisor call');
     assert.equal(credentials.until, stored() + 150_000);
     sup.requests.length = 0;
-    await rb._internal.maintainWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(sup.requests.find(r => r.op === 'renew').until, stored() + 150_000);
 });
 
@@ -814,7 +822,7 @@ test('an authorization that has expired ends the session at renew and at attach'
     await reset();
     const renewed = await rb.createWebSession(USER, {}, '');
     sup.clock = () => Date.now() + 200_000;
-    await rb._internal.maintainWebSessions();
+    await rb._internal.superviseWebSessions();
     assert.equal(table.rows.get(renewed.sessionId).state, 'ended');
     assert.equal(table.rows.get(renewed.sessionId).end_code, rb.CODE.denied);
     assert.match(table.rows.get(renewed.sessionId).end_reason, /couldn't be verified/);
@@ -828,7 +836,7 @@ test('an authorization that has expired ends the session at renew and at attach'
     assert.ok(sup.tombstones.has(attached.sessionId));
 });
 
-test('a pending record from an earlier holder of the uid becomes a gap, and one from after the new start is attributed', async () => {
+test('a record from an earlier holder of the uid becomes a gap, and one from after the start the supervisor reports is attributed', async () => {
     await reset();
     const out = await rb.createWebSession(USER, {}, '');
     assert.equal(await rb._internal.bindConnections(), true);
@@ -837,11 +845,12 @@ test('a pending record from an earlier holder of the uid becomes a gap, and one 
     const uid = table.rows.get(out.sessionId).uid;
     const startedAt = sup.sessions.get(out.sessionId).startedAt;
     rb._internal.resetForTest();
+    await rb._internal.refreshUidMap();
     const record = (at, port) => JSON.stringify({ timestamp: ulogdTime(at), 'oob.uid': uid, 'ip.protocol': 6, src_ip: '100.92.0.7', src_port: port, dest_ip: '93.184.215.14', dest_port: 443 });
     rb._internal.handleRecord(record(startedAt - 10_000, 44000));
     rb._internal.handleRecord(record(startedAt + 1_000, 44001));
-    await rb._internal.lookupPendingUids();
-    await rb._internal.lookupPendingUids();
+    await rb._internal.eventsIdleForTest();
+    rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     const conns = recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'connection');
     assert.deepEqual(conns.map(e => e.meta.source_addr), ['100.92.0.7:44001']);
@@ -885,13 +894,21 @@ test('a flood of connection records with a slow database stays bounded and ends 
         }
     }
     assert.equal(rb._internal.queuedForTest(), 5000);
+    rb._internal.flushMissedForTest();
+    rb._internal.flushMissedForTest();
+    assert.equal(rb._internal.queuedForTest(), 5000, 'gap records wait for room instead of passing the budget');
     connectGate.open();
     connectGate = null;
-    await until(async () => { await rb._internal.eventsIdleForTest(); return rb._internal.queuedForTest() === 0 && recorded.filter(e => e.remoteAccess.kind === 'gap').length === 3; }, 20_000);
+    await until(async () => { await rb._internal.eventsIdleForTest(); return rb._internal.queuedForTest() === 0; }, 20_000);
+    rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
-    assert.equal(recorded.filter(e => e.remoteAccess.kind === 'connection').length, 5000);
+    rb._internal.flushMissedForTest();
+    await rb._internal.eventsIdleForTest();
+    assert.equal(recorded.filter(e => e.remoteAccess.kind === 'connection').length, 4000);
     const gaps = recorded.filter(e => e.remoteAccess.kind === 'gap');
-    assert.deepEqual(gaps.map(e => [e.remoteAccess.sessionId, e.remoteAccess.missed]), [[sessions[0], 1000], [sessions[1], 1000], [sessions[2], 2000]]);
+    assert.deepEqual(gaps.filter(e => e.remoteAccess.missed).map(e => [e.remoteAccess.sessionId, e.remoteAccess.missed]), [[sessions[1], 1000], [sessions[2], 3000]],
+        'one record per session with everything it missed, written once');
+    assert.deepEqual(gaps.filter(e => !e.remoteAccess.missed).map(e => e.ID), [`web-gap:${sessions[0]}:cap`]);
     await rb._internal.closeConnectionsForTest();
 });
 
@@ -902,7 +919,7 @@ test('the leader authorizes each user once per tick, and one slow stop does not 
     let checks = 0;
     rb.setRemoteBrowserDeps({ stillPermitted: async () => { checks++; await sleep(50); return true; } });
     try {
-        await rb._internal.recheckWebSessions();
+        await rb._internal.superviseWebSessions();
     } finally {
         rb.setRemoteBrowserDeps({ stillPermitted: undefined });
     }
@@ -912,7 +929,7 @@ test('the leader authorizes each user once per tick, and one slow stop does not 
     sup.delays.set(`stop:${slow}`, 400);
     sup.requests.length = 0;
     const started = Date.now();
-    await rb._internal.maintainWebSessions();
+    await rb._internal.superviseWebSessions();
     const renews = sup.requests.filter(r => r.op === 'renew');
     assert.equal(renews.length, 3);
     assert.ok(renews.every(r => r.at - started < 300), 'the renewals did not wait for the slow stop');
@@ -946,4 +963,85 @@ test('a late row-watch answer about an earlier tab never closes the tab that too
     assert.equal(errorOf(second.got), undefined);
     second.ws.close();
     await second.closed;
+});
+
+test('the leader keeps the newest authorization time, and renews with the value stored on the row', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    const newer = new Date(Date.now() + 60_000);
+    table.rows.get(out.sessionId).last_auth_ok_at = newer;
+    sup.requests.length = 0;
+    await rb._internal.superviseWebSessions();
+    assert.equal(table.rows.get(out.sessionId).last_auth_ok_at.getTime(), newer.getTime(), 'a newer authorization is never overwritten');
+    assert.equal(sup.requests.find(r => r.op === 'renew').until, newer.getTime() + 150_000);
+});
+
+test('a slow permission check for one user does not delay the renewals of other users', async () => {
+    await reset();
+    snapshot['/api/peers'].push({ id: 'laptop-2', name: 'Laptop 2', user_id: 'u2', groups: [{ id: 'g-staff' }], connected: false });
+    snapshot['/api/groups'][1].peers.push({ id: 'laptop-2' });
+    ra.invalidateSnapshot();
+    const slow = await rb.createWebSession(USER, {}, '');
+    const fast = [await rb.createWebSession(OTHER, {}, ''), await rb.createWebSession(OTHER, {}, '')];
+    rb.setRemoteBrowserDeps({ stillPermitted: async ({ userId }) => { if (userId === 'u1') await sleep(300); return true; } });
+    sup.requests.length = 0;
+    const started = Date.now();
+    try {
+        await rb._internal.superviseWebSessions();
+    } finally {
+        rb.setRemoteBrowserDeps({ stillPermitted: undefined });
+    }
+    const renewedAt = (id) => sup.requests.find(r => r.op === 'renew' && r.session === id).at - started;
+    for (const out of fast) assert.ok(renewedAt(out.sessionId) < 200, 'renewed as soon as its own check passed');
+    assert.ok(renewedAt(slow.sessionId) >= 300);
+});
+
+test('the per-tick permission cache is keyed by the NetBird user and the signed-in identity', async () => {
+    await reset();
+    const first = await rb.createWebSession(USER, {}, '');
+    const second = await rb.createWebSession({ ...USER, oid: 'oid-2', email: 'second@example.com' }, {}, '');
+    const asked = [];
+    rb.setRemoteBrowserDeps({ stillPermitted: async ({ oid }) => { asked.push(oid); return oid === 'oid-1'; } });
+    try {
+        await rb._internal.superviseWebSessions();
+    } finally {
+        rb.setRemoteBrowserDeps({ stillPermitted: undefined });
+    }
+    assert.deepEqual(asked.sort(), ['oid-1', 'oid-2']);
+    assert.equal(table.rows.get(first.sessionId).state, 'detached');
+    assert.equal(table.rows.get(second.sessionId).state, 'ended');
+    assert.equal(table.rows.get(second.sessionId).end_code, rb.CODE.denied);
+});
+
+test('a tunnel whose attachment was replaced before guacd connects is closed as moved and never connects', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    onSelect = () => { table.rows.get(out.sessionId).attachment = 'another-tab'; };
+    const c = connect(out.token);
+    await c.closed;
+    const err = errorOf(c.got);
+    assert.equal(err.args[0], 'Your browser was opened in another window.');
+    assert.equal(Number(err.args[1]), 0x0205);
+    assert.ok(!guacdSeen.some(i => i.opcode === 'connect'));
+});
+
+test('a record from an unknown uid refreshes the map from the supervisor at most once per 5 s', async () => {
+    await reset();
+    await rb.createWebSession(USER, {}, '');
+    assert.equal(await rb._internal.bindConnections(), true);
+    await rb._internal.eventsIdleForTest();
+    sup.requests.length = 0;
+    const unknown = (port) => JSON.stringify({ 'oob.uid': 62555, 'ip.protocol': 6, src_ip: '100.92.0.7', src_port: port, dest_ip: '1.1.1.1', dest_port: 443 });
+    rb._internal.handleRecord(unknown(1));
+    rb._internal.handleRecord(unknown(2));
+    await until(() => sup.requests.some(r => r.op === 'list'));
+    await sleep(30);
+    rb._internal.handleRecord(unknown(3));
+    await sleep(30);
+    assert.equal(sup.requests.filter(r => r.op === 'list').length, 1);
+    recorded.length = 0;
+    rb._internal.flushMissedForTest();
+    await rb._internal.eventsIdleForTest();
+    assert.deepEqual(recorded.map(e => e.remoteAccess.missed), [3]);
+    await rb._internal.closeConnectionsForTest();
 });

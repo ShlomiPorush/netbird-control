@@ -25,14 +25,14 @@ function browserTable() {
                 id: p[0], user_id: p[1], user_email: p[2], user_name: p[3], oid: p[4], client_ip: p[5], state: 'starting',
                 width: p[6], height: p[7], dpi: p[8], attachment: p[9], uid: null, port: null, owner_instance: '', recorded: false,
                 created_at: now(), last_auth_ok_at: p[10], lease_expires_at: null, detached_at: null, ended_at: null, end_reason: '', end_code: null,
-                supervisor_instance: '', token_hash: null, token_expires: null, conn_count: 0, browser_started_at: null,
+                supervisor_instance: '', token_hash: null, token_expires: null, conn_count: 0,
             });
             return { rows: [], rowCount: 1 };
         }
-        if (/^UPDATE browser_sessions SET state = 'detached', detached_at = NOW\(\), uid = \$2, port = \$3, supervisor_instance = \$4, browser_started_at = \$5 WHERE id = \$1 AND state = 'starting' RETURNING \*$/.test(s)) {
+        if (/^UPDATE browser_sessions SET state = 'detached', detached_at = NOW\(\), uid = \$2, port = \$3, supervisor_instance = \$4 WHERE id = \$1 AND state = 'starting' RETURNING \*$/.test(s)) {
             const r = rows.get(p[0]);
             if (!r || r.state !== 'starting') return one(null);
-            Object.assign(r, { state: 'detached', detached_at: now(), uid: p[1], port: p[2], supervisor_instance: p[3], browser_started_at: p[4] });
+            Object.assign(r, { state: 'detached', detached_at: now(), uid: p[1], port: p[2], supervisor_instance: p[3] });
             return one(r);
         }
         if (/^UPDATE browser_sessions SET recorded = true WHERE id = \$1$/.test(s)) { const r = rows.get(p[0]); if (r) r.recorded = true; return one(r); }
@@ -95,10 +95,11 @@ function browserTable() {
         }
         if (/^SELECT id, state, attachment, end_reason, end_code FROM browser_sessions WHERE id = ANY\(\$1\)$/.test(s)) return many(p[0].map(id => rows.get(id)).filter(Boolean));
         if (/^SELECT id FROM browser_sessions WHERE state <> 'ended'$/.test(s)) return many([...rows.values()].filter(open));
-        if (/^SELECT \* FROM browser_sessions WHERE state = ANY\(\$1\)$/.test(s)) return many([...rows.values()].filter(r => p[0].includes(r.state)));
-        if (/^UPDATE browser_sessions SET last_auth_ok_at = \$2 WHERE id = ANY\(\$1\) AND state <> 'ended'$/.test(s)) {
-            for (const id of p[0]) { const r = rows.get(id); if (r && open(r)) r.last_auth_ok_at = p[1]; }
-            return { rows: [], rowCount: p[0].length };
+        if (/^UPDATE browser_sessions SET last_auth_ok_at = GREATEST\(last_auth_ok_at, \$2\) WHERE id = \$1 AND state <> 'ended' RETURNING last_auth_ok_at$/.test(s)) {
+            const r = rows.get(p[0]);
+            if (!r || !open(r)) return one(null);
+            if (p[1] > r.last_auth_ok_at) r.last_auth_ok_at = p[1];
+            return one(r);
         }
         if (/^SELECT \* FROM browser_sessions WHERE state <> 'ended'$/.test(s)) return many([...rows.values()].filter(open));
         if (/^UPDATE browser_sessions SET state = 'detached', detached_at = lease_expires_at, owner_instance = '' WHERE id = \$1 AND state = 'active' AND lease_expires_at < NOW\(\) RETURNING detached_at$/.test(s)) {
@@ -109,11 +110,8 @@ function browserTable() {
         }
         if (/^SELECT 1 FROM browser_sessions WHERE state <> 'ended' LIMIT 1$/.test(s)) return many([...rows.values()].filter(open).slice(0, 1));
         if (/^DELETE FROM browser_sessions WHERE state = 'ended'/.test(s)) return { rows: [], rowCount: 0 };
-        if (/^SELECT id, uid, user_id, user_email, user_name, supervisor_instance, browser_started_at FROM browser_sessions WHERE state = ANY\(\$1\) AND uid IS NOT NULL$/.test(s)) {
-            return many([...rows.values()].filter(r => p[0].includes(r.state) && r.uid !== null));
-        }
         if (/^SELECT id, uid, user_id, user_email, user_name FROM browser_sessions WHERE state <> 'ended'$/.test(s)) return many([...rows.values()].filter(open));
-        if (/^SELECT id, user_id, user_email, user_name, supervisor_instance, browser_started_at FROM browser_sessions WHERE id = ANY\(\$1\) AND state = ANY\(\$2\)$/.test(s)) {
+        if (/^SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY\(\$1\) AND state = ANY\(\$2\)$/.test(s)) {
             return many(p[0].map(id => rows.get(id)).filter(r => r && p[1].includes(r.state)));
         }
         if (/^SELECT conn_count FROM browser_sessions WHERE id = \$1 FOR UPDATE$/.test(s)) return one(rows.get(p[0]));

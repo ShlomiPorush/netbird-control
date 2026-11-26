@@ -822,8 +822,21 @@ async function createGatewaySetupKey(kind = 'ip') {
     if (!_nb[k.groupKey]) await applyGatewayObjects();
     if (!_nb[k.groupKey]) throw new Error(`The "${nbName(k.group)}" group could not be created. Save the Remote Access settings again, then create the setup key.`);
     await loadInstallName();
-    const issue = () => _deps.createSetupKey({ name: nbName(k.group), type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
-    return web ? withWebEnrollmentLock(async () => { await prepareWebEnrollment(); return issue(); }) : issue();
+    const issue = (groupId) => _deps.createSetupKey({ name: nbName(k.group), type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [groupId] });
+    if (!web) return issue(_nb[k.groupKey]);
+    return withWebEnrollmentLock(async () => {
+        const groupId = await savedWebGroupId();
+        await prepareWebEnrollment(groupId);
+        return issue(groupId);
+    });
+}
+
+async function savedWebGroupId() {
+    let saved = {};
+    try { saved = JSON.parse(await getSetting('remote_access_nb') || 'null') || {}; } catch { saved = {}; }
+    const groupId = String(saved.webGroupId || '');
+    if (!groupId) throw new Error(`The "${nbName(WEB.group)}" group could not be created. Save the Remote Access settings again, then create the setup key.`);
+    return groupId;
 }
 
 async function withWebEnrollmentLock(task) {
@@ -850,8 +863,7 @@ async function refuseWebGroupMember(groupId, name) {
     }
 }
 
-async function prepareWebEnrollment() {
-    const groupId = _nb.webGroupId;
+async function prepareWebEnrollment(groupId) {
     const name = nbName(WEB.group);
     await refuseWebGroupMember(groupId, name);
     const keys = await netbirdGet('/api/setup-keys');
@@ -1880,15 +1892,19 @@ function pipeTunnel(s, ws, o) {
                 if (ins.opcode === 'args') {
                     const version = ins.args[0] && ins.args[0].startsWith('VERSION_') ? ins.args[0] : null;
                     const names = version ? ins.args.slice(1) : ins.args;
-                    sock.write(encodeInstruction('size', String(s.width), String(s.height), String(s.dpi)));
-                    sock.write(encodeInstruction('audio'));
-                    sock.write(encodeInstruction('video'));
-                    sock.write(encodeInstruction('image', 'image/png', 'image/jpeg', 'image/webp'));
-                    if (s.timezone) sock.write(encodeInstruction('timezone', s.timezone));
-                    const values = o.connectArgs(names);
-                    sock.write(encodeInstruction('connect', ...(version ? [version] : []), ...values));
-                    // The SSH secrets are no longer needed here.
-                    s.creds = {};
+                    const connect = () => {
+                        sock.write(encodeInstruction('size', String(s.width), String(s.height), String(s.dpi)));
+                        sock.write(encodeInstruction('audio'));
+                        sock.write(encodeInstruction('video'));
+                        sock.write(encodeInstruction('image', 'image/png', 'image/jpeg', 'image/webp'));
+                        if (s.timezone) sock.write(encodeInstruction('timezone', s.timezone));
+                        const values = o.connectArgs(names);
+                        sock.write(encodeInstruction('connect', ...(version ? [version] : []), ...values));
+                        // The SSH secrets are no longer needed here.
+                        s.creds = {};
+                    };
+                    if (!o.beforeConnect) connect();
+                    else o.beforeConnect().then((ok) => { if (ok && !s.closed) connect(); }, () => { });
                 } else if (ins.opcode === 'ready') {
                     handshakeDone = true;
                     clearTimeout(handshakeTimer);

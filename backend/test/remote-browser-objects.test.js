@@ -14,8 +14,13 @@ core.pool.query = async (sql, params) => {
 };
 
 const lockQueries = [];
+let onLock = null;
 core.pool.connect = async () => ({
-    query: async (sql, params) => { lockQueries.push([sql.replace(/\s+/g, ' ').trim(), params]); return { rows: [] }; },
+    query: async (sql, params) => {
+        lockQueries.push([sql.replace(/\s+/g, ' ').trim(), params]);
+        if (/pg_advisory_xact_lock/.test(sql) && onLock) onLock();
+        return { rows: [] };
+    },
     release: () => { },
 });
 
@@ -95,6 +100,7 @@ function reset({ browser = { enabled: true, routerGroupId: 'g-office' }, managed
     };
     failSetupKeyPut = false;
     onSetupKeyPut = null;
+    onLock = null;
     lockQueries.length = 0;
 }
 const stored = () => JSON.parse(settings.remote_access_nb);
@@ -282,4 +288,19 @@ test('web key issuance runs under one advisory lock and checks the group again a
     lockQueries.length = 0;
     await ra.createGatewaySetupKey('ip');
     assert.deepEqual(lockQueries, [], 'other gateways need no lock');
+});
+
+test('web key issuance reads the web group id once, after the lock, and uses that id for every step', async () => {
+    reset();
+    await ra._internal.applyGatewayObjects();
+    const earlier = stored().webGroupId;
+    state.groups.find(g => g.id === earlier).peers = [{ id: 'old-gateway' }];
+    state.groups.push({ id: 'g-web-saved', name: 'Browser Gateway Web (NetBird Control)', peers: [] });
+    state.setupKeys.push(
+        { id: 'k-saved', name: 'Browser Gateway Web (NetBird Control)', valid: true, revoked: false, state: 'valid', auto_groups: ['g-web-saved'] },
+        { id: 'k-earlier', name: 'Browser Gateway Web (NetBird Control)', valid: true, revoked: false, state: 'valid', auto_groups: [earlier] });
+    onLock = () => { settings.remote_access_nb = JSON.stringify({ ...stored(), webGroupId: 'g-web-saved' }); };
+    await ra.createGatewaySetupKey('web');
+    assert.deepEqual(keys.map(k => k.autoGroups), [['g-web-saved']]);
+    assert.deepEqual(calls.filter(c => c[0] === 'PUT' && c[1].startsWith('/api/setup-keys/')).map(c => c[1]), ['/api/setup-keys/k-saved']);
 });
