@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowRight, CheckCircle2, Globe, Loader2, Lock, MonitorPlay, Plus, Terminal, X as XIcon, XCircle } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Globe, Loader2, Lock, MonitorPlay, Plus, Terminal, Trash2, X as XIcon, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
 import { apiText, remoteApi, cleanAddressInput, type RemoteHealth, type RemoteInfo, type RemoteProtocol, type RemoteSession, type TargetProtocol } from '@/lib/remoteAccess';
@@ -727,8 +727,10 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
                   {busy === s.sessionId ? <Loader2 size={14} className="animate-spin" /> : null}
                   {s.state === 'active' ? 'Open Here' : 'Resume'}
                 </Button>
-                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { void close(s.sessionId); }}>
-                  {closingId === s.sessionId ? 'Closing…' : 'Close Browser'}
+                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { void close(s.sessionId); }}
+                  title="Close Browser" aria-label={closingId === s.sessionId ? 'Closing The Browser' : 'Close Browser'}
+                  className="w-8 px-0! text-nb-gray-500 hover:text-red-600 dark:text-nb-gray-400 dark:hover:text-red-400">
+                  {closingId === s.sessionId ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                 </Button>
               </div>}
             </div>
