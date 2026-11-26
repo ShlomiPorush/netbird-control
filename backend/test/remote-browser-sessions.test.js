@@ -110,6 +110,7 @@ function answer(req) {
             return sup.sessions.has(req.session) ? { ok: true, state: 'running' } : gone(req.session);
         case 'credentials': {
             if (!Number.isInteger(req.until)) return { ok: false, error: 'BAD_REQUEST' };
+            if (sup.onCredentials) sup.onCredentials();
             const s = sup.sessions.get(req.session);
             if (!s) return gone(req.session);
             if (expired(req)) return { ok: false, error: 'EXPIRED' };
@@ -133,6 +134,7 @@ function answer(req) {
 let guacdSeen = [];
 let guacdNoDisplay = false;
 let onSelect = null;
+let holdSync = null;
 const guacdSockets = [];
 const guacd = net.createServer((sock) => {
     guacdSockets.push(sock);
@@ -143,7 +145,12 @@ const guacd = net.createServer((sock) => {
             guacdSeen.push(ins);
             if (ins.opcode === 'select' && onSelect) onSelect();
             if (ins.opcode === 'select') sock.write(encodeInstruction('args', 'VERSION_1_5_0', 'hostname', 'port', 'password', 'color-depth', 'disable-copy', 'disable-paste', 'enable-sftp', 'enable-audio', 'disable-display-resize', 'clipboard-encoding'));
-            if (ins.opcode === 'connect') sock.write(encodeInstruction('ready', '$vnc-1') + (guacdNoDisplay ? encodeInstruction('nop') + encodeInstruction('error', 'Aborted. See logs.', '519') : encodeInstruction('size', '0', '1280', '720')));
+            if (ins.opcode === 'connect') {
+                sock.write(encodeInstruction('ready', '$vnc-1') + (guacdNoDisplay ? encodeInstruction('nop') + encodeInstruction('error', 'Aborted. See logs.', '519') : encodeInstruction('size', '0', '1280', '720')));
+                const sync = () => { if (!sock.destroyed) sock.write(encodeInstruction('sync', '1')); };
+                if (guacdNoDisplay) continue;
+                if (holdSync) holdSync.promise.then(sync); else sync();
+            }
         }
     });
 });
@@ -197,9 +204,11 @@ async function reset({ maxSessions = 5, keepAliveMin = 15 } = {}) {
     guacdSeen = [];
     guacdNoDisplay = false;
     onSelect = null;
+    holdSync = null;
     Object.assign(sup, { requests: [], failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, clock: () => Date.now() });
     sup.delays.clear();
     sup.dropNextStart = false;
+    sup.onCredentials = null;
     insertedIds.clear();
     attemptedIds.length = 0;
     failingWrites = 0;
@@ -213,10 +222,9 @@ async function reset({ maxSessions = 5, keepAliveMin = 15 } = {}) {
     settings.remote_access_nb = JSON.stringify(WEB_IDS);
     settings.remote_access_web_peer = JSON.stringify({ id: 'web-gw', ip: '100.92.0.7' });
     ra._internal.setManagedForTest(WEB_IDS);
-    ra._internal.setConfigForTest({
-        enabled: true,
-        browser: { enabled: true, routerGroupId: 'g-office', maxSessions, keepAliveMin },
-    });
+    const saved = { enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions, keepAliveMin } };
+    settings.remote_access_config = JSON.stringify(saved);
+    ra._internal.setConfigForTest(saved);
     ra.invalidateSnapshot();
     await buildSnapshot();
 }
@@ -851,22 +859,32 @@ test('the authorization time is one value: stored at create and resume, and sent
     assert.equal(sup.requests.find(r => r.op === 'renew').until, stored() + 150_000);
 });
 
-test('an authorization that has expired ends the session at renew and at attach', async () => {
+test('an EXPIRED answer stops nothing: the supervisor lease ends the browser and a later answer ends the row', async () => {
     await reset();
     const renewed = await rb.createWebSession(USER, {}, '');
     sup.clock = () => Date.now() + 200_000;
     await rb._internal.superviseWebSessions();
-    assert.equal(table.rows.get(renewed.sessionId).state, 'ended');
-    assert.equal(table.rows.get(renewed.sessionId).end_code, rb.CODE.denied);
-    assert.match(table.rows.get(renewed.sessionId).end_reason, /couldn't be verified/);
+    assert.equal(table.rows.get(renewed.sessionId).state, 'detached');
+    assert.ok(!sup.requests.some(r => r.op === 'stop'), 'no stop is queued for EXPIRED');
     sup.clock = () => Date.now();
     const attached = await rb.createWebSession(USER, {}, '');
     table.rows.get(attached.sessionId).last_auth_ok_at = new Date(Date.now() - 151_000);
     const c = connect(attached.token);
     await c.closed;
     assert.match(errorOf(c.got).args[0], /couldn't be verified/);
+    assert.equal(table.rows.get(attached.sessionId).state, 'detached');
+    assert.ok(!sup.requests.some(r => r.op === 'stop'));
+    sup.sessions.delete(attached.sessionId);
+    sup.tombstones.add(attached.sessionId);
+    const readSnapshot = ra.readSnapshotNow;
+    ra.readSnapshotNow = async () => { throw new Error('NetBird is not answering'); };
+    try {
+        await rb._internal.superviseWebSessions();
+    } finally {
+        ra.readSnapshotNow = readSnapshot;
+    }
     assert.equal(table.rows.get(attached.sessionId).state, 'ended');
-    assert.ok(sup.tombstones.has(attached.sessionId));
+    assert.equal(table.rows.get(attached.sessionId).end_code, rb.CODE.denied);
 });
 
 test('a record from an earlier holder of the uid becomes a gap, and one from after the start the supervisor reports is attributed', async () => {
@@ -1106,4 +1124,132 @@ test('a gap record whose write fails is kept and written later with the same tot
     rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     assert.deepEqual(recorded.map(e => e.remoteAccess.missed), [1]);
+});
+
+test('a permission check whose Graph lookup could not answer (null) neither renews nor stops', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    rb.setRemoteBrowserDeps({ stillPermitted: async () => null });
+    sup.requests.length = 0;
+    try {
+        await rb._internal.superviseWebSessions();
+    } finally {
+        rb.setRemoteBrowserDeps({ stillPermitted: undefined });
+    }
+    assert.equal(table.rows.get(out.sessionId).state, 'detached');
+    assert.deepEqual(sup.requests.filter(r => r.session === out.sessionId).map(r => r.op), ['status']);
+});
+
+test('the per-session lock is held until the first tunnel shows its display', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    holdSync = gate();
+    const first = connect(out.token);
+    await first.opened;
+    await until(() => guacdSeen.some(i => i.opcode === 'connect'));
+    let resumed = false;
+    const resuming = rb.resumeWebSession(USER, out.sessionId, {}).then((r) => { resumed = true; return r; });
+    await sleep(100);
+    assert.equal(resumed, false, 'a takeover waits for the first display');
+    holdSync.open();
+    const again = await resuming;
+    await first.closed;
+    holdSync = null;
+    const second = connect(again.token);
+    await second.opened;
+    await until(() => guacdSeen.filter(i => i.opcode === 'connect').length === 2);
+    second.ws.close();
+    await second.closed;
+});
+
+test('a tunnel that loses the leadership before its display opens is refused as restarting and the row goes back to detached', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    let leader = true;
+    rb.setRemoteBrowserDeps({ isLeader: () => leader });
+    sup.onCredentials = () => { leader = false; };
+    try {
+        const c = connect(out.token);
+        await c.closed;
+        assert.equal(Number(errorOf(c.got).args[1]), 0x0201);
+        assert.equal(table.rows.get(out.sessionId).state, 'detached');
+        assert.ok(!guacdSeen.some(i => i.opcode === 'connect'));
+    } finally {
+        rb.setRemoteBrowserDeps({ isLeader: undefined });
+        sup.onCredentials = null;
+    }
+});
+
+test('the connection check asks the page to wait while this instance is not the leader', async () => {
+    await reset();
+    rb.setRemoteBrowserDeps({ isLeader: () => false });
+    try {
+        const check = await rb.checkWebAccess(USER);
+        assert.deepEqual(check.steps.map(s => [s.key, s.code, s.retry]), [['ready', 'SERVER_RESTARTING', true]]);
+    } finally {
+        rb.setRemoteBrowserDeps({ isLeader: undefined });
+    }
+});
+
+test('a settings change on another instance stops nothing; the leader reads the saved settings on its tick and stops the browsers', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    rb.setRemoteBrowserDeps({ isLeader: () => false });
+    sup.requests.length = 0;
+    try {
+        ra._internal.setConfigForTest({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office' } });
+        await rb.onConfigChanged();
+        assert.deepEqual(sup.requests, []);
+        assert.equal(table.rows.get(out.sessionId).state, 'detached');
+    } finally {
+        rb.setRemoteBrowserDeps({ isLeader: undefined });
+    }
+    ra._internal.setConfigForTest(JSON.parse(settings.remote_access_config));
+    settings.remote_access_config = JSON.stringify({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office' } });
+    await rb.leaderTick();
+    await rb._internal.stopsIdleForTest();
+    assert.equal(table.rows.get(out.sessionId).state, 'ended');
+    assert.ok(sup.tombstones.has(out.sessionId));
+    await rb._internal.closeConnectionsForTest();
+});
+
+test('the first leader tick opens the connection socket and works on the sessions at once', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    assert.equal(await rb._internal.bindConnections(), false, 'the socket is already open');
+    assert.ok(sup.requests.some(r => r.op === 'renew' && r.session === out.sessionId));
+    await rb._internal.closeConnectionsForTest();
+});
+
+test('a uid map rebuild keeps mappings added while it runs, and a failed rebuild is retried on the next tick', async () => {
+    await reset();
+    sup.down = true;
+    assert.equal(await rb._internal.bindConnections(), true);
+    sup.down = false;
+    const early = await rb.createWebSession(USER, {}, '');
+    rb._internal.resetForTest();
+    const earlyUid = table.rows.get(early.sessionId).uid;
+    await rb.leaderTick();
+    recorded.length = 0;
+    const record = (uid, port) => JSON.stringify({ 'oob.uid': uid, 'ip.protocol': 6, src_ip: '100.92.0.7', src_port: port, dest_ip: '93.184.215.14', dest_port: 443 });
+    rb._internal.handleRecord(record(earlyUid, 47000));
+    await rb._internal.eventsIdleForTest();
+    assert.deepEqual(recorded.filter(e => e.remoteAccess.kind === 'connection').map(e => e.remoteAccess.sessionId), [early.sessionId], 'the tick rebuilt the map the failed bind left empty');
+    let added;
+    queryHook = {
+        match: /SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY/,
+        run: async () => { added = await rb.createWebSession(USER, {}, ''); },
+    };
+    sup.unlisted.clear();
+    const listedBefore = new Set(sup.sessions.keys());
+    sup.onList = () => { for (const id of sup.sessions.keys()) if (!listedBefore.has(id)) sup.unlisted.add(id); };
+    await rb._internal.refreshUidMap();
+    sup.onList = null;
+    recorded.length = 0;
+    rb._internal.handleRecord(record(table.rows.get(added.sessionId).uid, 47001));
+    await rb._internal.eventsIdleForTest();
+    assert.deepEqual(recorded.filter(e => e.remoteAccess.kind === 'connection').map(e => e.remoteAccess.sessionId), [added.sessionId]);
+    await rb._internal.closeConnectionsForTest();
 });

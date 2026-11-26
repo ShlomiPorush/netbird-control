@@ -209,6 +209,12 @@ async function loadRemoteAccessConfig({ strict = false } = {}) {
     await loadTargetHolds({ strict });
 }
 
+async function reloadSavedConfig() {
+    const before = _cfg;
+    const saved = normConfig(JSON.parse(await getSetting('remote_access_config') || 'null'));
+    if (_cfg === before) _cfg = saved;
+}
+
 function getRemoteAccessConfig() {
     return { ..._cfg, networks: [..._cfg.networks], sshHostKeys: { ..._cfg.sshHostKeys }, rdp: { ..._cfg.rdp }, ssh: { ..._cfg.ssh }, createResources: { ..._cfg.createResources }, browser: { ..._cfg.browser },
         options: { rdpLayouts: RDP_LAYOUTS, rdpColorDepths: RDP_COLOR_DEPTHS, sshColorSchemes: SSH_COLOR_SCHEMES }, managed: { ..._nb }, lastApply: { ..._lastApply } };
@@ -1864,6 +1870,12 @@ function pipeTunnel(s, ws, o) {
         }
         return false;
     };
+    let synced = false;
+    const noteSync = (list) => {
+        if (synced || !o.onSync || !list.some(ins => ins.opcode === 'sync')) return;
+        synced = true;
+        o.onSync();
+    };
 
     sock.setNoDelay(true);
     sock.on('connect', () => sock.write(encodeInstruction('select', o.select)));
@@ -1909,6 +1921,7 @@ function pipeTunnel(s, ws, o) {
                     const after = instructions.slice(k + 1);
                     noteRequired(after);
                     if (noteDisplay(after)) return;
+                    noteSync(after);
                     const rest = after.map(x => x.raw).join('');
                     if (rest) forward(rest);
                     return;
@@ -1920,6 +1933,7 @@ function pipeTunnel(s, ws, o) {
         }
         noteRequired(instructions);
         if (noteDisplay(instructions)) return;
+        noteSync(instructions);
         const text = instructions.map(x => x.raw).join('');
         if (text) forward(text);
     });
@@ -2994,7 +3008,7 @@ module.exports = {
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     getServiceHealth, invalidateSnapshot,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
-    browserWanted, readBrowserGate, readWebPeer, readSnapshotNow, pipeTunnel, encodeInstruction, sendError, httpError, freshSnapshot, withDeadline,
+    browserWanted, reloadSavedConfig, readBrowserGate, readWebPeer, readSnapshotNow, pipeTunnel, encodeInstruction, sendError, httpError, freshSnapshot, withDeadline,
     CHECK_SNAPSHOT_TTL_MS, LEASE_TIMEOUT_MS, MAX_SNAPSHOT_AGE_MS: SNAPSHOT_MAX_AGE_MS,
     _internal: {
         GuacParser, CLIENT_MAX_ELEMENTS, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, syncTargetGroup, applyGatewayObjects,

@@ -5150,6 +5150,7 @@ async function leaderStartup() {
     if (closed) console.log(`[remote-access] closed ${closed} session(s) left open by a restart`);
     // 'running' flags of automations and grants that the previous leader left.
     await resetAllStuckRuns();
+    tracked('remoteBrowser', remoteBrowser.leaderTick).catch(e => console.error('[remote-browser] first tick:', e.message));
     // Maintenance that must not hold the jobs back, as before: the one-time backfill of
     // approved_minutes, and the (tenant, timestamp DESC) log indexes, built CONCURRENTLY (minutes on
     // a big table), which log their own progress and heal an interrupted build on the next run.
@@ -5236,7 +5237,7 @@ async function start() {
                 // Only Entra (Graph) membership can still grant it: that needs a fresh, successful
                 // lookup - a failed or cached one never keeps a session open.
                 const adGroups = await fetchUserGroupsFresh(oid).catch(() => null);
-                if (adGroups === null) return false;
+                if (adGroups === null) return null;
                 if (!!ADMIN_GROUP_ID && adGroups.includes(ADMIN_GROUP_ID)) return true;
                 return permitted([...adGroups, ...nbGroups]);
             },
