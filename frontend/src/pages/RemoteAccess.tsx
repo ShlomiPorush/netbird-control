@@ -401,7 +401,7 @@ export default function RemoteAccess() {
           ...(creds || {}),
         });
       sessions.add({
-        sessionId: s.sessionId, token: s.token, protocol,
+        sessionId: s.sessionId, token: s.token, attachment: s.attachment, protocol,
         title: web ? WEB_TITLE : sessionTitle(s, targetRef.current.port) || c.label || `${targetRef.current.address}:${targetRef.current.port}`,
         clipboard: !!info.data?.clipboard, steps: handoff, dwell,
         target: { ...targetRef.current }, user: creds?.username,
@@ -643,7 +643,11 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
   const qc = useQueryClient();
   const list = useQuery({
     queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(),
-    refetchInterval: (q) => (q.state.data?.sessions?.length ? 15_000 : false), retry: false,
+    refetchInterval: (q) => {
+      const listed = q.state.data?.sessions || [];
+      return listed.some((s) => s.state === 'ending') ? 3_000 : listed.length ? 15_000 : false;
+    },
+    retry: false,
   });
   const idKey = sessions.ids.join(' ');
   const seenIds = useRef(idKey);
@@ -654,10 +658,11 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
   }, [idKey, qc]);
   const [now, setNow] = useState(Date.now);
   const [busy, setBusy] = useState('');
+  const [closingId, setClosingId] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const shown = (list.data?.sessions || []).filter((s) => {
     if (sessions.ids.includes(s.sessionId)) return false;
-    if (s.state === 'active') return true;
+    if (s.state === 'active' || s.state === 'ending') return true;
     if (s.state !== 'detached') return false;
     const left = minutesLeft(s.expiresAt, now);
     return left === null || left > 0;
@@ -677,7 +682,7 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
     try {
       const s = await remoteApi.resumeWeb(id, { ...sessionScreenSize('web'), timezone: timezone() });
       sessions.add({
-        sessionId: s.sessionId, token: s.token, protocol: 'web', title: WEB_TITLE, clipboard,
+        sessionId: s.sessionId, token: s.token, attachment: s.attachment, protocol: 'web', title: WEB_TITLE, clipboard,
         steps: handoffSteps({}, 'web'), dwell: pickDwell(), target: { address: '', port: 0 },
       });
     } catch (err) {
@@ -688,14 +693,15 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
     }
   };
   const close = async (id: string) => {
-    setBusy(id); setError(id, '');
+    setBusy(id); setClosingId(id); setError(id, '');
     try {
       await remoteApi.end(id);
     } catch (err) {
-      setError(id, apiText(err, "The browser couldn't be closed. Try again."));
+      if (!isWebEnded(err)) setError(id, apiText(err, "The browser couldn't be closed. Try again."));
     } finally {
+      await refresh();
       setBusy('');
-      void refresh();
+      setClosingId('');
     }
   };
 
@@ -704,6 +710,7 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
       {shown.map((s, i) => {
         const left = minutesLeft(s.expiresAt, now);
         const ago = openedAgo(s.createdAt, now);
+        const ending = s.state === 'ending';
         return (
           <div key={s.sessionId} className={cn('px-4 py-3', i > 0 && 'border-t border-netbird/20')}>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -713,16 +720,18 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
                   {shown.length > 1 && ago ? `Browser Opened ${ago}` : 'Your Browser Is Still Open'}
                 </p>
                 <p className="text-[0.8rem] leading-snug text-nb-gray-600 dark:text-nb-gray-400">
-                  {s.state === 'active' ? 'Open in another window.' : `Disconnected. ${left === null ? 'It keeps running for a while.' : `${closesIn(left)}.`}`}
+                  {ending ? 'Closing…' : s.state === 'active' ? 'Open in another window.' : `Disconnected. ${left === null ? 'It keeps running for a while.' : `${closesIn(left)}.`}`}
                 </p>
               </div>
-              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              {ending ? <Loader2 size={16} className="ml-auto shrink-0 animate-spin text-netbird" aria-hidden /> : <div className="ml-auto flex shrink-0 items-center gap-1.5">
                 <Button size="sm" variant="primary" disabled={!!busy} onClick={() => { void resume(s.sessionId); }}>
                   {busy === s.sessionId ? <Loader2 size={14} className="animate-spin" /> : null}
                   {s.state === 'active' ? 'Open Here' : 'Resume'}
                 </Button>
-                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { void close(s.sessionId); }}>Close Browser</Button>
-              </div>
+                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { void close(s.sessionId); }}>
+                  {closingId === s.sessionId ? 'Closing…' : 'Close Browser'}
+                </Button>
+              </div>}
             </div>
             {errors[s.sessionId] && <p role="alert" className="mt-2 text-[0.8rem] text-red-600 dark:text-red-400">{errors[s.sessionId]}</p>}
           </div>

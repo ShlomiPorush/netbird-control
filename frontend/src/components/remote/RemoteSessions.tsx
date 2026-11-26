@@ -20,6 +20,7 @@ import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN
 export interface SessionEntry {
   sessionId: string;
   token: string;
+  attachment?: string;
   protocol: RemoteProtocol;
   title: string;
   clipboard: boolean;
@@ -61,6 +62,8 @@ export function minutesLeft(expiresAt: string | null, now = Date.now()) {
   const ms = new Date(expiresAt).getTime() - now;
   return Number.isFinite(ms) ? Math.max(0, Math.ceil(ms / 60_000)) : null;
 }
+
+const CLOSING_POLL_MS = 3000;
 
 export const closesIn = (min: number) => (min <= 1 ? 'Closes in less than a minute' : `Closes in ${min} minutes`);
 
@@ -258,6 +261,25 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
     delete current.current[id];
     onRemove(id);
   };
+  const [closing, setClosing] = useState<Record<string, true>>({});
+  const unmounted = useRef(false);
+  useEffect(() => () => { unmounted.current = true; }, []);
+  const closeBrowser = (id: string) => {
+    if (closing[id]) return;
+    const sessionId = current.current[id] || id;
+    setClosing((m) => ({ ...m, [id]: true }));
+    const done = () => {
+      if (unmounted.current) return;
+      setClosing((m) => { const n = { ...m }; delete n[id]; return n; });
+      delete current.current[id];
+      onRemove(id);
+      refreshWebSessions();
+    };
+    remoteApi.end(sessionId)
+      .then((r) => (r?.state === 'ending' ? untilWebSessionGone(sessionId, unmounted) : undefined),
+        (err) => (isWebEnded(err) ? undefined : untilWebSessionGone(sessionId, unmounted)))
+      .then(done);
+  };
   const detach = (id: string) => {
     delete current.current[id];
     onRemove(id);
@@ -314,7 +336,8 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             onStatus={(st) => setStatus((m) => (m[s.sessionId] === st ? m : { ...m, [s.sessionId]: st }))}
             onRemoteClipboard={(t) => setClips((m) => ({ ...m, [s.sessionId]: t }))}
             onClose={() => disconnect(s.sessionId)}
-            onCloseBrowser={() => endSession(s.sessionId)}
+            onCloseBrowser={() => closeBrowser(s.sessionId)}
+            closing={!!closing[s.sessionId]}
             onSession={(id) => {
               current.current[s.sessionId] = id;
               // A new session (a sign-in retry) reports its own text size and draws its own picture.
@@ -458,7 +481,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                     <MenuRow icon={<Pin size={15} />} label="Keep The Bar Open" checked={pinned}
                       onClick={() => { togglePin(); close(); }} />
                     <MenuRow icon={<Plus size={15} />} label="New Session" onClick={() => { close(); newSession(); }} />
-                    {webActive && <MenuRow icon={<Power size={15} />} label="Close Browser" onClick={() => { close(); endSession(active.sessionId); }} />}
+                    {webActive && <MenuRow icon={<Power size={15} />} label="Close Browser" onClick={() => { close(); closeBrowser(active.sessionId); }} />}
                   </div>
                 </>
               )}
@@ -473,7 +496,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           </button>
         )}
         {active && (
-          <button type="button" onClick={() => (webActive ? endSession(active.sessionId) : disconnect(active.sessionId))}
+          <button type="button" onClick={() => (webActive ? closeBrowser(active.sessionId) : disconnect(active.sessionId))}
             title={webActive ? 'Close Browser' : 'Disconnect'} aria-label={webActive ? 'Close Browser' : 'Disconnect'}
             className={cn('h-8 shrink-0 items-center gap-1.5 rounded-lg bg-red-500/15 px-2 text-[0.8rem] font-semibold text-red-300 ring-1 ring-inset ring-red-500/35 transition-colors hover:bg-red-600 hover:text-white md:px-3',
               webActive ? 'hidden sm:inline-flex' : 'inline-flex')}>
@@ -578,7 +601,15 @@ const SSH_KEY_NOTE = 'To sign in with a private key instead, close this tab and 
 // same server, which the portal checks again like any other.
 type WebEnd = { reason: string; live: boolean; found?: WebSessionInfo | null | 'unknown' };
 
-function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onCloseBrowser, onSession, onLeave, fontSize, onFontSize, onPainted }: {
+async function untilWebSessionGone(sessionId: string, stop: { current: boolean }) {
+  while (!stop.current) {
+    await new Promise((done) => window.setTimeout(done, CLOSING_POLL_MS));
+    const listed = await remoteApi.webSessions().catch(() => null);
+    if (listed && !listed.sessions.some((s) => s.sessionId === sessionId)) return;
+  }
+}
+
+function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onCloseBrowser, closing, onSession, onLeave, fontSize, onFontSize, onPainted }: {
   entry: SessionEntry; active: boolean; apiRef: { current: ScreenApi | null };
   pointer: PointerMode; onLatchChange: (modifiers: number[]) => void; onTouchTap?: () => void;
   /** SSH: the text size chosen in the session bar, and the terminal's as guacd reports it. */
@@ -589,13 +620,14 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
   onStatus: (s: TabStatus) => void; onRemoteClipboard: (t: string) => void;
   onClose: () => void;
   onCloseBrowser: () => void;
+  closing: boolean;
   /** The session this tab runs now (a new one after a sign-in retry). */
   onSession: (sessionId: string) => void;
   onLeave: () => void;
 }) {
   const ssh = entry.protocol === 'ssh';
   const web = entry.protocol === 'web';
-  const [conn, setConn] = useState({ sessionId: entry.sessionId, token: entry.token });
+  const [conn, setConn] = useState<{ sessionId: string; token: string; attachment?: string }>({ sessionId: entry.sessionId, token: entry.token, attachment: entry.attachment });
   const connRef = useRef(conn);
   connRef.current = conn;
   const [webEnd, setWebEnd] = useState<WebEnd | null>(null);
@@ -760,7 +792,7 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
       setFailure(null);
       setSteps(handoffSteps({}, 'web'));
       setPhase('connecting');
-      setConn({ sessionId: s.sessionId, token: s.token });
+      setConn({ sessionId: s.sessionId, token: s.token, attachment: s.attachment });
     } catch (err) {
       if (!mounted.current) return;
       if (isWebEnded(err)) setWebEnd((w) => (w ? { ...w, found: null } : w));
@@ -905,6 +937,13 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
           </form>
         </FlowCard>
       )
+        : web && closing ? (
+          <FlowCard className="flex flex-col items-center text-center">
+            <FlowTile icon={<Loader2 size={26} className="animate-spin" />} tone="neutral" large />
+            <h2 className="mt-4 text-xl font-bold tracking-tight text-nb-gray-900 dark:text-white">Closing…</h2>
+            <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">Your browser is being closed. This tab closes when it has stopped.</p>
+          </FlowCard>
+        )
         : web && phase === 'ended' && webCard ? webCard
         : phase === 'ended' && failure ? (
           <FlowCard>
@@ -933,7 +972,7 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
   const formUp = !!retry || (!!required && caughtUp);
   return (
     <>
-      <GuacScreen sessionId={conn.sessionId} token={conn.token} protocol={entry.protocol} pointer={pointer} active={active && !formUp} clipboard={entry.clipboard}
+      <GuacScreen sessionId={conn.sessionId} token={conn.token} attachment={conn.attachment} protocol={entry.protocol} pointer={pointer} active={active && !formUp} clipboard={entry.clipboard}
         onLatchChange={onLatchChange} onTouchTap={onTouchTap}
         fontSize={fontSize} onFontSize={ssh ? onFontSize : undefined}
         onEvent={onEvent} onRemoteClipboard={onRemoteClipboard} apiRef={apiRef} />

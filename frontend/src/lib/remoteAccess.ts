@@ -22,7 +22,7 @@ export interface RemoteInfo {
 
 export interface WebSessionInfo {
   sessionId: string;
-  state: 'active' | 'detached';
+  state: 'starting' | 'active' | 'detached' | 'ending';
   createdAt: string;
   detachedAt: string | null;
   expiresAt: string | null;
@@ -82,6 +82,7 @@ export interface RemoteCheck {
 export interface RemoteSession {
   sessionId: string;
   token: string;
+  attachment?: string;
   resource?: { id: string; name: string; address: string };
   network?: { id: string; name: string };
   address?: string;
@@ -234,8 +235,8 @@ export const remoteApi = {
   addNetworks: () => api.get<{ networks: RemoteAddNetwork[] }>('/api/remote-access/add-networks'),
   health: (signal?: AbortSignal) => api.get<RemoteHealth>('/api/remote-access/health', undefined, signal),
   createSession: (body: Record<string, unknown>) => api.post<RemoteSession>('/api/remote-access/sessions', body),
-  lease: (id: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, {}),
-  end: (id: string) => api.del<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
+  lease: (id: string, attachment?: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, attachment ? { attachment } : {}),
+  end: (id: string) => api.del<{ ok: boolean; state?: 'ending' }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
   webSessions: () => api.get<{ sessions: WebSessionInfo[] }>('/api/remote-access/web-sessions'),
   resumeWeb: (id: string, body: { width: number; height: number; dpi: number; timezone: string }) =>
     api.post<RemoteSession>(`/api/remote-access/sessions/${encodeURIComponent(id)}/resume`, body),
