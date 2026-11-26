@@ -64,7 +64,7 @@ const WS_BUFFER_HIGH = 4 * 1024 * 1024;  // pause guacd while the browser is thi
 const WS_BUFFER_LOW = 1 * 1024 * 1024;
 const STALL_LIMIT_MS = 30_000;           // a consumer stuck above the cap this long is disconnected
 const MAX_WIDTH = 7680, MAX_HEIGHT = 4320;
-const BROWSER_LANGUAGES = ['en-US', 'he', 'ar', 'ru'];
+const BROWSER_LANGUAGES = ['en-US', 'he'];
 
 const DEFAULTS = {
     enabled: false,

@@ -12,8 +12,6 @@ const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', max
 const LANGUAGE_OPTIONS: SelectOption[] = [
   { value: 'en-US', label: 'English' },
   { value: 'he', label: 'עברית' },
-  { value: 'ar', label: 'العربية' },
-  { value: 'ru', label: 'Русский' },
 ];
 const languageName = (language: string) => LANGUAGE_OPTIONS.find((o) => o.value === language)?.label ?? LANGUAGE_OPTIONS[0].label;
 const DEFAULT_ROUTER_GROUP = 'Office Peers';

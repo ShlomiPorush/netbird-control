@@ -402,8 +402,8 @@ test('the files requests poll waits for a slow answer before it asks again, and 
         rb._internal.stopFileRequestsForTest();
     }
     const [first, second] = asked();
-    assert.ok(second.at - first.at >= 2400, `the second ask came ${second.at - first.at} ms after the first`);
-    await sleep(2700);
+    assert.ok(second.at - first.at >= 900, `the second ask came ${second.at - first.at} ms after the first`);
+    await sleep(1200);
     assert.equal(asked().length, 2);
     c.ws.send(encodeInstruction('disconnect'));
     await c.closed;

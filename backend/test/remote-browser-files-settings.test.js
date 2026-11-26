@@ -42,7 +42,8 @@ function reset(saved, cached = saved) {
 test('the browser language is English unless it is one of the four offered', () => {
     const language = (value) => normConfig({ browser: { language: value } }).browser.language;
     assert.equal(normConfig({}).browser.language, 'en-US');
-    for (const value of ['en-US', 'he', 'ar', 'ru']) assert.equal(language(value), value);
+    for (const value of ['en-US', 'he']) assert.equal(language(value), value);
+    for (const value of ['ar', 'ru']) assert.equal(language(value), 'en-US');
     for (const value of ['fr', 'HE', 'he,en-US', '', null, 7, ['he']]) assert.equal(language(value), 'en-US');
 });
 

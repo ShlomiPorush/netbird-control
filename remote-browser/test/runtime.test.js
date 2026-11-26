@@ -133,14 +133,14 @@ test('Chromium gets the browser language in its environment and asks websites fo
   assert.ok(hebrew.includes('--accept-lang=he,en-US'));
   assert.equal(hebrew.at(-1), 'https://example.com/');
   assert.ok(chromiumArgs({ dir, scale: 1, startPage: '', language: 'en-US' }).includes('--accept-lang=en-US'));
-  assert.equal(chromiumArgs({ dir, scale: 1, startPage: '', language: 'ar' }).filter((arg) => arg.startsWith('--accept-lang=')).length, 1);
-  assert.deepEqual(chromiumEnv({ display: 5, dir, language: 'ru' }), {
+  assert.equal(hebrew.filter((arg) => arg.startsWith('--accept-lang=')).length, 1);
+  assert.deepEqual(chromiumEnv({ display: 5, dir, language: 'he' }), {
     DISPLAY: ':5',
     XAUTHORITY: path.join(dir, 'xauth'),
     HOME: dir,
     TMPDIR: dir,
     LANG: 'C.UTF-8',
-    LANGUAGE: 'ru',
+    LANGUAGE: 'he',
   });
   assert.equal(chromiumEnv({ display: 5, dir, language: 'en-US' }).LANGUAGE, 'en-US');
 });

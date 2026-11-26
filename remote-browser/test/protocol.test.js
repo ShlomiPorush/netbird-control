@@ -108,7 +108,8 @@ test('the files limit of a start is a whole number of bytes from 1 to 10 GiB', (
 });
 
 test('the browser language of a start is one of four, and English when it is missing', () => {
-  for (const language of ['en-US', 'he', 'ar', 'ru']) assert.equal(parseRequest(start({ language })).language, language);
+  for (const language of ['en-US', 'he']) assert.equal(parseRequest(start({ language })).language, language);
+  for (const language of ['ar', 'ru']) assert.throws(() => parseRequest(start({ language })), { code: 'BAD_REQUEST' });
   assert.equal(parseRequest(start()).language, 'en-US');
   for (const language of ['fr', 'en', 'HE', 'he,en-US', '', null, 7, ['he']]) rejects(start({ language }));
 });

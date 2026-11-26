@@ -735,7 +735,7 @@ A new browser opens on the **Start Page** set in the same card, or on a blank pa
 Only an `http` or `https` address without a user name or password is accepted. A resumed browser
 keeps its own tabs.
 
-**Browser Language** in the same card (English, Hebrew, Arabic or Russian; default English) is the
+**Browser Language** in the same card (English or Hebrew; default English) is the
 language of a new browser's menus. Websites are asked for that language first and English second,
 so a site that offers it shows it. A changed language applies to browsers opened after the change;
 a resumed browser keeps the language it started with.
@@ -793,7 +793,7 @@ effect in open browsers within about a minute; a download that already started f
 
 **Show in folder and Open.** The browser has no file manager of its own. With **Files In The
 Browser** on, **Show in folder** on a download, and **Open** on a file the browser can't show
-itself, open the session bar's **Files** panel instead, within about two seconds, while the session
+itself, open the session bar's **Files** panel instead, within about a second, while the session
 view is open and that browser is the one in front. Local files never open in the browser itself,
 so **Open** on a file it would show in a tab, such as a PDF, still shows a blocked page; the file is
 in the **Files** panel and on a website's upload button. Other

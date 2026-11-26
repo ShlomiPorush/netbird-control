@@ -19,8 +19,6 @@ RUN apt-get update \
  && find /usr/lib/chromium/locales -type f \
       ! -name en-US.pak ! -name en-US.pak.info \
       ! -name he.pak ! -name he.pak.info \
-      ! -name ar.pak ! -name ar.pak.info \
-      ! -name ru.pak ! -name ru.pak.info \
       -delete
 RUN for slot in $(seq 0 999); do \
       uid=$((62000 + slot)); \

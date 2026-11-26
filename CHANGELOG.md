@@ -29,8 +29,8 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 - **Show in folder opens the Files panel.** With **Files In The Browser** on, **Show in folder** on
   a download in the remote browser opens the session bar's **Files** panel, instead of a blocked
   page. **Open** on a file the browser can't show itself opens the panel too.
-- **A language for the remote browser.** The new **Browser Language** setting (English, Hebrew,
-  Arabic or Russian; default English) sets the language of the browser's menus and the language
+- **A language for the remote browser.** The new **Browser Language** setting (English or
+  Hebrew; default English) sets the language of the browser's menus and the language
   websites are asked for. It applies to browsers opened after the change.
 - **The Browser Gateways' host isolation rules come as a script and a systemd unit.**
   `netbird-docker-compose-files/remote-access-isolation` holds a script that sets the rules and a

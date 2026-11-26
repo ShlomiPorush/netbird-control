@@ -13,7 +13,7 @@ const START_PAGE_MAX = 2048;
 const GIB = 1024 ** 3;
 const FILES_LIMIT = { min: GIB, max: 10 * GIB, fallback: 2 * GIB };
 const FILE_NAME_MAX_BYTES = 255;
-const LANGUAGES = ['en-US', 'he', 'ar', 'ru'];
+const LANGUAGES = ['en-US', 'he'];
 
 class RequestError extends Error {
   constructor(code, message) {
