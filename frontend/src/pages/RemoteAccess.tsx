@@ -642,12 +642,7 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
   const sessions = useRemoteSessions();
   const qc = useQueryClient();
   const list = useQuery({
-    queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(),
-    refetchInterval: (q) => {
-      const listed = q.state.data?.sessions || [];
-      return listed.some((s) => s.state === 'ending') ? 3_000 : listed.length ? 15_000 : false;
-    },
-    retry: false,
+    queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(), retry: false,
   });
   const idKey = sessions.ids.join(' ');
   const seenIds = useRef(idKey);

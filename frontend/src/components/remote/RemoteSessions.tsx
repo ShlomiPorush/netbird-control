@@ -64,6 +64,7 @@ export function minutesLeft(expiresAt: string | null, now = Date.now()) {
 }
 
 const CLOSING_POLL_MS = 3000;
+const OPEN_POLL_MS = 15_000;
 
 export const closesIn = (min: number) => (min <= 1 ? 'Closes in less than a minute' : `Closes in ${min} minutes`);
 
@@ -132,6 +133,16 @@ export function RemoteSessionsProvider({ children }: { children: ReactNode }) {
     if (!sessions.some((x) => x.sessionId === activeId)) setActiveId(sessions[sessions.length - 1].sessionId);
   }, [sessions, activeId]);
   const show = useCallback(() => { if (sessions.length) setOpen(true); }, [sessions.length]);
+
+  const hasWebTab = sessions.some((s) => s.protocol === 'web');
+  useQuery({
+    queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(), retry: false,
+    enabled: (q) => hasWebTab || !!q.state.data?.sessions.length,
+    refetchInterval: (q) => {
+      const listed = q.state.data?.sessions || [];
+      return listed.some((s) => s.state === 'ending') ? CLOSING_POLL_MS : listed.length || hasWebTab ? OPEN_POLL_MS : false;
+    },
+  });
 
   const idList = sessions.map((s) => s.sessionId).join(' ');
   const ids = useMemo(() => (idList ? idList.split(' ') : []), [idList]);
@@ -262,13 +273,10 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
     onRemove(id);
   };
   const [closing, setClosing] = useState<Record<string, ClosingBrowser>>({});
-  const [closeErrors, setCloseErrors] = useState<Record<string, string>>({});
-  const waitingForList = Object.values(closing).some((c) => c.settled);
-  const webList = useQuery({
-    queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(),
-    enabled: waitingForList, refetchInterval: waitingForList ? CLOSING_POLL_MS : false, retry: false,
-  });
+  const [closeProblems, setCloseProblems] = useState<Record<string, CloseProblem>>({});
+  const webList = useQuery({ queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(), enabled: false });
   const forgetClosing = (id: string) => setClosing((m) => { const n = { ...m }; delete n[id]; return n; });
+  const forgetProblem = (id: string) => setCloseProblems((m) => { const n = { ...m }; delete n[id]; return n; });
   const finishClose = (id: string) => {
     forgetClosing(id);
     delete current.current[id];
@@ -282,26 +290,36 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const closeBrowser = (id: string) => {
     if (closing[id]) return;
     const sessionId = current.current[id] || id;
-    setCloseErrors((m) => { const n = { ...m }; delete n[id]; return n; });
+    forgetProblem(id);
     setClosing((m) => ({ ...m, [id]: { sessionId, settled: false, since: Date.now() } }));
     remoteApi.end(sessionId).then(
       (r) => (r?.state === 'ending' ? settleClose(id) : finishClose(id)),
       (err) => (isWebEnded(err) ? finishClose(id) : settleClose(id)),
     );
   };
+  const checkAgain = (id: string) => {
+    const sessionId = current.current[id] || id;
+    forgetProblem(id);
+    setClosing((m) => ({ ...m, [id]: { sessionId, settled: true, since: Date.now() } }));
+    refreshWebSessions();
+  };
   useEffect(() => {
     const listed = webList.data?.sessions;
-    if (!listed) return;
     for (const [id, c] of Object.entries(closing)) {
-      if (!c.settled || webList.dataUpdatedAt <= c.since) continue;
-      const row = listed.find((s) => s.sessionId === c.sessionId);
-      if (!row) finishClose(id);
-      else if (row.state !== 'ending') {
+      if (!c.settled) continue;
+      if (listed && webList.dataUpdatedAt > c.since) {
+        const row = listed.find((s) => s.sessionId === c.sessionId);
+        if (!row) finishClose(id);
+        else if (row.state !== 'ending') {
+          forgetClosing(id);
+          setCloseProblems((m) => ({ ...m, [id]: { message: "Your browser couldn't be closed. Try again.", unknown: false } }));
+        }
+      } else if (webList.errorUpdatedAt > c.since) {
         forgetClosing(id);
-        setCloseErrors((m) => ({ ...m, [id]: "Your browser couldn't be closed. Try again." }));
+        setCloseProblems((m) => ({ ...m, [id]: { message: "Your browser couldn't be closed, and its state couldn't be checked.", unknown: true } }));
       }
     }
-  }, [webList.data, webList.dataUpdatedAt, closing]);
+  }, [webList.data, webList.dataUpdatedAt, webList.errorUpdatedAt, closing]);
   const detach = (id: string) => {
     delete current.current[id];
     onRemove(id);
@@ -360,8 +378,10 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             onClose={() => disconnect(s.sessionId)}
             onCloseBrowser={() => closeBrowser(s.sessionId)}
             closing={!!closing[s.sessionId]}
-            closeError={closeErrors[s.sessionId] || ''}
-            onDismissCloseError={() => setCloseErrors((m) => { const n = { ...m }; delete n[s.sessionId]; return n; })}
+            closeProblem={closeProblems[s.sessionId] || null}
+            onDismissCloseProblem={() => forgetProblem(s.sessionId)}
+            onCheckAgain={() => checkAgain(s.sessionId)}
+            onCloseTab={() => finishClose(s.sessionId)}
             onSession={(id) => {
               current.current[s.sessionId] = id;
               // A new session (a sign-in retry) reports its own text size and draws its own picture.
@@ -626,8 +646,9 @@ const SSH_KEY_NOTE = 'To sign in with a private key instead, close this tab and 
 type WebEnd = { reason: string; live: boolean; found?: WebSessionInfo | null | 'unknown' };
 
 interface ClosingBrowser { sessionId: string; settled: boolean; since: number }
+interface CloseProblem { message: string; unknown: boolean }
 
-function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onCloseBrowser, closing, closeError, onDismissCloseError, onSession, onLeave, fontSize, onFontSize, onPainted }: {
+function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onCloseBrowser, closing, closeProblem, onDismissCloseProblem, onCheckAgain, onCloseTab, onSession, onLeave, fontSize, onFontSize, onPainted }: {
   entry: SessionEntry; active: boolean; apiRef: { current: ScreenApi | null };
   pointer: PointerMode; onLatchChange: (modifiers: number[]) => void; onTouchTap?: () => void;
   /** SSH: the text size chosen in the session bar, and the terminal's as guacd reports it. */
@@ -639,8 +660,10 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
   onClose: () => void;
   onCloseBrowser: () => void;
   closing: boolean;
-  closeError: string;
-  onDismissCloseError: () => void;
+  closeProblem: CloseProblem | null;
+  onDismissCloseProblem: () => void;
+  onCheckAgain: () => void;
+  onCloseTab: () => void;
   /** The session this tab runs now (a new one after a sign-in retry). */
   onSession: (sessionId: string) => void;
   onLeave: () => void;
@@ -957,14 +980,19 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
           </form>
         </FlowCard>
       )
-        : web && closeError ? (
+        : web && closeProblem ? (
           <FlowCard className="flex flex-col items-center text-center">
             <FlowTile icon={<AlertCircle size={26} />} tone="neutral" large />
             <h2 className="mt-4 text-xl font-bold tracking-tight text-nb-gray-900 dark:text-white">Couldn't Close The Browser</h2>
-            <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">{closeError}</p>
+            <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">{closeProblem.message}</p>
             <div className="mt-6 flex w-full flex-col gap-2">
-              <Button variant="primary" className={FLOW_BUTTON} onClick={onCloseBrowser}>Try Again</Button>
-              <Button variant="ghost" className={FLOW_QUIET} onClick={onDismissCloseError}>Keep It Open</Button>
+              {closeProblem.unknown ? <>
+                <Button variant="primary" className={FLOW_BUTTON} onClick={onCheckAgain}>Check Again</Button>
+                <Button variant="ghost" className={FLOW_QUIET} onClick={onCloseTab}>Close Tab</Button>
+              </> : <>
+                <Button variant="primary" className={FLOW_BUTTON} onClick={onCloseBrowser}>Try Again</Button>
+                <Button variant="ghost" className={FLOW_QUIET} onClick={onDismissCloseProblem}>Keep It Open</Button>
+              </>}
             </div>
           </FlowCard>
         )
@@ -999,11 +1027,9 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
               </FlowCard>
             ) : null;
 
-  // While a sign-in form is up, keys go to the form (and its buttons), not to the remote.
-  const formUp = !!retry || (!!required && caughtUp);
   return (
     <>
-      <GuacScreen sessionId={conn.sessionId} token={conn.token} attachment={conn.attachment} protocol={entry.protocol} pointer={pointer} active={active && !formUp} clipboard={entry.clipboard}
+      <GuacScreen sessionId={conn.sessionId} token={conn.token} attachment={conn.attachment} protocol={entry.protocol} pointer={pointer} active={active && !overlay} clipboard={entry.clipboard}
         onLatchChange={onLatchChange} onTouchTap={onTouchTap}
         fontSize={fontSize} onFontSize={ssh ? onFontSize : undefined}
         onEvent={onEvent} onRemoteClipboard={onRemoteClipboard} apiRef={apiRef} />
