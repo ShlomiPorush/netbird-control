@@ -794,9 +794,9 @@ effect in open browsers within about a minute; a download that already started f
 **Show in folder and Open.** The browser has no file manager of its own. With **Files In The
 Browser** on, **Show in folder** on a download, and **Open** on a file the browser can't show
 itself, open the session bar's **Files** panel instead, within about two seconds, while the session
-view is open and that browser is the one in front. **Open** on a file the browser can show, such as
-a PDF, opens it in a browser tab: while the setting is on, the browser may open files of its own
-folder, and no other local files. Each browser's folder is readable only by that browser. Other
+view is open and that browser is the one in front. Local files never open in the browser itself,
+so **Open** on a file it would show in a tab, such as a PDF, still shows a blocked page; the file is
+in the **Files** panel and on a website's upload button. Other
 requests to open something outside the browser, such as a `mailto:` link, do nothing.
 
 **Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger

@@ -28,8 +28,7 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   request bodies on the upload route (8 MiB recommended): see docs/remote-access.md.
 - **Show in folder opens the Files panel.** With **Files In The Browser** on, **Show in folder** on
   a download in the remote browser opens the session bar's **Files** panel, instead of a blocked
-  page. **Open** shows a PDF or another file the browser can display in a tab, and opens the
-  **Files** panel for other files.
+  page. **Open** on a file the browser can't show itself opens the panel too.
 - **A language for the remote browser.** The new **Browser Language** setting (English, Hebrew,
   Arabic or Russian; default English) sets the language of the browser's menus and the language
   websites are asked for. It applies to browsers opened after the change.

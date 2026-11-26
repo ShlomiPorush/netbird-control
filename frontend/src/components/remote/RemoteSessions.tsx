@@ -338,9 +338,12 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const filesOn = webActive && filesAllowed;
   useEffect(() => setFilesOpen(false), [activeId]);
   const toggleFiles = () => { setClipOpen(false); setFilesOpen((v) => !v); };
+  const inView = useRef({ open, activeId: active?.sessionId });
+  inView.current = { open, activeId: active?.sessionId };
   const showFiles = async (id: string) => {
     if (!open || !webActive || id !== active?.sessionId) return;
     if (!filesAllowed && !(await info.refetch()).data?.browser?.files) return;
+    if (!inView.current.open || inView.current.activeId !== id) return;
     setClipOpen(false);
     setFilesOpen(true);
     reveal();
