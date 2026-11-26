@@ -179,8 +179,8 @@ async function writeChunk({ queued, runtime, item: id, req, searchParams }) {
   const chunk = await readBody(req, CHUNK_MAX_BYTES, 'TOO_LARGE');
   const offset = offsetOf(searchParams);
   return queued(async (record) => {
-    const published = record.published.get(id);
-    if (published !== undefined) return { received: published, done: true };
+    const kept = record.published.get(id);
+    if (kept) return kept;
     const { upload } = record;
     if (!upload || upload.id !== id) refuse('NO_UPLOAD');
     if (offset !== upload.received) refuse('OFFSET', { received: upload.received });
@@ -192,11 +192,12 @@ async function writeChunk({ queued, runtime, item: id, req, searchParams }) {
       if (appended.error) refuse(appended.error, appended.error === 'OFFSET' ? { received: upload.received } : {});
     }
     if (upload.received < upload.size) return { received: upload.received, done: false };
-    record.upload = null;
     const result = await runtime.publishUpload(record.ids, upload.temporary, upload.name);
+    record.upload = null;
     if (result.error) refuse(result.error);
-    record.published.set(id, upload.size);
-    return { received: upload.size, done: true };
+    const published = { received: upload.size, done: true, name: upload.name, size: upload.size };
+    record.published.set(id, published);
+    return published;
   });
 }
 

@@ -111,7 +111,9 @@ function browserTable() {
             Object.assign(r, { state: 'detached', detached_at: r.lease_expires_at, owner_instance: '' });
             return one(r);
         }
-        if (/^SELECT 1 FROM browser_sessions WHERE state <> 'ended' LIMIT 1$/.test(s)) return many([...rows.values()].filter(open).slice(0, 1));
+        if (/^SELECT 1 FROM browser_sessions WHERE state <> 'ended' OR ended_at > NOW\(\) - interval '10 minutes' LIMIT 1$/.test(s)) {
+            return many([...rows.values()].filter(r => open(r) || r.ended_at > new Date(Date.now() - 10 * 60_000)).slice(0, 1));
+        }
         if (/^DELETE FROM browser_sessions WHERE state = 'ended'/.test(s)) return { rows: [], rowCount: 0 };
         if (/^SELECT id, uid, user_id, user_email, user_name FROM browser_sessions WHERE state <> 'ended'$/.test(s)) return many([...rows.values()].filter(open));
         if (/^SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY\(\$1\) AND state = ANY\(\$2\)$/.test(s)) {

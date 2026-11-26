@@ -8,7 +8,7 @@ const contentDisposition = require('content-disposition');
 const { ssoServer } = require('./helpers/sso-server');
 
 const h = ssoServer();
-const USERS = { remote: { perms: ['remote.connect'] }, plain: {} };
+const USERS = { remote: { perms: ['remote.connect'] }, plain: {}, blocked: { blocked: true } };
 const recorded = [];
 const seen = [];
 let ra;
@@ -47,7 +47,7 @@ before(async () => {
             Object.assign(db, {
                 ensureUsersFresh: async () => { },
                 ensurePeersFresh: async () => { },
-                resolveViewer: async (oid) => (USERS[oid] ? { user_id: oid, role: 'user', name: oid, email: `${oid}@example.com`, auto_groups: [], blocked: false } : null),
+                resolveViewer: async (oid) => (USERS[oid] ? { user_id: oid, role: 'user', name: oid, email: `${oid}@example.com`, auto_groups: [], blocked: !!USERS[oid].blocked } : null),
                 fetchUserGroups: async () => [],
                 getUserPeerGroupIds: async () => [],
                 getApproverGroupIds: () => [],
@@ -60,7 +60,7 @@ before(async () => {
             ra = require('../lib/remote-access');
             const rb = require('../lib/remote-browser');
             rb.ownedWebSession = async (viewer, id) => {
-                if (id === 'w1' && viewer.user_id === 'remote') return { id: 'w1', userId: 'remote', user: 'remote@example.com' };
+                if (id === 'w1' && ['remote', 'blocked'].includes(viewer.user_id)) return { id: 'w1', userId: 'remote', user: 'remote@example.com' };
                 throw ra.httpError(404, 'SESSION_NOT_FOUND', 'This web session was not found.');
             };
             browserFiles = require('../lib/remote-browser-files');
@@ -76,7 +76,6 @@ after(async () => {
 beforeEach(() => {
     ra._internal.setConfigForTest({ enabled: true, allowAll: false, networks: [], browser: { enabled: true, routerGroupId: 'g-office', files: true, transfer: true } });
     browserFiles._internal.setSocketForTest(filesSocket);
-    browserFiles._internal.resetForTest();
     recorded.length = 0;
     seen.length = 0;
     handle = (req, res) => json(res, 500, { error: 'UNEXPECTED', message: 'not expected in this test' });
@@ -109,6 +108,19 @@ test('the file list reaches the remote browser for the owner of the session only
     r = await h.call('remote', 'DELETE', '/api/remote-access/sessions/w2/files/a.bin');
     assert.equal(r.status, 404);
     assert.deepEqual(seen, [], 'nothing reaches the remote browser for another session');
+    assert.deepEqual(fileEvents(), []);
+});
+
+test('a viewer blocked in NetBird reaches no file route, even when every signed-in user may use Remote Access', async () => {
+    ra._internal.setConfigForTest({ enabled: true, allowAll: true, networks: [], browser: { enabled: true, routerGroupId: 'g-office', files: true, transfer: true } });
+    handle = (req, res) => json(res, 200, { ok: true, files: [], used: 0, limit: 1, upload: null, id: 'up1', received: 0 });
+    const routes = [['GET', `${base}/files`], ['GET', `${base}/files/a.bin`], ['DELETE', `${base}/files/a.bin`],
+        ['POST', `${base}/uploads`, { name: 'x.bin', size: 1 }], ['PUT', `${base}/uploads/up1?offset=0`, new Uint8Array(1)], ['DELETE', `${base}/uploads/up1`]];
+    for (const [method, url, body] of routes) {
+        const r = await h.call('blocked', method, url, body, body instanceof Uint8Array ? { 'content-type': 'application/octet-stream' } : undefined);
+        assert.deepEqual([r.status, r.json && r.json.code], [403, 'USER_BLOCKED'], `${method} ${url}`);
+    }
+    assert.deepEqual(seen, [], 'nothing reaches the remote browser');
     assert.deepEqual(fileEvents(), []);
 });
 
@@ -200,14 +212,14 @@ test('a delete passes through and is recorded with the size the remote browser r
     assert.deepEqual(fileEvents()[0].remoteAccess, { protocol: 'web', kind: 'file', action: 'deleted', sessionId: 'w1', user: 'remote@example.com', name: 'old firmware.out', size: 1234 });
 });
 
-test('an upload chunk reaches the remote browser as raw bytes, even sent as JSON, and the published file is recorded once with its start name and size', async () => {
+test('an upload chunk reaches the remote browser as raw bytes, even sent as JSON, and the published file is recorded with the same event id on a retry', async () => {
     const chunk = Buffer.from('{"not":"parsed"}');
     const bodies = [];
     handle = async (req, res) => {
         const body = await readBody(req);
         bodies.push({ url: req.url, type: req.headers['content-type'], body });
         if (req.method === 'POST') return json(res, 200, { id: 'up1', received: 0 });
-        if (req.method === 'PUT') return json(res, 200, { received: chunk.length, done: true });
+        if (req.method === 'PUT') return json(res, 200, { received: chunk.length, done: true, name: 'fw.bin', size: chunk.length });
         return json(res, 200, { ok: true });
     };
     let r = await h.call('remote', 'POST', `${base}/uploads`, { name: 'fw.bin', size: chunk.length, extra: 'dropped' });
@@ -215,7 +227,7 @@ test('an upload chunk reaches the remote browser as raw bytes, even sent as JSON
     assert.deepEqual(JSON.parse(bodies[0].body), { name: 'fw.bin', size: chunk.length });
     for (let i = 0; i < 2; i++) {
         r = await h.call('remote', 'PUT', `${base}/uploads/up1?offset=0`, new Uint8Array(chunk), { 'content-type': 'application/json' });
-        assert.deepEqual([r.status, r.json], [200, { received: chunk.length, done: true }]);
+        assert.deepEqual([r.status, r.json], [200, { received: chunk.length, done: true, name: 'fw.bin', size: chunk.length }]);
     }
     const puts = bodies.filter(b => b.url.startsWith('/sessions/w1/uploads/up1'));
     assert.deepEqual(puts.map(p => [p.url, p.type]), Array(2).fill(['/sessions/w1/uploads/up1?offset=0', 'application/octet-stream']));
@@ -227,16 +239,18 @@ test('an upload chunk reaches the remote browser as raw bytes, even sent as JSON
     assert.deepEqual([r.status, r.json], [200, { ok: true }]);
 });
 
-test('after a restart, the published name comes from the upload the remote browser has in progress', async () => {
+test('the uploaded file is recorded with the name and size of the answer of the remote browser, never from a copy on this server', async () => {
     handle = async (req, res) => {
         await readBody(req);
-        if (req.method === 'GET') return json(res, 200, { files: [], used: 0, limit: 1, upload: { id: 'up2', name: 'kept.bin', size: 3, received: 0 } });
-        return json(res, 200, { received: 3, done: true });
+        if (req.method === 'POST') return json(res, 200, { id: 'up2', received: 0 });
+        return json(res, 200, { received: 3, done: true, name: 'kept.bin', size: 3 });
     };
+    await h.call('remote', 'POST', `${base}/uploads`, { name: 'started.bin', size: 99 });
     const r = await h.call('remote', 'PUT', `${base}/uploads/up2?offset=0`, new Uint8Array(3), { 'content-type': 'application/octet-stream' });
     assert.equal(r.status, 200);
     await until(() => fileEvents().length === 1);
     assert.deepEqual([fileEvents()[0].remoteAccess.name, fileEvents()[0].remoteAccess.size], ['kept.bin', 3]);
+    assert.deepEqual(seen.map(s => s.method), ['POST', 'PUT'], 'no extra request to learn the name');
 });
 
 test('a chunk over 8 MiB is refused, with or without a declared length; 8 MiB itself passes', async () => {

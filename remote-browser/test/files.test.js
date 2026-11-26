@@ -196,10 +196,11 @@ test('an upload goes in chunks at the received offset and is published on its la
   refusal(409, 'OFFSET')(await call('PUT', `/sessions/s1/uploads/${id}?offset=x`, Buffer.from('d')));
   refusal(409, 'OFFSET')(await call('PUT', `/sessions/s1/uploads/${id}`, Buffer.from('d')));
   refusal(400, 'BAD_SIZE')(await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.from('defg')));
-  assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.from('def'))).json, { received: 6, done: true });
+  const published = { received: 6, done: true, name: 'firmware.out', size: 6 };
+  assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.from('def'))).json, published);
   assert.equal(folder().get('firmware.out').toString(), 'abcdef');
   assert.equal(folder().has(`.upload-${id}`), false);
-  assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.from('def'))).json, { received: 6, done: true }, 'a retried last chunk gets the kept answer');
+  assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.from('def'))).json, published, 'a retried last chunk gets the kept answer');
   assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, null);
 });
 
@@ -216,8 +217,40 @@ test('the received offset follows the file when an earlier write went missing', 
 test('an empty file is published by an empty chunk at offset 0', async (t) => {
   const { call, folder } = await setup(t);
   const { json: { id } } = await startUpload(call, 'empty.txt', 0);
-  assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=0`, Buffer.alloc(0))).json, { received: 0, done: true });
+  assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=0`, Buffer.alloc(0))).json, { received: 0, done: true, name: 'empty.txt', size: 0 });
   assert.equal(folder().get('empty.txt').length, 0);
+});
+
+test('a publish whose helper fails keeps the upload, and a retried last chunk publishes it', async (t) => {
+  const { call, folder, runtime } = await setup(t);
+  const { json: { id } } = await startUpload(call, 'fw.bin', 3);
+  const publishUpload = runtime.publishUpload;
+  runtime.publishUpload = async () => {
+    throw new Error('the helper timed out');
+  };
+  refusal(500, 'INTERNAL')(await call('PUT', `/sessions/s1/uploads/${id}?offset=0`, Buffer.from('abc')));
+  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, { id, name: 'fw.bin', size: 3, received: 3 });
+  runtime.publishUpload = publishUpload;
+  assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.alloc(0))).json, { received: 3, done: true, name: 'fw.bin', size: 3 });
+  assert.equal(folder().get('fw.bin').toString(), 'abc');
+  assert.equal(folder().has(`.upload-${id}`), false);
+  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, null);
+});
+
+test('a publish that failed after the file got its name answers NAME_TAKEN on retry and drops the upload', async (t) => {
+  const { call, folder, runtime } = await setup(t);
+  const { json: { id } } = await startUpload(call, 'fw.bin', 3);
+  const publishUpload = runtime.publishUpload;
+  runtime.publishUpload = async (...args) => {
+    await publishUpload(...args);
+    throw new Error('the helper timed out');
+  };
+  refusal(500, 'INTERNAL')(await call('PUT', `/sessions/s1/uploads/${id}?offset=0`, Buffer.from('abc')));
+  runtime.publishUpload = publishUpload;
+  refusal(409, 'NAME_TAKEN')(await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.alloc(0)));
+  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, null);
+  refusal(404, 'NO_UPLOAD')(await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.alloc(0)));
+  assert.equal(folder().get('fw.bin').toString(), 'abc');
 });
 
 test('a session has one active upload: a new one cancels the old and frees its reservation', async (t) => {

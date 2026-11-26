@@ -80,7 +80,7 @@ async function appendUpload(temporary, offset, input) {
 
 function publishUpload(temporary, final) {
   const opened = refusedAs('NO_UPLOAD', () => openRegular(temporary, O_WRONLY));
-  if (opened.error) return opened;
+  if (opened.error) return exists(final) ? { error: 'NAME_TAKEN' } : opened;
   fs.fchmodSync(opened.fd, PUBLISHED_MODE);
   fs.closeSync(opened.fd);
   try {

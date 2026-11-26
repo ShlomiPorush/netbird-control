@@ -23,6 +23,7 @@ const START_TIMEOUT_MS = 15_000;
 const KILL_TIMEOUT_MS = 10_000;
 const DISK_CACHE_BYTES = 64 * 1024 * 1024;
 const HEADER_MAX_BYTES = 256;
+const ROOT_UID = 0;
 
 const BLOCKED_POLICY = { DownloadRestrictions: 3, AllowFileSelectionDialogs: false };
 const ENABLED_POLICY = {
@@ -309,9 +310,19 @@ async function sweepTemporary(uids) {
   }
 }
 
-async function wipe({ dir, uid }) {
-  if (!fs.existsSync(dir)) return;
-  await runAs(uid, 'sh', ['-c', 'chmod -R u+rwx -- "$1" && find "$1" -mindepth 1 -delete', 'wipe', dir]);
+function ownerOf(dir) {
+  try {
+    return fs.lstatSync(dir).uid;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function wipe({ dir, uid }, owner = ownerOf) {
+  const found = owner(dir);
+  if (found === null) return;
+  if (found !== ROOT_UID) await runAs(uid, 'sh', ['-c', 'chmod -R u+rwx -- "$1" && find "$1" -mindepth 1 -delete', 'wipe', dir]);
   fs.rmdirSync(dir);
 }
 
@@ -369,11 +380,15 @@ function parseScan(text) {
   return sawRoot ? { used, files } : null;
 }
 
+const scanCommand = (dir) => ['find', [dir, '-ignore_readdir_race', '-printf', SCAN_FORMAT]];
+
 async function scanFiles(ids) {
   const { dir, uid } = filesEntry(ids);
   if (!fs.existsSync(dir)) return null;
-  const out = await runAs(uid, 'sh', ['-c', 'find "$1" -printf "$2" 2>/dev/null; exit 0', 'scan', dir, SCAN_FORMAT]);
-  return parseScan(out.toString());
+  const out = await runAs(uid, ...scanCommand(dir));
+  const scan = parseScan(out.toString());
+  if (!scan) throw new Error('the scan did not list the files folder');
+  return scan;
 }
 
 async function fileio(ids, op, args, input) {
@@ -500,11 +515,13 @@ module.exports = {
   randomPassword,
   readFile,
   ready,
+  scanCommand,
   scanFiles,
   slotIsFree,
   teardown,
   temporaryLeftovers,
   watchChild,
+  wipe,
   wipeLeftoverFiles,
   writeFilesPolicy,
   xvncArgs,

@@ -113,7 +113,7 @@ function fakeRuntime() {
     async publishUpload(ids, temporary, name) {
       const folder = runtime.folder(ids.slot);
       const data = folder.get(temporary);
-      if (!data) return { error: 'NO_UPLOAD' };
+      if (!data) return { error: folder.has(name) ? 'NAME_TAKEN' : 'NO_UPLOAD' };
       folder.delete(temporary);
       if (folder.has(name)) return { error: 'NAME_TAKEN' };
       folder.set(name, data);

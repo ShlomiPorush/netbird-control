@@ -43,12 +43,15 @@ const CONNECTION_REFERENCE = 'remote-access:web-connection';
 const OPEN_STATES = ['active', 'detached'];
 const GIB = 1024 ** 3;
 const ACKS_PER_LIST = 40;
+const ENDED_LIST_MIN = 10;
 const CODE = { ended: 0x020B, takenOver: 0x0205, denied: 0x0303, restarting: 0x0201, lost: 0x0208 };
 const TAKEN_OVER = 'Your browser was opened in another window.';
 const BROWSER_CLOSED = 'The browser was closed.';
 const BROWSER_RESTARTED = 'The remote browser restarted, so the session ended.';
 const UNVERIFIED = "Your access couldn't be verified with NetBird, so the session ended.";
-const filesFullText = () => `This browser's files passed its ${config().browser.filesLimitGb} GB limit, so it was closed.`;
+const filesFullText = ({ limit }) => (Number.isSafeInteger(limit) && limit > 0
+    ? `This browser's files passed its ${Math.round(limit / GIB)} GB limit, so it was closed.`
+    : "This browser's files passed their limit, so it was closed.");
 
 const MESSAGES = {
     BROWSER_DISABLED: 'Web sessions are turned off. Ask an administrator to turn them on in Settings > Remote Access.',
@@ -155,7 +158,7 @@ function noteInstance(reply) {
 const isExpired = (reply) => !!reply && reply.ok !== true && reply.error === 'EXPIRED';
 const isGone = (reply) => !!reply && reply.ok !== true && (reply.error === 'ENDED' || reply.error === 'UNKNOWN');
 const filesFull = (status) => !!status && status.code === 'FILES_FULL';
-const closedReason = (status, fallback = BROWSER_CLOSED) => (filesFull(status) ? filesFullText() : fallback);
+const closedReason = (status, fallback = BROWSER_CLOSED) => (filesFull(status) ? filesFullText(status) : fallback);
 const statusOf = (id) => supervisorRequest({ op: 'status', session: id }).catch(() => null);
 
 function guacdReachable() {
@@ -475,7 +478,6 @@ async function endWebSession(id, reason, code = CODE.ended) {
         console.error('[remote-browser] session %s: stop failed: %s', id, (stopped && stopped.error) || 'no answer');
         return false;
     }
-    await recordJournal(marked, stopped.files);
     if (marked.recorded) await addEvent(webSessionEvent(marked, 'end', { reason: marked.end_reason || reason }));
     await pool.query(`UPDATE browser_sessions SET state = 'ended', ended_at = NOW() WHERE id = $1 AND state = 'ending'`, [id]);
     return true;
@@ -639,18 +641,19 @@ async function endAllWebSessions(reason, code) {
 }
 
 async function sendFilesSetting(saved) {
-    const request = { op: 'files', enabled: saved.browser.files, transfer: saved.browser.transfer, rev: saved.rev };
+    const enabled = browserActive() && !!saved.browser.files;
+    const request = { op: 'files', enabled, transfer: enabled && !!saved.browser.transfer, rev: saved.rev };
     const reply = await supervisorRequest(request).catch((e) => {
-        console.error('[remote-browser] could not send the files setting:', e.message);
+        if (e.code !== 'ENOENT') console.error('[remote-browser] could not send the files setting:', e.message);
         return undefined;
     });
     if (reply !== undefined && (!reply || reply.ok !== true)) console.error('[remote-browser] the files setting was refused: %s', (reply && reply.error) || 'no answer');
 }
 
-function onConfigChanged() {
-    if (browserActive()) return sendFilesSetting(config());
-    if (!leading()) return Promise.resolve();
-    return endAllWebSessions('Web sessions were turned off by an administrator.', CODE.denied)
+async function onConfigChanged() {
+    await sendFilesSetting(config());
+    if (browserActive() || !leading()) return;
+    await endAllWebSessions('Web sessions were turned off by an administrator.', CODE.denied)
         .catch(e => console.error('[remote-browser] could not end the web sessions:', e.message));
 }
 
@@ -787,11 +790,10 @@ async function reconcileWithSupervisor(now = Date.now()) {
     let listed;
     try { listed = await supervisorRequest({ op: 'list', ...(ack ? { ack } : {}) }); } catch (e) {
         console.error('[remote-browser] reconcile: the supervisor did not answer:', e.message);
-        return false;
+        return null;
     }
-    if (!listed || listed.ok !== true || !Array.isArray(listed.sessions)) return false;
+    if (!listed || listed.ok !== true || !Array.isArray(listed.sessions)) return null;
     acksSent(ack);
-    await recordListedJournals(listed);
     const instance = typeof listed.instance === 'string' ? listed.instance : '';
     const byId = new Map(rows.map(r => [r.id, r]));
     const running = new Set();
@@ -814,7 +816,7 @@ async function reconcileWithSupervisor(now = Date.now()) {
             || (row.state === 'starting' ? 'The session did not open.' : closedReason(status, row.supervisor_instance === instance ? BROWSER_CLOSED : BROWSER_RESTARTED));
         queueEnd(row.id, reason);
     })));
-    return true;
+    return listed;
 }
 
 const _acks = new Map();
@@ -872,11 +874,16 @@ async function leaderTick() {
             console.error('[remote-browser] could not read the saved settings:', e.message);
             return null;
         });
-        if (saved && browserActive()) await sendFilesSetting(saved);
-        const busy = browserActive() || rowsOf(await pool.query(`SELECT 1 FROM browser_sessions WHERE state <> 'ended' LIMIT 1`)).length > 0;
+        if (saved) await sendFilesSetting(saved);
+        const busy = browserActive() || rowsOf(await pool.query(
+            `SELECT 1 FROM browser_sessions WHERE state <> 'ended' OR ended_at > NOW() - interval '${ENDED_LIST_MIN} minutes' LIMIT 1`)).length > 0;
         if (browserActive()) await bindConnections().catch(e => console.error('[remote-browser] connection log:', e.message));
-        if (busy) await reconcileWithSupervisor().catch(e => console.error('[remote-browser] reconcile:', e.message));
+        const listed = busy ? await reconcileWithSupervisor().catch((e) => {
+            console.error('[remote-browser] reconcile:', e.message);
+            return null;
+        }) : null;
         await superviseWebSessions().catch(e => console.error('[remote-browser] supervise:', e.message));
+        if (listed) await recordListedJournals(listed).catch(e => console.error('[remote-browser] file log:', e.message));
         if (_connServer && _mapNeedsRebuild) await refreshUidMap().catch(e => console.error('[remote-browser] connection log map:', e.message));
         flushMissed();
         if (Date.now() - _lastPurge > 3_600_000) {
@@ -1215,7 +1222,12 @@ module.exports = {
         eventsIdleForTest: () => _eventChain,
         queuedForTest: () => _queued,
         attachedForTest: (id) => _attached.get(id),
-        reconcileWithSupervisor: async (now) => { const done = await reconcileWithSupervisor(now); await stopsIdle(); return done; },
+        reconcileWithSupervisor: async (now) => {
+            const listed = await reconcileWithSupervisor(now);
+            if (listed) await recordListedJournals(listed);
+            await stopsIdle();
+            return !!listed;
+        },
         superviseWebSessions: async (now) => { await superviseWebSessions(now); await stopsIdle(); },
         supervisorRequest, checkGate, bindConnections, handleRecord, parseRecord, refreshUidMap,
         vncArgs, fitSize, webSessionEvent, CAPACITY_LOCK, CONNECTIONS_PER_SESSION, INSTANCE,

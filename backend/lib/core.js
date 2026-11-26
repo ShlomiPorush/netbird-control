@@ -136,6 +136,7 @@ async function updateSetting(key, update) {
     let value;
     try {
         await client.query('BEGIN');
+        await client.query('INSERT INTO app_settings (key, value) VALUES ($1, NULL) ON CONFLICT (key) DO NOTHING', [key]);
         const row = (await client.query('SELECT value FROM app_settings WHERE key = $1 FOR UPDATE', [key])).rows[0];
         value = String(update(row ? row.value : null));
         await client.query(

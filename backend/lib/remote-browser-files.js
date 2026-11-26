@@ -10,7 +10,6 @@ const CHUNK_MAX = 8 * 1024 * 1024;
 const REPLY_MAX = 1024 * 1024;
 const REPLY_TIMEOUT_MS = 30_000;
 const STREAM_IDLE_MS = 60_000;
-const UPLOADS_KEPT = 1000;
 const SOURCE_TYPE = 'BROWSER_GATEWAY';
 const FILE_REFERENCE = 'remote-access:web-connection';
 const UPLOAD_CHUNK_PATH = /^\/api\/remote-access\/sessions\/[^/]+\/uploads\/[^/]+\/?$/i;
@@ -18,10 +17,8 @@ const UNAVAILABLE = { status: 503, body: { error: 'BROWSER_UNAVAILABLE', message
 const TOO_LARGE = { status: 413, body: { error: 'TOO_LARGE', message: 'A part of the upload was larger than 8 MiB.' } };
 
 let _socketPath = DEFAULT_SOCKET;
-const _uploads = new Map();
 
 const sessionPath = (sessionId, ...segments) => ['/sessions', sessionId, ...segments].map((s, i) => (i ? encodeURIComponent(s) : s)).join('/');
-const uploadKey = (sessionId, uploadId) => `${sessionId}:${uploadId}`;
 const journalEventId = (sessionId, seq) => `web-file:${sessionId}:${seq}`;
 
 function fileEvent(session, action, { id = `web-file:${session.id}:${action}:${crypto.randomUUID()}`, name, size, complete } = {}) {
@@ -93,18 +90,6 @@ function relay(res, reply) {
     res.status(reply.status).json(appBody(reply.status, reply.body));
 }
 
-function remember(sessionId, uploadId, upload) {
-    _uploads.delete(uploadKey(sessionId, uploadId));
-    _uploads.set(uploadKey(sessionId, uploadId), upload);
-    if (_uploads.size > UPLOADS_KEPT) _uploads.delete(_uploads.keys().next().value);
-}
-
-async function learnUpload(sessionId, uploadId) {
-    const reply = await ask('GET', sessionPath(sessionId, 'files'));
-    const upload = reply.status === 200 && reply.body && reply.body.upload;
-    if (upload && upload.id === uploadId) remember(sessionId, uploadId, { name: String(upload.name || ''), size: Number(upload.size) });
-}
-
 async function listFiles(req, res, session) {
     relay(res, await ask('GET', sessionPath(session.id, 'files')));
 }
@@ -118,23 +103,17 @@ async function deleteFile(req, res, session) {
 
 async function startUpload(req, res, session) {
     const body = req.body || {};
-    const reply = await ask('POST', sessionPath(session.id, 'uploads'), { name: body.name, size: body.size });
-    if (reply.status === 200 && reply.body && typeof reply.body.id === 'string') remember(session.id, reply.body.id, { name: String(body.name), size: Number(body.size) });
-    relay(res, reply);
+    relay(res, await ask('POST', sessionPath(session.id, 'uploads'), { name: body.name, size: body.size }));
 }
 
 async function cancelUpload(req, res, session) {
-    const uploadId = String(req.params.uploadId);
-    const reply = await ask('DELETE', sessionPath(session.id, 'uploads', uploadId));
-    if (reply.status === 200) _uploads.delete(uploadKey(session.id, uploadId));
-    relay(res, reply);
+    relay(res, await ask('DELETE', sessionPath(session.id, 'uploads', String(req.params.uploadId))));
 }
 
 async function uploadChunk(req, res, session) {
     const uploadId = String(req.params.uploadId);
     const declared = req.headers['content-length'];
     if (Number(declared) > CHUNK_MAX) return relay(res, TOO_LARGE);
-    if (!_uploads.has(uploadKey(session.id, uploadId))) await learnUpload(session.id, uploadId);
     const offset = encodeURIComponent(String(req.query.offset ?? ''));
     return new Promise((resolve) => {
         let received = 0;
@@ -149,8 +128,7 @@ async function uploadChunk(req, res, session) {
             if (!req.complete) req.resume();
             relay(res, reply);
             if (reply.status === 200 && reply.body && reply.body.done === true) {
-                const upload = _uploads.get(uploadKey(session.id, uploadId)) || { name: '', size: reply.body.received };
-                record(fileEvent(session, 'uploaded', { id: `web-file:${session.id}:upload:${uploadId}`, name: upload.name, size: upload.size }));
+                record(fileEvent(session, 'uploaded', { id: `web-file:${session.id}:upload:${uploadId}`, name: reply.body.name, size: reply.body.size }));
             }
             resolve();
         };
@@ -227,6 +205,5 @@ module.exports = {
     listFiles, downloadFile, deleteFile, startUpload, uploadChunk, cancelUpload, fileEvent, journalEventId, UPLOAD_CHUNK_PATH, CHUNK_MAX,
     _internal: {
         setSocketForTest: (p) => { _socketPath = p || DEFAULT_SOCKET; },
-        resetForTest: () => { _uploads.clear(); },
     },
 };

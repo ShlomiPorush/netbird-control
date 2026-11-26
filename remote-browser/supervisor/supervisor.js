@@ -9,6 +9,8 @@ const MAX_SESSIONS = 50;
 const MAX_TOMBSTONES = 10_000;
 const SLOT_COOLDOWN_MS = 10 * 60_000;
 const ENDED_RECORD_MS = 10 * 60_000;
+const JOURNAL_PER_LIST = 20;
+const SESSIONS_WITH_FILES_PER_LIST = 20;
 
 const expiredFailure = () => failure('EXPIRED', "The user's authorization has expired.");
 
@@ -74,13 +76,23 @@ class Supervisor {
 
   async setFilesPolicy({ enabled, transfer, rev }) {
     if (rev < this.filesPolicy.rev) return { ok: true, rev: this.filesPolicy.rev };
-    this.filesPolicy = { enabled, transfer: enabled && transfer, rev };
     if (this.policyFileEnabled !== enabled) {
-      this.runtime.writeFilesPolicy(enabled);
+      try {
+        this.runtime.writeFilesPolicy(enabled);
+      } catch (error) {
+        this.log(`files policy (rev ${rev}) could not be written: ${error.message}`);
+        if (!enabled) this.endAll('the files policy could not be blocked');
+        return failure('POLICY_FAILED', 'The files policy could not be written.');
+      }
       this.policyFileEnabled = enabled;
       this.log(`files in the browser ${enabled ? 'enabled' : 'blocked'} (rev ${rev})`);
     }
+    this.filesPolicy = { enabled, transfer: enabled && transfer, rev };
     return { ok: true, rev };
+  }
+
+  endAll(reason) {
+    for (const [session, record] of this.sessions) this.endWith(session, record, reason, null);
   }
 
   async start({ session, width, height, scale, terminal, until, startPage = '', filesLimit = FILES_LIMIT.fallback }) {
@@ -196,8 +208,8 @@ class Supervisor {
   status(session) {
     const { record, refusal } = this.live(session);
     if (refusal) {
-      const code = this.endings.get(session)?.code;
-      return code ? { ...refusal, code } : refusal;
+      const ending = this.endings.get(session);
+      return ending?.code ? { ...refusal, code: ending.code, limit: ending.limit } : refusal;
     }
     return { ok: true, state: record.state };
   }
@@ -217,12 +229,11 @@ class Supervisor {
       ending.code = ending.code ?? code;
       return;
     }
-    this.endings.set(session, { code, journal: record.journal, endedAt: this.now() });
+    this.endings.set(session, { code, limit: record.filesLimit, journal: record.journal, endedAt: this.now() });
   }
 
   stopped(session) {
-    const ending = this.endings.get(session);
-    return { ok: true, state: 'stopped', files: ending ? [...ending.journal.entries] : [], code: ending?.code ?? null };
+    return { ok: true, state: 'stopped', code: this.endings.get(session)?.code ?? null };
   }
 
   async stop(session, reason) {
@@ -303,7 +314,13 @@ class Supervisor {
 
   async pollSession(session, record) {
     if (this.sessions.get(session) !== record || !this.running(record)) return;
-    const scan = await this.runtime.scanFiles(record.ids);
+    let scan;
+    try {
+      scan = await this.runtime.scanFiles(record.ids);
+    } catch (error) {
+      this.endWith(session, record, `files could not be measured: ${error.message}`, 'FILES_FULL');
+      return;
+    }
     if (!scan) return;
     this.noteFiles(record.journal, scan.files);
     const charged = scan.used + this.reservedBy(record);
@@ -348,6 +365,13 @@ class Supervisor {
   list(acks = {}) {
     this.acknowledge(acks);
     this.pruneEndings();
+    let sessionsLeft = SESSIONS_WITH_FILES_PER_LIST;
+    const pending = ({ entries }) => {
+      if (entries.length === 0 || sessionsLeft === 0) return [];
+      sessionsLeft -= 1;
+      return entries.slice(0, JOURNAL_PER_LIST);
+    };
+    const ended = [...this.endings].map(([session, ending]) => ({ session, code: ending.code, limit: ending.limit, files: pending(ending.journal) }));
     return {
       ok: true,
       instance: this.instance,
@@ -357,9 +381,9 @@ class Supervisor {
         uid: record.ids.chromiumUid,
         port: record.ids.port,
         startedAt: record.startedAt,
-        files: this.endings.has(record.session) ? [] : [...record.journal.entries],
+        files: this.endings.has(record.session) ? [] : pending(record.journal),
       })),
-      ended: [...this.endings].map(([session, ending]) => ({ session, code: ending.code, files: [...ending.journal.entries] })),
+      ended,
     };
   }
 
@@ -400,4 +424,4 @@ class Supervisor {
   }
 }
 
-module.exports = { Supervisor, LEASE_MS, MAX_SESSIONS, ENDED_RECORD_MS };
+module.exports = { Supervisor, LEASE_MS, MAX_SESSIONS, ENDED_RECORD_MS, JOURNAL_PER_LIST, SESSIONS_WITH_FILES_PER_LIST };

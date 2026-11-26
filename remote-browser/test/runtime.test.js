@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -12,8 +13,10 @@ const {
   chromiumCommand,
   exited,
   parseScan,
+  scanCommand,
   temporaryLeftovers,
   watchChild,
+  wipe,
   wipeLeftoverFiles,
   writeFilesPolicy,
   xvncArgs,
@@ -136,6 +139,47 @@ test('a scan sums the blocks of the whole tree and lists visible top-level regul
 test('a scan without the folder itself has no result', () => {
   assert.equal(parseScan(''), null);
   assert.equal(parseScan('1\tf\t1\t8\t1.0\tx\0'), null);
+});
+
+test('the scan runs find itself, so its errors and exit code reach the supervisor', () => {
+  const [command, args] = scanCommand('/var/lib/browser-files/chromium-3');
+  assert.equal(command, 'find');
+  assert.deepEqual(args.slice(0, 3), ['/var/lib/browser-files/chromium-3', '-ignore_readdir_race', '-printf']);
+  assert.equal(args.length, 4);
+});
+
+const asNonRoot = { skip: (process.platform !== 'linux' && 'needs GNU find and Linux file modes') || (process.getuid?.() === 0 && 'root reads any folder') };
+
+test('a folder the scan cannot read fails the scan instead of being left out', asNonRoot, (t) => {
+  const root = scratch(t);
+  fs.writeFileSync(path.join(root, 'a.bin'), 'x');
+  const [command, args] = scanCommand(root);
+  const clean = spawnSync(command, args);
+  assert.equal(clean.status, 0);
+  assert.deepEqual(parseScan(clean.stdout.toString()).files.map((file) => file.name), ['a.bin']);
+  const hidden = path.join(root, 'hidden');
+  fs.mkdirSync(hidden);
+  fs.writeFileSync(path.join(hidden, 'big.bin'), Buffer.alloc(1024 * 1024));
+  fs.chmodSync(hidden, 0);
+  try {
+    assert.notEqual(spawnSync(command, args).status, 0);
+  } finally {
+    fs.chmodSync(hidden, 0o700);
+  }
+});
+
+test('a files folder still owned by root is removed with rmdir as root, and is never read', async (t) => {
+  const root = scratch(t);
+  const empty = path.join(root, 'chromium-0');
+  fs.mkdirSync(empty);
+  await wipe({ dir: empty, uid: 62000 }, () => 0);
+  assert.equal(fs.existsSync(empty), false);
+  const full = path.join(root, 'chromium-1');
+  fs.mkdirSync(full);
+  fs.writeFileSync(path.join(full, 'kept'), 'x');
+  await assert.rejects(wipe({ dir: full, uid: 62001 }, () => 0), { code: 'ENOTEMPTY' });
+  assert.equal(fs.readFileSync(path.join(full, 'kept'), 'utf8'), 'x');
+  await wipe({ dir: path.join(root, 'missing'), uid: 62002 }, () => null);
 });
 
 test('leftover files folders are wiped as their slot uid and anything else is reported', async (t) => {

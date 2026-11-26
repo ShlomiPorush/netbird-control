@@ -98,6 +98,16 @@ test('an upload never replaces an existing name', onLinux, (t) => {
   assert.equal(fs.existsSync(temporary), false);
 });
 
+test('a publish whose temporary file is gone answers NAME_TAKEN when the name exists, otherwise NO_UPLOAD', onLinux, (t) => {
+  const dir = scratch(t);
+  const temporary = path.join(dir, '.upload-5');
+  const final = path.join(dir, 'fw.bin');
+  assert.deepEqual(createUpload(temporary, final), { ok: true });
+  assert.deepEqual(publishUpload(temporary, final), { received: 0 });
+  assert.deepEqual(publishUpload(temporary, final), { error: 'NAME_TAKEN' });
+  assert.deepEqual(publishUpload(temporary, path.join(dir, 'other.bin')), { error: 'NO_UPLOAD' });
+});
+
 test('appending or publishing through a swapped temporary file is refused', onLinux, async (t) => {
   const dir = scratch(t);
   hostileEntries(dir);

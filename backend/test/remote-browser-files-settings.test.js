@@ -12,6 +12,10 @@ core.pool.connect = async () => ({
         const s = sql.replace(/\s+/g, ' ').trim();
         statements.push(s);
         if (/^SELECT value FROM app_settings WHERE key = \$1 FOR UPDATE$/.test(s)) return { rows: stored.has(params[0]) ? [{ value: stored.get(params[0]) }] : [] };
+        if (/^INSERT INTO app_settings \(key, value\) VALUES \(\$1, NULL\) ON CONFLICT \(key\) DO NOTHING$/.test(s)) {
+            if (!stored.has(params[0])) stored.set(params[0], null);
+            return { rows: [], rowCount: 1 };
+        }
         if (/^INSERT INTO app_settings/.test(s)) {
             if (failInsert) throw new Error('the database is not answering');
             stored.set(params[0], params[1]);
@@ -49,23 +53,35 @@ test('the files settings are off by default, transfer needs files, and the limit
     for (const bad of [-1, 1.5, '3', null]) assert.equal(normConfig({ rev: bad }).rev, 0);
 });
 
+const CREATE_ROW = 'INSERT INTO app_settings (key, value) VALUES ($1, NULL) ON CONFLICT (key) DO NOTHING';
+const LOCK_ROW = 'SELECT value FROM app_settings WHERE key = $1 FOR UPDATE';
+
 test('a locked update reads the row FOR UPDATE, writes, commits and releases; a failure rolls back and still releases', async () => {
     reset();
     stored.set('k', 'old');
     assert.equal(await core.updateSetting('k', (v) => `${v}+new`), 'old+new');
-    assert.deepEqual(statements.map(s => s.split(' ').slice(0, 2).join(' ')), ['BEGIN', 'SELECT value', 'INSERT INTO', 'COMMIT']);
-    assert.match(statements[1], /FOR UPDATE$/);
+    assert.deepEqual(statements.map(s => s.split(' ').slice(0, 2).join(' ')), ['BEGIN', 'INSERT INTO', 'SELECT value', 'INSERT INTO', 'COMMIT']);
+    assert.deepEqual(statements.slice(1, 3), [CREATE_ROW, LOCK_ROW]);
     assert.equal(stored.get('k'), 'old+new');
     assert.equal(releases, 1);
     statements.length = 0;
     await assert.rejects(core.updateSetting('k', () => { throw new Error('bad change'); }), /bad change/);
-    assert.deepEqual(statements, ['BEGIN', 'SELECT value FROM app_settings WHERE key = $1 FOR UPDATE', 'ROLLBACK']);
+    assert.deepEqual(statements, ['BEGIN', CREATE_ROW, LOCK_ROW, 'ROLLBACK']);
     failInsert = true;
     statements.length = 0;
     await assert.rejects(core.updateSetting('k', () => 'x'), /not answering/);
     assert.equal(statements.at(-1), 'ROLLBACK');
     assert.equal(stored.get('k'), 'old+new');
     assert.equal(releases, 3);
+});
+
+test('a first save creates the row before it locks it, so a second first save waits for it instead of also starting from nothing', async () => {
+    reset();
+    const seen = [];
+    assert.equal(await core.updateSetting('fresh', (v) => { seen.push(v); return 'first'; }), 'first');
+    assert.deepEqual(seen, [null]);
+    assert.deepEqual(statements.slice(0, 3), ['BEGIN', CREATE_ROW, LOCK_ROW]);
+    assert.equal(stored.get('fresh'), 'first');
 });
 
 test('a save merges into the saved settings, not into a stale copy, and counts up the revision', async () => {

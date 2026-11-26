@@ -70,6 +70,10 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
     setUpload({ name: file.name, size: file.size, sent: 0, uploadId: '', ctrl });
     try {
       const started = await remoteApi.startUpload(sessionId, { name: file.name, size: file.size });
+      if (ctrl.signal.aborted) {
+        remoteApi.cancelUpload(sessionId, started.id).catch(() => { });
+        return;
+      }
       setUpload((u) => u && { ...u, uploadId: started.id });
       let offset = started.received || 0;
       let chunkSize = CHUNK;

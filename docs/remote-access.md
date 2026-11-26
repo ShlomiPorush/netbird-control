@@ -788,9 +788,10 @@ effect in open browsers within about a minute; a download that already started f
 
 **Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger
 than the limit fails to download. The total is checked every 3 seconds, and a browser whose files
-pass the limit is closed: its user sees *This browser's files passed its N GB limit, so it was
-closed.* The limit is an estimate, not a hard bound: a fast download can pass it by what arrives
-between two checks. A changed limit applies to browsers opened after the change.
+pass the limit, or can't be measured completely, is closed: its user sees *This browser's files
+passed its N GB limit, so it was closed.* The limit is an estimate, not a hard bound: a fast
+download can pass it by what arrives between two checks. A changed limit applies to browsers opened
+after the change.
 
 **Disk sizing.** The files are on the `remote-browser-files` Docker volume. The Docker host needs
 about **Browsers At A Time × Storage Per Browser** free space (for example 5 × 2 GB = 10 GB). For a

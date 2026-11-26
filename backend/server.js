@@ -3426,6 +3426,11 @@ const remoteUserGate = ({ refresh = true } = {}) => async (req, res, next) => {
     }
 };
 const requireRemoteUser = remoteUserGate();
+const refuseBlockedViewer = (req, res) => {
+    if (!req.remoteViewer.blocked) return false;
+    res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
+    return true;
+};
 function sendRemoteError(res, e) {
     const status = e.status || 500;
     if (status >= 500 && !e.code) console.error('[remote-access]', e.message);
@@ -3480,7 +3485,7 @@ app.get('/api/remote-access/add-networks', requireRemoteUser, async (req, res) =
 // 'down' or 'unknown', and nothing else. Asked only on a user action (the page polls nothing).
 app.get('/api/remote-access/health', remoteUserGate({ refresh: false }), async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    if (req.remoteViewer.blocked) return res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
+    if (refuseBlockedViewer(req, res)) return;
     try {
         const [health, browserGateway] = await Promise.all([remoteAccessLib.getServiceHealth(), remoteBrowser.getBrowserHealth()]);
         res.json(browserGateway ? { ...health, browserGateway } : health);
@@ -3520,6 +3525,7 @@ app.post('/api/remote-access/sessions/:id/resume', requireRemoteUser, async (req
     catch (e) { sendRemoteError(res, e); }
 });
 const webFiles = (handler) => async (req, res) => {
+    if (refuseBlockedViewer(req, res)) return;
     try { await handler(req, res, await remoteBrowser.ownedWebSession(req.remoteViewer, String(req.params.id))); } catch (e) {
         if (res.headersSent) res.destroy(); else sendRemoteError(res, e);
     }

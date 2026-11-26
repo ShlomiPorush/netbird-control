@@ -8,7 +8,7 @@ const { deferred, fakeRuntime } = require('./fake-runtime');
 
 const FAR = 10 ** 13;
 const INSTANCE = 'instance-1';
-const STOPPED = { ok: true, state: 'stopped', files: [], code: null };
+const STOPPED = { ok: true, state: 'stopped', code: null };
 
 function setup(options = {}) {
   const runtime = fakeRuntime();
@@ -445,16 +445,40 @@ test('the files policy is written only when it changes, and an older rev is igno
   assert.deepEqual(runtime.policyWrites, [true, false]);
 });
 
-test('a policy write that fails is retried by the next files op', async () => {
-  const { supervisor, runtime } = setup();
+test('a policy write that fails is refused, keeps the held settings and is retried by the next files op', async () => {
+  const { supervisor, runtime, startOf } = setup();
+  await startOf('a');
   runtime.writeFilesPolicy = () => {
     throw new Error('read-only');
   };
-  await assert.rejects(filesOp(supervisor, { rev: 0 }), /read-only/);
+  const refused = await filesOp(supervisor, { rev: 0 });
+  assert.deepEqual([refused.ok, refused.error], [false, 'POLICY_FAILED']);
+  assert.deepEqual(supervisor.filesPolicy, { enabled: false, transfer: false, rev: -1 });
+  assert.deepEqual(supervisor.filesAccess('a', false), { refusal: 'FILES_OFF' });
+  await settleStops();
+  assert.deepEqual(runtime.calls, ['launch 0'], 'a failed write toward more access stops nothing');
   const written = [];
   runtime.writeFilesPolicy = (enabled) => written.push(enabled);
-  await filesOp(supervisor, { rev: 0 });
+  assert.deepEqual(await filesOp(supervisor, { rev: 0 }), { ok: true, rev: 0 });
   assert.deepEqual(written, [true]);
+  assert.deepEqual(supervisor.filesPolicy, { enabled: true, transfer: true, rev: 0 });
+});
+
+test('a policy write that fails to block files keeps files allowed in the supervisor, as in Chromium, and stops every session', async () => {
+  const { supervisor, runtime, startOf } = setup();
+  await filesOp(supervisor, { rev: 0 });
+  await startOf('a');
+  await startOf('b');
+  runtime.writeFilesPolicy = () => {
+    throw new Error('no space left on device');
+  };
+  const refused = await filesOp(supervisor, { rev: 1, enabled: false });
+  assert.deepEqual([refused.ok, refused.error], [false, 'POLICY_FAILED']);
+  assert.deepEqual(supervisor.filesPolicy, { enabled: true, transfer: true, rev: 0 });
+  assert.equal(supervisor.policyFileEnabled, true);
+  await settleStops();
+  assert.deepEqual(runtime.calls, ['launch 0', 'launch 1', 'teardown 0', 'teardown 1']);
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions, []);
 });
 
 test('the files limit of a start reaches the launch and defaults to 2 GiB', async () => {
@@ -509,12 +533,23 @@ test('the poll stops a session whose files pass its limit, with FILES_FULL recor
   await poll(supervisor);
   await settleStops();
   assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
-  assert.deepEqual(seenAtTeardown, [{ ok: false, error: 'ENDED', message: 'The session is ending.', code: 'FILES_FULL' }]);
-  assert.deepEqual(supervisor.status('a'), { ok: false, error: 'ENDED', message: 'The session has ended.', code: 'FILES_FULL' });
+  assert.deepEqual(seenAtTeardown, [{ ok: false, error: 'ENDED', message: 'The session is ending.', code: 'FILES_FULL', limit: GIB }]);
+  assert.deepEqual(supervisor.status('a'), { ok: false, error: 'ENDED', message: 'The session has ended.', code: 'FILES_FULL', limit: GIB });
   const listed = await supervisor.handle({ op: 'list' });
   assert.deepEqual(listed.sessions, []);
-  assert.deepEqual(listed.ended, [{ session: 'a', code: 'FILES_FULL', files: [{ seq: 1, name: 'big.iso', size: 10 }] }]);
-  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped', files: [{ seq: 1, name: 'big.iso', size: 10 }], code: 'FILES_FULL' });
+  assert.deepEqual(listed.ended, [{ session: 'a', code: 'FILES_FULL', limit: GIB, files: [{ seq: 1, name: 'big.iso', size: 10 }] }]);
+  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped', code: 'FILES_FULL' });
+});
+
+test('the ended record carries the limit the session ran with', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a', { filesLimit: 3 * GIB });
+  await startOf('b', { filesLimit: 5 * GIB });
+  runtime.padding = 3 * GIB + 1;
+  await poll(supervisor);
+  await settleStops();
+  assert.equal(supervisor.status('a').limit, 3 * GIB);
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).ended.map((ending) => [ending.session, ending.limit]), [['a', 3 * GIB]]);
 });
 
 test('the poll counts the rest of an active upload as reserved', async () => {
@@ -558,29 +593,31 @@ test('the poll runs whatever the files setting, skips a session without its fold
   assert.equal(scanned.length, 2);
 });
 
-test('a failed scan neither stops the session nor breaks later polls', async () => {
+test('a scan that does not complete counts as over the limit and stops only that session with FILES_FULL', async () => {
   const logged = [];
   const { startOf, supervisor, runtime } = setup({ log: (line) => logged.push(line) });
   await startOf('a');
+  await startOf('b');
   const scanFiles = runtime.scanFiles;
-  runtime.scanFiles = async () => {
-    throw new Error('find timed out');
+  runtime.scanFiles = async (ids) => {
+    if (ids.slot === 0) throw new Error("find failed (1): '/var/lib/browser-files/chromium-0/hidden': Permission denied");
+    return scanFiles(ids);
   };
   await poll(supervisor);
-  assert.ok(logged.some((line) => /files poll failed: find timed out/.test(line)));
-  runtime.scanFiles = scanFiles;
-  runtime.folder(0).set('late', Buffer.alloc(1));
-  await poll(supervisor);
-  assert.equal((await supervisor.handle({ op: 'list' })).sessions[0].files.length, 1);
+  await settleStops();
+  assert.deepEqual(runtime.calls, ['launch 0', 'launch 1', 'teardown 0']);
+  assert.equal(supervisor.status('a').code, 'FILES_FULL');
+  assert.ok(logged.some((line) => /files could not be measured: find failed/.test(line)));
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions.map((s) => s.session), ['b']);
 });
 
-test('the final scan at teardown journals files the poll has not seen yet, and stop returns them', async () => {
+test('the final scan at teardown journals files the poll has not seen yet, and list returns them under ended, not stop', async () => {
   const { startOf, supervisor, runtime } = setup();
   await startOf('a');
   runtime.folder(0).set('last.bin', Buffer.alloc(3));
-  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped', files: [{ seq: 1, name: 'last.bin', size: 3 }], code: null });
+  assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped', code: null });
   const listed = await supervisor.handle({ op: 'list' });
-  assert.deepEqual(listed.ended, [{ session: 'a', code: null, files: [{ seq: 1, name: 'last.bin', size: 3 }] }]);
+  assert.deepEqual(listed.ended, [{ session: 'a', code: null, limit: 2 * GIB, files: [{ seq: 1, name: 'last.bin', size: 3 }] }]);
   assert.deepEqual(supervisor.status('a'), { ok: false, error: 'ENDED', message: 'The session has ended.' }, 'no code for a plain stop');
 });
 
@@ -595,7 +632,7 @@ test('an ended record is dropped once its files are acked and it has no code, or
   runtime.padding = GIB + 1;
   await poll(supervisor);
   await settleStops();
-  assert.deepEqual((await supervisor.handle({ op: 'list', ack: { b: 5 } })).ended, [{ session: 'b', code: 'FILES_FULL', files: [] }]);
+  assert.deepEqual((await supervisor.handle({ op: 'list', ack: { b: 5 } })).ended, [{ session: 'b', code: 'FILES_FULL', limit: GIB, files: [] }]);
   advance(10 * 60_000 - 1);
   assert.equal((await supervisor.handle({ op: 'list' })).ended.length, 1);
   advance(1);
@@ -612,7 +649,38 @@ test('an ended session still tearing down is listed under ended, and its files o
   assert.equal((await supervisor.handle({ op: 'stop', session: 'a' })).error, 'STOP_FAILED');
   const listed = await supervisor.handle({ op: 'list' });
   assert.deepEqual(listed.sessions.map((s) => [s.state, s.files]), [['stopping', []]]);
-  assert.deepEqual(listed.ended, [{ session: 'a', code: null, files: [{ seq: 1, name: 'a.bin', size: 1 }] }]);
+  assert.deepEqual(listed.ended, [{ session: 'a', code: null, limit: 2 * GIB, files: [{ seq: 1, name: 'a.bin', size: 1 }] }]);
+});
+
+test('list returns at most 20 journal entries per session, oldest first, and the rest after the ack', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  for (let i = 1; i <= 25; i += 1) runtime.folder(0).set(`f${String(i).padStart(2, '0')}`, Buffer.alloc(1));
+  await poll(supervisor);
+  const first = (await supervisor.handle({ op: 'list' })).sessions[0].files;
+  assert.deepEqual(first.map((entry) => entry.seq), Array.from({ length: 20 }, (_, i) => i + 1));
+  const rest = (await supervisor.handle({ op: 'list', ack: { a: 20 } })).sessions[0].files;
+  assert.deepEqual(rest.map((entry) => entry.seq), [21, 22, 23, 24, 25]);
+  await supervisor.handle({ op: 'stop', session: 'a' });
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).ended[0].files.map((entry) => entry.seq), [21, 22, 23, 24, 25]);
+});
+
+test('list gives entries to at most 20 sessions, ended ones first, and stays far below the reply limit of the backend', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  const sessions = Array.from({ length: 30 }, (_, i) => `s${i}`);
+  for (const session of sessions) await startOf(session);
+  const worstName = (i, j) => `${'\u0001'.repeat(250)}${String(i).padStart(2, '0')}${String(j).padStart(2, '0')}`;
+  sessions.forEach((_, i) => {
+    for (let j = 0; j < 25; j += 1) runtime.folder(i).set(worstName(i, j), Buffer.alloc(1));
+  });
+  await poll(supervisor);
+  for (const session of sessions.slice(25)) await supervisor.handle({ op: 'stop', session });
+  const listed = await supervisor.handle({ op: 'list' });
+  const withFiles = [...listed.ended, ...listed.sessions].filter((entry) => entry.files.length > 0);
+  assert.equal(withFiles.length, 20);
+  assert.ok(withFiles.every((entry) => entry.files.length === 20));
+  assert.deepEqual(listed.ended.filter((entry) => entry.files.length > 0).map((entry) => entry.session), sessions.slice(25));
+  assert.ok(Buffer.byteLength(JSON.stringify(listed)) < 1024 * 1024);
 });
 
 test('a start that fails leaves no ended record behind', async () => {
