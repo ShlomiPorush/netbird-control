@@ -353,8 +353,12 @@ services:
     mem_limit: 256m
     pids_limit: 256
 
+  # The health check only looks for guacd's listening socket in /proc/net/tcp (172.31.250.4:4822,
+  # hex 04FA1FAC:12D6): connecting to it as uid 1000 would be refused by the gateway's lock. The
+  # app checks that it reaches guacd before it opens a web session.
   remote-browser-guacd:
     <<: *guacd
+    image: guacamole/guacd:1.6.0
     profiles: [ "remote-browser" ]
     container_name: netbird-control-remote-browser-guacd
     network_mode: "service:remote-browser-gateway"
@@ -366,7 +370,7 @@ services:
     volumes:
       - remote-browser-status:/run/nbc-status:ro
     healthcheck:
-      test: [ "CMD-SHELL", "nc -z 172.31.250.4 4822 || exit 1" ]
+      test: [ "CMD-SHELL", "grep -qE '^ *[0-9]+: (04FA1FAC|00000000):12D6 00000000:0000 0A ' /proc/net/tcp" ]
       interval: 60s
       timeout: 5s
       start_period: 20s

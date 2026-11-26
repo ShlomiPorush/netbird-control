@@ -723,8 +723,10 @@ count. The check runs when the session opens and every minute after.
   running, with its tabs and sign-ins, for the keep-alive time (default 15 minutes). The Remote
   Access page lists the user's open browsers with **Resume** and **Close Browser**. Only the same
   user can resume, and the access checks run again first.
-- **Close Browser** ends the browser at once and wipes its profile. A browser also ends when the
-  user closes its last window, when the keep-alive passes, or when access is lost.
+- **Close Browser** ends the browser at once and wipes its profile. When the remote browser does not
+  confirm that it stopped, the browser shows as **Closing...** until the app has stopped it (it tries
+  again every minute). A browser also ends when the user closes its last window, when the keep-alive
+  passes, or when access is lost.
 - Opening the same browser in another window moves it there; the first window shows that it moved.
 
 ### Inside the browser
@@ -738,6 +740,9 @@ count. The check runs when the session opens and every minute after.
   1.6.1). Typing Hebrew works.
 - Every session runs as its own Linux users (one for the display, one for Chromium), with Chromium's
   sandbox on and no capabilities. A session cannot see another session's screen or connect to it.
+- The browser container's seccomp profile, `remote-browser/seccomp.json`, is Docker's default
+  profile from moby `docker-v29.8.2`, with `clone` allowed without its namespace-flag filter and
+  `chroot` and `unshare` allowed, which Chromium's sandbox needs.
 
 ### Session and connection records
 
@@ -752,7 +757,7 @@ recorder misses connections (for example while the app restarts), a gap record s
    peers) and turn web sessions on. The app creates its groups, route and policies in NetBird.
 2. **Create Setup Key** in the same card and put it in `.env` as
    `REMOTE_BROWSER_GATEWAY_SETUP_KEY` (one-time key, valid for one day). Keep `.env` readable by its
-   owner only.
+   owner only. A new key revokes the earlier unused ones, so only one browser gateway can enroll.
 3. `.env` must also set `TAG` (the release `update.sh` installs), because the browser image follows
    the app's version.
 4. Start the browser gateway and its containers together, from the folder that holds
@@ -772,7 +777,13 @@ recorder misses connections (for example while the app restarts), a gap record s
    gateway as not ready.
 
 **Settings → Remote Access → Remote Browser** shows whether the gateway is enrolled, online and
-ready, and why not.
+ready, and why not. Before a web session opens, the app also checks that it reaches the browser
+gateway's guacd.
+
+**Enroll the browser gateway again** (for example after its state volume was lost): delete the old
+browser gateway peer in NetBird (**Peers**), create a new setup key in the card, put it in `.env`,
+remove the `remote-browser-gateway-state` volume and start the four containers again with the
+command above. The card refuses a new key while the browser gateway group still has a peer.
 
 ### Known limits
 
