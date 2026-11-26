@@ -299,7 +299,7 @@ async function listWebSessions(viewer) {
     return {
         keepAliveMin: config().browser.keepAliveMin,
         sessions: rowsOf(r).map(x => ({
-            id: x.id, state: x.state, width: x.width, height: x.height, createdAt: iso(x.created_at),
+            sessionId: x.id, state: x.state, width: x.width, height: x.height, createdAt: iso(x.created_at),
             detachedAt: x.state === 'detached' ? iso(x.detached_at) : null,
             expiresAt: x.state === 'detached' && msOf(x.detached_at) ? new Date(msOf(x.detached_at) + keepAliveMs).toISOString() : null,
         })),

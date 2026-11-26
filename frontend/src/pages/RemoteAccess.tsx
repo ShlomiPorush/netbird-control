@@ -23,12 +23,12 @@ const HERO_TEXT: Record<RemoteProtocol, string> = {
   ssh: 'Open an RDP or SSH session to any server your NetBird access allows.',
   web: "Open a browser for public websites. Sites see the office's internet address.",
 };
-const WEB_READY_CODES = new Set(['BROWSER_DISABLED', 'BROWSER_NOT_READY']);
+const WEB_READY_CODES = new Set(['BROWSER_DISABLED', 'GATEWAY_NOT_READY', 'BROWSER_UNAVAILABLE']);
 const WEB_FALLBACK: Record<string, string> = {
   BROWSER_DISABLED: 'Browser sessions are turned off. Ask an administrator.',
-  BROWSER_NOT_READY: "The browser service isn't ready. Try again in a few minutes, or tell an administrator.",
+  GATEWAY_NOT_READY: "The browser service isn't ready. Try again in a few minutes, or tell an administrator.",
   BROWSER_CAPACITY: 'All browsers are in use right now. Try again in a few minutes.',
-  EXIT_NODE_REQUIRED: 'Browser sessions need one of your devices to use the office Exit Node. Ask an administrator.',
+  NO_EXIT_NODE: 'Browser sessions need one of your devices to use the office Exit Node. Ask an administrator.',
 };
 const timezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 // While remote access is getting ready, ask again this often, for at most this long.
@@ -410,7 +410,7 @@ export default function RemoteAccess() {
     } catch (err) {
       const code = err instanceof ApiError ? err.code || '' : '';
       if (web && code) {
-        const key: StepKey = WEB_READY_CODES.has(code) ? 'ready' : code === 'EXIT_NODE_REQUIRED' ? 'access' : 'route';
+        const key: StepKey = WEB_READY_CODES.has(code) ? 'ready' : code === 'NO_EXIT_NODE' ? 'access' : 'route';
         if (key !== 'route') setStep('route', 'pending');
         fail(key, { message: apiText(err, WEB_FALLBACK[code] || "The browser couldn't be started. Try again.") });
         setPhase('checking');
