@@ -7,6 +7,7 @@ const { isFileName, isSessionId } = require('./protocol');
 const CHUNK_MAX_BYTES = 8 * 1024 * 1024;
 const JSON_MAX_BYTES = 4096;
 const PARTIAL_SUFFIX = '.crdownload';
+const LISTED_FILES_MAX = 500;
 
 const REFUSALS = {
   NO_ROUTE: [404, 'No such route.'],
@@ -88,7 +89,7 @@ function decodeSegment(segment, refusal) {
   }
 }
 
-const uploadView = (upload) => (upload ? { id: upload.id, name: upload.name, size: upload.size, received: upload.received } : null);
+const newestFirst = (a, b) => b.mtime - a.mtime || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
 async function dropActiveUpload(runtime, record) {
   const { upload } = record;
@@ -100,16 +101,17 @@ async function dropActiveUpload(runtime, record) {
 async function listFiles({ queued, runtime }) {
   return queued(async (record) => {
     const scan = (await runtime.scanFiles(record.ids)) ?? { used: 0, files: [] };
-    return { files: scan.files, used: scan.used, limit: record.filesLimit, upload: uploadView(record.upload) };
+    const files = [...scan.files].sort(newestFirst).slice(0, LISTED_FILES_MAX).map(({ name, size, partial }) => ({ name, size, partial }));
+    return { files, total: scan.files.length, used: scan.used, limit: record.filesLimit };
   });
 }
 
-async function downloadFile({ record, runtime, name, res }) {
+async function downloadFile({ queued, record, runtime, name, res }) {
   if (name.endsWith(PARTIAL_SUFFIX)) refuse('PARTIAL');
-  record.streams.set(name, (record.streams.get(name) ?? 0) + 1);
+  let registered = false;
   let released = false;
   const release = () => {
-    if (released) return;
+    if (!registered || released) return;
     released = true;
     const left = record.streams.get(name) - 1;
     if (left > 0) record.streams.set(name, left);
@@ -122,6 +124,12 @@ async function downloadFile({ record, runtime, name, res }) {
     opened?.stop();
     release();
   });
+  await queued(async () => {
+    if (clientGone) return;
+    record.streams.set(name, (record.streams.get(name) ?? 0) + 1);
+    registered = true;
+  });
+  if (clientGone) return null;
   try {
     opened = await runtime.readFile(record.ids, name);
   } catch (error) {

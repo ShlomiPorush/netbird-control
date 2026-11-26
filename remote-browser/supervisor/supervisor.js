@@ -34,7 +34,7 @@ class Supervisor {
     this.freedAt = new Map();
     this.slotCooldownMs = slotCooldownMs;
     this.filesPolicy = { enabled: false, transfer: false, rev: -1 };
-    this.policyFileEnabled = false;
+    this.policyFailed = false;
     this.endings = new Map();
     const saved = store.load();
     this.nextSlot = Number.isInteger(saved) && saved >= 0 && saved < slotCount ? saved : 0;
@@ -76,15 +76,18 @@ class Supervisor {
 
   async setFilesPolicy({ enabled, transfer, rev }) {
     if (rev < this.filesPolicy.rev) return { ok: true, rev: this.filesPolicy.rev };
-    if (this.policyFileEnabled !== enabled) {
+    if (this.policyFailed || this.filesPolicy.enabled !== enabled) {
       try {
         this.runtime.writeFilesPolicy(enabled);
       } catch (error) {
         this.log(`files policy (rev ${rev}) could not be written: ${error.message}`);
-        if (!enabled) this.endAll('the files policy could not be blocked');
+        if (!enabled) {
+          this.policyFailed = true;
+          this.endAll('the files policy could not be blocked');
+        }
         return failure('POLICY_FAILED', 'The files policy could not be written.');
       }
-      this.policyFileEnabled = enabled;
+      this.policyFailed = false;
       this.log(`files in the browser ${enabled ? 'enabled' : 'blocked'} (rev ${rev})`);
     }
     this.filesPolicy = { enabled, transfer: enabled && transfer, rev };
@@ -97,6 +100,7 @@ class Supervisor {
 
   async start({ session, width, height, scale, terminal, until, startPage = '', filesLimit = FILES_LIMIT.fallback }) {
     if (terminal) return failure('TERMINAL', 'The session has ended and cannot start again.');
+    if (this.policyFailed) return failure('POLICY_FAILED', 'The files policy could not be blocked, so no browser starts.');
     if (this.expired(until)) return expiredFailure();
     if (this.tombstones.has(session)) return failure('ENDED', 'The session has ended and cannot start again.');
     const existing = this.sessions.get(session);
@@ -341,7 +345,7 @@ class Supervisor {
   filesAccess(session, needsTransfer) {
     const record = this.sessions.get(session);
     if (!record || !this.running(record) || record.leaseExpiresAt <= this.now()) return { refusal: 'NO_SESSION' };
-    if (!this.filesPolicy.enabled) return { refusal: 'FILES_OFF' };
+    if (!this.filesPolicy.enabled || this.policyFailed) return { refusal: 'FILES_OFF' };
     if (needsTransfer && !this.filesPolicy.transfer) return { refusal: 'TRANSFER_OFF' };
     return { record };
   }

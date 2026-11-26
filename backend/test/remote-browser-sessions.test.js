@@ -137,8 +137,8 @@ function answer(req) {
             acknowledge(req.ack);
             return {
                 ok: true, instance: sup.instance,
-                sessions: [...sup.sessions].filter(([session]) => !sup.unlisted.has(session)).map(([session, s]) => ({ session, state: 'running', uid: s.uid, port: s.port, startedAt: s.startedAt, files: journalOf(session) })),
-                ended: [...sup.endedIds].map(session => ({ session, code: sup.codes.get(session) ?? null, limit: sup.limits.get(session), files: journalOf(session) })),
+                sessions: [...sup.sessions].filter(([session]) => !sup.unlisted.has(session)).map(([session, s]) => ({ session, state: 'running', uid: s.uid, port: s.port, startedAt: s.startedAt, files: journalOf(session).slice(0, 20) })),
+                ended: [...sup.endedIds].map(session => ({ session, code: sup.codes.get(session) ?? null, limit: sup.limits.get(session), files: journalOf(session).slice(0, 20) })),
             };
         case 'files':
             if (req.rev >= sup.rev) sup.rev = req.rev;
@@ -1329,6 +1329,67 @@ test('a supervisor that is not deployed is not logged as an error when the files
         console.error = error;
     }
     assert.deepEqual(logged.filter(line => /files setting/.test(line)), []);
+});
+
+test('the leader tick takes the web sessions flag from the same fresh read as the files setting and its revision', async () => {
+    await reset();
+    settings.remote_access_config = JSON.stringify({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office', files: true, transfer: true }, rev: 12 });
+    const stored = settings.remote_access_config;
+    Object.defineProperty(settings, 'remote_access_config', {
+        configurable: true, enumerable: true,
+        get() {
+            ra._internal.setConfigForTest({ ...filesOn(), rev: 11 });
+            return stored;
+        },
+    });
+    sup.requests.length = 0;
+    try {
+        await rb.leaderTick();
+    } finally {
+        delete settings.remote_access_config;
+        await rb._internal.closeConnectionsForTest();
+    }
+    assert.deepEqual(filesOps(), [{ op: 'files', enabled: false, transfer: false, rev: 12 }]);
+});
+
+test('the leader tick drains a long journal in bounded lists, acknowledging each part before it asks for the next', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    await rb.endWebSessionByUser(USER, out.sessionId);
+    sup.journal.set(out.sessionId, Array.from({ length: 250 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    await rb._internal.closeConnectionsForTest();
+    assert.equal(fileRecords().length, 250);
+    assert.deepEqual(sup.journal.get(out.sessionId).length, 0);
+    assert.deepEqual(listRequests().filter(r => r.ack).map(r => r.ack[out.sessionId]), Array.from({ length: 13 }, (_, i) => Math.min(250, (i + 1) * 20)));
+});
+
+test('the drain stops after 20 lists in one tick and goes on in the next', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    await rb.endWebSessionByUser(USER, out.sessionId);
+    sup.journal.set(out.sessionId, Array.from({ length: 500 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    assert.equal(listRequests().filter(r => r.ack).length, 19, 'the list of the tick and 19 more');
+    assert.equal(fileRecords().length, 400);
+    await rb.leaderTick();
+    await rb._internal.closeConnectionsForTest();
+    assert.equal(fileRecords().length, 500);
+});
+
+test('the drain stops when a round records nothing new', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    await rb.endWebSessionByUser(USER, out.sessionId);
+    sup.journal.set(out.sessionId, Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
+    failingIds.add(`web-file:${out.sessionId}:21`);
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    await rb._internal.closeConnectionsForTest();
+    assert.equal(fileRecords().length, 20);
+    assert.equal(listRequests().filter(r => r.ack).length, 1);
 });
 
 test('the leader tick sends the files setting from a fresh read of the saved settings, and nothing when the read fails', async () => {

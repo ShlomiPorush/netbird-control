@@ -6,6 +6,7 @@ const net = require('net');
 const { pool } = require('./core');
 const { addEvent } = require('./events');
 const ra = require('./remote-access');
+const { netbirdApiConfigured } = require('./netbird');
 const { browserGateProblem, browserLiveProblem } = require('./remote-access-auth');
 const { fileEvent, journalEventId } = require('./remote-browser-files');
 
@@ -44,6 +45,7 @@ const OPEN_STATES = ['active', 'detached'];
 const GIB = 1024 ** 3;
 const ACKS_PER_LIST = 40;
 const ENDED_LIST_MIN = 10;
+const JOURNAL_ROUNDS_PER_TICK = 20;
 const CODE = { ended: 0x020B, takenOver: 0x0205, denied: 0x0303, restarting: 0x0201, lost: 0x0208 };
 const TAKEN_OVER = 'Your browser was opened in another window.';
 const BROWSER_CLOSED = 'The browser was closed.';
@@ -641,7 +643,7 @@ async function endAllWebSessions(reason, code) {
 }
 
 async function sendFilesSetting(saved) {
-    const enabled = browserActive() && !!saved.browser.files;
+    const enabled = !!(saved.enabled && saved.browser.enabled && saved.browser.files) && netbirdApiConfigured();
     const request = { op: 'files', enabled, transfer: enabled && !!saved.browser.transfer, rev: saved.rev };
     const reply = await supervisorRequest(request).catch((e) => {
         if (e.code !== 'ENOENT') console.error('[remote-browser] could not send the files setting:', e.message);
@@ -849,6 +851,20 @@ async function recordJournal(row, files) {
     }
 }
 
+async function drainJournals(listed) {
+    for (let round = 1; ; round++) {
+        await recordListedJournals(listed);
+        const ack = acksToSend();
+        if (!ack || round >= JOURNAL_ROUNDS_PER_TICK) return;
+        try { listed = await supervisorRequest({ op: 'list', ack }); } catch (e) {
+            console.error('[remote-browser] file log: the supervisor did not answer:', e.message);
+            return;
+        }
+        if (!listed || listed.ok !== true || !Array.isArray(listed.sessions)) return;
+        acksSent(ack);
+    }
+}
+
 async function recordListedJournals(listed) {
     const batches = [...listed.sessions, ...(Array.isArray(listed.ended) ? listed.ended : [])]
         .filter(b => b && typeof b.session === 'string' && journalEntries(b.files).length);
@@ -883,7 +899,7 @@ async function leaderTick() {
             return null;
         }) : null;
         await superviseWebSessions().catch(e => console.error('[remote-browser] supervise:', e.message));
-        if (listed) await recordListedJournals(listed).catch(e => console.error('[remote-browser] file log:', e.message));
+        if (listed) await drainJournals(listed).catch(e => console.error('[remote-browser] file log:', e.message));
         if (_connServer && _mapNeedsRebuild) await refreshUidMap().catch(e => console.error('[remote-browser] connection log map:', e.message));
         flushMissed();
         if (Date.now() - _lastPurge > 3_600_000) {

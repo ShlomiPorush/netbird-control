@@ -134,7 +134,6 @@ export function BarMenu({ title, icon, container, width = 248, pressed, onOpenCh
   );
 }
 
-/** One row of a bar menu: an action, with its keys or a check mark on the right. */
 const BELOW_BAR = 64;
 
 export function useBarPanelPosition(anchor: RefObject<HTMLElement | null>, maxWidth: number, shown = true) {

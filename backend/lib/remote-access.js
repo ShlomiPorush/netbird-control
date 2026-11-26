@@ -824,7 +824,6 @@ async function setRemoteAccessConfig(input) {
     const { createResources: sent, ...rest } = input || {};
     const wasEnabled = _cfg.enabled;
     try {
-        // A read-only instance never adds or removes servers, so it doesn't decide this section.
         const checked = sent && typeof sent === 'object' && !NETBIRD_READONLY ? await checkedCreateSection(sent) : null;
         await updateStoredConfig((fresh) => {
             const createResources = checked
@@ -2766,7 +2765,6 @@ async function checkedCreateSection(sent) {
     return next;
 }
 const createdInUseMessage = (n, what = 'The network') => `${n} server${n === 1 ? '' : 's'} added by launch links ${n === 1 ? 'is' : 'are'} still in use. ${what} can be changed once ${n === 1 ? 'it is' : 'they are'} removed; kept ones can be deleted in Networks.`;
-// A chosen network is open to the gateway.
 async function storeCreateSection(patch) {
     const next = await updateStoredConfig((fresh) => ({
         ...fresh,

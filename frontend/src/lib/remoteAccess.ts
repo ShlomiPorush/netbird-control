@@ -43,22 +43,14 @@ export interface BrowserConfig {
 export interface BrowserFile {
   name: string;
   size: number;
-  mtime: number;
   partial: boolean;
-}
-
-export interface BrowserUpload {
-  id: string;
-  name: string;
-  size: number;
-  received: number;
 }
 
 export interface BrowserFiles {
   files: BrowserFile[];
+  total: number;
   used: number;
   limit: number;
-  upload: BrowserUpload | null;
 }
 
 export interface BrowserStatus {

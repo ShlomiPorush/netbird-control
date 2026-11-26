@@ -464,21 +464,44 @@ test('a policy write that fails is refused, keeps the held settings and is retri
   assert.deepEqual(supervisor.filesPolicy, { enabled: true, transfer: true, rev: 0 });
 });
 
-test('a policy write that fails to block files keeps files allowed in the supervisor, as in Chromium, and stops every session', async () => {
+test('a policy write that fails to block files stops every session, refuses new ones and the files channel until a later write succeeds', async () => {
   const { supervisor, runtime, startOf } = setup();
   await filesOp(supervisor, { rev: 0 });
   await startOf('a');
   await startOf('b');
+  const writeFilesPolicy = runtime.writeFilesPolicy;
   runtime.writeFilesPolicy = () => {
     throw new Error('no space left on device');
   };
   const refused = await filesOp(supervisor, { rev: 1, enabled: false });
   assert.deepEqual([refused.ok, refused.error], [false, 'POLICY_FAILED']);
   assert.deepEqual(supervisor.filesPolicy, { enabled: true, transfer: true, rev: 0 });
-  assert.equal(supervisor.policyFileEnabled, true);
   await settleStops();
   assert.deepEqual(runtime.calls, ['launch 0', 'launch 1', 'teardown 0', 'teardown 1']);
   assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions, []);
+  assert.equal((await startOf('c')).error, 'POLICY_FAILED');
+  assert.deepEqual(runtime.calls, ['launch 0', 'launch 1', 'teardown 0', 'teardown 1']);
+  assert.equal((await filesOp(supervisor, { rev: 2 })).error, 'POLICY_FAILED', 'turning files back on still has to write');
+  runtime.writeFilesPolicy = writeFilesPolicy;
+  assert.deepEqual(await filesOp(supervisor, { rev: 2 }), { ok: true, rev: 2 });
+  assert.deepEqual(runtime.policyWrites, [true, true]);
+  assert.equal((await startOf('c')).ok, true);
+  assert.equal(supervisor.filesAccess('c', true).record, supervisor.sessions.get('c'));
+});
+
+test('while a failed block is pending the files channel is off for a session that is still running', async () => {
+  const { supervisor, runtime, startOf } = setup();
+  await filesOp(supervisor, { rev: 0 });
+  runtime.teardownResult = false;
+  await startOf('a');
+  runtime.writeFilesPolicy = () => {
+    throw new Error('read-only');
+  };
+  await filesOp(supervisor, { rev: 1, enabled: false });
+  const record = supervisor.sessions.get('a');
+  record.ending = false;
+  record.state = 'running';
+  assert.deepEqual(supervisor.filesAccess('a', false), { refusal: 'FILES_OFF' });
 });
 
 test('the files limit of a start reaches the launch and defaults to 2 GiB', async () => {

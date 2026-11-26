@@ -333,8 +333,9 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   };
   const webActive = active?.protocol === 'web';
   const info = useQuery({ queryKey: ['remote-access-info'], queryFn: ({ signal }) => remoteApi.info(signal), enabled: open && webActive, staleTime: 60_000 });
-  const filesOn = webActive && !!info.data?.browser?.files;
-  const transferOn = filesOn && !!info.data?.browser?.transfer;
+  const filesAllowed = !!info.data?.browser?.files;
+  const transferAllowed = filesAllowed && !!info.data?.browser?.transfer;
+  const filesOn = webActive && filesAllowed;
   useEffect(() => setFilesOpen(false), [activeId]);
   const toggleFiles = () => { setClipOpen(false); setFilesOpen((v) => !v); };
   const toggleClipboard = () => { setFilesOpen(false); setClipOpen((v) => !v); };
@@ -582,16 +583,16 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           onClose={() => { setClipOpen(false); if (!pinned) scheduleHide(1500); }}
         />
       )}
-      {filesOn && active && (
+      {filesAllowed && sessions.filter((s) => s.protocol === 'web').map((s) => (
         <FilesPanel
-          key={active.sessionId}
-          sessionId={current.current[active.sessionId] || active.sessionId}
-          transfer={transferOn}
+          key={s.sessionId}
+          sessionId={current.current[s.sessionId] || s.sessionId}
+          transfer={transferAllowed}
           anchor={filesButton}
-          open={filesOpen}
+          open={filesOpen && s.sessionId === active?.sessionId}
           onClose={() => { setFilesOpen(false); if (!pinned) scheduleHide(1500); }}
         />
-      )}
+      ))}
       </div>
     </div>,
     document.body,

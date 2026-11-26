@@ -253,6 +253,28 @@ test('the uploaded file is recorded with the name and size of the answer of the 
     assert.deepEqual(seen.map(s => s.method), ['POST', 'PUT'], 'no extra request to learn the name');
 });
 
+test('an upload whose last chunk was sent before the tab closed is still recorded from the answer of the remote browser', async () => {
+    const cookie = await h.signIn('remote');
+    let bodyIn = false;
+    let reply;
+    const answered = new Promise(r => { reply = r; });
+    handle = async (req, res) => {
+        await readBody(req);
+        bodyIn = true;
+        await answered;
+        json(res, 200, { received: 3, done: true, name: 'last.bin', size: 3 });
+    };
+    const client = http.request(h.url(`${base}/uploads/up9?offset=0`), { method: 'PUT', headers: { cookie, 'content-type': 'application/octet-stream', 'content-length': 3 } });
+    client.on('error', () => { });
+    client.end(Buffer.from('abc'));
+    await until(() => bodyIn);
+    client.destroy();
+    await new Promise(r => setTimeout(r, 100));
+    reply();
+    await until(() => fileEvents().length === 1);
+    assert.deepEqual([fileEvents()[0].ID, fileEvents()[0].remoteAccess.name, fileEvents()[0].remoteAccess.size], ['web-file:w1:upload:up9', 'last.bin', 3]);
+});
+
 test('a chunk over 8 MiB is refused, with or without a declared length; 8 MiB itself passes', async () => {
     const cookie = await h.signIn('remote');
     const received = [];

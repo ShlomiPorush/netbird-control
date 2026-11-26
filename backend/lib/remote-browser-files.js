@@ -140,7 +140,7 @@ async function uploadChunk(req, res, session) {
         });
         upstream.on('response', (up) => readJson(up).then(body => answer({ status: up.statusCode, body }), () => answer(UNAVAILABLE)));
         res.on('close', () => {
-            if (answered) return;
+            if (answered || req.complete) return;
             answered = true;
             upstream.destroy();
             resolve();

@@ -58,8 +58,12 @@ const refusal = (status, error) => (response) => {
 };
 
 const startUpload = (call, name, size) => call('POST', '/sessions/s1/uploads', { name, size });
+const uploadOf = (supervisor) => {
+  const upload = supervisor.sessions.get('s1').upload;
+  return upload && { id: upload.id, name: upload.name, size: upload.size, received: upload.received };
+};
 
-test('the list shows visible files with partial marks, the bytes used, the limit and the active upload', async (t) => {
+test('the list shows visible files with partial marks, their total, the bytes used and the limit', async (t) => {
   const { call, folder } = await setup(t);
   folder().set('b.out', Buffer.alloc(3));
   folder().set('a.out.crdownload', Buffer.alloc(2));
@@ -68,15 +72,27 @@ test('the list shows visible files with partial marks, the bytes used, the limit
   assert.equal(before.status, 200);
   assert.deepEqual(before.json, {
     files: [
-      { name: 'b.out', size: 3, mtime: 5_000, partial: false },
-      { name: 'a.out.crdownload', size: 2, mtime: 5_000, partial: true },
+      { name: 'a.out.crdownload', size: 2, partial: true },
+      { name: 'b.out', size: 3, partial: false },
     ],
+    total: 2,
     used: 6,
     limit: GIB,
-    upload: null,
   });
-  const { json: { id } } = await startUpload(call, 'c.out', 10);
-  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, { id, name: 'c.out', size: 10, received: 0 });
+});
+
+test('the list holds the newest 500 files and the full count, while the bytes used stay exact', async (t) => {
+  const { call, folder, runtime } = await setup(t);
+  const scanFiles = runtime.scanFiles;
+  runtime.scanFiles = async (ids) => {
+    const scan = await scanFiles(ids);
+    return { ...scan, files: scan.files.map((file) => ({ ...file, mtime: Number(file.name.slice(1)) })) };
+  };
+  for (let i = 0; i < 1200; i += 1) folder().set(`f${i}`, Buffer.alloc(1));
+  const listed = (await call('GET', '/sessions/s1/files')).json;
+  assert.equal(listed.files.length, 500);
+  assert.deepEqual([listed.files[0].name, listed.files[499].name], ['f1199', 'f700']);
+  assert.deepEqual([listed.total, listed.used], [1200, 1200]);
 });
 
 test('every route is refused for a session that is unknown, stopped or past its lease', async (t) => {
@@ -156,6 +172,27 @@ test('a file still downloading can be neither fetched nor deleted', async (t) =>
   assert.ok(folder().has('big.iso.crdownload'));
 });
 
+test('a download asked for while a delete of its file runs waits for the delete and finds no file', async (t) => {
+  const { call, folder, runtime } = await setup(t);
+  folder().set('image.bin', Buffer.from('abcdef'));
+  const deleteFile = runtime.deleteFile;
+  const gate = deferred();
+  let deleting = false;
+  runtime.deleteFile = async (...args) => {
+    deleting = true;
+    await gate.promise;
+    return deleteFile(...args);
+  };
+  const removal = call('DELETE', '/sessions/s1/files/image.bin');
+  while (!deleting) await new Promise((resolve) => setImmediate(resolve));
+  const download = call('GET', '/sessions/s1/files/image.bin');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runtime.reads.length, 0, 'no read helper while the delete runs');
+  gate.resolve();
+  assert.deepEqual((await removal).json, { ok: true, size: 6 });
+  refusal(404, 'NOT_FOUND')(await download);
+});
+
 test('a file being streamed cannot be deleted until its stream ends', async (t) => {
   const { call, folder, runtime } = await setup(t);
   folder().set('image.bin', Buffer.from('abcdef'));
@@ -182,7 +219,7 @@ test('a download whose helper fails is cut short, never ended as complete', asyn
 });
 
 test('an upload goes in chunks at the received offset and is published on its last byte', async (t) => {
-  const { call, folder } = await setup(t);
+  const { call, folder, supervisor } = await setup(t);
   const started = await startUpload(call, 'firmware.out', 6);
   assert.equal(started.status, 200);
   const { id } = started.json;
@@ -201,7 +238,7 @@ test('an upload goes in chunks at the received offset and is published on its la
   assert.equal(folder().get('firmware.out').toString(), 'abcdef');
   assert.equal(folder().has(`.upload-${id}`), false);
   assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.from('def'))).json, published, 'a retried last chunk gets the kept answer');
-  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, null);
+  assert.equal(uploadOf(supervisor), null);
 });
 
 test('the received offset follows the file when an earlier write went missing', async (t) => {
@@ -222,23 +259,23 @@ test('an empty file is published by an empty chunk at offset 0', async (t) => {
 });
 
 test('a publish whose helper fails keeps the upload, and a retried last chunk publishes it', async (t) => {
-  const { call, folder, runtime } = await setup(t);
+  const { call, folder, runtime, supervisor } = await setup(t);
   const { json: { id } } = await startUpload(call, 'fw.bin', 3);
   const publishUpload = runtime.publishUpload;
   runtime.publishUpload = async () => {
     throw new Error('the helper timed out');
   };
   refusal(500, 'INTERNAL')(await call('PUT', `/sessions/s1/uploads/${id}?offset=0`, Buffer.from('abc')));
-  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, { id, name: 'fw.bin', size: 3, received: 3 });
+  assert.deepEqual(uploadOf(supervisor), { id, name: 'fw.bin', size: 3, received: 3 });
   runtime.publishUpload = publishUpload;
   assert.deepEqual((await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.alloc(0))).json, { received: 3, done: true, name: 'fw.bin', size: 3 });
   assert.equal(folder().get('fw.bin').toString(), 'abc');
   assert.equal(folder().has(`.upload-${id}`), false);
-  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, null);
+  assert.equal(uploadOf(supervisor), null);
 });
 
 test('a publish that failed after the file got its name answers NAME_TAKEN on retry and drops the upload', async (t) => {
-  const { call, folder, runtime } = await setup(t);
+  const { call, folder, runtime, supervisor } = await setup(t);
   const { json: { id } } = await startUpload(call, 'fw.bin', 3);
   const publishUpload = runtime.publishUpload;
   runtime.publishUpload = async (...args) => {
@@ -248,7 +285,7 @@ test('a publish that failed after the file got its name answers NAME_TAKEN on re
   refusal(500, 'INTERNAL')(await call('PUT', `/sessions/s1/uploads/${id}?offset=0`, Buffer.from('abc')));
   runtime.publishUpload = publishUpload;
   refusal(409, 'NAME_TAKEN')(await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.alloc(0)));
-  assert.deepEqual((await call('GET', '/sessions/s1/files')).json.upload, null);
+  assert.equal(uploadOf(supervisor), null);
   refusal(404, 'NO_UPLOAD')(await call('PUT', `/sessions/s1/uploads/${id}?offset=3`, Buffer.alloc(0)));
   assert.equal(folder().get('fw.bin').toString(), 'abc');
 });

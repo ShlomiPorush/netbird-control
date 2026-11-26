@@ -13,7 +13,7 @@ const POLL_MS = 3000;
 const CHUNK = 8 * 1024 * 1024;
 const SMALL_CHUNK = 1024 * 1024;
 const NETWORK_RETRIES = 5;
-const STOP_POLLING = new Set(['NO_SESSION', 'FILES_OFF', 'BROWSER_ENDED', 'SESSION_NOT_FOUND']);
+const STOP_POLLING = new Set(['NO_SESSION', 'BROWSER_ENDED', 'SESSION_NOT_FOUND']);
 
 const FILE_MESSAGES: Record<string, string> = {
   FILES_LIMIT: "There isn't room for this file in the browser's storage. Delete some files and try again.",
@@ -78,6 +78,7 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
       let offset = started.received || 0;
       let chunkSize = CHUNK;
       let failures = 0;
+      let publishFailures = 0;
       let done = false;
       while (!done) {
         let answer;
@@ -90,6 +91,7 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
         }
         failures = 0;
         const reply = answer.json;
+        const lastChunk = offset + chunkSize >= file.size;
         if (answer.status === 200 && reply && typeof reply.received === 'number') {
           offset = reply.received;
           done = !!reply.done;
@@ -100,6 +102,9 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
           chunkSize = SMALL_CHUNK;
         } else if (answer.status === 429) {
           await pause((answer.retryAfter || 5) * 1000, ctrl.signal);
+        } else if (answer.status >= 500 && lastChunk && ++publishFailures <= NETWORK_RETRIES) {
+          await pause(2000 * publishFailures, ctrl.signal);
+          offset = file.size;
         } else {
           throw new ApiError(answer.status, reply?.error || `HTTP ${answer.status}`, reply?.code);
         }
@@ -175,6 +180,10 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
             </li>
           ))}
         </ul>
+      )}
+
+      {data && data.total > data.files.length && (
+        <p className="mt-1 text-[0.72rem] text-nb-gray-500 tabular-nums">Showing {data.files.length} of {data.total} files, newest first.</p>
       )}
 
       {upload && (
