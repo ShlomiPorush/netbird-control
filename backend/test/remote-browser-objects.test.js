@@ -223,7 +223,7 @@ test('the browser settings are normalized, clamped and merged', async () => {
     assert.deepEqual(out.config.browser, { enabled: false, routerGroupId: 'g-office', maxSessions: 7, keepAliveMin: 20 });
 });
 
-test('a new web setup key needs an empty web group, and revokes the earlier keys for that group first', async () => {
+test('a new web setup key needs an empty web group, and revokes every still-valid key for that group first', async () => {
     reset();
     await ra._internal.applyGatewayObjects();
     const webGroupId = stored().webGroupId;
@@ -231,7 +231,7 @@ test('a new web setup key needs an empty web group, and revokes the earlier keys
     state.setupKeys.push(
         { id: 'k-open', name, valid: true, revoked: false, state: 'valid', auto_groups: [webGroupId] },
         { id: 'k-used', name, valid: false, revoked: false, state: 'overused', auto_groups: [webGroupId] },
-        { id: 'k-other', name: 'Servers', valid: true, revoked: false, state: 'valid', auto_groups: [webGroupId] },
+        { id: 'k-renamed', name: 'Browser Gateway Web (Old Name)', valid: true, revoked: false, state: 'valid', auto_groups: [webGroupId] },
         { id: 'k-ip', name: 'Browser Gateway (NetBird Control)', valid: true, revoked: false, state: 'valid', auto_groups: ['g-gw'] });
     state.groups.find(g => g.id === webGroupId).peers = [{ id: 'old-gateway' }];
     await assert.rejects(ra.createGatewaySetupKey('web'), /already has a peer\. Delete the old browser gateway peer in NetBird first/);
@@ -244,10 +244,11 @@ test('a new web setup key needs an empty web group, and revokes the earlier keys
     await ra.createGatewaySetupKey('web');
     assert.equal(keys.length, 1);
     const puts = calls.filter(c => c[0] === 'PUT' && c[1].startsWith('/api/setup-keys/'));
-    assert.deepEqual(puts.pop().slice(1), ['/api/setup-keys/k-open', { revoked: true, auto_groups: [webGroupId] }]);
-    assert.ok(puts.every(c => c[1] === '/api/setup-keys/k-open'), 'only the still-valid key of the web group is revoked');
-    assert.equal(state.setupKeys.find(k => k.id === 'k-open').revoked, true);
-    assert.equal(state.setupKeys.find(k => k.id === 'k-other').revoked, false);
+    assert.deepEqual(puts.slice(-2).map(c => c.slice(1)), [
+        ['/api/setup-keys/k-open', { revoked: true, auto_groups: [webGroupId] }],
+        ['/api/setup-keys/k-renamed', { revoked: true, auto_groups: [webGroupId] }],
+    ], 'a key from before an Application Name change is revoked too');
+    assert.ok(puts.every(c => c[1] !== '/api/setup-keys/k-used' && c[1] !== '/api/setup-keys/k-ip'));
     state.groups = state.groups.filter(g => g.id !== webGroupId);
     await assert.rejects(ra.createGatewaySetupKey('web'), /Couldn't read the "Browser Gateway Web \(NetBird Control\)" group/);
     assert.equal(keys.length, 1);

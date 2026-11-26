@@ -780,10 +780,10 @@ recorder misses connections (for example while the app restarts), a gap record s
 ready, and why not. Before a web session opens, the app also checks that it reaches the browser
 gateway's guacd.
 
-**Enroll the browser gateway again** (for example after its state volume was lost): delete the old
-browser gateway peer in NetBird (**Peers**), create a new setup key in the card, put it in `.env`,
-remove the `remote-browser-gateway-state` volume and start the four containers again with the
-command above. The card refuses a new key while the browser gateway group still has a peer.
+**Enroll the browser gateway again** (for example after its peer was deleted in NetBird): delete the
+old browser gateway peer in NetBird (**Peers**), create a new setup key in the card, put it in `.env`
+and start the four containers again with the command above. The card refuses a new key while the
+browser gateway group still has a peer.
 
 ### Known limits
 

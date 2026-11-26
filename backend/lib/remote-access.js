@@ -835,11 +835,10 @@ async function prepareWebEnrollment() {
     }
     const keys = await netbirdGet('/api/setup-keys');
     if (!Array.isArray(keys)) throw new Error("Couldn't read the setup keys from NetBird. Try again in a minute.");
-    const open = keys.filter(key => key && key.id && key.name === name && key.valid === true && !key.revoked
-        && Array.isArray(key.auto_groups) && key.auto_groups.includes(groupId));
+    const open = keys.filter(key => key && key.id && key.valid === true && !key.revoked && Array.isArray(key.auto_groups) && key.auto_groups.includes(groupId));
     for (const key of open) {
         const r = await netbirdReq('PUT', '/api/setup-keys/' + encodeURIComponent(key.id), { revoked: true, auto_groups: key.auto_groups });
-        if (!nbOk(r)) throw nbErr(`Revoking the earlier "${name}" setup key`, r);
+        if (!nbOk(r)) throw nbErr(`Revoking the earlier setup key "${key.name || key.id}" of the "${name}" group`, r);
     }
 }
 
