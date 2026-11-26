@@ -245,6 +245,23 @@ test('no exit node for the same device, a closed gate or no capacity: no session
     assert.equal([...table.rows.values()].filter(r => r.state !== 'ended').length, 1);
 });
 
+test('the connection check reports each web step the way the page shows it, and opens nothing', async () => {
+    await reset();
+    const ok = await rb.checkWebAccess(USER);
+    assert.equal(ok.ok, true);
+    assert.deepEqual(ok.steps.map(s => [s.key, s.status]), [['access', 'pass'], ['path', 'pass']]);
+    snapshot['/api/policies'][0].enabled = false;
+    ra.invalidateSnapshot();
+    assert.deepEqual((await rb.checkWebAccess(USER)).steps.map(s => [s.key, s.status, s.code]), [['access', 'fail', 'NO_EXIT_NODE']]);
+    await buildSnapshot();
+    ra.invalidateSnapshot();
+    sup.table7120 = ['default dev wt0', '10.0.0.0/8 dev wt0'];
+    assert.deepEqual((await rb.checkWebAccess(USER)).steps.map(s => [s.key, s.status, s.code]), [['ready', 'fail', 'GATEWAY_NOT_READY']]);
+    sup.table7120 = ['default dev wt0'];
+    assert.equal(sup.requests.filter(r => r.op === 'start').length, 0);
+    assert.equal(table.rows.size, 0);
+});
+
 test('turned off: no session opens, and the open ones are stopped', async () => {
     await reset();
     const out = await rb.createWebSession(USER, {}, '');

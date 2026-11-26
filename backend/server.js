@@ -3453,7 +3453,10 @@ app.get('/api/remote-access/info', async (req, res) => {
     }
 });
 app.post('/api/remote-access/check', requireRemoteUser, async (req, res) => {
-    try { res.json(await checkRemoteAccess(req.remoteViewer, req.body || {})); }
+    try {
+        const body = req.body || {};
+        res.json(body.protocol === 'web' ? await remoteBrowser.checkWebAccess(req.remoteViewer) : await checkRemoteAccess(req.remoteViewer, body));
+    }
     catch (e) { sendRemoteError(res, e); }
 });
 // Where "Add As Resource" may add a missing server: the networks open to Remote Access (Settings >

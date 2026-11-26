@@ -158,6 +158,25 @@ async function authorize(viewer) {
     return entitlement;
 }
 
+async function checkWebAccess(viewer) {
+    const ready = (code, retry = false) => ({ steps: [{ key: 'ready', status: 'fail', code, message: MESSAGES[code], retry }] });
+    if (!browserActive()) return ready('BROWSER_DISABLED');
+    if (_shuttingDown) return ready('SERVER_RESTARTING', true);
+    let snap;
+    try { snap = await ra.freshSnapshot(ra.CHECK_SNAPSHOT_TTL_MS); } catch { return ready('SNAPSHOT_FAILED', true); }
+    const entitlement = evaluateExitNodeEntitlement(snap, entitlementCfg(), { userId: viewer.user_id });
+    if (!entitlement.ok) return { steps: [{ key: 'access', status: 'fail', code: entitlement.code, message: MESSAGES[entitlement.code] }] };
+    const gate = await checkGate(snap);
+    if (!gate.ok) return ready('GATEWAY_NOT_READY');
+    return {
+        ok: true,
+        steps: [
+            { key: 'access', status: 'pass', detail: 'Your device may use the office exit node' },
+            { key: 'path', status: 'pass', detail: 'The browser gateway is ready' },
+        ],
+    };
+}
+
 function screen(body) {
     const b = body && typeof body === 'object' ? body : {};
     return {
@@ -857,7 +876,7 @@ async function getBrowserHealth() {
 }
 
 module.exports = {
-    setRemoteBrowserDeps, createWebSession, resumeWebSession, listWebSessions, renewWebLease, endWebSessionByUser, endWebSession,
+    setRemoteBrowserDeps, checkWebAccess, createWebSession, resumeWebSession, listWebSessions, renewWebLease, endWebSessionByUser, endWebSession,
     takeToken, attachWebTunnel, watchAttached, shutdownWebTunnels, onConfigChanged, leaderTick, getBrowserStatus, getBrowserHealth,
     LOOP_INTERVAL_MS, WATCH_INTERVAL_MS, MESSAGES, GATE_REASONS, CODE,
     _internal: {
