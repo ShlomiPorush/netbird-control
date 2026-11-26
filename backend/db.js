@@ -275,7 +275,7 @@ async function getWebhookConfig() {
     // arrive via the API pull, so their presence is not proof the streaming integration exists. The
     // authoritative on/off signal comes from getNetbirdWebhookStatus (reads NetBird itself).
     const evLast = await pool.query(
-        `SELECT MAX(timestamp) AS at FROM events WHERE tenant = $1 AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY'`, [tnt()]).catch(() => ({ rows: [] }));
+        `SELECT MAX(timestamp) AS at FROM events WHERE tenant = $1 AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY' AND COALESCE(reference, '') <> 'remote-access:web-connection'`, [tnt()]).catch(() => ({ rows: [] }));
     const nLast = await pool.query(
         `SELECT MAX(received_at) AS at FROM nb_notifications WHERE tenant = $1`, [tnt()]).catch(() => ({ rows: [] }));
     return {
@@ -2139,7 +2139,7 @@ async function getFleetReport() {
     const lastEvent = new Map();
     const mergeMax = (t, v) => { if (!v) return; const cur = lastEvent.get(t); if (!cur || new Date(v) > new Date(cur)) lastEvent.set(t, v); };
     if (ids.length) {
-        const ev = await pool.query(`SELECT tenant, MAX(timestamp) AS m FROM events WHERE tenant = ANY($1) AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY' GROUP BY tenant`, [ids]).catch(() => ({ rows: [] }));
+        const ev = await pool.query(`SELECT tenant, MAX(timestamp) AS m FROM events WHERE tenant = ANY($1) AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY' AND COALESCE(reference, '') <> 'remote-access:web-connection' GROUP BY tenant`, [ids]).catch(() => ({ rows: [] }));
         for (const row of ev.rows) mergeMax(row.tenant, row.m);
         const ae = await pool.query(`SELECT tenant, MAX(timestamp) AS m FROM admin_events WHERE tenant = ANY($1) GROUP BY tenant`, [ids]).catch(() => ({ rows: [] }));
         for (const row of ae.rows) mergeMax(row.tenant, row.m);
@@ -4129,6 +4129,34 @@ async function initializeDatabase() {
         // Older rows keep the defaults and are IP sessions.
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS target_name TEXT DEFAULT ''`);
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS gateway TEXT DEFAULT 'ip'`);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS browser_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            user_email TEXT DEFAULT '',
+            user_name TEXT DEFAULT '',
+            oid TEXT DEFAULT '',
+            client_ip TEXT DEFAULT '',
+            state TEXT NOT NULL,
+            uid INTEGER,
+            port INTEGER,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            dpi INTEGER NOT NULL DEFAULT 96,
+            attachment TEXT DEFAULT '',
+            owner_instance TEXT DEFAULT '',
+            recorded BOOLEAN NOT NULL DEFAULT false,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_auth_ok_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            lease_expires_at TIMESTAMPTZ,
+            detached_at TIMESTAMPTZ,
+            ended_at TIMESTAMPTZ,
+            end_reason TEXT DEFAULT '',
+            end_code INTEGER
+          );
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_browser_sessions_open ON browser_sessions (state) WHERE state <> 'ended'`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_browser_sessions_user ON browser_sessions (user_id) WHERE state <> 'ended'`);
         // Browser Gateway targets that sessions opened: one hold per resource, for the network and
         // the address the resource had when the session started. The resource stays in its target
         // group until expires_at; added_at is when this app last added it to the group; updated_at is
@@ -9682,13 +9710,13 @@ async function checkTrafficAnomalies() {
             SELECT source_name AS src, SUM(rx_bytes + tx_bytes)::bigint AS b
             FROM events
             WHERE tenant = $3 AND timestamp >= NOW() - interval '1 hour' AND COALESCE(source_name, '') <> ''
-              AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY'
+              AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY' AND COALESCE(reference, '') <> 'remote-access:web-connection'
             GROUP BY 1
         ), baseline AS (
             SELECT source_name AS src, SUM(rx_bytes + tx_bytes)::numeric / 168 AS avg_b
             FROM events
             WHERE tenant = $3 AND timestamp >= NOW() - interval '8 days' AND timestamp < NOW() - interval '1 hour'
-              AND COALESCE(source_name, '') <> '' AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY'
+              AND COALESCE(source_name, '') <> '' AND COALESCE(source_type, '') <> 'BROWSER_GATEWAY' AND COALESCE(reference, '') <> 'remote-access:web-connection'
             GROUP BY 1
         )
         SELECT l.src, l.b, COALESCE(bs.avg_b, 0)::bigint AS avg_b
@@ -11734,7 +11762,7 @@ const SETTINGS_EXPORT_EXCLUDE = new Set([
     // defense in depth, and they are meaningless outside the internal-backup file that carries them.
     'backup_private_key_enc', 'backup_public_key',
     // NetBird object ids of this account's Browser Gateway, and a one-time migration marker.
-    'remote_access_nb', 'migration_grant_revoke_marker',
+    'remote_access_nb', 'remote_access_web_peer', 'migration_grant_revoke_marker',
 ]);
 // Prefixed/MSP keys - excluded by prefix (tokens are secrets; service-user metadata is
 // install-specific and meaningless in another deployment). Plus the provisioning token.

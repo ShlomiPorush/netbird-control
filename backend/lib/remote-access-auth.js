@@ -88,7 +88,11 @@ function userSourceGroups(snap, userId, now) {
         for (const g of arr(p.groups)) if (idOf(g)) groups.add(idOf(g));
     }
     for (const id of allGroupIds(snap)) groups.add(id);
+    dropLapsedGrantGroups(snap, userId, groups, now);
+    return { groups, user };
+}
 
+function dropLapsedGrantGroups(snap, userId, groups, now) {
     const grants = arr(snap.grants);
     const grantById = new Map(grants.map(g => [String(g.id), g]));
     const held = (g) => [g.group_id, ...arr(g.assigned_groups)].filter(Boolean);
@@ -106,7 +110,7 @@ function userSourceGroups(snap, userId, now) {
         const m = TEMP_GROUP_RE.exec(nameOf.get(gid) || '');
         if (m && !grantIsValid(grantById.get(m[1]), now)) groups.delete(gid);
     }
-    return { groups, user };
+    return groups;
 }
 
 // Does this rule open TCP `port`? Unknown shapes never do.
@@ -315,8 +319,8 @@ const viewResource = (view, res) => arr(view.resources).find(r => r && r.id === 
 // was added) or followed by " (<installation name>)". Every installation recognizes every other
 // installation's objects on the same NetBird account, whatever characters its name has.
 const MANAGED_NAME_BASES = {
-    group: ['Browser Gateway', 'Browser Gateway Targets', 'Browser Gateway Names', 'Browser Gateway Name Targets'],
-    policy: ['Browser Gateway', 'Browser Gateway Names'],
+    group: ['Browser Gateway', 'Browser Gateway Targets', 'Browser Gateway Names', 'Browser Gateway Name Targets', 'Browser Gateway Web', 'Browser Gateway Web ACL'],
+    policy: ['Browser Gateway', 'Browser Gateway Names', 'Browser Gateway Web', 'Browser Gateway Web Routing'],
 };
 function isManagedGatewayName(name, kind) {
     if (typeof name !== 'string' || !name) return false;
@@ -525,7 +529,170 @@ function pathStatus(snap, cfg, routers) {
     return { ok: false, code: 'NO_ROUTER_ONLINE' };
 }
 
+const EXIT_NETWORK = '0.0.0.0/0';
+const WEB_ROUTE_NETWORK_PREFIX = 'nbc-browser-';
+const WEB_ROUTE_METRIC = 9999;
+const WEB_GATEWAY_ROUTES = ['default dev wt0'];
+const GATEWAY_STATUS_MAX_AGE_S = 60;
+
+const idSet = (list) => new Set(arr(list).map(idOf).filter(Boolean));
+const sameIds = (list, expected) => {
+    const have = idSet(list);
+    return arr(list).length === expected.length && have.size === expected.length && expected.every(id => have.has(id));
+};
+
+function webRouteBody({ description, networkId, routerGroupId, webGroupId, aclGroupId }) {
+    return {
+        description, network_id: networkId, enabled: true, network: EXIT_NETWORK,
+        peer_groups: [routerGroupId], groups: [webGroupId], access_control_groups: [aclGroupId],
+        metric: WEB_ROUTE_METRIC, masquerade: true, keep_route: false, skip_auto_apply: false,
+    };
+}
+
+function webPolicyBody({ name, description, protocol, sourceGroupId, destinationGroupId }) {
+    return {
+        name, description, enabled: true, source_posture_checks: [],
+        rules: [{ name, enabled: true, action: 'accept', bidirectional: false, protocol, ports: [], sources: [sourceGroupId], destinations: [destinationGroupId] }],
+    };
+}
+
+function webRouteMatches(route, want) {
+    if (!route || typeof route !== 'object') return false;
+    return route.enabled === true && route.network === EXIT_NETWORK && route.network_id === want.network_id
+        && !route.peer && !arr(route.domains).length
+        && sameIds(route.peer_groups, want.peer_groups) && sameIds(route.groups, want.groups)
+        && sameIds(route.access_control_groups, want.access_control_groups)
+        && route.masquerade === true && route.metric === want.metric && route.keep_route === false
+        && (route.skip_auto_apply === undefined || route.skip_auto_apply === false);
+}
+
+function webPolicyMatches(policy, want) {
+    if (!policy || typeof policy !== 'object' || policy.enabled !== true || arr(policy.source_posture_checks).length) return false;
+    const rules = arr(policy.rules);
+    if (rules.length !== 1) return false;
+    const [rule] = rules;
+    const [expected] = want.rules;
+    return !!rule && rule.enabled !== false && rule.action === 'accept' && rule.bidirectional === false
+        && String(rule.protocol || '').toLowerCase() === expected.protocol
+        && sameIds(rule.sources, expected.sources) && sameIds(rule.destinations, expected.destinations)
+        && isEmptyValue(rule.sourceResource) && isEmptyValue(rule.destinationResource);
+}
+
+function browserGateProblem(snap, ids, want) {
+    if (!ids.webGroupId || !ids.webAclGroupId || !ids.webRouteId || !ids.webPolicyId || !ids.webRoutingPolicyId) return 'WEB_NOT_SET_UP';
+    const groups = new Map(arr(snap.groups).filter(g => g && g.id).map(g => [g.id, g]));
+    if (!want.routerGroupId || !groups.has(want.routerGroupId)) return 'WEB_ROUTER_GROUP_MISSING';
+    const web = groups.get(ids.webGroupId);
+    if (!web) return 'WEB_NOT_SET_UP';
+    if (!ids.webPeerId) return 'WEB_PEER_NOT_ENROLLED';
+    if (!sameIds(web.peers, [ids.webPeerId])) return 'WEB_GROUP_CHANGED';
+    const acl = groups.get(ids.webAclGroupId);
+    if (!acl || arr(acl.peers).length || arr(acl.resources).length) return 'WEB_ACL_CHANGED';
+    const route = arr(snap.routes).find(r => r && r.id === ids.webRouteId);
+    if (!webRouteMatches(route, want.route)) return 'WEB_ROUTE_CHANGED';
+    const policies = new Map(arr(snap.policies).filter(p => p && p.id).map(p => [p.id, p]));
+    if (!webPolicyMatches(policies.get(ids.webPolicyId), want.icmpPolicy)) return 'WEB_POLICY_CHANGED';
+    if (!webPolicyMatches(policies.get(ids.webRoutingPolicyId), want.routingPolicy)) return 'WEB_POLICY_CHANGED';
+    return null;
+}
+
+function browserLiveProblem(ready, { peerIp, nowSec }) {
+    if (!ready || ready.ok !== true) return 'BROWSER_UNAVAILABLE';
+    const g = ready.gateway;
+    if (!g || typeof g !== 'object') return 'GATEWAY_STATUS_MISSING';
+    if (!Number.isFinite(g.ts) || Math.abs(nowSec - g.ts) > GATEWAY_STATUS_MAX_AGE_S) return 'GATEWAY_STATUS_STALE';
+    if (!Number.isFinite(Number(ready.netns)) || Number(g.netns) !== Number(ready.netns)) return 'GATEWAY_NETNS_CHANGED';
+    if (g.lock !== true) return 'GATEWAY_LOCK_MISSING';
+    if (!peerIp || g.wt0 !== peerIp) return 'GATEWAY_ADDRESS_CHANGED';
+    const routes = arr(ready.table7120).map(line => String(line).trim()).filter(Boolean);
+    if (routes.length !== WEB_GATEWAY_ROUTES.length || routes.some((line, i) => line !== WEB_GATEWAY_ROUTES[i])) return 'GATEWAY_ROUTES_CHANGED';
+    return null;
+}
+
+const isWebRoute = (route, webRouteId) => !!route && (route.id === webRouteId || String(route.network_id || '').startsWith(WEB_ROUTE_NETWORK_PREFIX));
+
+const isPeerRef = (ref, peerIds) => !isEmptyValue(ref) && peerIds.has(idOf(ref)) && (typeof ref !== 'object' || ref.type === undefined || ref.type === 'peer');
+const ruleFrom = (rule, groupIds, peerIds) => arr(rule.sources).some(s => groupIds.has(idOf(s))) || isPeerRef(rule.sourceResource, peerIds);
+const ruleReaches = (rule, groupIds, peerIds) => arr(rule.destinations).some(d => groupIds.has(idOf(d))) || isPeerRef(rule.destinationResource, peerIds);
+
+function routingPeerIds(route, groupsById) {
+    if (route.peer) return new Set([String(route.peer)]);
+    const ids = new Set();
+    for (const gid of arr(route.peer_groups).map(idOf)) for (const m of arr((groupsById.get(gid) || {}).peers)) if (idOf(m)) ids.add(idOf(m));
+    return ids;
+}
+
+function groupsHolding(peerIds, groups) {
+    return new Set(groups.filter(g => g && g.id && arr(g.peers).some(m => peerIds.has(idOf(m)))).map(g => g.id));
+}
+
+function evaluateExitNodeEntitlement(snap, cfg, { userId, now = Date.now() }) {
+    const user = arr(snap.users).find(u => u && u.id === userId);
+    if (!user) return { ok: false, code: 'USER_NOT_FOUND' };
+    if (user.is_blocked || user.status === 'blocked') return { ok: false, code: 'USER_BLOCKED' };
+    const groupsList = arr(snap.groups);
+    const groupsById = new Map(groupsList.filter(g => g && g.id).map(g => [g.id, g]));
+    const managed = managedPolicyIds(cfg);
+    const grantById = new Map(arr(snap.grants).map(g => [String(g.id), g]));
+    const policies = arr(snap.policies).filter(p => {
+        if (!p || p.enabled === false) return false;
+        const tm = TEMP_POLICY_RE.exec(p.name || '');
+        return !(tm && !grantIsValid(grantById.get(tm[1]), now));
+    });
+    const exitRoutes = arr(snap.routes).filter(r => r && r.enabled !== false && r.network === EXIT_NETWORK
+        && !arr(r.domains).length && !isWebRoute(r, cfg && cfg.webRouteId));
+
+    const devices = arr(snap.peers).filter(p => p && p.id && p.user_id === userId && p.login_expired !== true && p.approval_required !== true);
+    for (const peer of devices) {
+        const groups = new Set(arr(peer.groups).map(idOf).filter(Boolean));
+        for (const id of allGroupIds(snap)) groups.add(id);
+        dropLapsedGrantGroups(snap, userId, groups, now);
+        const peerSelf = new Set([peer.id]);
+        const peerGroups = groupsHolding(peerSelf, groupsList);
+        for (const g of groups) peerGroups.add(g);
+        const covers = (rule, targetGroups, targetPeers) => (ruleFrom(rule, groups, peerSelf) && ruleReaches(rule, targetGroups, targetPeers))
+            || (rule.bidirectional === true && ruleReaches(rule, peerGroups, peerSelf) && ruleFrom(rule, targetGroups, targetPeers));
+        const allowed = (targetGroups, targetPeers, needAll) => {
+            let granted = null;
+            for (const p of policies) {
+                const infra = managed.has(p.id) || isManagedGatewayName(p.name, 'policy');
+                const posture = arr(p.source_posture_checks).length > 0;
+                for (const rule of arr(p.rules)) {
+                    if (!rule || rule.enabled === false) continue;
+                    const action = rule.action || 'accept';
+                    if (action === 'drop') {
+                        if (covers(rule, targetGroups, targetPeers)) return null;
+                        continue;
+                    }
+                    if (action !== 'accept' || infra || posture || granted) continue;
+                    if (needAll && String(rule.protocol || '').toLowerCase() !== 'all') continue;
+                    if (ruleFrom(rule, groups, peerSelf) && ruleReaches(rule, targetGroups, targetPeers)) granted = p.name || p.id;
+                }
+            }
+            return granted;
+        };
+        for (const route of exitRoutes) {
+            if (!arr(route.groups).some(g => groups.has(idOf(g)))) continue;
+            const routers = routingPeerIds(route, groupsById);
+            if (!routers.size) continue;
+            const toRouters = allowed(groupsHolding(routers, groupsList), routers, false);
+            if (!toRouters) continue;
+            const acl = idSet(route.access_control_groups);
+            const toAcl = acl.size ? allowed(acl, new Set(), true) : 'none';
+            if (!toAcl) continue;
+            return {
+                ok: true, code: 'OK',
+                peer: { id: peer.id, name: peer.name || peer.id },
+                route: { id: route.id, networkId: route.network_id || '' },
+                policies: [...new Set([toRouters, ...(acl.size ? [toAcl] : [])])],
+            };
+        }
+    }
+    return { ok: false, code: 'NO_EXIT_NODE' };
+}
+
 module.exports = {
+    evaluateExitNodeEntitlement, browserGateProblem, browserLiveProblem, webRouteBody, webPolicyBody, webRouteMatches, webPolicyMatches, WEB_ROUTE_NETWORK_PREFIX,
     evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
     gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt, evaluatePolicies, patternMatches,

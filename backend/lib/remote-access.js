@@ -30,7 +30,7 @@ const { pool, getSetting, setSetting } = require('./core');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, nbDirectGet, getUsageData, _nbApi } = require('./netbird');
 const { addEvent } = require('./events');
 const apiKeys = require('./api-keys');
-const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem, userSourceGroups, ipv4ToInt, isRefusedTarget } = require('./remote-access-auth');
+const { evaluateUserAccess, evaluateNameAccess, normalizeTarget, isExactDomainResource, gatewayReach, extraReach, pathStatus, isManagedGatewayName, parsePrefix, standingPolicyProblem, userSourceGroups, ipv4ToInt, isRefusedTarget, webRouteBody, webPolicyBody, webRouteMatches, webPolicyMatches, WEB_ROUTE_NETWORK_PREFIX } = require('./remote-access-auth');
 const { ipUncovered, nameUncovered, nameCovered, ipCovered } = require('./coverage');
 const { addressBlockedForNetwork, getBlocklist } = require('./blocklist');
 const { nbListBody } = require('./pure');
@@ -72,6 +72,8 @@ const DEFAULTS = {
     guacdPort: 4822,
     namesGuacdHost: 'remote-names-gateway',
     namesGuacdPort: 4822,
+    browserGuacdHost: '172.31.250.4',
+    browserGuacdPort: 4822,
     networks: [],
     maxSessionsPerUser: 5,
     maxSessionsTotal: 20,
@@ -97,6 +99,7 @@ const DEFAULTS = {
     ssh: { fontSize: 12, colorScheme: 'gray-black' },
     // networkId is set by the Choose Network actions only, groupId by resolving the chosen profile.
     createResources: { enabled: false, networkId: '', profileId: 0, groupId: '', max: 50 },
+    browser: { enabled: false, routerGroupId: '', maxSessions: 5, keepAliveMin: 15 },
 };
 
 // What guacd 1.6 accepts (its built-in keymaps and terminal color schemes).
@@ -110,7 +113,7 @@ const RDP_FLAGS = ['fontSmoothing', 'wallpaper', 'theming', 'fullWindowDrag', 'd
 
 // ─── Settings ───
 let _cfg = { ...DEFAULTS };
-const NB_EMPTY = { gatewayGroupId: '', targetGroupId: '', policyId: '', namesGroupId: '', namesTargetGroupId: '', namesPolicyId: '' };
+const NB_EMPTY = { gatewayGroupId: '', targetGroupId: '', policyId: '', namesGroupId: '', namesTargetGroupId: '', namesPolicyId: '', webGroupId: '', webAclGroupId: '', webRouteId: '', webPolicyId: '', webRoutingPolicyId: '' };
 let _nb = { ...NB_EMPTY };
 let _deps = {};
 let _lastApply = { at: null, error: '' };
@@ -136,6 +139,8 @@ function normConfig(c) {
         guacdPort: clampInt(x.guacdPort, 1, 65535, DEFAULTS.guacdPort),
         namesGuacdHost: HOST_RE.test(String(x.namesGuacdHost || '').trim()) ? String(x.namesGuacdHost).trim() : DEFAULTS.namesGuacdHost,
         namesGuacdPort: clampInt(x.namesGuacdPort, 1, 65535, DEFAULTS.namesGuacdPort),
+        browserGuacdHost: HOST_RE.test(String(x.browserGuacdHost || '').trim()) ? String(x.browserGuacdHost).trim() : DEFAULTS.browserGuacdHost,
+        browserGuacdPort: clampInt(x.browserGuacdPort, 1, 65535, DEFAULTS.browserGuacdPort),
         networks: [...new Set((Array.isArray(x.networks) ? x.networks : []).map(String).filter(s => /^[A-Za-z0-9_-]{1,64}$/.test(s)))],
         maxSessionsPerUser: clampInt(x.maxSessionsPerUser, 1, 10, DEFAULTS.maxSessionsPerUser),
         maxSessionsTotal: clampInt(x.maxSessionsTotal, 1, 200, DEFAULTS.maxSessionsTotal),
@@ -147,6 +152,19 @@ function normConfig(c) {
         rdp: normRdp(x.rdp),
         ssh: normSsh(x.ssh),
         createResources: normCreate(x.createResources),
+        browser: normBrowser(x.browser),
+    };
+}
+
+function normBrowser(v) {
+    const x = v && typeof v === 'object' ? v : {};
+    const d = DEFAULTS.browser;
+    const routerGroupId = String(x.routerGroupId || '');
+    return {
+        enabled: !!x.enabled,
+        routerGroupId: /^[A-Za-z0-9_|:.@-]{1,200}$/.test(routerGroupId) ? routerGroupId : '',
+        maxSessions: clampInt(x.maxSessions, 1, 50, d.maxSessions),
+        keepAliveMin: clampInt(x.keepAliveMin, 1, 120, d.keepAliveMin),
     };
 }
 
@@ -196,7 +214,7 @@ async function loadRemoteAccessConfig({ strict = false } = {}) {
 }
 
 function getRemoteAccessConfig() {
-    return { ..._cfg, networks: [..._cfg.networks], sshHostKeys: { ..._cfg.sshHostKeys }, rdp: { ..._cfg.rdp }, ssh: { ..._cfg.ssh }, createResources: { ..._cfg.createResources },
+    return { ..._cfg, networks: [..._cfg.networks], sshHostKeys: { ..._cfg.sshHostKeys }, rdp: { ..._cfg.rdp }, ssh: { ..._cfg.ssh }, createResources: { ..._cfg.createResources }, browser: { ..._cfg.browser },
         options: { rdpLayouts: RDP_LAYOUTS, rdpColorDepths: RDP_COLOR_DEPTHS, sshColorSchemes: SSH_COLOR_SCHEMES }, managed: { ..._nb }, lastApply: { ..._lastApply } };
 }
 
@@ -207,8 +225,7 @@ function setRemoteAccessDeps(deps) { _deps = { ..._deps, ...deps }; }
 // for a policy whose id was not saved yet (an interrupted first save).
 function isRemoteAccessManagedPolicy(p) {
     if (!p) return false;
-    const ids = [_nb.policyId, _nb.namesPolicyId].filter(Boolean);
-    return ids.includes(p.id) || isManagedGatewayName(p.name, 'policy');
+    return managedPolicyIdList().includes(p.id) || isManagedGatewayName(p.name, 'policy');
 }
 
 // The managed gateway and target groups are app-owned too: resource writes, grants and routers
@@ -216,7 +233,8 @@ function isRemoteAccessManagedPolicy(p) {
 // NetBird (callers pass that name, never one a client sent): the name covers the old objects
 // when the stored ids are gone, for example after a settings import into a new database, and the
 // objects of another installation on the same NetBird account.
-const managedGroupIds = () => Object.values(KINDS).flatMap(k => [_nb[k.groupKey], _nb[k.targetKey]]).filter(Boolean);
+const managedGroupIds = () => [...Object.values(KINDS).flatMap(k => [_nb[k.groupKey], _nb[k.targetKey]]), _nb.webGroupId, _nb.webAclGroupId].filter(Boolean);
+const managedPolicyIdList = () => [_nb.policyId, _nb.namesPolicyId, _nb.webPolicyId, _nb.webRoutingPolicyId].filter(Boolean);
 function isRemoteAccessManagedGroup(id, liveName) {
     if (!id) return false;
     return managedGroupIds().includes(id) || isManagedGatewayName(liveName, 'group');
@@ -456,23 +474,121 @@ function policyBody(kind, enabled) {
     };
 }
 
-async function ensurePolicy(kind, enabled) {
+function ensurePolicy(kind, enabled) {
     const k = KINDS[kind];
+    return ensureNamedPolicy(_nb[k.policyKey], policyBody(kind, enabled));
+}
+
+async function ensureNamedPolicy(knownId, body, unchanged = () => false) {
     const pols = await netbirdGet('/api/policies');
     if (!Array.isArray(pols)) throw new Error("Couldn't read the policies from NetBird");
-    const name = nbName(k.policy);
-    const found = _nb[k.policyKey] && pols.find(p => p && p.id === _nb[k.policyKey]);
+    const name = body.name;
+    const found = knownId && pols.find(p => p && p.id === knownId);
     if (!found && pols.some(p => p && p.name === name)) {
         throw new Error(`NetBird already has a policy named "${name}" that NetBird Control did not create or no longer has on record. Delete or rename that policy in NetBird, then save again.`);
     }
     if (found) {
-        const r = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(found.id), policyBody(kind, enabled));
+        if (found.name === name && unchanged(found)) return found.id;
+        const r = await netbirdReq('PUT', '/api/policies/' + encodeURIComponent(found.id), body);
         if (!nbOk(r)) throw nbErr(`Updating the "${name}" policy`, r);
         return found.id;
     }
-    const r = await netbirdPost('/api/policies', policyBody(kind, enabled));
+    const r = await netbirdPost('/api/policies', body);
     if (!nbOk(r) || !r.body || !r.body.id) throw nbErr(`Creating the "${name}" policy`, r);
     return r.body.id;
+}
+
+const WEB = { group: 'Browser Gateway Web', acl: 'Browser Gateway Web ACL', policy: 'Browser Gateway Web', routing: 'Browser Gateway Web Routing' };
+const webObjectIds = () => [_nb.webGroupId, _nb.webAclGroupId, _nb.webRouteId, _nb.webPolicyId, _nb.webRoutingPolicyId].filter(Boolean);
+const browserWanted = () => _cfg.enabled && _cfg.browser.enabled;
+const webNetworkId = () => WEB_ROUTE_NETWORK_PREFIX + crypto.createHash('sha256').update(_installName).digest('hex').slice(0, 8);
+
+function browserGateWant(routerGroupId, ids) {
+    const installation = ` Installation: ${_installName}.`;
+    return {
+        routerGroupId,
+        route: webRouteBody({ description: nbName(WEB.group), networkId: webNetworkId(), routerGroupId, webGroupId: ids.webGroupId, aclGroupId: ids.webAclGroupId }),
+        icmpPolicy: webPolicyBody({
+            name: nbName(WEB.policy), protocol: 'icmp', sourceGroupId: ids.webGroupId, destinationGroupId: routerGroupId,
+            description: 'Managed by NetBird Control: lets the browser gateway for web sessions reach the routing peers of its internet route.' + installation,
+        }),
+        routingPolicy: webPolicyBody({
+            name: nbName(WEB.routing), protocol: 'all', sourceGroupId: ids.webGroupId, destinationGroupId: ids.webAclGroupId,
+            description: 'Managed by NetBird Control: lets the browser gateway for web sessions use its internet route. Who may open a web session is decided by NetBird Control.' + installation,
+        }),
+    };
+}
+
+async function readBrowserGate() {
+    await loadInstallName();
+    let stored = {};
+    try { stored = JSON.parse(await getSetting('remote_access_nb') || 'null') || {}; } catch { stored = {}; }
+    const ids = Object.fromEntries(['webGroupId', 'webAclGroupId', 'webRouteId', 'webPolicyId', 'webRoutingPolicyId'].map(k => [k, String(stored[k] || '')]));
+    const peer = await readWebPeer();
+    return { ids: { ...ids, webPeerId: peer ? peer.id : '' }, peer, want: browserGateWant(_cfg.browser.routerGroupId, ids) };
+}
+
+async function deleteWebObject(key, path, what) {
+    if (!_nb[key]) return;
+    const r = await netbirdReq('DELETE', path + encodeURIComponent(_nb[key]));
+    if (!nbOk(r) && !(r && r.status === 404)) throw nbErr(`Deleting the ${what}`, r);
+    _nb[key] = '';
+    await setSetting('remote_access_nb', JSON.stringify(_nb));
+}
+const deleteWebRoute = () => deleteWebObject('webRouteId', '/api/routes/', 'internet route of the web sessions');
+const deleteWebIcmpPolicy = () => deleteWebObject('webPolicyId', '/api/policies/', `"${nbName(WEB.policy)}" policy`);
+const deleteWebRoutingPolicy = () => deleteWebObject('webRoutingPolicyId', '/api/policies/', `"${nbName(WEB.routing)}" policy`);
+
+async function ensureWebRoute(body) {
+    const routes = await netbirdGet('/api/routes');
+    if (!Array.isArray(routes)) throw new Error("Couldn't read the routes from NetBird");
+    const found = _nb.webRouteId && routes.find(r => r && r.id === _nb.webRouteId);
+    if (!found && routes.some(r => r && (r.network_id === body.network_id || r.description === body.description))) {
+        throw new Error(`NetBird already has a route "${body.network_id}" or "${body.description}" that NetBird Control did not create or no longer has on record. Delete that route in NetBird, then save again.`);
+    }
+    if (found) {
+        if (found.description === body.description && webRouteMatches(found, body)) return found.id;
+        const r = await netbirdReq('PUT', '/api/routes/' + encodeURIComponent(found.id), body);
+        if (!nbOk(r)) throw nbErr('Updating the internet route of the web sessions', r);
+        return found.id;
+    }
+    const r = await netbirdPost('/api/routes', body);
+    if (!nbOk(r) || !r.body || !r.body.id) throw nbErr('Creating the internet route of the web sessions', r);
+    return r.body.id;
+}
+
+async function applyBrowserObjectsLocked() {
+    const routerGroupId = _cfg.browser.routerGroupId;
+    if (!browserWanted() || !routerGroupId) {
+        await deleteWebRoute();
+        await deleteWebIcmpPolicy();
+        await deleteWebRoutingPolicy();
+    }
+    if (!browserWanted()) return;
+    _nb.webGroupId = await ensureGroup(nbName(WEB.group), _nb.webGroupId);
+    await setSetting('remote_access_nb', JSON.stringify(_nb));
+    _nb.webAclGroupId = await ensureGroup(nbName(WEB.acl), _nb.webAclGroupId);
+    await setSetting('remote_access_nb', JSON.stringify(_nb));
+    if (!routerGroupId) return;
+    const groups = await netbirdGet('/api/groups');
+    if (!Array.isArray(groups)) throw new Error("Couldn't read the groups from NetBird");
+    const router = groups.find(g => g && g.id === routerGroupId);
+    if (!router) throw new Error('The routing group chosen for web sessions no longer exists in NetBird. Choose another group in Settings > Remote Access, then save again.');
+    if (isRemoteAccessManagedGroup(routerGroupId, router.name)) throw new Error('A Browser Gateway group cannot route web sessions. Choose the group of your exit node routing peers in Settings > Remote Access, then save again.');
+    const want = browserGateWant(routerGroupId, _nb);
+    const routes = await netbirdGet('/api/routes');
+    if (!Array.isArray(routes)) throw new Error("Couldn't read the routes from NetBird");
+    const route = _nb.webRouteId && routes.find(r => r && r.id === _nb.webRouteId);
+    if (route && !(Array.isArray(route.peer_groups) && route.peer_groups.length === 1 && refId(route.peer_groups[0]) === routerGroupId)) {
+        await deleteWebRoute();
+        await deleteWebIcmpPolicy();
+    }
+    _nb.webRoutingPolicyId = await ensureNamedPolicy(_nb.webRoutingPolicyId, want.routingPolicy, p => p.description === want.routingPolicy.description && webPolicyMatches(p, want.routingPolicy));
+    await setSetting('remote_access_nb', JSON.stringify(_nb));
+    _nb.webPolicyId = await ensureNamedPolicy(_nb.webPolicyId, want.icmpPolicy, p => p.description === want.icmpPolicy.description && webPolicyMatches(p, want.icmpPolicy));
+    await setSetting('remote_access_nb', JSON.stringify(_nb));
+    _nb.webRouteId = await ensureWebRoute(want.route);
+    await setSetting('remote_access_nb', JSON.stringify(_nb));
 }
 
 // NetBird is the source of truth for which resources are in a target group: the sync never adds
@@ -640,7 +756,7 @@ async function applyGatewayObjects() {
 async function applyGatewayObjectsLocked() {
     try {
         await loadInstallName();
-        const tooLong = Object.values(KINDS).flatMap(k => [k.group, k.targets, k.policy]).map(nbName).find(n => n.length > NB_NAME_MAX);
+        const tooLong = [...Object.values(KINDS).flatMap(k => [k.group, k.targets, k.policy]), ...Object.values(WEB)].map(nbName).find(n => n.length > NB_NAME_MAX);
         if (tooLong) throw new Error(`The Application Name (Settings > General) is too long for the NetBird object names, such as "${tooLong}". Shorten it to 60 characters or less, then save again.`);
         for (const [kind, k] of Object.entries(KINDS)) {
             // Each id is recorded as soon as it exists: a group this app created but did not record
@@ -653,7 +769,8 @@ async function applyGatewayObjectsLocked() {
             await setSetting('remote_access_nb', JSON.stringify(_nb));
         }
         const sync = await syncTargetGroup();
-        bustNbCaches('policies', 'gref', 'usage');
+        await applyBrowserObjectsLocked();
+        bustNbCaches('policies', 'gref', 'usage', 'groups');
         invalidateSnapshot();
         _lastApply = { at: new Date().toISOString(), error: '' };
         return sync;
@@ -669,7 +786,8 @@ async function setRemoteAccessConfig(input) {
     try {
         // A read-only instance never adds or removes servers, so it doesn't decide this section.
         const createResources = sent && typeof sent === 'object' && !NETBIRD_READONLY ? await checkedCreateSection(sent) : _cfg.createResources;
-        const next = normConfig({ ..._cfg, ...rest, createResources });
+        const browser = { ..._cfg.browser, ...(rest.browser && typeof rest.browser === 'object' ? rest.browser : {}) };
+        const next = normConfig({ ..._cfg, ...rest, browser, createResources });
         // The network launch links use stays open to the gateway.
         if (createResources.networkId) next.networks = [...new Set([...next.networks, createResources.networkId])];
         await setSetting('remote_access_config', JSON.stringify(next));
@@ -682,7 +800,7 @@ async function setRemoteAccessConfig(input) {
     noteTargetsChanged();
     if (!_cfg.enabled) closeAllSessions('Browser remote access was turned off by an administrator.');
     let sync = null;
-    if (_cfg.enabled || wasEnabled || _nb.policyId || _nb.namesPolicyId) sync = await applyGatewayObjects();
+    if (_cfg.enabled || wasEnabled || _nb.policyId || _nb.namesPolicyId || webObjectIds().length) sync = await applyGatewayObjects();
     return { config: getRemoteAccessConfig(), sync };
 }
 
@@ -692,7 +810,7 @@ async function setRemoteAccessConfig(input) {
 async function reconcileRemoteAccess() {
     if (!netbirdApiConfigured() || NETBIRD_READONLY) return;
     let failed = null;
-    if (_cfg.enabled || targetGroupIds().length || _nb.policyId || _nb.namesPolicyId) {
+    if (_cfg.enabled || targetGroupIds().length || _nb.policyId || _nb.namesPolicyId || webObjectIds().length) {
         try { await applyGatewayObjects(); } catch (e) { failed = e; }
     }
     await maintainCreatedResources().catch(e => console.error('[remote-access] created resources:', e.message));
@@ -700,8 +818,12 @@ async function reconcileRemoteAccess() {
 }
 
 async function createGatewaySetupKey(kind = 'ip') {
-    const k = KINDS[kind] || KINDS.ip;
+    const web = kind === 'web';
+    const k = web ? { group: WEB.group, groupKey: 'webGroupId' } : KINDS[kind];
+    if (!k) throw new Error(`Unknown gateway kind "${kind}".`);
+    if (web && !browserWanted()) throw new Error('Turn on Remote Access and web sessions first, then create the setup key.');
     if (!_nb[k.groupKey]) await applyGatewayObjects();
+    if (!_nb[k.groupKey]) throw new Error(`The "${nbName(k.group)}" group could not be created. Save the Remote Access settings again, then create the setup key.`);
     await loadInstallName();
     return _deps.createSetupKey({ name: nbName(k.group), type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
 }
@@ -755,9 +877,10 @@ function enforceManagedMembership(data = {}) {
 }
 
 async function runMembership({ users, peers }) {
-    const gateways = Object.values(KINDS).map(k => _nb[k.groupKey]).filter(Boolean);
-    const targets = targetGroupIds();
+    const gateways = [...Object.values(KINDS).map(k => _nb[k.groupKey]), _nb.webGroupId].filter(Boolean);
+    const targets = [...targetGroupIds(), _nb.webAclGroupId].filter(Boolean);
     const managed = new Set([...gateways, ...targets]);
+    const extraWebPeers = await webPeersToRemove(peers);
     const add = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
     const fromGroups = new Map(); // group id -> peer ids to take out
     const fromUsers = new Map();  // user id -> group ids to take away
@@ -773,10 +896,11 @@ async function runMembership({ users, peers }) {
         for (const g of Array.isArray(p.groups) ? p.groups : []) {
             const gid = refId(g);
             const gateway = gateways.includes(gid);
-            if (!targets.includes(gid) && !(gateway && owner)) continue;
+            const extraWeb = gid === _nb.webGroupId && extraWebPeers.has(String(p.id));
+            if (!targets.includes(gid) && !(gateway && owner) && !extraWeb) continue;
             add(fromGroups, gid, String(p.id));
             peerName.set(String(p.id), p.name || String(p.id));
-            if (gateway) add(fromUsers, owner, gid);
+            if (gateway && owner) add(fromUsers, owner, gid);
         }
     }
     // A failure is forgotten once the data this run covers no longer shows that member.
@@ -817,6 +941,41 @@ async function runMembership({ users, peers }) {
     }
     noteMemberRemovals(removed);
     return removed;
+}
+
+const WEB_PEER_KEY = 'remote_access_web_peer';
+async function readWebPeer() {
+    const raw = await getSetting(WEB_PEER_KEY);
+    let v = null;
+    try { v = JSON.parse(raw || 'null'); } catch { return null; }
+    return v && typeof v.id === 'string' && v.id ? { id: v.id, ip: typeof v.ip === 'string' ? v.ip : '', raw } : null;
+}
+const webPeerValue = (p) => JSON.stringify({ id: String(p.id), ip: String(p.ip || ''), at: new Date().toISOString() });
+
+async function webPeersToRemove(peers) {
+    const out = new Set();
+    if (!_nb.webGroupId || !Array.isArray(peers) || !peers.length) return out;
+    try {
+        const inWeb = peers.filter(p => p && p.id && (Array.isArray(p.groups) ? p.groups : []).some(g => refId(g) === _nb.webGroupId));
+        let rec = await readWebPeer();
+        const live = rec && peers.find(p => p && p.id === rec.id);
+        if (rec && !live) {
+            await pool.query('DELETE FROM app_settings WHERE key = $1 AND value = $2', [WEB_PEER_KEY, rec.raw]);
+            rec = null;
+        } else if (rec && live.ip && live.ip !== rec.ip) {
+            await pool.query('UPDATE app_settings SET value = $3 WHERE key = $1 AND value = $2', [WEB_PEER_KEY, rec.raw, webPeerValue(live)]);
+            rec = await readWebPeer();
+        }
+        const enrolled = inWeb.filter(p => !p.user_id);
+        if (!rec && enrolled.length === 1) {
+            await pool.query('INSERT INTO app_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [WEB_PEER_KEY, webPeerValue(enrolled[0])]);
+            rec = await readWebPeer();
+        }
+        if (rec) for (const p of inWeb) if (p.id !== rec.id) out.add(String(p.id));
+    } catch (e) {
+        console.error('[remote-access] could not check the browser gateway peer for web sessions:', e.message);
+    }
+    return out;
 }
 
 // Members taken out of a managed group (by the clean-up, or by the target sync): logged, audited
@@ -927,8 +1086,8 @@ const authCfg = (kind = 'ip', { real = false, standing = false } = {}) => ({
     networks: _cfg.networks,
     standingPolicy: standing ? standingIds(kind) : null,
     gatewayGroupId: kind === 'names' ? _nb.namesGroupId : _nb.gatewayGroupId,
-    gatewayGroupIds: [_nb.gatewayGroupId, _nb.namesGroupId].filter(Boolean), // never routing peers
-    managedPolicyIds: [_nb.policyId, _nb.namesPolicyId].filter(Boolean),
+    gatewayGroupIds: [_nb.gatewayGroupId, _nb.namesGroupId, _nb.webGroupId].filter(Boolean), // never routing peers
+    managedPolicyIds: managedPolicyIdList(),
     targetGroupId: kind === 'names' ? _nb.namesTargetGroupId : _nb.targetGroupId,
     targetGroupIds: targetGroupIds(), // a match only through one of these never grants
     simulate: !real && !NETBIRD_READONLY,
@@ -1592,19 +1751,29 @@ function attachTunnel(sessionId, ws) {
     if (!s || s.state !== 'pending' || s.closed) { sendError(ws, 'This session is no longer available.', 0x0205); ws.close(); return; }
     clearTimeout(s.tokenTimer);
     s.state = 'connecting';
+    pipeTunnel(s, ws, {
+        guacd: s.gateway === 'names' ? { host: _cfg.namesGuacdHost, port: _cfg.namesGuacdPort } : { host: _cfg.guacdHost, port: _cfg.guacdPort },
+        select: s.protocol,
+        connectArgs: (names) => connectArgs(s, names),
+        argv: s.protocol === 'ssh' ? SSH_ARGV : [],
+        fitSize: (w, h) => (w > 0 && h > 0 && w <= MAX_WIDTH && h <= MAX_HEIGHT ? [w, h] : null),
+        fail: (message, code, detail) => failSession(s, message, code, detail),
+        close: (reason) => closeSession(s, reason),
+    });
+}
+
+function pipeTunnel(s, ws, o) {
     s.ws = ws;
     // The tunnel's own UUID first: Guacamole.WebSocketTunnel marks itself open on it.
     ws.send(encodeInstruction('', s.id));
 
-    const sock = net.connect(s.gateway === 'names'
-        ? { host: _cfg.namesGuacdHost, port: _cfg.namesGuacdPort }
-        : { host: _cfg.guacdHost, port: _cfg.guacdPort });
+    const sock = net.connect(o.guacd);
     s.guacd = sock;
     const decoder = new StringDecoder('utf8');
     const parser = new GuacParser(GUACD_INSTRUCTION_MAX);
     const clientParser = new GuacParser(CLIENT_INSTRUCTION_MAX, { maxElements: CLIENT_MAX_ELEMENTS, maxInstruction: CLIENT_INSTRUCTION_MAX });
     // argv names guacd asked for, and the browser's open output streams (clipboard, allowed argv).
-    const argvNames = new Set(s.protocol === 'ssh' ? SSH_ARGV : []);
+    const argvNames = new Set(o.argv);
     const openStreams = new Set();
     let warnedDrop = false;
     const noteRequired = (list) => {
@@ -1630,13 +1799,28 @@ function attachTunnel(sessionId, ws) {
     };
     let handshakeDone = false;
     const handshakeTimer = setTimeout(() => {
-        if (!handshakeDone) failSession(s, 'The Browser Gateway did not answer in time.', 0x0208);
+        if (!handshakeDone) o.fail('The Browser Gateway did not answer in time.', 0x0208);
     }, HANDSHAKE_TIMEOUT_MS);
+    let displayTimer = null;
+    const DISPLAY_OPCODES = new Set(['size', 'sync']);
+    const noteDisplay = (list) => {
+        for (const ins of list) {
+            if (!displayTimer) return false;
+            if (DISPLAY_OPCODES.has(ins.opcode)) { clearTimeout(displayTimer); displayTimer = null; return false; }
+            if (ins.opcode === 'error') {
+                clearTimeout(displayTimer);
+                displayTimer = null;
+                o.fail(o.displayFailedMessage, 0x0203, ins.args[0]);
+                return true;
+            }
+        }
+        return false;
+    };
 
     sock.setNoDelay(true);
-    sock.on('connect', () => sock.write(encodeInstruction('select', s.protocol)));
-    sock.on('error', (e) => failSession(s, handshakeDone ? 'The connection to the server was lost.' : 'The Browser Gateway is not reachable.', 0x0208, e.message));
-    sock.on('close', () => closeSession(s, handshakeDone ? 'The server closed the connection.' : 'The Browser Gateway closed the connection.'));
+    sock.on('connect', () => sock.write(encodeInstruction('select', o.select)));
+    sock.on('error', (e) => o.fail(handshakeDone ? 'The connection to the server was lost.' : 'The Browser Gateway is not reachable.', 0x0208, e.message));
+    sock.on('close', () => { clearTimeout(displayTimer); o.close(handshakeDone ? 'The server closed the connection.' : 'The Browser Gateway closed the connection.', 'guacd'); });
 
     // Backpressure guacd -> browser.
     let stalledSince = 0;
@@ -1646,14 +1830,14 @@ function attachTunnel(sessionId, ws) {
         if (ws.bufferedAmount <= WS_BUFFER_LOW) {
             clearInterval(drainTimer); drainTimer = null; stalledSince = 0; sock.resume();
         } else if (Date.now() - stalledSince > STALL_LIMIT_MS) {
-            clearInterval(drainTimer); failSession(s, 'Your browser stopped receiving data, so the session was closed.', 0x0308);
+            clearInterval(drainTimer); o.fail('Your browser stopped receiving data, so the session was closed.', 0x0308);
         }
     };
 
     sock.on('data', (chunk) => {
         let instructions;
         try { instructions = parser.push(decoder.write(chunk)); }
-        catch (e) { return failSession(s, 'The gateway sent data that could not be read.', 0x0200, e.message); }
+        catch (e) { return o.fail('The gateway sent data that could not be read.', 0x0200, e.message); }
         if (!handshakeDone) {
             for (let k = 0; k < instructions.length; k++) {
                 const ins = instructions[k];
@@ -1665,7 +1849,7 @@ function attachTunnel(sessionId, ws) {
                     sock.write(encodeInstruction('video'));
                     sock.write(encodeInstruction('image', 'image/png', 'image/jpeg', 'image/webp'));
                     if (s.timezone) sock.write(encodeInstruction('timezone', s.timezone));
-                    const values = connectArgs(s, names);
+                    const values = o.connectArgs(names);
                     sock.write(encodeInstruction('connect', ...(version ? [version] : []), ...values));
                     // The SSH secrets are no longer needed here.
                     s.creds = {};
@@ -1673,18 +1857,21 @@ function attachTunnel(sessionId, ws) {
                     handshakeDone = true;
                     clearTimeout(handshakeTimer);
                     s.state = 'open';
+                    if (o.displayTimeoutMs) displayTimer = setTimeout(() => o.fail(o.displayFailedMessage, 0x0202), o.displayTimeoutMs);
                     const after = instructions.slice(k + 1);
                     noteRequired(after);
+                    if (noteDisplay(after)) return;
                     const rest = after.map(x => x.raw).join('');
                     if (rest) forward(rest);
                     return;
                 } else if (ins.opcode === 'error') {
-                    return failSession(s, 'The Browser Gateway refused the connection.', 0x0203, ins.args[0]);
+                    return o.fail('The Browser Gateway refused the connection.', 0x0203, ins.args[0]);
                 }
             }
             return;
         }
         noteRequired(instructions);
+        if (noteDisplay(instructions)) return;
         const text = instructions.map(x => x.raw).join('');
         if (text) forward(text);
     });
@@ -1702,10 +1889,10 @@ function attachTunnel(sessionId, ws) {
 
     // Browser -> guacd.
     ws.on('message', (data, isBinary) => {
-        if (isBinary) return failSession(s, 'Unexpected data from the browser.', 0x0300);
+        if (isBinary) return o.fail('Unexpected data from the browser.', 0x0300);
         let instructions;
         try { instructions = clientParser.push(data.toString('utf8')); }
-        catch (e) { return failSession(s, 'The browser sent data that could not be read.', 0x0300, e.message); }
+        catch (e) { return o.fail('The browser sent data that could not be read.', 0x0300, e.message); }
         let out = '';
         for (const ins of instructions) {
             if (ins.opcode === '') {
@@ -1714,29 +1901,32 @@ function attachTunnel(sessionId, ws) {
                 continue;
             }
             if (!handshakeDone || !CLIENT_OPCODES.has(ins.opcode)) continue;
+            let raw = ins.raw;
             if (ins.opcode === 'size') {
                 const w = Number(ins.args[0]), h = Number(ins.args[1]);
-                if (!(w > 0 && h > 0 && w <= MAX_WIDTH && h <= MAX_HEIGHT)) continue;
+                const fit = o.fitSize(w, h);
+                if (!fit) continue;
+                if (fit[0] !== w || fit[1] !== h) raw = encodeInstruction('size', String(fit[0]), String(fit[1]), ...ins.args.slice(2));
             }
-            if (ins.opcode === 'disconnect') { closeSession(s, 'Closed by the user.'); return; }
+            if (ins.opcode === 'disconnect') { o.close('Closed by the user.', 'disconnect'); return; }
             if (!streamAllowed(ins)) {
                 if (!warnedDrop) { warnedDrop = true; console.warn('[remote-access] session %s: dropped a browser %s that guacd did not ask for', s.id, ins.opcode); }
                 continue;
             }
             if (INPUT_OPCODES.has(ins.opcode)) s.lastInputAt = Date.now();
-            out += ins.raw;
+            out += raw;
         }
         if (!out || s.closed) return;
         s.tx += Buffer.byteLength(out);
         if (!sock.write(out)) {
             ws.pause();
             const pausedAt = Date.now();
-            const t = setTimeout(() => failSession(s, 'The server stopped receiving data, so the session was closed.', 0x0308), STALL_LIMIT_MS);
+            const t = setTimeout(() => o.fail('The server stopped receiving data, so the session was closed.', 0x0308), STALL_LIMIT_MS);
             sock.once('drain', () => { clearTimeout(t); if (!s.closed && Date.now() - pausedAt <= STALL_LIMIT_MS) ws.resume(); });
         }
     });
-    ws.on('close', () => closeSession(s, 'The browser closed the session.'));
-    ws.on('error', () => closeSession(s, 'The browser connection failed.'));
+    ws.on('close', () => o.close('The browser closed the session.', 'browser'));
+    ws.on('error', () => o.close('The browser connection failed.', 'browser'));
 }
 
 function failSession(s, message, code, detail) {
@@ -1879,6 +2069,11 @@ async function extendHolds(sessions) {
             }
         }
     }).catch(() => { });
+}
+
+function readSnapshotNow() {
+    _snapshot = null;
+    return freshSnapshot(0);
 }
 
 // Sweeps that need no NetBird read: lease, idle, duration. Runs more often than the full re-check
@@ -2751,6 +2946,8 @@ module.exports = {
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,
     getServiceHealth, invalidateSnapshot,
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
+    browserWanted, readBrowserGate, readWebPeer, readSnapshotNow, pipeTunnel, encodeInstruction, sendError, httpError, freshSnapshot, withDeadline,
+    CHECK_SNAPSHOT_TTL_MS, LEASE_TIMEOUT_MS, MAX_SNAPSHOT_AGE_MS: SNAPSHOT_MAX_AGE_MS,
     _internal: {
         GuacParser, CLIENT_MAX_ELEMENTS, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, syncTargetGroup, applyGatewayObjects,
         launchCount: () => _launches.size, launchScreen, LAUNCH_MAX, LAUNCH_TTL_MS, ticketHash, sweepLaunches,

@@ -371,6 +371,7 @@ app.post('/api/integrations/telegram/callback', async (req, res) => {
 // passwords.
 const apiKeysLib = require('./lib/api-keys');
 const remoteAccessLib = require('./lib/remote-access');
+const remoteBrowser = require('./lib/remote-browser');
 const apiV1 = express.Router();
 const apiV1IpLimiter = rateLimit(limiterOptions('apiv1'));
 const apiKeyLimiter = rateLimit(limiterOptions('apikey'));
@@ -3444,6 +3445,8 @@ app.get('/api/remote-access/info', async (req, res) => {
             // launch link instead of using it up.
             settling: remoteAccessViewerOk(v) && remoteAccessAvailable() ? remoteAccessLib.isSettling() : false,
             clipboard: cfg.clipboard, idleTimeoutMin: cfg.idleTimeoutMin, maxDurationHours: cfg.maxDurationHours,
+            ...(AUTH_ENABLED && !currentTenantAccount() && remoteAccessViewerOk(v) && remoteAccessAvailable() && remoteAccessLib.browserWanted()
+                ? { browser: { keepAliveMin: cfg.browser.keepAliveMin } } : {}),
         });
     } catch (err) {
         res.status(500).json({ error: 'Internal server error' });
@@ -3474,20 +3477,41 @@ app.get('/api/remote-access/add-networks', requireRemoteUser, async (req, res) =
 app.get('/api/remote-access/health', remoteUserGate({ refresh: false }), async (req, res) => {
     res.set('Cache-Control', 'no-store');
     if (req.remoteViewer.blocked) return res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
-    try { res.json(await remoteAccessLib.getServiceHealth()); }
-    catch (e) { sendRemoteError(res, e); }
+    try {
+        const [health, browserGateway] = await Promise.all([remoteAccessLib.getServiceHealth(), remoteBrowser.getBrowserHealth()]);
+        res.json(browserGateway ? { ...health, browserGateway } : health);
+    } catch (e) { sendRemoteError(res, e); }
 });
 app.post('/api/remote-access/sessions', requireRemoteUser, async (req, res) => {
-    try { res.json(await createRemoteSession(req.remoteViewer, req.body || {}, req.ip)); }
+    const body = req.body || {};
+    try {
+        res.json(String(body.protocol || '').toLowerCase() === 'web'
+            ? await remoteBrowser.createWebSession(req.remoteViewer, body, req.ip)
+            : await createRemoteSession(req.remoteViewer, body, req.ip));
+    } catch (e) { sendRemoteError(res, e); }
+});
+app.post('/api/remote-access/sessions/:id/lease', requireRemoteUser, async (req, res) => {
+    const id = String(req.params.id);
+    try {
+        if (!renewRemoteLease(req.remoteViewer, id) && !(await remoteBrowser.renewWebLease(req.remoteViewer, id))) return res.status(404).json({ error: 'This session has ended.' });
+        res.json({ ok: true });
+    } catch (e) { sendRemoteError(res, e); }
+});
+app.delete('/api/remote-access/sessions/:id', requireRemoteUser, async (req, res) => {
+    const id = String(req.params.id);
+    try {
+        if (!endRemoteSession(req.remoteViewer, id)) await remoteBrowser.endWebSessionByUser(req.remoteViewer, id);
+        res.json({ ok: true });
+    } catch (e) { sendRemoteError(res, e); }
+});
+app.get('/api/remote-access/web-sessions', requireRemoteUser, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try { res.json(await remoteBrowser.listWebSessions(req.remoteViewer)); }
     catch (e) { sendRemoteError(res, e); }
 });
-app.post('/api/remote-access/sessions/:id/lease', requireRemoteUser, (req, res) => {
-    if (!renewRemoteLease(req.remoteViewer, String(req.params.id))) return res.status(404).json({ error: 'This session has ended.' });
-    res.json({ ok: true });
-});
-app.delete('/api/remote-access/sessions/:id', requireRemoteUser, (req, res) => {
-    endRemoteSession(req.remoteViewer, String(req.params.id));
-    res.json({ ok: true });
+app.post('/api/remote-access/sessions/:id/resume', requireRemoteUser, async (req, res) => {
+    try { res.json(await remoteBrowser.resumeWebSession(req.remoteViewer, String(req.params.id), req.body || {})); }
+    catch (e) { sendRemoteError(res, e); }
 });
 // A launch link from another system (POST /api/v1/remote-access/launch), opened in the browser.
 // Only the ticket and the screen size come from the browser; the target and credentials don't.
@@ -3544,9 +3568,10 @@ app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
     const createMeta = ({ enabled, networkId, profileId, groupId, max }) => ({ enabled, networkId, profileId, groupId, max });
     try {
         const out = await setRemoteAccessConfig(req.body || {});
+        remoteBrowser.onConfigChanged();
         audit(await getViewer(req), 'settings.remote_access', '', {
             enabled: out.config.enabled, networks: out.config.networks.length, allowAll: out.config.allowAll,
-            wasEnabled: before.enabled, sync: out.sync || undefined, createResources: createMeta(out.config.createResources),
+            wasEnabled: before.enabled, sync: out.sync || undefined, createResources: createMeta(out.config.createResources), browser: out.config.browser,
         });
         res.json(out);
     } catch (e) {
@@ -3555,10 +3580,11 @@ app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
         // The settings are saved even when NetBird could not be updated; the error says what failed.
         // A change that was saved is audited all the same, with the error.
         const after = getRemoteAccessConfig();
+        remoteBrowser.onConfigChanged();
         if (JSON.stringify(after) !== JSON.stringify(before)) {
             audit(await getViewer(req), 'settings.remote_access', '', {
                 enabled: after.enabled, networks: after.networks.length, allowAll: after.allowAll,
-                wasEnabled: before.enabled, netbirdError: String(e.message || e).slice(0, 300), createResources: createMeta(after.createResources),
+                wasEnabled: before.enabled, netbirdError: String(e.message || e).slice(0, 300), createResources: createMeta(after.createResources), browser: after.browser,
             });
         }
         res.status(502).json({ error: e.message || 'Could not update NetBird', config: after });
@@ -3566,8 +3592,10 @@ app.put('/api/remote-access/config', requireAdmin, async (req, res) => {
 });
 app.get('/api/remote-access/status', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
-    try { res.json(await getRemoteAccessStatus()); }
-    catch (e) { sendRemoteError(res, e); }
+    try {
+        const [status, browser] = await Promise.all([getRemoteAccessStatus(), remoteBrowser.getBrowserStatus()]);
+        res.json({ ...status, browser });
+    } catch (e) { sendRemoteError(res, e); }
 });
 // Settings > Remote Access > Servers From Launch Links.
 app.get('/api/remote-access/created-resources', requireAdmin, async (req, res) => {
@@ -3594,9 +3622,10 @@ app.post('/api/remote-access/setup-key', requireAdmin, async (req, res) => {
     if (currentTenantAccount()) return res.status(404).json({ error: 'Main account only' });
     if (NETBIRD_READONLY) return res.status(403).json({ error: 'This instance is read-only (NETBIRD_READONLY=true).' });
     try {
-        const kind = (req.body || {}).kind === 'names' ? 'names' : 'ip';
+        const asked = (req.body || {}).kind;
+        const kind = asked === 'names' || asked === 'web' ? asked : 'ip';
         const key = await createGatewaySetupKey(kind);
-        audit(await getViewer(req), 'remote_access.setup_key', kind === 'names' ? 'Browser Gateway Names' : 'Browser Gateway', { expiresInDays: 1, usageLimit: 1 });
+        audit(await getViewer(req), 'remote_access.setup_key', { ip: 'Browser Gateway', names: 'Browser Gateway Names', web: 'Browser Gateway Web' }[kind], { expiresInDays: 1, usageLimit: 1 });
         res.json({ key: key && key.key, expires: key && key.expires, name: key && key.name });
     } catch (e) {
         res.status(502).json({ error: e.message || 'Could not create the setup key' });
@@ -3625,9 +3654,17 @@ function handleRemoteUpgrade(req, socket, head) {
     let originHost = '';
     try { originHost = new URL(String(req.headers.origin || '')).host.toLowerCase(); } catch { /* none */ }
     if (!originHost || !allowedHosts.has(originHost)) return reject(403, 'Forbidden');
-    const sessionId = takeRemoteToken(url.searchParams.get('token'));
-    if (!sessionId) return reject(401, 'Unauthorized');
-    remoteWss.handleUpgrade(req, socket, head, (ws) => attachRemoteTunnel(sessionId, ws));
+    const token = url.searchParams.get('token');
+    const sessionId = takeRemoteToken(token);
+    if (sessionId) return remoteWss.handleUpgrade(req, socket, head, (ws) => attachRemoteTunnel(sessionId, ws));
+    const web = remoteBrowser.takeToken(token);
+    if (!web) return reject(401, 'Unauthorized');
+    remoteWss.handleUpgrade(req, socket, head, (ws) => {
+        remoteBrowser.attachWebTunnel(web, ws).catch((e) => {
+            console.error('[remote-browser] attach failed:', e.message);
+            try { ws.close(1011); } catch { }
+        });
+    });
 }
 
 // ─── Connectivity diagnostics (Troubleshoot page) - all read-only ───
@@ -3792,7 +3829,7 @@ function parseAccessCheckQuery(q) {
 async function accessCheckSnapshot(target) {
     const snap = await loadAccessCheckSnapshot();
     const managed = currentTenantAccount() ? {} : ((remoteAccessLib.getRemoteAccessConfig() || {}).managed || {});
-    snap.managedPolicyIds = [managed.policyId, managed.namesPolicyId].filter(Boolean);
+    snap.managedPolicyIds = [managed.policyId, managed.namesPolicyId, managed.webPolicyId, managed.webRoutingPolicyId].filter(Boolean);
     snap.routers = target ? await loadAccessCheckRouters(accessCheck.networksForTarget(snap, target)) : new Map();
     return snap;
 }
@@ -5138,7 +5175,10 @@ function installShutdown(server) {
         const closing = new Promise((resolve) => server.close(() => { serverClosed = true; resolve(); }));
         (async () => {
             try {
-                await within(shutdownRemoteSessions('The server is restarting. Open the session again in a moment.'), left());
+                await within(Promise.all([
+                    shutdownRemoteSessions('The server is restarting. Open the session again in a moment.'),
+                    remoteBrowser.shutdownWebTunnels('The server is restarting. Resume the session in a moment.'),
+                ]), left());
                 const unsent = await settleTelegramQueue(deadline - 1000);
                 if (unsent) console.warn(`[shutdown] ${unsent} Telegram message(s) were not sent`);
                 await within(closing, left());
@@ -5171,7 +5211,7 @@ async function start() {
         // Browser remote access: inject the db.js helpers it needs, close sessions a crash or
         // restart left open (with an honest "end time unknown"), then run its timers. The re-check
         // reads NetBird; the sweep (lease, stale verification) needs no NetBird read.
-        setRemoteAccessDeps({
+        const remoteAccessDeps = {
             createSetupKey, scanResourceConflicts, removeUserManagedGroups, recordAudit, createClientResource, checkLaunchNetwork,
             isLeader: leaderReady,
             // Same rules as getViewer, but from the re-check's FRESH NetBird snapshot (the users and
@@ -5194,13 +5234,19 @@ async function start() {
                 if (!!ADMIN_GROUP_ID && adGroups.includes(ADMIN_GROUP_ID)) return true;
                 return permitted([...adGroups, ...nbGroups]);
             },
-        });
+        };
+        setRemoteAccessDeps(remoteAccessDeps);
+        remoteBrowser.setRemoteBrowserDeps({ stillPermitted: remoteAccessDeps.stillPermitted });
         // A resource write sent before a restart may still land in NetBird: no session is approved
         // until a target sync that starts 90 s from now has finished.
         beginRemoteTargetSettling();
         // Orphaned sessions are closed by the leader (leaderStartup), not by every instance that starts.
         setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);
         setInterval(sweepRemoteSessions, 15000);
+        setInterval(() => remoteBrowser.watchAttached().catch(e => console.error('[remote-browser] watch:', e.message)), remoteBrowser.WATCH_INTERVAL_MS);
+        const browserTick = leaderOnly(() => tracked('remoteBrowser', remoteBrowser.leaderTick));
+        setTimeout(browserTick, 5000);
+        setInterval(browserTick, remoteBrowser.LOOP_INTERVAL_MS);
         if (!NETBIRD_READONLY) {
             const raTick = leaderOnly(() => tracked('remoteAccessSync', reconcileRemoteAccess));
             setTimeout(raTick, 45000);
