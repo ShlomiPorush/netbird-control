@@ -7,8 +7,9 @@ const USERS = { remote: { perms: ['remote.connect'] }, admin: { role: 'admin' },
 const calls = [];
 let ra;
 let rb;
-let endImpl = async () => true;
+let endImpl = async () => 'stopped';
 let leaseImpl = async () => true;
+const leases = [];
 
 before(async () => {
     await h.start({
@@ -35,7 +36,7 @@ before(async () => {
                 createWebSession: async (viewer, body) => { calls.push(['web-session', viewer.user_id, body.protocol]); return { sessionId: 'w1', token: 't', protocol: 'web', keepAliveMin: 15 }; },
                 resumeWebSession: async (viewer, id) => { calls.push(['resume', viewer.user_id, id]); return { sessionId: id, token: 't2', protocol: 'web', keepAliveMin: 15 }; },
                 listWebSessions: async (viewer) => ({ keepAliveMin: 15, sessions: [{ id: 'w1', state: 'detached', owner: viewer.user_id }] }),
-                renewWebLease: async (...args) => leaseImpl(...args),
+                renewWebLease: async (...args) => { leases.push(args.slice(1)); return leaseImpl(...args); },
                 endWebSessionByUser: async (...args) => endImpl(...args),
                 onConfigChanged: () => Promise.resolve(),
             });
@@ -71,13 +72,18 @@ test('a session with protocol web goes to the remote browser, any other to RDP/S
 
 test('lease, DELETE, list and resume reach web sessions on any instance; an ended one answers 410', async () => {
     config({ enabled: true, routerGroupId: 'g-office' });
-    let r = await h.call('remote', 'POST', '/api/remote-access/sessions/w1/lease');
+    let r = await h.call('remote', 'POST', '/api/remote-access/sessions/w1/lease', { attachment: 'tab-1' });
     assert.equal(r.status, 200);
+    assert.deepEqual(leases.pop(), ['w1', 'tab-1']);
     leaseImpl = async () => false;
     r = await h.call('remote', 'POST', '/api/remote-access/sessions/w1/lease');
     assert.equal(r.status, 404);
     r = await h.call('remote', 'DELETE', '/api/remote-access/sessions/w1');
     assert.equal(r.status, 200);
+    endImpl = async () => 'ending';
+    r = await h.call('remote', 'DELETE', '/api/remote-access/sessions/w1');
+    assert.equal(r.status, 202, 'a stop that did not finish is not reported as done');
+    assert.deepEqual(r.json, { ok: true, state: 'ending' });
     endImpl = async () => { throw ra.httpError(410, 'BROWSER_ENDED', 'This web session has ended.'); };
     r = await h.call('remote', 'DELETE', '/api/remote-access/sessions/w1');
     assert.equal(r.status, 410);

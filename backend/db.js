@@ -4157,6 +4157,11 @@ async function initializeDatabase() {
         `);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_browser_sessions_open ON browser_sessions (state) WHERE state <> 'ended'`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_browser_sessions_user ON browser_sessions (user_id) WHERE state <> 'ended'`);
+        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS supervisor_instance TEXT DEFAULT ''`);
+        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS token_hash TEXT`);
+        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS token_expires TIMESTAMPTZ`);
+        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS conn_count INTEGER NOT NULL DEFAULT 0`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_token ON browser_sessions (token_hash) WHERE token_hash IS NOT NULL`);
         // Browser Gateway targets that sessions opened: one hold per resource, for the network and
         // the address the resource had when the session started. The resource stays in its target
         // group until expires_at; added_at is when this app last added it to the group; updated_at is

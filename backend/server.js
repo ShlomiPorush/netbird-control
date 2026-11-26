@@ -3496,14 +3496,16 @@ app.post('/api/remote-access/sessions', requireRemoteUser, async (req, res) => {
 app.post('/api/remote-access/sessions/:id/lease', requireRemoteUser, async (req, res) => {
     const id = String(req.params.id);
     try {
-        if (!renewRemoteLease(req.remoteViewer, id) && !(await remoteBrowser.renewWebLease(req.remoteViewer, id))) return res.status(404).json({ error: 'This session has ended.' });
+        if (!renewRemoteLease(req.remoteViewer, id) && !(await remoteBrowser.renewWebLease(req.remoteViewer, id, String((req.body || {}).attachment || '')))) return res.status(404).json({ error: 'This session has ended.' });
         res.json({ ok: true });
     } catch (e) { sendRemoteError(res, e); }
 });
 app.delete('/api/remote-access/sessions/:id', requireRemoteUser, async (req, res) => {
     const id = String(req.params.id);
     try {
-        if (!endRemoteSession(req.remoteViewer, id)) await remoteBrowser.endWebSessionByUser(req.remoteViewer, id);
+        if (!endRemoteSession(req.remoteViewer, id) && (await remoteBrowser.endWebSessionByUser(req.remoteViewer, id)) === 'ending') {
+            return res.status(202).json({ ok: true, state: 'ending' });
+        }
         res.json({ ok: true });
     } catch (e) { sendRemoteError(res, e); }
 });
@@ -3660,14 +3662,15 @@ function handleRemoteUpgrade(req, socket, head) {
     const token = url.searchParams.get('token');
     const sessionId = takeRemoteToken(token);
     if (sessionId) return remoteWss.handleUpgrade(req, socket, head, (ws) => attachRemoteTunnel(sessionId, ws));
-    const web = remoteBrowser.takeToken(token);
-    if (!web) return reject(401, 'Unauthorized');
-    remoteWss.handleUpgrade(req, socket, head, (ws) => {
-        remoteBrowser.attachWebTunnel(web, ws).catch((e) => {
-            console.error('[remote-browser] attach failed:', e.message);
-            try { ws.close(1011); } catch { }
+    remoteBrowser.takeToken(token).then((web) => {
+        if (!web) return reject(401, 'Unauthorized');
+        remoteWss.handleUpgrade(req, socket, head, (ws) => {
+            remoteBrowser.attachWebTunnel(web, ws).catch((e) => {
+                console.error('[remote-browser] attach failed:', e.message);
+                try { ws.close(1011); } catch { }
+            });
         });
-    });
+    }, () => reject(401, 'Unauthorized'));
 }
 
 // ─── Connectivity diagnostics (Troubleshoot page) - all read-only ───

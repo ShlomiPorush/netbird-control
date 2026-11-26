@@ -8,12 +8,17 @@ const { addEvent } = require('./events');
 const ra = require('./remote-access');
 const { evaluateExitNodeEntitlement, browserGateProblem, browserLiveProblem } = require('./remote-access-auth');
 
-const DEFAULT_PATHS = { supervisor: '/run/nbc-control/supervisor.sock', connections: '/run/nbc-connections/connections.sock' };
+const DEFAULT_ENDPOINTS = {
+    supervisor: '/run/nbc-control/supervisor.sock',
+    connections: '/run/nbc-connections/connections.sock',
+    guacd: { host: '172.31.250.4', port: 4822 },
+};
 const INSTANCE = crypto.randomUUID();
 const SUPERVISOR_TIMEOUT_MS = 10_000;
 const SUPERVISOR_STOP_TIMEOUT_MS = 30_000;
 const SUPERVISOR_REPLY_MAX = 4 * 1024 * 1024;
-const TOKEN_TTL_MS = 30_000;
+const TOKEN_TTL_S = 30;
+const GUACD_PROBE_TIMEOUT_MS = 2000;
 const VIEWER_LEASE_S = 150;
 const AUTH_GRACE_MS = 150_000;
 const LOOP_INTERVAL_MS = 60_000;
@@ -35,6 +40,8 @@ const CONNECTION_REFERENCE = 'remote-access:web-connection';
 const OPEN_STATES = ['active', 'detached'];
 const CODE = { ended: 0x020B, takenOver: 0x0205, denied: 0x0303, restarting: 0x0201, lost: 0x0208 };
 const TAKEN_OVER = 'Your browser was opened in another window.';
+const BROWSER_CLOSED = 'The browser was closed.';
+const BROWSER_RESTARTED = 'The remote browser restarted, so the session ended.';
 
 const MESSAGES = {
     BROWSER_DISABLED: 'Web sessions are turned off. Ask an administrator to turn them on in Settings > Remote Access.',
@@ -43,6 +50,7 @@ const MESSAGES = {
     NO_EXIT_NODE: 'Web sessions are only for people whose device may use the office exit node in NetBird. Ask an administrator if you need it.',
     SNAPSHOT_FAILED: "Remote Access couldn't read NetBird to check your access. Try again in a minute.",
     GATEWAY_NOT_READY: "The browser gateway isn't ready, so web sessions can't open right now. Try again later, or tell an administrator.",
+    GUACD_UNREACHABLE: "NetBird Control can't reach the remote browser's display service, so web sessions can't open right now. Try again later, or tell an administrator.",
     BROWSER_CAPACITY: 'Every web session is in use right now. Try again later.',
     BROWSER_UNAVAILABLE: "The remote browser isn't answering right now. Try again in a minute, or tell an administrator.",
     RECORD_FAILED: "Remote Access couldn't record the session, so it wasn't opened. Try again.",
@@ -69,13 +77,14 @@ const GATE_REASONS = {
     GATEWAY_LOCK_MISSING: "The browser gateway's network lock isn't in place.",
     GATEWAY_ADDRESS_CHANGED: "The browser gateway's NetBird address doesn't match the enrolled peer.",
     GATEWAY_ROUTES_CHANGED: 'The browser gateway received another route than the internet route of the web sessions.',
+    GUACD_UNREACHABLE: "NetBird Control can't reach the remote browser's guacd (172.31.250.4:4822). Check that the remote-browser-guacd container runs.",
     SNAPSHOT_FAILED: "NetBird couldn't be read.",
 };
 
-let _paths = { ...DEFAULT_PATHS };
+let _endpoints = { ...DEFAULT_ENDPOINTS };
 let _deps = {};
 let _shuttingDown = false;
-const _tokens = new Map();
+let _supervisorInstance = '';
 const _attached = new Map();
 
 const httpError = (status, code, message) => ra.httpError(status, code, message || MESSAGES[code]);
@@ -90,7 +99,7 @@ function setRemoteBrowserDeps(deps) { _deps = { ..._deps, ...deps }; }
 
 function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
-        const sock = net.connect(_paths.supervisor);
+        const sock = net.connect(_endpoints.supervisor);
         let buffered = '';
         let done = false;
         const finish = (error, value) => {
@@ -113,6 +122,7 @@ function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS) {
             let reply;
             try { reply = JSON.parse(buffered.slice(0, newline)); } catch { return finish(new Error('the remote browser sent an answer that could not be read')); }
             if (!reply || typeof reply !== 'object') return finish(new Error('the remote browser sent an answer that could not be read'));
+            noteInstance(reply);
             finish(null, reply);
         });
         sock.on('error', (e) => finish(e));
@@ -120,9 +130,28 @@ function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS) {
     });
 }
 
+function noteInstance(reply) {
+    const instance = typeof reply.instance === 'string' ? reply.instance : '';
+    if (!instance || instance === _supervisorInstance) return;
+    _supervisorInstance = instance;
+    for (const [uid, s] of _uidSessions) if (s.instance !== instance) _uidSessions.delete(uid);
+}
+
+const isGone = (reply) => !!reply && reply.ok !== true && (reply.error === 'ENDED' || reply.error === 'UNKNOWN');
+
+function guacdReachable() {
+    return new Promise((resolve) => {
+        const sock = net.connect(_endpoints.guacd);
+        const done = (ok) => { clearTimeout(timer); sock.destroy(); resolve(ok); };
+        const timer = setTimeout(() => done(false), GUACD_PROBE_TIMEOUT_MS);
+        sock.once('connect', () => done(true));
+        sock.once('error', () => done(false));
+    });
+}
+
 const peerOf = (snap, peerId) => (peerId ? (snap.peers || []).find(p => p && p.id === peerId) : null) || null;
 
-async function checkGate(snap) {
+async function checkGate(snap, { probeGuacd = true } = {}) {
     const gate = await ra.readBrowserGate();
     const peer = peerOf(snap, gate.ids.webPeerId);
     const base = { ids: gate.ids, peer };
@@ -131,7 +160,9 @@ async function checkGate(snap) {
     let ready = null;
     try { ready = await supervisorRequest({ op: 'ready' }); } catch (e) { console.error('[remote-browser] the supervisor did not answer "ready":', e.message); }
     const liveProblem = browserLiveProblem(ready, { peerIp: peer ? String(peer.ip || '') : '', nowSec: Math.floor(Date.now() / 1000) });
-    return liveProblem ? { ...base, ok: false, code: liveProblem } : { ...base, ok: true, code: 'OK' };
+    if (liveProblem) return { ...base, ok: false, code: liveProblem };
+    if (probeGuacd && !(await guacdReachable())) return { ...base, ok: false, code: 'GUACD_UNREACHABLE' };
+    return { ...base, ok: true, code: 'OK' };
 }
 
 function entitlementCfg() {
@@ -141,6 +172,8 @@ function entitlementCfg() {
         managedPolicyIds: [managed.policyId, managed.namesPolicyId, managed.webPolicyId, managed.webRoutingPolicyId].filter(Boolean),
     };
 }
+
+const notReadyMessage = (gateCode) => (gateCode === 'GUACD_UNREACHABLE' ? MESSAGES.GUACD_UNREACHABLE : MESSAGES.GATEWAY_NOT_READY);
 
 async function authorize(viewer) {
     if (!browserActive()) throw httpError(403, 'BROWSER_DISABLED');
@@ -152,14 +185,14 @@ async function authorize(viewer) {
     const gate = await checkGate(snap);
     if (!gate.ok) {
         console.warn('[remote-browser] the browser gateway is not ready: %s', gate.code);
-        throw httpError(503, 'GATEWAY_NOT_READY');
+        throw httpError(503, 'GATEWAY_NOT_READY', notReadyMessage(gate.code));
     }
     if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
     return entitlement;
 }
 
 async function checkWebAccess(viewer) {
-    const ready = (code, retry = false) => ({ steps: [{ key: 'ready', status: 'fail', code, message: MESSAGES[code], retry }] });
+    const ready = (code, retry = false, message = MESSAGES[code]) => ({ steps: [{ key: 'ready', status: 'fail', code, message, retry }] });
     if (!browserActive()) return ready('BROWSER_DISABLED');
     if (_shuttingDown) return ready('SERVER_RESTARTING', true);
     let snap;
@@ -167,7 +200,7 @@ async function checkWebAccess(viewer) {
     const entitlement = evaluateExitNodeEntitlement(snap, entitlementCfg(), { userId: viewer.user_id });
     if (!entitlement.ok) return { steps: [{ key: 'access', status: 'fail', code: entitlement.code, message: MESSAGES[entitlement.code] }] };
     const gate = await checkGate(snap);
-    if (!gate.ok) return ready('GATEWAY_NOT_READY');
+    if (!gate.ok) return ready('GATEWAY_NOT_READY', false, notReadyMessage(gate.code));
     return {
         ok: true,
         steps: [
@@ -230,22 +263,38 @@ function webSessionEvent(row, kind, { reason = '', at = new Date() } = {}) {
     };
 }
 
-function issueToken(entry) {
+const tokenHash = (token) => crypto.createHash('sha256').update(String(token)).digest('hex');
+const keepAliveMin = () => config().browser.keepAliveMin;
+const keepAliveText = () => `The session ended after ${keepAliveMin()} minutes without a connection.`;
+const RESUMABLE = `state = ANY($2) AND (state <> 'detached' OR detached_at > NOW() - $3 * interval '1 minute')`;
+
+async function issueToken(id) {
     const token = crypto.randomBytes(32).toString('base64url');
-    _tokens.set(token, { ...entry, expiresAt: Date.now() + TOKEN_TTL_MS });
-    for (const [t, v] of _tokens) if (v.expiresAt < Date.now()) _tokens.delete(t);
-    return token;
+    const r = await pool.query(
+        `UPDATE browser_sessions SET token_hash = $4, token_expires = NOW() + interval '${TOKEN_TTL_S} seconds' WHERE id = $1 AND ${RESUMABLE} RETURNING id`,
+        [id, OPEN_STATES, keepAliveMin(), tokenHash(token)]);
+    return rowsOf(r).length ? token : null;
 }
 
-function takeToken(token) {
-    const key = String(token || '');
-    const entry = _tokens.get(key);
-    if (!entry) return null;
-    _tokens.delete(key);
-    return entry.expiresAt >= Date.now() && browserActive() && !_shuttingDown ? entry : null;
+async function takeToken(token) {
+    const value = String(token || '');
+    if (!value) return null;
+    let row;
+    try {
+        row = rowsOf(await pool.query(
+            `UPDATE browser_sessions SET token_hash = NULL, token_expires = NULL WHERE token_hash = $1 AND token_expires > NOW() AND state = ANY($2)
+             RETURNING id, user_id, attachment, width, height, dpi`,
+            [tokenHash(value), OPEN_STATES]))[0];
+    } catch (e) {
+        console.error('[remote-browser] could not check a session token:', e.message);
+        return null;
+    }
+    if (!row || !browserActive() || _shuttingDown) return null;
+    return { sessionId: row.id, attachment: row.attachment, userId: row.user_id, width: row.width, height: row.height, dpi: row.dpi };
 }
 
 async function createWebSession(viewer, body, clientIp) {
+    const authorizedAt = Date.now();
     await authorize(viewer);
     const size = screen(body);
     const row = {
@@ -261,14 +310,16 @@ async function createWebSession(viewer, body, clientIp) {
     if (!reserved) throw httpError(429, 'BROWSER_CAPACITY');
     try {
         let started;
-        try { started = await supervisorRequest({ op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false }); } catch (e) {
+        try {
+            started = await supervisorRequest({ op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false, until: authorizedAt + AUTH_GRACE_MS });
+        } catch (e) {
             console.error('[remote-browser] start failed:', e.message);
             throw httpError(503, 'BROWSER_UNAVAILABLE');
         }
         if (!started || started.ok !== true) throw httpError(started && started.error === 'CAPACITY' ? 429 : 503, started && started.error === 'CAPACITY' ? 'BROWSER_CAPACITY' : 'BROWSER_UNAVAILABLE');
         const u = await pool.query(
-            `UPDATE browser_sessions SET state = 'detached', detached_at = NOW(), uid = $2, port = $3 WHERE id = $1 AND state = 'starting' RETURNING *`,
-            [row.id, started.uid, started.port]);
+            `UPDATE browser_sessions SET state = 'detached', detached_at = NOW(), uid = $2, port = $3, supervisor_instance = $4 WHERE id = $1 AND state = 'starting' RETURNING *`,
+            [row.id, started.uid, started.port, String(started.instance || '')]);
         const stored = rowsOf(u)[0];
         if (!stored) throw httpError(409, 'SESSION_CLOSED');
         if (_connServer) noteUid(stored);
@@ -280,8 +331,9 @@ async function createWebSession(viewer, body, clientIp) {
             throw httpError(503, 'RECORD_FAILED');
         }
         if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
-        const token = issueToken({ sessionId: row.id, attachment: row.attachment, userId: row.userId, ...size });
-        return { sessionId: row.id, token, protocol: 'web', keepAliveMin: config().browser.keepAliveMin };
+        const token = await issueToken(row.id);
+        if (!token) throw httpError(409, 'SESSION_CLOSED');
+        return { sessionId: row.id, token, attachment: row.attachment, protocol: 'web', keepAliveMin: keepAliveMin() };
     } catch (e) {
         await endWebSession(row.id, _shuttingDown ? 'The server is restarting.' : 'The session did not open.').catch(() => { });
         throw e;
@@ -292,6 +344,27 @@ async function sessionRow(id) {
     return rowsOf(await pool.query('SELECT * FROM browser_sessions WHERE id = $1', [String(id)]))[0] || null;
 }
 
+async function browserCredentials(id) {
+    try {
+        const r = await supervisorRequest({ op: 'credentials', session: id });
+        if (r && r.ok === true) return r;
+        if (isGone(r)) return 'gone';
+        console.error('[remote-browser] session %s: credentials refused: %s', id, (r && r.error) || 'no answer');
+    } catch (e) {
+        console.error('[remote-browser] session %s: credentials failed: %s', id, e.message);
+    }
+    return null;
+}
+
+async function endIfKeepAlivePassed(id) {
+    const r = await pool.query(
+        `SELECT id FROM browser_sessions WHERE id = $1 AND state = 'detached' AND detached_at <= NOW() - $2 * interval '1 minute'`,
+        [id, keepAliveMin()]);
+    if (!rowsOf(r).length) return false;
+    await endWebSession(id, keepAliveText()).catch(() => { });
+    return true;
+}
+
 async function resumeWebSession(viewer, id, body) {
     const row = await sessionRow(id);
     if (!row || row.user_id !== viewer.user_id) throw httpError(404, 'SESSION_NOT_FOUND');
@@ -299,24 +372,36 @@ async function resumeWebSession(viewer, id, body) {
     if (row.state === 'ending') throw httpError(409, 'SESSION_ENDING');
     if (row.state === 'starting') throw httpError(409, 'SESSION_STARTING');
     await authorize(viewer);
+    const creds = await browserCredentials(row.id);
+    if (creds === 'gone') {
+        await endWebSession(row.id, BROWSER_CLOSED).catch(() => { });
+        throw httpError(410, 'BROWSER_ENDED');
+    }
+    if (!creds) throw httpError(503, 'BROWSER_UNAVAILABLE');
+    const size = screen(body);
     const attachment = crypto.randomUUID();
+    const token = crypto.randomBytes(32).toString('base64url');
     const u = await pool.query(
-        `UPDATE browser_sessions SET attachment = $3, last_auth_ok_at = NOW() WHERE id = $1 AND user_id = $2 AND state = ANY($4) RETURNING id`,
-        [row.id, viewer.user_id, attachment, OPEN_STATES]);
-    if (!rowsOf(u).length) throw httpError(410, 'BROWSER_ENDED');
+        `UPDATE browser_sessions SET attachment = $5, last_auth_ok_at = NOW(), width = $6, height = $7, dpi = $8,
+            token_hash = $9, token_expires = NOW() + interval '${TOKEN_TTL_S} seconds'
+         WHERE id = $1 AND user_id = $4 AND ${RESUMABLE} RETURNING id`,
+        [row.id, OPEN_STATES, keepAliveMin(), viewer.user_id, attachment, size.width, size.height, size.dpi, tokenHash(token)]);
+    if (!rowsOf(u).length) {
+        await endIfKeepAlivePassed(row.id);
+        throw httpError(410, 'BROWSER_ENDED');
+    }
     const local = _attached.get(row.id);
     if (local) closeLocal(local, TAKEN_OVER, CODE.takenOver);
-    const token = issueToken({ sessionId: row.id, attachment, userId: row.user_id, ...screen(body) });
-    return { sessionId: row.id, token, protocol: 'web', keepAliveMin: config().browser.keepAliveMin };
+    return { sessionId: row.id, token, attachment, protocol: 'web', keepAliveMin: keepAliveMin() };
 }
 
 async function listWebSessions(viewer) {
     const r = await pool.query(
         `SELECT id, state, width, height, created_at, detached_at FROM browser_sessions WHERE user_id = $1 AND state <> 'ended' ORDER BY created_at`,
         [viewer.user_id]);
-    const keepAliveMs = config().browser.keepAliveMin * 60_000;
+    const keepAliveMs = keepAliveMin() * 60_000;
     return {
-        keepAliveMin: config().browser.keepAliveMin,
+        keepAliveMin: keepAliveMin(),
         sessions: rowsOf(r).map(x => ({
             sessionId: x.id, state: x.state, width: x.width, height: x.height, createdAt: iso(x.created_at),
             detachedAt: x.state === 'detached' ? iso(x.detached_at) : null,
@@ -325,29 +410,30 @@ async function listWebSessions(viewer) {
     };
 }
 
-async function renewWebLease(viewer, id) {
+async function renewWebLease(viewer, id, attachment) {
+    if (!attachment) return false;
     const r = await pool.query(
         `UPDATE browser_sessions SET lease_expires_at = CASE WHEN state = 'active' THEN NOW() + interval '${VIEWER_LEASE_S} seconds' ELSE lease_expires_at END
-         WHERE id = $1 AND user_id = $2 AND state = ANY($3) RETURNING id`,
-        [String(id), viewer.user_id, [...OPEN_STATES, 'starting']]);
+         WHERE id = $1 AND user_id = $2 AND attachment = $4 AND state = ANY($3) RETURNING id`,
+        [String(id), viewer.user_id, [...OPEN_STATES, 'starting'], String(attachment)]);
     return rowsOf(r).length > 0;
 }
 
 async function endWebSessionByUser(viewer, id) {
     const row = await sessionRow(id);
-    if (!row || row.user_id !== viewer.user_id) return false;
+    if (!row || row.user_id !== viewer.user_id) return null;
     if (row.state === 'ended') throw httpError(410, 'BROWSER_ENDED');
-    await endWebSession(row.id, 'Closed by the user.');
-    return true;
+    return (await endWebSession(row.id, 'Closed by the user.')) ? 'stopped' : 'ending';
 }
 
 async function endWebSession(id, reason, code = CODE.ended) {
     const marked = rowsOf(await pool.query(
-        `UPDATE browser_sessions SET state = 'ending',
+        `UPDATE browser_sessions SET state = 'ending', token_hash = NULL, token_expires = NULL,
             end_code = CASE WHEN COALESCE(end_reason, '') = '' THEN $3 ELSE end_code END,
             end_reason = CASE WHEN COALESCE(end_reason, '') = '' THEN $2 ELSE end_reason END
          WHERE id = $1 AND state <> 'ended' RETURNING *`, [id, reason, code]))[0];
-    if (!marked) return false;
+    if (!marked) return true;
+    forgetUid(marked);
     const local = _attached.get(id);
     if (local) closeLocal(local, marked.end_reason || reason, marked.end_code || code);
     let stopped = null;
@@ -360,9 +446,8 @@ async function endWebSession(id, reason, code = CODE.ended) {
         return false;
     }
     if (marked.recorded) await addEvent(webSessionEvent(marked, 'end', { reason: marked.end_reason || reason }));
-    const done = rowsOf(await pool.query(`UPDATE browser_sessions SET state = 'ended', ended_at = NOW() WHERE id = $1 AND state = 'ending' RETURNING id`, [id]))[0];
-    forgetUid(marked);
-    return !!done;
+    await pool.query(`UPDATE browser_sessions SET state = 'ended', ended_at = NOW() WHERE id = $1 AND state = 'ending'`, [id]);
+    return true;
 }
 
 function vncArgs(names, creds) {
@@ -400,8 +485,7 @@ async function detach(s) {
 
 async function browserClosed(id) {
     try {
-        const r = await supervisorRequest({ op: 'renew', session: id });
-        return !!r && r.ok !== true && (r.error === 'ENDED' || r.error === 'UNKNOWN');
+        return isGone(await supervisorRequest({ op: 'status', session: id }));
     } catch {
         return false;
     }
@@ -419,8 +503,8 @@ function onTunnelEnd(s, from, message, code) {
     browserClosed(s.id).then(async (closed) => {
         if (s.closed) return;
         if (closed) {
-            await endWebSession(s.id, 'The browser was closed.').catch(() => { });
-            if (!s.closed) closeLocal(s, 'The browser was closed.', CODE.ended);
+            await endWebSession(s.id, BROWSER_CLOSED).catch(() => { });
+            if (!s.closed) closeLocal(s, BROWSER_CLOSED, CODE.ended);
             return;
         }
         ra.sendError(s.ws, message || 'The connection to the remote browser was lost. Resume the session to continue.', code || CODE.lost);
@@ -437,23 +521,20 @@ async function attachWebTunnel(entry, ws) {
         const takenOver = !!row && row.attachment !== entry.attachment && OPEN_STATES.includes(row.state);
         return refuse(takenOver ? TAKEN_OVER : (row && row.end_reason) || 'This session is no longer available.', takenOver ? CODE.takenOver : (row && row.end_code) || CODE.ended);
     }
-    let creds;
-    try { creds = await supervisorRequest({ op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi || 96, terminal: false }); } catch (e) {
-        console.error('[remote-browser] session %s: start for attach failed: %s', row.id, e.message);
-        return refuse(MESSAGES.BROWSER_UNAVAILABLE, CODE.lost);
+    let creds = await browserCredentials(row.id);
+    if (creds === 'gone') {
+        await endWebSession(row.id, BROWSER_CLOSED).catch(() => { });
+        return refuse(BROWSER_CLOSED, CODE.ended);
     }
-    if (!creds || creds.ok !== true) {
-        if (creds && (creds.error === 'ENDED' || creds.error === 'TERMINAL')) {
-            await endWebSession(row.id, 'The browser was closed.').catch(() => { });
-            return refuse('The browser was closed.', CODE.ended);
-        }
-        return refuse(MESSAGES.BROWSER_UNAVAILABLE, CODE.lost);
-    }
+    if (!creds) return refuse(MESSAGES.BROWSER_UNAVAILABLE, CODE.lost);
     const u = await pool.query(
-        `UPDATE browser_sessions SET state = 'active', owner_instance = $3, detached_at = NULL, lease_expires_at = NOW() + interval '${VIEWER_LEASE_S} seconds'
-         WHERE id = $1 AND attachment = $2 AND state = ANY($4) RETURNING id`,
-        [row.id, entry.attachment, INSTANCE, OPEN_STATES]).catch(() => null);
-    if (!u || !rowsOf(u).length) return refuse('This session is no longer available.', CODE.ended);
+        `UPDATE browser_sessions SET state = 'active', owner_instance = $5, detached_at = NULL, lease_expires_at = NOW() + interval '${VIEWER_LEASE_S} seconds'
+         WHERE id = $1 AND attachment = $4 AND ${RESUMABLE} RETURNING id`,
+        [row.id, OPEN_STATES, keepAliveMin(), entry.attachment, INSTANCE]).catch(() => null);
+    if (!u || !rowsOf(u).length) {
+        const expired = await endIfKeepAlivePassed(row.id).catch(() => false);
+        return refuse(expired ? keepAliveText() : 'This session is no longer available.', CODE.ended);
+    }
     if (ws.readyState !== 1) {
         await detach({ id: row.id, attachment: entry.attachment });
         return undefined;
@@ -462,13 +543,12 @@ async function attachWebTunnel(entry, ws) {
     if (previous) closeLocal(previous, TAKEN_OVER, CODE.takenOver);
     const s = {
         id: row.id, attachment: entry.attachment, protocol: 'web',
-        width: entry.width, height: entry.height, dpi: entry.dpi, timezone: entry.timezone,
+        width: entry.width, height: entry.height, dpi: entry.dpi, timezone: '',
         state: 'connecting', closed: false, ending: false, detachOnClose: true, rx: 0, tx: 0, lastInputAt: Date.now(), creds: {}, ws: null, guacd: null,
     };
     _attached.set(row.id, s);
-    const cfg = config();
     ra.pipeTunnel(s, ws, {
-        guacd: { host: cfg.browserGuacdHost, port: cfg.browserGuacdPort },
+        guacd: _endpoints.guacd,
         select: 'vnc',
         connectArgs: (names) => {
             const values = vncArgs(names, creds);
@@ -506,7 +586,6 @@ async function watchAttached() {
 
 async function shutdownWebTunnels(message) {
     _shuttingDown = true;
-    _tokens.clear();
     const open = [..._attached.values()];
     for (const s of open) closeLocal(s, message, CODE.restarting);
     await Promise.allSettled(open.map(detach));
@@ -534,7 +613,7 @@ async function recheckWebSessions() {
         console.error('[remote-browser] re-check could not read NetBird:', e.message);
         return;
     }
-    const gate = await checkGate(snap);
+    const gate = await checkGate(snap, { probeGuacd: false });
     if (!gate.ok) {
         console.warn('[remote-browser] the browser gateway is not ready (%s): ending the web sessions', gate.code);
         for (const row of rows) await endWebSession(row.id, `The session ended because the browser gateway isn't ready. ${GATE_REASONS[gate.code] || ''}`.trim(), CODE.denied).catch(() => { });
@@ -587,10 +666,14 @@ async function maintainWebSessions(now = Date.now()) {
                 if (updated) { state = 'detached'; detachedAt = msOf(updated.detached_at); }
             }
             if (state === 'detached' && now - detachedAt > keepAliveMs) {
-                await endWebSession(row.id, `The session ended after ${config().browser.keepAliveMin} minutes without a connection.`);
+                await endWebSession(row.id, keepAliveText());
                 continue;
             }
-            if (await browserClosed(row.id)) await endWebSession(row.id, 'The browser was closed.');
+            const renewed = await supervisorRequest({ op: 'renew', session: row.id, until: msOf(row.last_auth_ok_at) + AUTH_GRACE_MS }).catch((e) => {
+                console.error('[remote-browser] session %s: renew failed: %s', row.id, e.message);
+                return null;
+            });
+            if (isGone(renewed)) await endWebSession(row.id, BROWSER_CLOSED);
         } catch (e) {
             console.error('[remote-browser] session %s: %s', row.id, e.message);
         }
@@ -598,13 +681,14 @@ async function maintainWebSessions(now = Date.now()) {
 }
 
 async function reconcileWithSupervisor(now = Date.now()) {
+    const rows = rowsOf(await pool.query(`SELECT * FROM browser_sessions WHERE state <> 'ended'`));
     let listed;
     try { listed = await supervisorRequest({ op: 'list' }); } catch (e) {
         console.error('[remote-browser] reconcile: the supervisor did not answer:', e.message);
         return false;
     }
     if (!listed || listed.ok !== true || !Array.isArray(listed.sessions)) return false;
-    const rows = rowsOf(await pool.query(`SELECT * FROM browser_sessions WHERE state <> 'ended'`));
+    const instance = typeof listed.instance === 'string' ? listed.instance : '';
     const byId = new Map(rows.map(r => [r.id, r]));
     const running = new Set();
     for (const s of listed.sessions) {
@@ -612,18 +696,22 @@ async function reconcileWithSupervisor(now = Date.now()) {
         running.add(s.session);
         const row = byId.get(s.session);
         if (row && row.state !== 'ending') continue;
-        if (row) await endWebSession(row.id, row.end_reason || 'The session ended.').catch(() => { });
-        else await supervisorRequest({ op: 'stop', session: s.session }, SUPERVISOR_STOP_TIMEOUT_MS).catch(e => console.error('[remote-browser] reconcile: could not stop %s: %s', s.session, e.message));
+        if (row) { await endWebSession(row.id, row.end_reason || 'The session ended.').catch(() => { }); continue; }
+        const fresh = await sessionRow(s.session).catch(() => undefined);
+        if (fresh === undefined || (fresh && fresh.state !== 'ended')) continue;
+        await supervisorRequest({ op: 'stop', session: s.session }, SUPERVISOR_STOP_TIMEOUT_MS).catch(e => console.error('[remote-browser] reconcile: could not stop %s: %s', s.session, e.message));
     }
     for (const row of rows) {
         if (running.has(row.id)) continue;
         if (row.state === 'starting' && now - msOf(row.created_at) <= STARTING_STALE_MS) continue;
-        await endWebSession(row.id, row.end_reason || 'The remote browser restarted, so the session ended.').catch(() => { });
+        if (row.state !== 'ending' && !(await browserClosed(row.id))) continue;
+        const reason = row.end_reason
+            || (row.state === 'starting' ? 'The session did not open.' : row.supervisor_instance === instance ? BROWSER_CLOSED : BROWSER_RESTARTED);
+        await endWebSession(row.id, reason).catch(() => { });
     }
     return true;
 }
 
-let _reconciled = false;
 let _ticking = false;
 let _lastPurge = 0;
 async function leaderTick() {
@@ -632,7 +720,7 @@ async function leaderTick() {
     try {
         const busy = browserActive() || rowsOf(await pool.query(`SELECT 1 FROM browser_sessions WHERE state <> 'ended' LIMIT 1`)).length > 0;
         if (browserActive()) await bindConnections().catch(e => console.error('[remote-browser] connection log:', e.message));
-        if (busy && !_reconciled) _reconciled = await reconcileWithSupervisor();
+        if (busy) await reconcileWithSupervisor().catch(e => console.error('[remote-browser] reconcile:', e.message));
         await recheckWebSessions().catch(e => console.error('[remote-browser] re-check:', e.message));
         await maintainWebSessions();
         await refreshUidMap().catch(() => { });
@@ -648,6 +736,7 @@ async function leaderTick() {
 const _uidSessions = new Map();
 const _pending = new Map();
 let _pendingCount = 0;
+let _unattributed = 0;
 let _lookupTimer = null;
 let _lastLookup = 0;
 let _connServer = null;
@@ -656,9 +745,10 @@ let _eventChain = Promise.resolve();
 function noteUid(row) {
     const uid = Number(row && row.uid);
     if (!Number.isInteger(uid) || !row.id) return;
+    if (!_supervisorInstance || row.supervisor_instance !== _supervisorInstance) return;
     const known = _uidSessions.get(uid);
     if (known && known.id === row.id) return;
-    _uidSessions.set(uid, { id: row.id, userId: row.user_id, user: row.user_email || row.user_name || '', seen: new Set(), capped: false });
+    _uidSessions.set(uid, { id: row.id, instance: row.supervisor_instance, userId: row.user_id, user: row.user_email || row.user_name || '', seen: new Set(), capped: false });
     flushPending(uid);
 }
 
@@ -669,38 +759,53 @@ function forgetUid(row) {
 }
 
 async function refreshUidMap() {
-    const rows = rowsOf(await pool.query(`SELECT id, uid, user_id, user_email, user_name FROM browser_sessions WHERE state <> 'ended' AND uid IS NOT NULL`));
+    const rows = rowsOf(await pool.query(
+        `SELECT id, uid, user_id, user_email, user_name, supervisor_instance FROM browser_sessions WHERE state = ANY($1) AND uid IS NOT NULL`, [OPEN_STATES]));
     const live = new Set(rows.map(r => r.id));
     for (const [uid, s] of _uidSessions) if (!live.has(s.id)) _uidSessions.delete(uid);
     for (const r of rows) noteUid(r);
 }
 
-function writeEvent(event) {
-    _eventChain = _eventChain.then(() => addEvent(event)).catch(e => console.error('[remote-browser] could not record a connection:', e.message));
+function enqueue(task) {
+    _eventChain = _eventChain.then(task).catch(e => console.error('[remote-browser] could not record a connection:', e.message));
     return _eventChain;
 }
+const writeEvent = (event) => enqueue(() => addEvent(event));
 
-function gapEvent(session, reason) {
-    const flow = crypto.randomUUID();
+function gapEvent(session, reason, id = `${session.id}:gap:${crypto.randomUUID()}`) {
     return {
-        ID: `${session.id}:gap:${flow}`,
+        ID: id,
         Timestamp: new Date().toISOString(),
         Message: 'TYPE_UNKNOWN',
         reference: CONNECTION_REFERENCE,
-        meta: { flow_id: flow, protocol: 0, direction: 'EGRESS', source_name: 'Browser Gateway Web', source_type: SOURCE_TYPE, user_id: session.userId },
+        meta: { flow_id: id, protocol: 0, direction: 'EGRESS', source_name: 'Browser Gateway Web', source_type: SOURCE_TYPE, user_id: session.userId },
         remoteAccess: { protocol: 'web', kind: 'gap', sessionId: session.id, user: session.user, reason },
     };
 }
 
-function connectionEvent(session, rec) {
-    const flow = crypto.randomUUID();
+function unattributedGapEvent(missed) {
+    const id = `web-gap:unattributed:${crypto.randomUUID()}`;
     return {
-        ID: `${session.id}:conn:${flow}`,
+        ID: id,
+        Timestamp: new Date().toISOString(),
+        Message: 'TYPE_UNKNOWN',
+        reference: CONNECTION_REFERENCE,
+        meta: { flow_id: id, protocol: 0, direction: 'EGRESS', source_name: 'Browser Gateway Web', source_type: SOURCE_TYPE, user_id: '' },
+        remoteAccess: { protocol: 'web', kind: 'gap', missed, reason: `${missed} connection${missed === 1 ? '' : 's'} could not be matched to an open web session, so they were not recorded.` },
+    };
+}
+
+const tupleOf = (rec) => `${rec.protocol}|${rec.srcIp}|${rec.srcPort}|${rec.destIp}|${rec.destPort}`;
+
+function connectionEvent(session, rec) {
+    const id = `web-conn:${session.id}:${crypto.createHash('sha256').update(tupleOf(rec)).digest('hex')}`;
+    return {
+        ID: id,
         Timestamp: rec.at.toISOString(),
         Message: 'TYPE_START',
         reference: CONNECTION_REFERENCE,
         meta: {
-            flow_id: flow, protocol: rec.protocol, direction: 'EGRESS',
+            flow_id: id, protocol: rec.protocol, direction: 'EGRESS',
             source_addr: rec.srcIp ? `${rec.srcIp}:${rec.srcPort}` : '', source_name: 'Browser Gateway Web', source_type: SOURCE_TYPE,
             destination_addr: `${rec.destIp}:${rec.destPort}`, destination_name: rec.destIp,
             user_id: session.userId,
@@ -728,15 +833,21 @@ function parseRecord(line) {
 
 function logConnection(session, rec) {
     if (session.capped) return;
-    const tuple = `${rec.protocol}|${rec.srcIp}|${rec.srcPort}|${rec.destIp}|${rec.destPort}`;
+    const tuple = tupleOf(rec);
     if (session.seen.has(tuple)) return;
-    if (session.seen.size >= CONNECTIONS_PER_SESSION) {
-        session.capped = true;
-        writeEvent(gapEvent(session, `More than ${CONNECTIONS_PER_SESSION} connections: the later connections of this session are not recorded.`));
-        return;
-    }
     session.seen.add(tuple);
-    writeEvent(connectionEvent(session, rec));
+    enqueue(async () => {
+        const counted = rowsOf(await pool.query(
+            `UPDATE browser_sessions SET conn_count = conn_count + 1 WHERE id = $1 RETURNING conn_count`, [session.id]))[0];
+        const n = Number(counted && counted.conn_count) || 0;
+        if (!n) return;
+        if (n <= CONNECTIONS_PER_SESSION) { await addEvent(connectionEvent(session, rec)); return; }
+        session.capped = true;
+        session.seen.clear();
+        if (n === CONNECTIONS_PER_SESSION + 1) {
+            await addEvent(gapEvent(session, `More than ${CONNECTIONS_PER_SESSION} connections: the later connections of this session are not recorded.`, `web-gap:${session.id}:cap`));
+        }
+    });
 }
 
 function handleRecord(line) {
@@ -744,7 +855,7 @@ function handleRecord(line) {
     if (!rec) return;
     const session = _uidSessions.get(rec.uid);
     if (session) { logConnection(session, rec); return; }
-    if (_pendingCount >= PENDING_RECORDS_MAX) return;
+    if (_pendingCount >= PENDING_RECORDS_MAX) { _unattributed++; scheduleUidLookup(); return; }
     if (!_pending.has(rec.uid)) _pending.set(rec.uid, []);
     _pending.get(rec.uid).push({ rec, until: Date.now() + PENDING_RECORD_MS });
     _pendingCount++;
@@ -771,21 +882,32 @@ function scheduleUidLookup() {
     if (_lookupTimer.unref) _lookupTimer.unref();
 }
 
-async function lookupPendingUids() {
-    const now = Date.now();
+function flushUnattributed() {
+    if (!_unattributed) return;
+    const missed = _unattributed;
+    _unattributed = 0;
+    writeEvent(unattributedGapEvent(missed));
+}
+
+async function lookupPendingUids(now = Date.now()) {
     for (const [uid, list] of _pending) {
         const fresh = list.filter(x => x.until > now);
-        _pendingCount -= list.length - fresh.length;
+        const expired = list.length - fresh.length;
+        _pendingCount -= expired;
+        _unattributed += expired;
         if (fresh.length) _pending.set(uid, fresh); else _pending.delete(uid);
     }
+    flushUnattributed();
     if (!_pending.size) return;
     await refreshUidMap();
     if (!_pending.size) return;
     const listed = await supervisorRequest({ op: 'list' }).catch(() => null);
-    const ids = (listed && Array.isArray(listed.sessions) ? listed.sessions : []).filter(s => s && _pending.has(Number(s.uid))).map(s => s.session);
+    const sessions = listed && Array.isArray(listed.sessions) ? listed.sessions : [];
+    const ids = sessions.filter(s => s && _pending.has(Number(s.uid))).map(s => s.session);
     if (ids.length) {
-        const rows = rowsOf(await pool.query('SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY($1)', [ids]));
-        for (const s of listed.sessions) {
+        const rows = rowsOf(await pool.query(
+            'SELECT id, user_id, user_email, user_name, supervisor_instance FROM browser_sessions WHERE id = ANY($1) AND state = ANY($2)', [ids, OPEN_STATES]));
+        for (const s of sessions) {
             const row = rows.find(r => r.id === s.session);
             if (row) noteUid({ ...row, uid: s.uid });
         }
@@ -811,7 +933,7 @@ function onCollector(sock) {
 
 async function bindConnections() {
     if (_connServer) return false;
-    const socketPath = _paths.connections;
+    const socketPath = _endpoints.connections;
     try { fs.unlinkSync(socketPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     const server = net.createServer(onCollector);
     try {
@@ -880,16 +1002,16 @@ module.exports = {
     takeToken, attachWebTunnel, watchAttached, shutdownWebTunnels, onConfigChanged, leaderTick, getBrowserStatus, getBrowserHealth,
     LOOP_INTERVAL_MS, WATCH_INTERVAL_MS, MESSAGES, GATE_REASONS, CODE,
     _internal: {
-        setPathsForTest: (p) => { _paths = { ...DEFAULT_PATHS, ...(p || {}) }; },
+        setEndpointsForTest: (p) => { _endpoints = { ...DEFAULT_ENDPOINTS, ...(p || {}) }; },
         resetForTest: () => {
-            _tokens.clear(); _attached.clear(); _uidSessions.clear(); _pending.clear(); _pendingCount = 0;
-            _reconciled = false; _ticking = false; _shuttingDown = false; _health = null;
+            _attached.clear(); _uidSessions.clear(); _pending.clear(); _pendingCount = 0; _unattributed = 0;
+            _ticking = false; _shuttingDown = false; _health = null; _supervisorInstance = '';
             clearTimeout(_lookupTimer); _lookupTimer = null; _lastLookup = 0;
         },
         closeConnectionsForTest: () => new Promise(r => { if (!_connServer) return r(); _connServer.close(() => r()); _connServer = null; }),
         eventsIdleForTest: () => _eventChain,
         attachedForTest: (id) => _attached.get(id),
-        supervisorRequest, checkGate, reconcileWithSupervisor, maintainWebSessions, recheckWebSessions, bindConnections, handleRecord, parseRecord,
+        supervisorRequest, checkGate, reconcileWithSupervisor, maintainWebSessions, recheckWebSessions, bindConnections, handleRecord, parseRecord, lookupPendingUids,
         vncArgs, fitSize, webSessionEvent, CAPACITY_LOCK, CONNECTIONS_PER_SESSION, INSTANCE,
     },
 };

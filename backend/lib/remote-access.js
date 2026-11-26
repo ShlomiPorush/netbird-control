@@ -72,8 +72,6 @@ const DEFAULTS = {
     guacdPort: 4822,
     namesGuacdHost: 'remote-names-gateway',
     namesGuacdPort: 4822,
-    browserGuacdHost: '172.31.250.4',
-    browserGuacdPort: 4822,
     networks: [],
     maxSessionsPerUser: 5,
     maxSessionsTotal: 20,
@@ -139,8 +137,6 @@ function normConfig(c) {
         guacdPort: clampInt(x.guacdPort, 1, 65535, DEFAULTS.guacdPort),
         namesGuacdHost: HOST_RE.test(String(x.namesGuacdHost || '').trim()) ? String(x.namesGuacdHost).trim() : DEFAULTS.namesGuacdHost,
         namesGuacdPort: clampInt(x.namesGuacdPort, 1, 65535, DEFAULTS.namesGuacdPort),
-        browserGuacdHost: HOST_RE.test(String(x.browserGuacdHost || '').trim()) ? String(x.browserGuacdHost).trim() : DEFAULTS.browserGuacdHost,
-        browserGuacdPort: clampInt(x.browserGuacdPort, 1, 65535, DEFAULTS.browserGuacdPort),
         networks: [...new Set((Array.isArray(x.networks) ? x.networks : []).map(String).filter(s => /^[A-Za-z0-9_-]{1,64}$/.test(s)))],
         maxSessionsPerUser: clampInt(x.maxSessionsPerUser, 1, 10, DEFAULTS.maxSessionsPerUser),
         maxSessionsTotal: clampInt(x.maxSessionsTotal, 1, 200, DEFAULTS.maxSessionsTotal),
@@ -825,7 +821,26 @@ async function createGatewaySetupKey(kind = 'ip') {
     if (!_nb[k.groupKey]) await applyGatewayObjects();
     if (!_nb[k.groupKey]) throw new Error(`The "${nbName(k.group)}" group could not be created. Save the Remote Access settings again, then create the setup key.`);
     await loadInstallName();
+    if (web) await prepareWebEnrollment();
     return _deps.createSetupKey({ name: nbName(k.group), type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
+}
+
+async function prepareWebEnrollment() {
+    const groupId = _nb.webGroupId;
+    const name = nbName(WEB.group);
+    const group = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
+    if (!group || group.id !== groupId || !Array.isArray(group.peers)) throw new Error(`Couldn't read the "${name}" group from NetBird. Try again in a minute.`);
+    if (group.peers.length) {
+        throw new Error(`The "${name}" group already has a peer. Delete the old browser gateway peer in NetBird first, then create a new setup key.`);
+    }
+    const keys = await netbirdGet('/api/setup-keys');
+    if (!Array.isArray(keys)) throw new Error("Couldn't read the setup keys from NetBird. Try again in a minute.");
+    const open = keys.filter(key => key && key.id && key.name === name && key.valid === true && !key.revoked
+        && Array.isArray(key.auto_groups) && key.auto_groups.includes(groupId));
+    for (const key of open) {
+        const r = await netbirdReq('PUT', '/api/setup-keys/' + encodeURIComponent(key.id), { revoked: true, auto_groups: key.auto_groups });
+        if (!nbOk(r)) throw nbErr(`Revoking the earlier "${name}" setup key`, r);
+    }
 }
 
 // ─── Members added outside the app ───
