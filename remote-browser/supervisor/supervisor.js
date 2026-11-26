@@ -88,6 +88,7 @@ class Supervisor {
       ids,
       state: 'starting',
       startedAt: this.now(),
+      until,
       leaseExpiresAt: this.leaseUntil(until),
       password: null,
       ending: false,
@@ -111,6 +112,10 @@ class Supervisor {
       await this.stop(session, 'exited while starting');
       return failure('START_FAILED', 'The browser exited while it started.');
     }
+    if (this.expired(record.until)) {
+      await this.stop(session, 'authorization expired while starting');
+      return expiredFailure();
+    }
     record.state = 'running';
     this.log(`session ${session}: running on display :${ids.display} as uid ${ids.chromiumUid}`);
     return this.grant(record);
@@ -124,14 +129,13 @@ class Supervisor {
     return until <= this.now();
   }
 
-  async stopExpired(session) {
-    this.log(`session ${session}: its authorization expired`);
-    await this.stop(session, 'authorization expired');
-    return expiredFailure();
-  }
-
   leaseUntil(until) {
     return Math.min(this.now() + this.leaseMs, until);
+  }
+
+  authorizedUntil(record, until) {
+    record.until = Math.max(record.until, until);
+    return !this.expired(record.until);
   }
 
   live(session) {
@@ -150,8 +154,8 @@ class Supervisor {
   renew(session, until) {
     const { record, refusal } = this.live(session);
     if (refusal) return refusal;
-    if (this.expired(until)) return this.stopExpired(session);
-    record.leaseExpiresAt = this.leaseUntil(until);
+    if (!this.authorizedUntil(record, until)) return expiredFailure();
+    record.leaseExpiresAt = this.leaseUntil(record.until);
     return { ok: true };
   }
 
@@ -165,7 +169,7 @@ class Supervisor {
     const { record, refusal } = this.live(session);
     if (refusal) return refusal;
     if (record.state !== 'running') return failure('ENDED', 'The session is ending.');
-    if (this.expired(until)) return this.stopExpired(session);
+    if (!this.authorizedUntil(record, until)) return expiredFailure();
     return this.grant(record);
   }
 

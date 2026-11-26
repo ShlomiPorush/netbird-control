@@ -280,19 +280,6 @@ test('start of a running session leaves its lease as it was', async () => {
   assert.deepEqual(await sessionsOf(supervisor), []);
 });
 
-test('renew with an earlier until shortens the lease', async () => {
-  const { startOf, renewOf, supervisor, now, advance } = setup();
-  await startOf('a');
-  advance(10_000);
-  assert.deepEqual(await renewOf('a', now() + 30_000), { ok: true });
-  advance(29_999);
-  await expire(supervisor);
-  assert.deepEqual(await sessionsOf(supervisor), ['a']);
-  advance(1);
-  await expire(supervisor);
-  assert.deepEqual(await sessionsOf(supervisor), []);
-});
-
 test('renew never extends the lease past 150 s', async () => {
   const { startOf, renewOf, supervisor, advance } = setup();
   await startOf('a');
@@ -394,18 +381,53 @@ test('a start whose state cannot be recorded fails before any launch and frees i
   assert.deepEqual(saved, [1]);
 });
 
-test('start, renew and credentials refuse an authorization that has already expired, and the last two stop the session', async () => {
+test('the lease follows the newest authorization: an older until neither shortens nor stops it', async () => {
   const { startOf, supervisor, runtime, advance } = setup();
   assert.equal((await startOf('late', { until: 1_000 })).error, 'EXPIRED');
   assert.deepEqual(runtime.calls, []);
-  await startOf('a');
-  await startOf('b');
+  await startOf('a', { until: 100_000 });
   advance(10_000);
-  assert.equal((await supervisor.handle({ op: 'renew', session: 'a', until: 11_000 })).error, 'EXPIRED');
-  assert.equal((await supervisor.handle({ op: 'credentials', session: 'b', until: 5_000 })).error, 'EXPIRED');
-  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions, []);
-  assert.deepEqual(runtime.calls, ['launch 0', 'launch 1', 'teardown 0', 'teardown 1']);
-  assert.equal((await startOf('a')).error, 'ENDED');
+  assert.deepEqual(await supervisor.handle({ op: 'renew', session: 'a', until: 5_000 }), { ok: true });
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: 6_000 })).ok, true);
+  advance(80_000);
+  supervisor.expireLeases();
+  await flush();
+  assert.equal((await supervisor.handle({ op: 'list' })).sessions.length, 1);
+  assert.deepEqual(await supervisor.handle({ op: 'renew', session: 'a', until: 200_000 }), { ok: true });
+  advance(100_000);
+  supervisor.expireLeases();
+  await flush();
+  assert.equal((await supervisor.handle({ op: 'list' })).sessions.length, 1, 'still within the newest authorization');
+  advance(10_001);
+  supervisor.expireLeases();
+  await flush();
+  await flush();
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions, [], 'the lease timer stops it when the newest authorization passes');
+  assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
+});
+
+test('renew and credentials answer EXPIRED only when the newest authorization has passed, and leave the stop to the lease timer', async () => {
+  const { startOf, supervisor, runtime, advance } = setup({ leaseMs: 1_000_000 });
+  await startOf('a', { until: 20_000 });
+  advance(30_000);
+  assert.equal((await supervisor.handle({ op: 'renew', session: 'a', until: 25_000 })).error, 'EXPIRED');
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: 25_000 })).error, 'EXPIRED');
+  assert.deepEqual(runtime.calls, ['launch 0'], 'no stop from the request itself');
+  supervisor.expireLeases();
+  await flush();
+  await flush();
+  assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
+});
+
+test('a start whose authorization passes while the browser launches is stopped and answers EXPIRED', async () => {
+  const { startOf, runtime, advance } = setup();
+  runtime.launchGate = deferred();
+  const started = startOf('a', { until: 5_000 });
+  await flush();
+  advance(10_000);
+  runtime.launchGate.resolve();
+  assert.equal((await started).error, 'EXPIRED');
+  assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
 });
 
 test('credentials report when the session started', async () => {
