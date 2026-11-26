@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Wrench, ChevronRight, HeartPulse, Sparkles, Workflow, Layers, ListChecks, Ban, Filter as FilterIcon, Network as NetworkIcon } from 'lucide-react';
+import { Wrench, ChevronRight, HeartPulse, MonitorPlay, Sparkles, Workflow, Layers, ListChecks, Ban, Filter as FilterIcon, Network as NetworkIcon } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { getTenantMode } from '@/lib/api';
 import { SystemHealthTab } from '@/components/admin/SystemHealth';
+import { RemoteAccessOps } from '@/components/admin/RemoteAccessOps';
 import { NetworkAccess } from '@/components/settings/NetworkAccess';
 import { AccessProfiles } from '@/components/settings/AccessProfiles';
 import { PostureChecks } from '@/components/settings/PostureChecks';
@@ -17,10 +18,11 @@ import Automation from '@/pages/Automation';
 // access model, guardrails and data hygiene - under one Settings-style hub. Settings is
 // kept to pure configuration (connections, notifications, permissions, backup).
 // Section keys match the old Settings tab keys so /settings?tab=X deep links redirect cleanly.
-type Section = 'health' | 'automation' | 'profiles' | 'posture' | 'access' | 'blocklist' | 'filtering' | 'cleanup';
+type Section = 'health' | 'remote' | 'automation' | 'profiles' | 'posture' | 'access' | 'blocklist' | 'filtering' | 'cleanup';
 
 const TABS: { key: Section; label: string; icon: LucideIcon }[] = [
   { key: 'health', label: 'System Health', icon: HeartPulse },
+  { key: 'remote', label: 'Remote Access', icon: MonitorPlay },
   { key: 'automation', label: 'Automation', icon: Workflow },
   { key: 'profiles', label: 'Access Profiles', icon: Layers },
   { key: 'posture', label: 'Posture Checks', icon: ListChecks },
@@ -84,6 +86,7 @@ export default function Operations() {
         {/* In tenant mode `active` is already restricted to TENANT_SECTIONS - render by IT,
             not by raw state, so a stale ?tab can never mount a main-only section. */}
         {active.key === 'health' ? <SystemHealthTab />
+          : active.key === 'remote' ? <RemoteAccessOps />
           : active.key === 'automation' ? <Automation />
             : active.key === 'profiles' ? <AccessProfiles />
               : active.key === 'posture' ? <PostureChecks />

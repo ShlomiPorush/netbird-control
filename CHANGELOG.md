@@ -24,6 +24,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   own window, without the browser's address bar.
 
 ### Changed
+- **Remote Access status moved to Operations.** A new **Remote Access** tab in Operations shows the
+  gateways' health and warnings, the servers open right now, the active sessions and the servers
+  launch links added. Settings → Remote Access keeps only the settings and one status line.
 - **autoheal can recover guacd after its gateway restarts.** A restarted gateway leaves guacd in the
   old network namespace, unhealthy and unreachable until it restarts too. Both guacd services now
   carry the label `autoheal=true`, so a host that runs
