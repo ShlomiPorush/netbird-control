@@ -10,6 +10,19 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Changed
+- **Remote sessions on a phone.** RDP from a phone now asks for a desktop-sized screen at 100% scaling
+  (720 pixels on the short side) instead of the phone's own resolution and scaling, which gave Windows
+  a desktop about 400 pixels wide. The pointer works like a touchpad by default, with a visible
+  pointer, two-finger scrolling and right click, and a **Zoom** button; **Direct Touch Mode** stays in
+  **More**. The keyboard button opens the phone's keyboard in one tap, the session ends where the
+  keyboard starts, and a row above it adds Esc, Tab, Ctrl, Alt, Win, the arrows and Del. Over SSH a
+  finger scrolls the terminal's history and a tap opens the keyboard.
+
+### Added
+- **Add to the home screen.** The portal can be added to a phone's home screen and opens there in its
+  own window, without the browser's address bar.
+
 ---
 
 ## [1.9.1] - 2026-11-24

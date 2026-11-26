@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { loadGuacamole, loadKeyboardLayout, type Guac } from '@/lib/remoteAccess';
 import type { ScreenApi } from './GuacScreen';
@@ -206,6 +206,49 @@ export function ScreenKeyboard({ target, onClose, onHeight }: {
   );
 }
 
+export const KEY_ROW_HEIGHT = 48;
+
+const ROW_MODIFIERS = [
+  { label: 'Ctrl', keysym: K.ctrl },
+  { label: 'Alt', keysym: K.alt },
+  { label: 'Win', keysym: K.win, rdpOnly: true },
+];
+const ROW_KEYS = [
+  { label: 'Esc', keysym: K.esc },
+  { label: 'Tab', keysym: K.tab },
+  { label: 'Left', keysym: 0xff51, icon: <ArrowLeft size={16} /> },
+  { label: 'Up', keysym: 0xff52, icon: <ArrowUp size={16} /> },
+  { label: 'Down', keysym: 0xff54, icon: <ArrowDown size={16} /> },
+  { label: 'Right', keysym: 0xff53, icon: <ArrowRight size={16} /> },
+  { label: 'Del', keysym: K.del },
+];
+
+export function KeyRow({ protocol, latched, onKey, onLatch }: {
+  protocol: 'rdp' | 'ssh'; latched: number[]; onKey: (keysym: number) => void; onLatch: (modifiers: number[]) => void;
+}) {
+  const keepKeyboardOpen = (e: ReactPointerEvent) => e.preventDefault();
+  const key = 'flex h-9 min-w-0 max-w-16 flex-1 items-center justify-center rounded-lg text-[0.78rem] font-semibold text-nb-gray-200 ring-1 ring-inset ring-nb-gray-800 active:bg-nb-gray-800';
+  return (
+    <div role="toolbar" aria-label="Extra Keys" style={{ height: KEY_ROW_HEIGHT }}
+      className="absolute inset-x-0 bottom-0 z-30 flex items-center justify-center gap-1 border-t border-nb-gray-800 bg-nb-gray-940/95 px-1.5 backdrop-blur-md">
+      {ROW_MODIFIERS.filter((m) => !m.rdpOnly || protocol === 'rdp').map((m) => {
+        const on = latched.includes(m.keysym);
+        return (
+          <button key={m.label} type="button" aria-pressed={on} onPointerDown={keepKeyboardOpen}
+            onClick={() => onLatch(on ? latched.filter((k) => k !== m.keysym) : [...latched, m.keysym])}
+            className={cn(key, on && 'bg-netbird text-white ring-netbird')}>{m.label}</button>
+        );
+      })}
+      <span className="mx-0.5 h-5 w-px shrink-0 bg-nb-gray-800" />
+      {ROW_KEYS.map((k) => (
+        <button key={k.label} type="button" aria-label={k.label} onPointerDown={keepKeyboardOpen} onClick={() => onKey(k.keysym)} className={key}>
+          {k.icon || k.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export interface DeviceKeyboardControl { open: () => void; close: () => void }
 
 /**
@@ -247,7 +290,11 @@ export function DeviceKeyboard({ control, onOpenChange }: {
       f.addEventListener('blur', onBlur);
       // Focused inside the tap itself: a phone shows its keyboard only then.
       control.current = {
-        open: () => { host.appendChild(f); f.focus(); },
+        open: () => {
+          if (document.activeElement === f) f.blur();
+          host.appendChild(f);
+          f.focus();
+        },
         close: () => { if (document.activeElement === f) f.blur(); else f.remove(); },
       };
     }).catch(() => { /* the session itself reports a library that did not load */ });

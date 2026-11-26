@@ -2308,6 +2308,12 @@ function launchUser(snap, email) {
     return u;
 }
 
+function launchScreen(protocol, body) {
+    const rdp = body.rdp;
+    const size = protocol === 'rdp' && rdp && typeof rdp === 'object' && ['width', 'height', 'dpi'].every((k) => Number.isFinite(rdp[k])) ? rdp : body;
+    return { width: size.width, height: size.height, dpi: size.dpi };
+}
+
 // Open a launch link: the signed-in viewer gets the session. The ticket is used up on the first
 // try, whatever the outcome. (The browser waits for remote access to be ready - /info settling -
 // before it opens a link.)
@@ -2334,10 +2340,7 @@ async function redeemLaunch(viewer, body, clientIp) {
         console.error('[remote-access] launch audit failed:', e.message);
         throw httpError(503, 'AUDIT_FAILED', "The connection couldn't be recorded, so it was not opened. Open it again from the system that sent you here.");
     }
-    const display = {
-        protocol: entry.protocol, address: entry.address, port: entry.port,
-        width: body.width, height: body.height, dpi: body.dpi, timezone: body.timezone,
-    };
+    const display = { protocol: entry.protocol, address: entry.address, port: entry.port, ...launchScreen(entry.protocol, body), timezone: body.timezone };
     const out = await createSession(viewer, display, clientIp, { presetCreds: entry.creds, targetName: entry.targetName || '' });
     return { ...out, protocol: entry.protocol, port: entry.port, serverCredentials: true };
 }
@@ -2750,7 +2753,7 @@ module.exports = {
     RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD,
     _internal: {
         GuacParser, CLIENT_MAX_ELEMENTS, encodeInstruction, connectArgs, normConfig, sessionEvent, resolveTarget, MESSAGES, syncTargetGroup, applyGatewayObjects,
-        launchCount: () => _launches.size, LAUNCH_MAX, LAUNCH_TTL_MS, ticketHash, sweepLaunches,
+        launchCount: () => _launches.size, launchScreen, LAUNCH_MAX, LAUNCH_TTL_MS, ticketHash, sweepLaunches,
         REFUSAL_WINDOW_MS, REFUSAL_RETRY_MS, clearRefusals: () => _refusals.clear(), refusalCount: () => _refusals.size,
         setConfigForTest: (c) => { _cfg = normConfig(c); },
         setManagedForTest: (n) => { _nb = { ...NB_EMPTY, ...(n || {}) }; },

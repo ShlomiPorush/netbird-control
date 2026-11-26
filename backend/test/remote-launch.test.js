@@ -147,6 +147,18 @@ test('a link opens once, for its user only, with the credentials going to guacd 
     ra.endSession(alice, out.sessionId);
 });
 
+test('a link takes the separate RDP screen only for an RDP link, and only when it is three numbers', () => {
+    const { launchScreen } = ra._internal;
+    const general = { width: 1236, height: 2745, dpi: 252 };
+    const phone = { width: 720, height: 1600, dpi: 96 };
+    assert.deepEqual(launchScreen('rdp', { ...general, rdp: phone }), phone);
+    assert.deepEqual(launchScreen('rdp', general), general, 'a browser that sends no RDP screen');
+    assert.deepEqual(launchScreen('ssh', { ...general, rdp: phone }), general, 'an SSH link keeps the general screen');
+    for (const rdp of [null, 'x', 7, [], { width: 720, height: 1600 }, { width: '720', height: '1600', dpi: '96' }, { width: 720, height: 1600, dpi: null }]) {
+        assert.deepEqual(launchScreen('rdp', { ...general, rdp }), general, JSON.stringify(rdp));
+    }
+});
+
 test('RDP credentials from a link reach guacd; a manual RDP session still sends none', () => {
     const names = ['hostname', 'port', 'username', 'password', 'domain'];
     const base = { protocol: 'rdp', address: '10.0.0.5', port: 3389, timezone: '', dpi: 96, gateway: 'ip' };

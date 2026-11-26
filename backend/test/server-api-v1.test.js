@@ -8,6 +8,8 @@ const assert = require('node:assert/strict');
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 // Every secret is generated for this run; none is fixed in the repository.
 const CLIENT_SECRET = crypto.randomBytes(32).toString('hex');
 const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
@@ -85,6 +87,18 @@ async function post(path, { key, raw, json, contentType = 'application/json', ip
     const text = await res.text();
     return { status: res.status, text, location: res.headers.get('location') || '' };
 }
+
+test('the app manifest and its icons are reached without a login, as a browser installing the app asks for them', async () => {
+    const built = fs.existsSync(path.join(__dirname, '..', 'public', 'manifest.webmanifest'));
+    for (const [p, type] of [['/manifest.webmanifest', 'application/manifest+json'], ['/favicon-192.png', 'image/png'], ['/FAVICON.PNG', 'image/png']]) {
+        const r = await fetch(BASE + p, { redirect: 'manual', credentials: 'omit' });
+        assert.equal(r.headers.get('location'), null, p);
+        if (!built) { assert.equal(r.status, 404, `${p}: the frontend is not built here`); continue; }
+        assert.equal(r.status, 200, p);
+        assert.match(r.headers.get('content-type') || '', new RegExp(`^${type.replace('+', '\\+')}`), p);
+    }
+    assert.equal((await fetch(BASE + '/favicon-1280.png', { redirect: 'manual' })).status, 401, 'other files still need a login');
+});
 
 test('without a valid key: a JSON error, never a login redirect', async () => {
     const none = await post('/api/v1/remote-access/launch', { json: {} });

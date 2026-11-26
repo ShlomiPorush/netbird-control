@@ -1,0 +1,13 @@
+{
+  "name": "NetBird Control",
+  "short_name": "NetBird Control",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#181a1d",
+  "theme_color": "#181a1d",
+  "icons": [
+    { "src": "/favicon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/favicon.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

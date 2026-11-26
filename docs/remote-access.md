@@ -382,7 +382,8 @@ peers: it uses the copy as it is.
   on its handle at the top of the screen, or the pointer resting there for half a second, brings it
   back. Pinned, it stays on top of the session; the session keeps the whole window. The NetBird
   mark at its start goes back to the portal while the sessions keep running. On a narrow screen,
-  Full Screen, Keep The Bar Open and New Session move to the **More** menu. The browser's own
+  Keep The Bar Open and New Session move to the **More** menu, and so does Full Screen, except on
+  a touch screen at least 400 pixels wide, where it stays in the bar. The browser's own
   right-click menu does not open anywhere on the Remote Access page or in the session view (the
   remote screen gets the right click), except in text fields such as the server address or the
   Clipboard panel's, so pasting there still works.
@@ -395,13 +396,32 @@ peers: it uses the copy as it is.
   at the bottom of the screen, with Ctrl, Alt, the Windows key, F1 to F12 and the arrows; Shift,
   Ctrl and Alt stay down until pressed again, and closing the keyboard lets go of them. While it
   is open the session uses the rest of the window, so nothing typed is hidden behind it; its keys
-  take at most 40% of the window's height, and an RDP server gets the new screen size. On a
-  phone or a tablet the button also offers the **Device Keyboard**, the device's own keyboard
-  (Guacamole's InputSink), which types any language (Hebrew too) as Unicode text. Most phone
-  keyboards send a word when it is finished, not each letter; a tap on the session bar hides it.
-  On a phone held upright the on-screen keyboard's keys are small.
-- **Touch.** On a touch screen a tap is a click and a long press is a right click. To drag, tap,
-  then touch again at once and move.
+  take at most 40% of the window's height, and an RDP server gets the new screen size (except on
+  a touch screen, where RDP keeps its size and the view follows the pointer). On a
+  tablet the button also offers the **Device Keyboard**, the device's own keyboard (Guacamole's
+  InputSink), which types any language (Hebrew too) as Unicode text. On a phone the button opens
+  the device keyboard in one tap, and the on-screen keyboard is in **More**. Only one keyboard is
+  open at a time. Most phone keyboards send a word when it is finished, not each letter.
+- **Above the device keyboard.** While the device keyboard is open, the session ends where the
+  keyboard starts, and a row of extra keys sits above it: Esc, Tab, Ctrl, Alt, the Windows key
+  (RDP), the arrows and Del. Ctrl, Alt and Win are pressed for the next key only, from the row or
+  the device keyboard, and let go right after it. RDP on a touch screen keeps its scale when a
+  keyboard opens: the view scrolls so the pointer stays in sight.
+- **Phones.** An RDP session from a phone asks for a desktop-sized screen at 100% scaling: 720
+  pixels on the short side, in the shape of the phone's window, so a phone held upright gets a
+  tall desktop (about 720x1600) and one held sideways a wide one. Turning the phone resizes the
+  remote desktop. A launch link opened on a phone does the same for RDP.
+- **Touch.** RDP on a touch screen has two modes, chosen in **More** and remembered by the browser.
+  **Touchpad Mode**, the default on a phone, works like a laptop touchpad: moving a finger moves
+  the pointer, a tap clicks, a tap with two fingers is a right click, two fingers moving up or
+  down scroll, and a tap followed at once by a touch that moves drags. The **Zoom** button in the
+  bar zooms in and out around the pointer (up to two screen pixels per remote pixel) and fits the
+  screen again; the view follows the pointer. **Direct Touch Mode**, the default on a tablet, fits
+  the whole screen: a tap is a click where the finger is, a long press is a right click, and a tap
+  followed at once by a touch that moves drags. Over SSH a finger moving up or down scrolls the
+  terminal's history, and a tap opens the device keyboard.
+- **Add to the home screen.** Chrome's **Add to Home screen** (or **Install app**) puts the portal
+  on the home screen; opened from there it runs in its own window, without the address bar.
 - **Screenshot and text size.** **More → Save A Screenshot** saves the remote screen, at its full
   size, as a PNG on the user's device, once the session shows something. Over SSH, **Text Size** in
   the same menu makes the terminal text smaller or larger for that tab; a session starts at the

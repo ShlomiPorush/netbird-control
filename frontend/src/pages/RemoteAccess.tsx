@@ -7,7 +7,7 @@ import { requestAccessLink } from '@/lib/requestAccess';
 import { apiText, remoteApi, cleanAddressInput, type RemoteHealth, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
 import { cn } from '@/lib/cn';
 import { Button, Field, Input, LoadingState, PasswordInput, Textarea } from '@/components/ui';
-import { sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
+import { launchScreenSize, sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
 import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from '@/components/remote/flow';
 import { ServiceStatus } from '@/components/remote/ServiceStatus';
 import { AddResourceModal } from '@/components/networks/AddResourceModal';
@@ -158,7 +158,7 @@ export default function RemoteAccess() {
       sent.current.add(me.ticket);
       try {
         const s = await remoteApi.redeemLaunch({
-          ticket: me.ticket, ...sessionScreenSize(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          ticket: me.ticket, ...launchScreenSize(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         });
         // Nobody waits for it any more (Cancel, another link, another page): end it.
         if (!live()) { remoteApi.end(s.sessionId).catch(() => { }); return; }
@@ -370,7 +370,7 @@ export default function RemoteAccess() {
       const s = await remoteApi.createSession({
         protocol, address: targetRef.current.address, port: targetRef.current.port,
         // The session view uses the whole window (the bar floats over it).
-        ...sessionScreenSize(),
+        ...sessionScreenSize(protocol),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(creds || {}),
       });

@@ -342,6 +342,13 @@ app.get('/login-wait.js', (req, res) => {
         "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a')){s=true;clearTimeout(t)}});");
 });
 
+const sendInstallFile = (name) => (req, res) => res.sendFile(path.join(__dirname, 'public', name), { maxAge: '1d' }, (err) => {
+    if (err && !res.headersSent) res.sendStatus(404);
+});
+app.get('/manifest.webmanifest', sendInstallFile('manifest.webmanifest'));
+app.get('/favicon-192.png', sendInstallFile('favicon-192.png'));
+app.get('/favicon.png', sendInstallFile('favicon.png'));
+
 // Telegram webhook - receives inline-button presses (callback_query). Public (Telegram can't
 // log in), but authenticated by the secret token Telegram echoes in a header, and each press is
 // re-checked against the approver allow-list inside handleTelegramCallback.
@@ -3488,7 +3495,7 @@ app.post('/api/remote-access/launch/redeem', requireRemoteUser, async (req, res)
     try {
         const b = req.body || {};
         res.json(await remoteAccessLib.redeemLaunch(req.remoteViewer, {
-            ticket: b.ticket, width: b.width, height: b.height, dpi: b.dpi, timezone: b.timezone,
+            ticket: b.ticket, width: b.width, height: b.height, dpi: b.dpi, rdp: b.rdp, timezone: b.timezone,
         }, req.ip));
     } catch (e) { sendRemoteError(res, e); }
 });

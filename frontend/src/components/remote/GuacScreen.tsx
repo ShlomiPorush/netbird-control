@@ -18,11 +18,15 @@ export interface ScreenApi {
   sendKeys: (keysyms: number[]) => void;
   /** One key going down or up (the on-screen keyboard). */
   sendKey: (pressed: boolean, keysym: number) => void;
+  latchForNextKey: (modifiers: number[]) => void;
   sendClipboard: (text: string) => void;
   submit: (values: Record<string, string>) => void;
   /** The remote screen as a PNG, at its full size. */
   screenshot: () => Promise<Blob | null>;
+  zoom: (step: 'in' | 'out' | 'fit') => void;
 }
+
+export type PointerMode = 'touchpad' | 'touchscreen';
 
 // The other side of each modifier (Shift, Ctrl, Meta, Alt, Super): a terminal keeps one state for
 // both, so releasing the left one would also undo a right one held down.
@@ -30,9 +34,14 @@ const OTHER_SIDE: Record<number, number> = {
   0xffe1: 0xffe2, 0xffe2: 0xffe1, 0xffe3: 0xffe4, 0xffe4: 0xffe3, 0xffe7: 0xffe8, 0xffe8: 0xffe7,
   0xffe9: 0xffea, 0xffea: 0xffe9, 0xffeb: 0xffec, 0xffec: 0xffeb,
 };
+const isModifier = (keysym: number) => keysym in OTHER_SIDE;
 
 const LEASE_MS = 60_000;
 const PAINT_WAIT_MS = 20_000;
+const MAX_ZOOM_SCALE = 2;
+const ZOOM_STEP = 1.5;
+const FOLLOW_MARGIN = 32;
+const SSH_SCROLL_STEP = 24;
 
 // Remote content has arrived once the display holds more than one color. The first sync (and the
 // blank frame guacd duplicates on join) is a single flat color, so it never counts.
@@ -67,6 +76,26 @@ export function deviceSize(w: number, h: number, scaling = window.devicePixelRat
   return { width: Math.round(w * dpr), height: Math.round(h * dpr), dpi: Math.round(96 * dpr) };
 }
 
+export const coarsePointer = () => typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches;
+export const isPhone = () => coarsePointer() && Math.min(window.screen.width, window.screen.height) < 600;
+
+const PHONE_DESKTOP_SHORT_SIDE = 720;
+const even = (n: number) => Math.round(n / 2) * 2;
+
+export function phoneDesktop(w: number, h: number) {
+  const long = even(Math.min(MAX_W, (PHONE_DESKTOP_SHORT_SIDE * Math.max(w, h)) / Math.min(w, h)));
+  return w >= h
+    ? { width: long, height: PHONE_DESKTOP_SHORT_SIDE, dpi: 96 }
+    : { width: PHONE_DESKTOP_SHORT_SIDE, height: long, dpi: 96 };
+}
+
+export function remoteScreen(protocol: 'rdp' | 'ssh', box: { width: number; height: number }, scaling = window.devicePixelRatio || 1) {
+  if (protocol === 'rdp' && coarsePointer()) {
+    return isPhone() ? phoneDesktop(window.innerWidth, window.innerHeight) : deviceSize(window.innerWidth, window.innerHeight, scaling);
+  }
+  return deviceSize(box.width, box.height, scaling);
+}
+
 // Keys go to the remote side unless one of our own fields or menus has the focus. The device
 // keyboard's field (data-remote-keys) belongs to the remote side: what it types goes there.
 const isTyping = () => {
@@ -97,11 +126,15 @@ function clipboardAutoRead(): Promise<boolean> {
  * (/api/remote-access/tunnel?token=…), drawn into the parent's box. The keyboard and the clipboard
  * sync follow `active` - only the visible session gets keys and clipboard text.
  */
-export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFontSize, onEvent, onRemoteClipboard, apiRef }: {
+export function GuacScreen({ sessionId, token, protocol, pointer, active, clipboard, fontSize, onFontSize, onEvent, onRemoteClipboard, onLatchChange, onTouchTap, apiRef }: {
   sessionId: string;
   token: string;
+  protocol: 'rdp' | 'ssh';
+  pointer: PointerMode;
   active: boolean;
   clipboard: boolean;
+  onLatchChange: (modifiers: number[]) => void;
+  onTouchTap?: () => void;
   /** SSH: the text size chosen in the session bar. Sent when it differs from the terminal's. */
   fontSize?: number;
   /** SSH: the terminal's text size, as guacd reports it. */
@@ -123,8 +156,14 @@ export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFo
   fontRef.current = fontSize;
   const onFontRef = useRef(onFontSize);
   onFontRef.current = onFontSize;
+  const onLatchRef = useRef(onLatchChange);
+  onLatchRef.current = onLatchChange;
+  const onTapRef = useRef(onTouchTap);
+  onTapRef.current = onTouchTap;
+  const pointerRef = useRef(pointer);
+  pointerRef.current = pointer;
   // Set while the session runs; called when it becomes inactive or visible again.
-  const hooks = useRef<{ release: () => void; resume: () => void; refit: () => void; syncLocal: () => void; applyFont: () => void } | null>(null);
+  const hooks = useRef<{ release: () => void; resume: () => void; refit: () => void; syncLocal: () => void; applyFont: () => void; usePointer: (m: PointerMode) => void } | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -154,7 +193,13 @@ export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFo
       const display = c.getDisplay();
       const el: HTMLElement = display.getElement();
       el.style.cursor = 'none';
+      el.style.margin = 'auto';
+      el.style.flexShrink = '0';
+      el.style.overflow = 'hidden';
       host.appendChild(el);
+      const touchRdp = protocol === 'rdp' && coarsePointer();
+      const touchSsh = protocol === 'ssh' && coarsePointer();
+      let zoom = 1;
 
       tunnel.onstatechange = (st: number) => { if (st === G.Tunnel.State.OPEN) emit({ type: 'channel-open' }); };
       c.onstatechange = (st: number) => {
@@ -247,61 +292,131 @@ export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFo
       const held = new Set<number>();
       const isDown = (k: number) => [k, OTHER_SIDE[k]].some((x) => x !== undefined && (held.has(x) || pressed.has(x)));
 
+      let latched: number[] = [];
+      const setLatched = (modifiers: number[]) => {
+        if (!latched.length && !modifiers.length) return;
+        latched = modifiers;
+        onLatchRef.current(modifiers);
+      };
+      const sendCombo = (keysyms: number[]) => {
+        endCombo();
+        const keys = [...new Set([...latched, ...keysyms])];
+        setLatched([]);
+        const fresh = keys.filter((k) => !isDown(k));
+        for (const k of fresh) c.sendKeyEvent(1, k);
+        for (const k of [...fresh].reverse()) c.sendKeyEvent(0, k);
+      };
+
       apiRef.current = {
-        sendKeys: (keysyms) => {
-          const fresh = keysyms.filter((k) => !isDown(k));
-          for (const k of fresh) c.sendKeyEvent(1, k);
-          for (const k of [...fresh].reverse()) c.sendKeyEvent(0, k);
-        },
+        sendKeys: sendCombo,
         sendKey: (down, keysym) => {
           if (down) held.add(keysym); else held.delete(keysym);
           c.sendKeyEvent(down ? 1 : 0, keysym);
         },
+        latchForNextKey: setLatched,
         sendClipboard: (text) => sendClip(text),
         submit: (values) => { for (const [name, value] of Object.entries(values)) sendArg(name, value); },
         screenshot: () => new Promise((resolve) => {
           try { display.flatten().toBlob((b: Blob | null) => resolve(b), 'image/png'); } catch { resolve(null); }
         }),
+        zoom: (step) => zoomBy(step),
       };
 
-      // Mouse: the remote draws its own cursor.
+      const sendMouse = (e: Guac) => { c.sendMouseState(e.state, true); followCursor(); };
       const mouse = new G.Mouse(el);
-      mouse.onEach(['mousedown', 'mouseup', 'mousemove'], (e: Guac) => c.sendMouseState(e.state, true));
-      // Touch, like the official client's touchscreen mode: a tap clicks, a long press is a right
-      // click, and a tap followed at once by a touch that moves drags. The browser's own panning and zooming
-      // would take those gestures, so the screen turns them off.
-      const touch = new G.Mouse.Touchscreen(el);
-      touch.onEach(['mousedown', 'mouseup', 'mousemove'], (e: Guac) => c.sendMouseState(e.state, true));
+      mouse.onEach(['mousedown', 'mouseup', 'mousemove'], sendMouse);
       el.style.touchAction = 'none';
       display.oncursor = (canvas: HTMLCanvasElement, x: number, y: number) => { el.style.cursor = `url(${canvas.toDataURL()}) ${x} ${y}, auto`; };
 
-      // Keyboard: keys go to the session in front, except while typing in our own fields. A key
-      // the remote saw go down always gets its release, even if focus or the tab changed.
-      // The keyboard listens to the whole page, so its handlers are set only while this session is
-      // in front: with a handler set, Guacamole.Keyboard cancels every keyup, and Space on a
-      // button or checkbox (which acts on keyup) would do nothing anywhere in the portal.
+      let syncTouchpad = () => { };
+      let usePointer = (_mode: PointerMode) => { };
+      if (touchRdp) {
+        const layer = () => {
+          const d = document.createElement('div');
+          d.style.cssText = 'position:absolute;inset:0;touch-action:none';
+          el.appendChild(d);
+          return d;
+        };
+        const padLayer = layer(), screenLayer = layer();
+        const pad = new G.Mouse.Touchpad(padLayer);
+        pad.scrollThreshold = 16;
+        pad.clickMoveThreshold = 12;
+        const direct = new G.Mouse.Touchscreen(screenLayer);
+        for (const [target, surface] of [[pad, padLayer], [direct, screenLayer]] as const) {
+          target.onEach(['mousedown', 'mouseup', 'mousemove'], sendMouse);
+          const { LEFT, MIDDLE, RIGHT } = G.Mouse.State.Buttons;
+          const letGo = (buttons: string[]) => { for (const b of buttons) target.release(b); };
+          surface.addEventListener('touchstart', (e) => letGo(e.touches.length > 1 ? [LEFT, MIDDLE, RIGHT] : [MIDDLE, RIGHT]));
+          surface.addEventListener('touchcancel', () => letGo([LEFT, MIDDLE, RIGHT]));
+        }
+        syncTouchpad = () => {
+          const s = display.getScale();
+          pad.currentState.x = display.cursorX * s;
+          pad.currentState.y = display.cursorY * s;
+        };
+        usePointer = (mode) => {
+          padLayer.style.display = mode === 'touchpad' ? '' : 'none';
+          screenLayer.style.display = mode === 'touchscreen' ? '' : 'none';
+          if (mode === 'touchpad') syncTouchpad();
+          else if (zoom !== 1) zoomBy('fit');
+        };
+        usePointer(pointerRef.current);
+      } else if (touchSsh) {
+        let startX = 0, startY = 0, lastY = 0, oneFinger = false, isTap = false;
+        el.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          oneFinger = isTap = e.touches.length === 1;
+          startX = e.touches[0].clientX;
+          startY = lastY = e.touches[0].clientY;
+        });
+        el.addEventListener('touchmove', (e) => {
+          if (!oneFinger) return;
+          const { clientX: x, clientY: y } = e.touches[0];
+          if (Math.hypot(x - startX, y - startY) > 8) isTap = false;
+          while (Math.abs(y - lastY) >= SSH_SCROLL_STEP) {
+            mouse.click(y > lastY ? G.Mouse.State.Buttons.UP : G.Mouse.State.Buttons.DOWN);
+            lastY += y > lastY ? SSH_SCROLL_STEP : -SSH_SCROLL_STEP;
+          }
+        });
+        el.addEventListener('touchend', (e) => { if (oneFinger && isTap && !e.touches.length) onTapRef.current?.(); });
+      } else {
+        const direct = new G.Mouse.Touchscreen(el);
+        direct.onEach(['mousedown', 'mouseup', 'mousemove'], sendMouse);
+      }
+
       keyboard = new G.Keyboard(document);
       const kb = keyboard;
       const pressed = new Set<number>();
+      let combo: { key: number; modifiers: number[] } | null = null;
+      const endCombo = () => {
+        if (!combo) return;
+        for (const m of [...combo.modifiers].reverse()) c.sendKeyEvent(0, m);
+        combo = null;
+      };
       const keyDown = (keysym: number) => {
         if (!activeRef.current || isTyping()) return true;
+        if (combo && combo.key !== keysym) endCombo();
+        if (!combo && latched.length && !isModifier(keysym)) {
+          combo = { key: keysym, modifiers: latched.filter((k) => !isDown(k)) };
+          setLatched([]);
+          for (const m of combo.modifiers) c.sendKeyEvent(1, m);
+        }
         pressed.add(keysym);
         c.sendKeyEvent(1, keysym);
         return false;
       };
-      // A key the on-screen keyboard still holds (either side) stays down on the remote side too.
       const keyUp = (keysym: number) => {
         if (pressed.delete(keysym) && ![keysym, OTHER_SIDE[keysym]].some((x) => x !== undefined && held.has(x))) c.sendKeyEvent(0, keysym);
+        if (combo?.key === keysym && !kb.pressed[keysym]) endCombo();
       };
       const listen = (on: boolean) => { kb.onkeydown = on ? keyDown : null; kb.onkeyup = on ? keyUp : null; };
       syncListen = () => listen(activeRef.current && !isTyping());
       syncListen();
-      // Lost focus (another window, a field of ours, another tab): release everything held, so
-      // nothing stays pressed or auto-repeats on the remote side.
       releaseKeys = () => {
         kb.reset();
         for (const k of pressed) c.sendKeyEvent(0, k);
         pressed.clear();
+        endCombo();
       };
       window.addEventListener('blur', releaseKeys);
       window.addEventListener('focus', syncLocal);
@@ -309,19 +424,45 @@ export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFo
       document.addEventListener('focusout', onFocusOut);
       host.addEventListener('pointerenter', syncLocal);
 
-      // Size: like the official Guacamole client, ask the remote for the box size in device pixels
-      // (the session's DPI follows the screen's scaling) and scale the display down to the box, so
-      // a scaled screen (125%, 150%) stays sharp. A remote that can't resize is scaled down to fit.
-      // The session keeps the scaling it opened with: guacd can't change a session's DPI, so on a
-      // screen with other scaling the same remote pixels are shown larger or smaller instead.
       const scaling = window.devicePixelRatio || 1;
       let sentSize = '';
-      // Fill the box, but never past one remote pixel per device pixel (a remote that can't resize
-      // stays sharp and centered).
-      const fit = () => {
-        const w = host.clientWidth, h = host.clientHeight;
+      const fitScale = () => {
         const dw = display.getWidth(), dh = display.getHeight();
-        if (dw && dh && w && h) display.scale(Math.min(w / dw, h / dh, w / deviceSize(w, h, scaling).width));
+        if (!dw || !dh) return 0;
+        if (touchRdp) {
+          const w = window.innerWidth, h = window.innerHeight;
+          const sharpest = isPhone() ? Infinity : w / deviceSize(w, h, scaling).width;
+          return Math.min(w / dw, h / dh, sharpest);
+        }
+        const w = host.clientWidth, h = host.clientHeight;
+        return w && h ? Math.min(w / dw, h / dh, w / deviceSize(w, h, scaling).width) : 0;
+      };
+      const zoomLimit = (fitted: number) => Math.max(1, MAX_ZOOM_SCALE / fitted);
+      const followCursor = () => {
+        if (!touchRdp) return;
+        const s = display.getScale();
+        const x = display.cursorX * s, y = display.cursorY * s;
+        const w = host.clientWidth, h = host.clientHeight;
+        if (x < host.scrollLeft + FOLLOW_MARGIN) host.scrollLeft = x - FOLLOW_MARGIN;
+        else if (x > host.scrollLeft + w - FOLLOW_MARGIN) host.scrollLeft = x - w + FOLLOW_MARGIN;
+        if (y < host.scrollTop + FOLLOW_MARGIN) host.scrollTop = y - FOLLOW_MARGIN;
+        else if (y > host.scrollTop + h - FOLLOW_MARGIN) host.scrollTop = y - h + FOLLOW_MARGIN;
+      };
+      const fit = () => {
+        const fitted = fitScale();
+        if (!fitted) return;
+        display.scale(fitted * Math.min(zoom, zoomLimit(fitted)));
+        syncTouchpad();
+        followCursor();
+      };
+      const zoomBy = (step: 'in' | 'out' | 'fit') => {
+        const fitted = fitScale();
+        if (!fitted) return;
+        zoom = step === 'fit' ? 1 : Math.min(zoomLimit(fitted), Math.max(1, step === 'in' ? zoom * ZOOM_STEP : zoom / ZOOM_STEP));
+        fit();
+        const s = display.getScale();
+        host.scrollLeft = display.cursorX * s - host.clientWidth / 2;
+        host.scrollTop = display.cursorY * s - host.clientHeight / 2;
       };
       display.onresize = fit;
       const refit = () => {
@@ -330,7 +471,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFo
           // Only a real change, and only once connected (before that the tunnel drops it): an
           // unchanged size still makes the remote redraw the whole screen.
           if (connected && host.clientWidth && host.clientHeight) {
-            const s = deviceSize(host.clientWidth, host.clientHeight, scaling);
+            const s = remoteScreen(protocol, { width: host.clientWidth, height: host.clientHeight }, scaling);
             const key = `${s.width}x${s.height}`;
             if (key !== sentSize) { sentSize = key; c.sendSize(s.width, s.height); }
           }
@@ -340,7 +481,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFo
       // The box changes with the window, full screen, and the session bar being pinned.
       const boxWatch = new ResizeObserver(refit);
       boxWatch.observe(host);
-      hooks.current = { release: () => { releaseKeys(); listen(false); }, resume: () => syncListen(), refit, syncLocal, applyFont };
+      hooks.current = { release: () => { releaseKeys(); listen(false); setLatched([]); }, resume: () => syncListen(), refit, syncLocal, applyFont, usePointer };
 
       c.connect('token=' + encodeURIComponent(token));
 
@@ -387,6 +528,7 @@ export function GuacScreen({ sessionId, token, active, clipboard, fontSize, onFo
   }, [active]);
 
   useEffect(() => { hooks.current?.applyFont(); }, [fontSize]);
+  useEffect(() => { hooks.current?.usePointer(pointer); }, [pointer]);
 
-  return <div ref={hostRef} className="absolute inset-0 overflow-hidden flex items-center justify-center" />;
+  return <div ref={hostRef} className="absolute inset-0 flex overflow-hidden" />;
 }
