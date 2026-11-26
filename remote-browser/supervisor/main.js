@@ -4,9 +4,11 @@ const fs = require('node:fs');
 const net = require('node:net');
 const { Supervisor } = require('./supervisor');
 const { serve } = require('./server');
+const { fileStore } = require('./state');
 const runtime = require('./runtime');
 
 const SOCKET_PATH = '/run/nbc-control/supervisor.sock';
+const STATE_PATH = '/run/nbc-control/state.json';
 const APP_UID = 1000;
 const LEASE_CHECK_MS = 5_000;
 
@@ -15,7 +17,7 @@ const log = (message) => process.stderr.write(`${new Date().toISOString()} ${mes
 function main() {
   process.umask(0o077);
   runtime.prepareHost();
-  const supervisor = new Supervisor({ runtime, log });
+  const supervisor = new Supervisor({ runtime, store: fileStore(STATE_PATH, log), log });
   const leases = setInterval(() => supervisor.expireLeases(), LEASE_CHECK_MS);
 
   fs.rmSync(SOCKET_PATH, { force: true });

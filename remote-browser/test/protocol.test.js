@@ -4,11 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { MAX_LINE_BYTES, parseRequest, scaleFactor, slotIds } = require('../supervisor/protocol');
 
-const start = (fields) => JSON.stringify({ op: 'start', session: 'abc', width: 1280, height: 720, dpi: 96, terminal: false, ...fields });
+const start = (fields) => JSON.stringify({ op: 'start', session: 'abc', width: 1280, height: 720, dpi: 96, terminal: false, until: 2_000_000, ...fields });
 const rejects = (line, code = 'BAD_REQUEST') => assert.throws(() => parseRequest(line), (error) => error.code === code);
 
 test('a start request is parsed with its screen and scale', () => {
-  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false });
+  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000 });
 });
 
 test('the screen is capped at 1920x1080 and raised to the minimum', () => {
@@ -46,12 +46,27 @@ test('session ids are limited to 64 safe characters', () => {
   }
 });
 
-test('renew, stop, list and ready keep only what they need', () => {
-  assert.deepEqual(parseRequest('{"op":"renew","session":"s1","extra":1}'), { op: 'renew', session: 's1' });
+test('renew, status, credentials, stop, list and ready keep only what they need', () => {
+  assert.deepEqual(parseRequest('{"op":"renew","session":"s1","until":5000,"extra":1}'), { op: 'renew', session: 's1', until: 5000 });
+  assert.deepEqual(parseRequest('{"op":"status","session":"s1","until":5000}'), { op: 'status', session: 's1' });
+  assert.deepEqual(parseRequest('{"op":"credentials","session":"s1"}'), { op: 'credentials', session: 's1' });
   assert.deepEqual(parseRequest('{"op":"stop","session":"s1"}'), { op: 'stop', session: 's1' });
   assert.deepEqual(parseRequest('{"op":"list","session":"ignored"}'), { op: 'list' });
   assert.deepEqual(parseRequest('{"op":"ready"}'), { op: 'ready' });
-  rejects('{"op":"renew"}');
+  rejects('{"op":"renew","until":5000}');
+  rejects('{"op":"status"}');
+  rejects('{"op":"credentials","session":"a b"}');
+});
+
+test('start and renew require until as a positive integer', () => {
+  for (const until of [undefined, null, '5000', 0, -1, 1.5]) {
+    rejects(start({ until }));
+    rejects(JSON.stringify({ op: 'renew', session: 's1', until }));
+  }
+});
+
+test('an unknown op names every op', () => {
+  assert.throws(() => parseRequest('{"op":"explode"}'), { message: 'op must be start, renew, status, credentials, stop, list or ready.' });
 });
 
 test('malformed requests are refused', () => {

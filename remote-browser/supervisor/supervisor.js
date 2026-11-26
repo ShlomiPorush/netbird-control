@@ -1,14 +1,18 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const { SLOT_COUNT, failure, slotIds } = require('./protocol');
+const { memoryStore } = require('./state');
 
 const LEASE_MS = 150_000;
 const MAX_SESSIONS = 50;
 const MAX_TOMBSTONES = 10_000;
 
 class Supervisor {
-  constructor({ runtime, now = Date.now, log = () => {}, leaseMs = LEASE_MS, maxSessions = MAX_SESSIONS, slotCount = SLOT_COUNT, maxTombstones = MAX_TOMBSTONES }) {
+  constructor({ runtime, store = memoryStore(), instance = crypto.randomUUID(), now = Date.now, log = () => {}, leaseMs = LEASE_MS, maxSessions = MAX_SESSIONS, slotCount = SLOT_COUNT, maxTombstones = MAX_TOMBSTONES }) {
     this.runtime = runtime;
+    this.store = store;
+    this.instance = instance;
     this.now = now;
     this.log = log;
     this.leaseMs = leaseMs;
@@ -19,7 +23,8 @@ class Supervisor {
     this.tombstones = new Set();
     this.queues = new Map();
     this.heldSlots = new Set();
-    this.nextSlot = 0;
+    const saved = store.load();
+    this.nextSlot = Number.isInteger(saved) && saved >= 0 && saved < slotCount ? saved : 0;
   }
 
   handle(request) {
@@ -27,13 +32,17 @@ class Supervisor {
       case 'start':
         return this.serialize(request.session, () => this.start(request));
       case 'renew':
-        return this.serialize(request.session, () => this.renew(request.session));
+        return this.serialize(request.session, () => this.renew(request.session, request.until));
+      case 'status':
+        return Promise.resolve(this.status(request.session));
+      case 'credentials':
+        return this.serialize(request.session, () => this.credentials(request.session));
       case 'stop':
         return this.serialize(request.session, () => this.stop(request.session, 'requested'));
       case 'list':
         return Promise.resolve(this.list());
       case 'ready':
-        return this.runtime.ready().then((state) => ({ ok: true, ...state }));
+        return this.runtime.ready().then((state) => ({ ok: true, instance: this.instance, ...state }));
       default:
         return Promise.resolve(failure('BAD_REQUEST', 'Unknown op.'));
     }
@@ -50,24 +59,33 @@ class Supervisor {
     return result;
   }
 
-  async start({ session, width, height, scale, terminal }) {
+  async start({ session, width, height, scale, terminal, until }) {
     if (terminal) return failure('TERMINAL', 'The session has ended and cannot start again.');
     if (this.tombstones.has(session)) return failure('ENDED', 'The session has ended and cannot start again.');
     const existing = this.sessions.get(session);
     if (existing) {
       if (existing.state !== 'running') return failure('ENDED', 'The session is ending.');
-      return this.credentials(existing);
+      return this.grant(existing);
     }
     if (this.sessions.size >= this.maxSessions) return failure('CAPACITY', 'The browser container runs its maximum number of sessions.');
     const slot = await this.allocate();
     if (slot === null) return failure('CAPACITY', 'No free display is available.');
+    const advancedTo = this.nextSlot;
+    try {
+      this.store.save(advancedTo);
+    } catch (error) {
+      this.log(`session ${session}: could not record the next slot ${advancedTo}: ${error.message}`);
+      this.heldSlots.delete(slot);
+      if (this.nextSlot === advancedTo) this.nextSlot = slot;
+      return failure('START_FAILED', 'The supervisor could not record its state.');
+    }
     const ids = slotIds(slot);
     const record = {
       session,
       ids,
       state: 'starting',
       startedAt: this.now(),
-      leaseExpiresAt: this.now() + this.leaseMs,
+      leaseExpiresAt: this.leaseUntil(until),
       password: null,
       ending: false,
     };
@@ -92,23 +110,48 @@ class Supervisor {
     }
     record.state = 'running';
     this.log(`session ${session}: running on display :${ids.display} as uid ${ids.chromiumUid}`);
-    return this.credentials(record);
+    return this.grant(record);
   }
 
-  credentials(record) {
-    return { ok: true, port: record.ids.port, password: record.password, uid: record.ids.chromiumUid };
+  grant(record) {
+    return { ok: true, port: record.ids.port, password: record.password, uid: record.ids.chromiumUid, instance: this.instance };
   }
 
-  renew(session) {
+  leaseUntil(until) {
+    return Math.min(this.now() + this.leaseMs, until);
+  }
+
+  live(session) {
     const record = this.sessions.get(session);
     if (!record) {
-      return this.tombstones.has(session)
-        ? failure('ENDED', 'The session has ended.')
-        : failure('UNKNOWN', 'No such session.');
+      return {
+        refusal: this.tombstones.has(session)
+          ? failure('ENDED', 'The session has ended.')
+          : failure('UNKNOWN', 'No such session.'),
+      };
     }
-    if (record.state === 'stopping' || record.ending) return failure('ENDED', 'The session is ending.');
-    record.leaseExpiresAt = this.now() + this.leaseMs;
+    if (record.state === 'stopping' || record.ending) return { refusal: failure('ENDED', 'The session is ending.') };
+    return { record };
+  }
+
+  renew(session, until) {
+    const { record, refusal } = this.live(session);
+    if (refusal) return refusal;
+    record.leaseExpiresAt = this.leaseUntil(until);
     return { ok: true };
+  }
+
+  status(session) {
+    const { record, refusal } = this.live(session);
+    if (refusal) return refusal;
+    return { ok: true, state: record.state };
+  }
+
+  credentials(session) {
+    const { record, refusal } = this.live(session);
+    if (refusal) return refusal;
+    if (record.state !== 'running') return failure('ENDED', 'The session is ending.');
+    return this.grant(record);
   }
 
   async stop(session, reason) {
@@ -151,6 +194,7 @@ class Supervisor {
   list() {
     return {
       ok: true,
+      instance: this.instance,
       sessions: [...this.sessions.values()].map((record) => ({
         session: record.session,
         state: record.state,

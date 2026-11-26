@@ -68,16 +68,20 @@ function parseRequest(line) {
         ...screenSize(request.width, request.height),
         scale: scaleFactor(request.dpi),
         terminal: request.terminal,
+        until: positiveInteger(request.until, 'until'),
       };
     }
     case 'renew':
+      return { op: 'renew', session: sessionId(request.session), until: positiveInteger(request.until, 'until') };
+    case 'status':
+    case 'credentials':
     case 'stop':
       return { op: request.op, session: sessionId(request.session) };
     case 'list':
     case 'ready':
       return { op: request.op };
     default:
-      throw new RequestError('BAD_REQUEST', 'op must be start, renew, stop, list or ready.');
+      throw new RequestError('BAD_REQUEST', 'op must be start, renew, status, credentials, stop, list or ready.');
   }
 }
 

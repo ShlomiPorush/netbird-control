@@ -153,8 +153,19 @@ async function waitFor(check, timeoutMs, what) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
+const childrenThatFailedToStart = new WeakSet();
+
 function exited(child) {
-  return child.exitCode !== null || child.signalCode !== null;
+  return childrenThatFailedToStart.has(child) || child.exitCode !== null || child.signalCode !== null;
+}
+
+function watchChild(child, name, onExit) {
+  child.on('exit', (code, signal) => onExit(`${name} exited (${signal ?? code})`));
+  child.on('error', (error) => {
+    childrenThatFailedToStart.add(child);
+    onExit(`${name} could not start (${error.code || error.message})`);
+  });
+  child.unref();
 }
 
 async function launch({ ids, width, height, scale, onExit }) {
@@ -181,11 +192,7 @@ async function launch({ ids, width, height, scale, onExit }) {
     '-depth', '24',
     '-nolisten', 'tcp',
   ], displayEnv);
-  const watch = (child, name) => {
-    child.on('exit', (code, signal) => onExit(`${name} exited (${signal ?? code})`));
-    child.unref();
-  };
-  watch(xvnc, 'Xvnc');
+  watchChild(xvnc, 'Xvnc', onExit);
 
   await waitFor(
     () => exited(xvnc) || (fs.existsSync(xFiles(display)[1]) && abstractSocketBound(display) && listeningOnLoopback(port)),
@@ -197,7 +204,7 @@ async function launch({ ids, width, height, scale, onExit }) {
 
   await runAs(displayUid, KEYMAP_SCRIPT, [], { env: { PATH: PATH_ENV, ...displayEnv } });
   const windowManager = spawnAs(displayUid, 'matchbox-window-manager', ['-use_titlebar', 'no'], displayEnv);
-  watch(windowManager, 'the window manager');
+  watchChild(windowManager, 'the window manager', onExit);
 
   const chromium = spawnAs(chromiumUid, 'chromium', [
     `--user-data-dir=${path.join(chromiumDir.dir, 'profile')}`,
@@ -214,7 +221,7 @@ async function launch({ ids, width, height, scale, onExit }) {
     TMPDIR: chromiumDir.dir,
     LANG: 'C.UTF-8',
   });
-  watch(chromium, 'Chromium');
+  watchChild(chromium, 'Chromium', onExit);
   return { password };
 }
 
@@ -297,4 +304,4 @@ function prepareHost() {
   fs.chmodSync(X_SOCKET_DIR, 0o1777);
 }
 
-module.exports = { launch, teardown, slotIsFree, ready, prepareHost, randomPassword };
+module.exports = { launch, teardown, slotIsFree, ready, prepareHost, randomPassword, watchChild, exited };
