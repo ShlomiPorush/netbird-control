@@ -84,6 +84,10 @@ test('lease, DELETE, list and resume reach web sessions on any instance; an ende
     r = await h.call('remote', 'DELETE', '/api/remote-access/sessions/w1');
     assert.equal(r.status, 202, 'a stop that did not finish is not reported as done');
     assert.deepEqual(r.json, { ok: true, state: 'ending' });
+    endImpl = async () => { throw ra.httpError(503, 'SERVER_RESTARTING', 'NetBird Control is restarting or shutting down. Try again in a minute.'); };
+    r = await h.call('remote', 'DELETE', '/api/remote-access/sessions/w1');
+    assert.equal(r.status, 503, 'an instance that is not the leader refuses to close a web session');
+    assert.equal(r.json.code, 'SERVER_RESTARTING');
     endImpl = async () => { throw ra.httpError(410, 'BROWSER_ENDED', 'This web session has ended.'); };
     r = await h.call('remote', 'DELETE', '/api/remote-access/sessions/w1');
     assert.equal(r.status, 410);

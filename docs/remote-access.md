@@ -726,8 +726,12 @@ count. The check runs when the session opens and every minute after.
 - **Close Browser** ends the browser at once and wipes its profile. When the remote browser does not
   confirm that it stopped, the browser shows as **Closing...** until the app has stopped it (it tries
   again every minute). A browser also ends when the user closes its last window, when the keep-alive
-  passes, or when access is lost.
+  passes, or when access is lost. When NetBird can't be read to check access, the browser keeps
+  running for up to 2.5 minutes after the last successful check, then ends.
 - Opening the same browser in another window moves it there; the first window shows that it moved.
+- **During an update** the browser view disconnects and the open browsers keep running. Resume them
+  when the update finishes: web sessions are run only by the app instance that leads, so opening,
+  resuming and closing a browser waits for the new instance.
 
 ### Inside the browser
 

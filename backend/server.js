@@ -5242,7 +5242,7 @@ async function start() {
             },
         };
         setRemoteAccessDeps(remoteAccessDeps);
-        remoteBrowser.setRemoteBrowserDeps({ stillPermitted: remoteAccessDeps.stillPermitted });
+        remoteBrowser.setRemoteBrowserDeps({ stillPermitted: remoteAccessDeps.stillPermitted, isLeader: leaderReady });
         // A resource write sent before a restart may still land in NetBird: no session is approved
         // until a target sync that starts 90 s from now has finished.
         beginRemoteTargetSettling();

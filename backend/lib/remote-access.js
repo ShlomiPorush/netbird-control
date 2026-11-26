@@ -1892,19 +1892,15 @@ function pipeTunnel(s, ws, o) {
                 if (ins.opcode === 'args') {
                     const version = ins.args[0] && ins.args[0].startsWith('VERSION_') ? ins.args[0] : null;
                     const names = version ? ins.args.slice(1) : ins.args;
-                    const connect = () => {
-                        sock.write(encodeInstruction('size', String(s.width), String(s.height), String(s.dpi)));
-                        sock.write(encodeInstruction('audio'));
-                        sock.write(encodeInstruction('video'));
-                        sock.write(encodeInstruction('image', 'image/png', 'image/jpeg', 'image/webp'));
-                        if (s.timezone) sock.write(encodeInstruction('timezone', s.timezone));
-                        const values = o.connectArgs(names);
-                        sock.write(encodeInstruction('connect', ...(version ? [version] : []), ...values));
-                        // The SSH secrets are no longer needed here.
-                        s.creds = {};
-                    };
-                    if (!o.beforeConnect) connect();
-                    else o.beforeConnect().then((ok) => { if (ok && !s.closed) connect(); }, () => { });
+                    sock.write(encodeInstruction('size', String(s.width), String(s.height), String(s.dpi)));
+                    sock.write(encodeInstruction('audio'));
+                    sock.write(encodeInstruction('video'));
+                    sock.write(encodeInstruction('image', 'image/png', 'image/jpeg', 'image/webp'));
+                    if (s.timezone) sock.write(encodeInstruction('timezone', s.timezone));
+                    const values = o.connectArgs(names);
+                    sock.write(encodeInstruction('connect', ...(version ? [version] : []), ...values));
+                    // The SSH secrets are no longer needed here.
+                    s.creds = {};
                 } else if (ins.opcode === 'ready') {
                     handshakeDone = true;
                     clearTimeout(handshakeTimer);

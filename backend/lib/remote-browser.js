@@ -31,8 +31,8 @@ const CAPACITY_LOCK = 0x4e424252;
 const SCREEN = { minWidth: 320, minHeight: 240, maxWidth: 1920, maxHeight: 1080 };
 const CONNECTIONS_PER_SESSION = 2000;
 const QUEUED_RECORDS_MAX = 5000;
-const LEADER_CONCURRENCY = 5;
-const UID_REFRESH_GAP_MS = 5000;
+const SESSION_CONCURRENCY = 5;
+const IDENTITY_CONCURRENCY = 25;
 const RECORD_HOLD_MS = 5000;
 const COLLECTOR_LINE_MAX = 64 * 1024;
 const SOURCE_TYPE = 'BROWSER_GATEWAY';
@@ -98,6 +98,16 @@ const browserActive = () => ra.remoteAccessAvailable() && ra.browserWanted();
 const config = () => ra.getRemoteAccessConfig();
 
 function setRemoteBrowserDeps(deps) { _deps = { ..._deps, ...deps }; }
+const leading = () => !_deps.isLeader || _deps.isLeader();
+
+const _sessionLocks = new Map();
+function withSessionLock(id, task) {
+    const result = (_sessionLocks.get(id) || Promise.resolve()).then(task);
+    const tail = result.catch(() => { });
+    _sessionLocks.set(id, tail);
+    tail.then(() => { if (_sessionLocks.get(id) === tail) _sessionLocks.delete(id); });
+    return result;
+}
 
 function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
@@ -297,6 +307,7 @@ async function takeToken(token) {
 }
 
 async function createWebSession(viewer, body, clientIp) {
+    if (!leading()) throw httpError(503, 'SERVER_RESTARTING');
     const authorizedAt = new Date();
     await authorize(viewer);
     const size = screen(body);
@@ -375,6 +386,11 @@ async function resumeWebSession(viewer, id, body) {
     if (row.state === 'ended') throw httpError(410, 'BROWSER_ENDED');
     if (row.state === 'ending') throw httpError(409, 'SESSION_ENDING');
     if (row.state === 'starting') throw httpError(409, 'SESSION_STARTING');
+    if (!leading()) throw httpError(503, 'SERVER_RESTARTING');
+    return withSessionLock(row.id, () => resumeLocked(viewer, row, body));
+}
+
+async function resumeLocked(viewer, row, body) {
     const authorizedAt = new Date();
     await authorize(viewer);
     const creds = await browserCredentials(row.id, authorizedAt.getTime() + AUTH_GRACE_MS);
@@ -429,6 +445,7 @@ async function endWebSessionByUser(viewer, id) {
     const row = await sessionRow(id);
     if (!row || row.user_id !== viewer.user_id) return null;
     if (row.state === 'ended') throw httpError(410, 'BROWSER_ENDED');
+    if (!leading()) throw httpError(503, 'SERVER_RESTARTING');
     return (await endWebSession(row.id, 'Closed by the user.')) ? 'stopped' : 'ending';
 }
 
@@ -519,8 +536,21 @@ function onTunnelEnd(s, from, message, code) {
     });
 }
 
-async function attachWebTunnel(entry, ws) {
-    const refuse = (message, code) => { ra.sendError(ws, message, code); try { ws.close(1000, String(code)); } catch { } };
+function refuseTunnel(ws, message, code) {
+    ra.sendError(ws, message, code);
+    try { ws.close(1000, String(code)); } catch { }
+}
+
+function attachWebTunnel(entry, ws) {
+    if (!leading()) {
+        refuseTunnel(ws, MESSAGES.SERVER_RESTARTING, CODE.restarting);
+        return Promise.resolve();
+    }
+    return withSessionLock(entry.sessionId, () => attachLocked(entry, ws));
+}
+
+async function attachLocked(entry, ws) {
+    const refuse = (message, code) => refuseTunnel(ws, message, code);
     let row;
     try { row = await sessionRow(entry.sessionId); } catch { return refuse(MESSAGES.BROWSER_UNAVAILABLE, CODE.lost); }
     if (!row || row.user_id !== entry.userId || row.attachment !== entry.attachment || !OPEN_STATES.includes(row.state)) {
@@ -534,6 +564,7 @@ async function attachWebTunnel(entry, ws) {
         return refuse(reason, code);
     }
     if (!creds) return refuse(MESSAGES.BROWSER_UNAVAILABLE, CODE.lost);
+    mapFromSupervisor(row, creds);
     const u = await pool.query(
         `UPDATE browser_sessions SET state = 'active', owner_instance = $5, detached_at = NULL, lease_expires_at = NOW() + interval '${VIEWER_LEASE_S} seconds'
          WHERE id = $1 AND attachment = $4 AND ${RESUMABLE} RETURNING id`,
@@ -564,16 +595,7 @@ async function attachWebTunnel(entry, ws) {
         },
         argv: [],
         fitSize,
-        beforeConnect: async () => {
-            let current;
-            try { current = await sessionRow(s.id); } catch {
-                closeLocal(s, MESSAGES.BROWSER_UNAVAILABLE, CODE.lost);
-                return false;
-            }
-            if (current && current.attachment === s.attachment && OPEN_STATES.includes(current.state)) return true;
-            closeLocal(s, TAKEN_OVER, CODE.takenOver);
-            return false;
-        },
+
         displayTimeoutMs: DISPLAY_TIMEOUT_MS,
         displayFailedMessage: "The remote browser's screen didn't open. Resume the session to try again.",
         fail: (message, code, detail) => {
@@ -586,18 +608,8 @@ async function attachWebTunnel(entry, ws) {
 }
 
 async function watchAttached() {
-    if (!_attached.size) return;
-    const watched = [..._attached.entries()];
-    let rows;
-    try { rows = rowsOf(await pool.query('SELECT id, state, attachment, end_reason, end_code FROM browser_sessions WHERE id = ANY($1)', [watched.map(([id]) => id)])); } catch { return; }
-    const byId = new Map(rows.map(r => [r.id, r]));
-    for (const [id, s] of watched) {
-        if (s.closed || _attached.get(id) !== s) continue;
-        const row = byId.get(id);
-        if (!row || row.state === 'ending' || row.state === 'ended') closeLocal(s, (row && row.end_reason) || 'The session ended.', (row && row.end_code) || CODE.ended);
-        else if (row.attachment !== s.attachment) closeLocal(s, TAKEN_OVER, CODE.takenOver);
-        else if (row.state === 'detached') closeLocal(s, 'Your sign-in ended or the page stopped responding, so the session was disconnected. Resume it to continue.', CODE.denied);
-    }
+    if (leading()) return;
+    for (const s of [..._attached.values()]) closeLocal(s, MESSAGES.SERVER_RESTARTING, CODE.restarting);
 }
 
 async function shutdownWebTunnels(message) {
@@ -621,54 +633,47 @@ function onConfigChanged() {
 
 async function userVerdict(snap, cfg, row) {
     const entitlement = evaluateExitNodeEntitlement(snap, cfg, { userId: row.user_id });
-    if (!entitlement.ok) return `Your session ended. ${MESSAGES[entitlement.code] || ''}`.trim();
-    if (!_deps.stillPermitted) return '';
+    if (!entitlement.ok) return { denied: `Your session ended. ${MESSAGES[entitlement.code] || ''}`.trim() };
+    if (!_deps.stillPermitted) return { ok: true };
     const permitted = await ra.withDeadline(Promise.resolve(_deps.stillPermitted({ oid: row.oid, email: row.user_email, userId: row.user_id, snap })), 15_000, 'Checking the permission')
-        .then(ok => !!ok, () => false);
-    return permitted ? '' : "Your session ended because your Remote Access permission was removed or couldn't be confirmed. Ask an administrator if you need it.";
+        .then(ok => !!ok, () => null);
+    if (permitted === null) return { unknown: true };
+    return permitted ? { ok: true } : { denied: 'Your session ended because your Remote Access permission was removed. Ask an administrator if you need it.' };
 }
 
-async function forEachLimited(items, task, limit = LEADER_CONCURRENCY) {
-    let next = 0;
-    const worker = async () => {
-        while (next < items.length) await task(items[next++]);
+function limiter(limit) {
+    let running = 0;
+    const waiting = [];
+    const next = () => {
+        while (running < limit && waiting.length) {
+            const { task, resolve, reject } = waiting.shift();
+            running++;
+            Promise.resolve().then(task).then(resolve, reject).finally(() => { running--; next(); });
+        }
     };
-    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+    const run = (task) => new Promise((resolve, reject) => { waiting.push({ task, resolve, reject }); next(); });
+    run.idle = () => running === 0 && waiting.length === 0;
+    return run;
 }
 
 const _stopKeys = new Set();
-const _stopWaiting = [];
-let _stopsRunning = 0;
+const _stops = limiter(SESSION_CONCURRENCY);
 
 function queueStop(key, task) {
     if (_stopKeys.has(key)) return;
     _stopKeys.add(key);
-    _stopWaiting.push({ key, task });
-    pumpStops();
-}
-
-function pumpStops() {
-    while (_stopsRunning < LEADER_CONCURRENCY && _stopWaiting.length) {
-        const { key, task } = _stopWaiting.shift();
-        _stopsRunning++;
-        Promise.resolve().then(task)
-            .catch(e => console.error('[remote-browser] %s: %s', key, e.message))
-            .finally(() => {
-                _stopsRunning--;
-                _stopKeys.delete(key);
-                pumpStops();
-            });
-    }
+    _stops(task)
+        .catch(e => console.error('[remote-browser] %s: %s', key, e.message))
+        .finally(() => _stopKeys.delete(key));
 }
 
 const queueEnd = (id, reason, code) => queueStop(id, () => endWebSession(id, reason, code));
 
 async function stopsIdle() {
-    while (_stopsRunning || _stopWaiting.length) await new Promise(resolve => setTimeout(resolve, 5));
+    while (_stopKeys.size) await new Promise(resolve => setTimeout(resolve, 5));
 }
 
-async function authorizationRound(rows) {
-    if (!browserActive() || !rows.some(r => OPEN_STATES.includes(r.state))) return null;
+async function readAuthorization() {
     const checkedAt = new Date();
     let snap;
     try { snap = await ra.readSnapshotNow(); } catch (e) {
@@ -680,36 +685,25 @@ async function authorizationRound(rows) {
         console.warn('[remote-browser] the browser gateway is not ready (%s): ending the web sessions', gate.code);
         return { gateReason: `The session ended because the browser gateway isn't ready. ${GATE_REASONS[gate.code] || ''}`.trim() };
     }
-    const cfg = entitlementCfg();
-    const verdicts = new Map();
-    return {
-        checkedAt,
-        verdictFor: (row) => {
-            const key = JSON.stringify([row.user_id, row.oid || '', row.user_email || '']);
-            if (!verdicts.has(key)) verdicts.set(key, userVerdict(snap, cfg, row));
-            return verdicts.get(key);
-        },
-    };
+    return { checkedAt, snap, cfg: entitlementCfg() };
 }
 
-async function superviseSession(row, now, auth) {
+async function superviseSession(row, now, auth, verdict) {
     if (!browserActive()) return queueEnd(row.id, 'Web sessions were turned off by an administrator.', CODE.denied);
     if (row.state === 'ending') return queueEnd(row.id, row.end_reason || 'The session ended.');
     if (row.state === 'starting') {
         if (now - msOf(row.created_at) > STARTING_STALE_MS) queueEnd(row.id, 'The session did not open.');
         return undefined;
     }
-    let authorizedAt = msOf(row.last_auth_ok_at);
     if (auth && auth.gateReason) return queueEnd(row.id, auth.gateReason, CODE.denied);
-    if (auth) {
-        const refused = await auth.verdictFor(row);
-        if (refused) return queueEnd(row.id, refused, CODE.denied);
+    if (verdict && verdict.denied) return queueEnd(row.id, verdict.denied, CODE.denied);
+    let authorizedAt = msOf(row.last_auth_ok_at);
+    if (verdict && verdict.ok) {
         const updated = rowsOf(await pool.query(
             `UPDATE browser_sessions SET last_auth_ok_at = GREATEST(last_auth_ok_at, $2) WHERE id = $1 AND state <> 'ended' RETURNING last_auth_ok_at`,
             [row.id, auth.checkedAt]))[0];
         if (updated) authorizedAt = msOf(updated.last_auth_ok_at);
     }
-    if (Date.now() - authorizedAt > AUTH_GRACE_MS) return queueEnd(row.id, UNVERIFIED, CODE.denied);
     let state = row.state;
     let detachedAt = msOf(row.detached_at);
     if (state === 'active' && msOf(row.lease_expires_at) < now) {
@@ -717,27 +711,53 @@ async function superviseSession(row, now, auth) {
             `UPDATE browser_sessions SET state = 'detached', detached_at = lease_expires_at, owner_instance = '' WHERE id = $1 AND state = 'active' AND lease_expires_at < NOW() RETURNING detached_at`,
             [row.id]);
         const detached = rowsOf(d)[0];
-        if (detached) { state = 'detached'; detachedAt = msOf(detached.detached_at); }
+        if (detached) {
+            state = 'detached';
+            detachedAt = msOf(detached.detached_at);
+            const local = _attached.get(row.id);
+            if (local) closeLocal(local, 'Your sign-in ended or the page stopped responding, so the session was disconnected. Resume it to continue.', CODE.denied);
+        }
     }
     if (state === 'detached' && now - detachedAt > keepAliveMin() * 60_000) return queueEnd(row.id, keepAliveText());
-    const renewed = await supervisorRequest({ op: 'renew', session: row.id, until: authorizedAt + AUTH_GRACE_MS }).catch((e) => {
-        console.error('[remote-browser] session %s: renew failed: %s', row.id, e.message);
+    const request = verdict && verdict.ok
+        ? { op: 'renew', session: row.id, until: authorizedAt + AUTH_GRACE_MS }
+        : { op: 'status', session: row.id };
+    const answer = await supervisorRequest(request).catch((e) => {
+        console.error('[remote-browser] session %s: %s failed: %s', row.id, request.op, e.message);
         return null;
     });
-    if (isGone(renewed)) queueEnd(row.id, BROWSER_CLOSED);
-    else if (isExpired(renewed)) queueEnd(row.id, UNVERIFIED, CODE.denied);
+    if (isGone(answer) || isExpired(answer)) {
+        const lapsed = isExpired(answer) || Date.now() - msOf(row.last_auth_ok_at) > AUTH_GRACE_MS;
+        queueEnd(row.id, lapsed ? UNVERIFIED : BROWSER_CLOSED, lapsed ? CODE.denied : CODE.ended);
+    }
     return undefined;
 }
 
 async function superviseWebSessions(now = Date.now()) {
     const rows = rowsOf(await pool.query(`SELECT * FROM browser_sessions WHERE state <> 'ended'`));
     if (!rows.length) return;
-    const auth = await authorizationRound(rows);
-    await forEachLimited(rows, async (row) => {
-        try { await superviseSession(row, now, auth); } catch (e) {
-            console.error('[remote-browser] session %s: %s', row.id, e.message);
+    const open = rows.filter(r => OPEN_STATES.includes(r.state));
+    const auth = browserActive() && open.length ? await readAuthorization() : null;
+    const ops = limiter(SESSION_CONCURRENCY);
+    const supervise = (row, verdict) => ops(() => superviseSession(row, now, auth, verdict)
+        .catch(e => console.error('[remote-browser] session %s: %s', row.id, e.message)));
+    const work = rows.filter(r => !open.includes(r)).map(row => supervise(row, null));
+    if (auth && auth.snap) {
+        const checks = limiter(IDENTITY_CONCURRENCY);
+        const byIdentity = new Map();
+        for (const row of open) {
+            const key = JSON.stringify([row.user_id, row.oid || '', row.user_email || '']);
+            if (!byIdentity.has(key)) byIdentity.set(key, []);
+            byIdentity.get(key).push(row);
         }
-    });
+        for (const group of byIdentity.values()) {
+            work.push(checks(() => userVerdict(auth.snap, auth.cfg, group[0]))
+                .then(verdict => Promise.all(group.map(row => supervise(row, verdict)))));
+        }
+    } else {
+        work.push(...open.map(row => supervise(row, null)));
+    }
+    await Promise.all(work);
 }
 
 async function reconcileWithSupervisor(now = Date.now()) {
@@ -761,13 +781,14 @@ async function reconcileWithSupervisor(now = Date.now()) {
         if (fresh === undefined || (fresh && fresh.state !== 'ended')) continue;
         queueStop(s.session, () => supervisorRequest({ op: 'stop', session: s.session }, SUPERVISOR_STOP_TIMEOUT_MS));
     }
-    await forEachLimited(rows.filter(row => !running.has(row.id)), async (row) => {
+    const ops = limiter(SESSION_CONCURRENCY);
+    await Promise.all(rows.filter(row => !running.has(row.id)).map(row => ops(async () => {
         if (row.state === 'starting' && now - msOf(row.created_at) <= STARTING_STALE_MS) return;
         if (row.state !== 'ending' && !(await browserClosed(row.id))) return;
         const reason = row.end_reason
             || (row.state === 'starting' ? 'The session did not open.' : row.supervisor_instance === instance ? BROWSER_CLOSED : BROWSER_RESTARTED);
         queueEnd(row.id, reason);
-    });
+    })));
     return true;
 }
 
@@ -781,7 +802,6 @@ async function leaderTick() {
         if (browserActive()) await bindConnections().catch(e => console.error('[remote-browser] connection log:', e.message));
         if (busy) await reconcileWithSupervisor().catch(e => console.error('[remote-browser] reconcile:', e.message));
         await superviseWebSessions().catch(e => console.error('[remote-browser] supervise:', e.message));
-        if (_connServer) await refreshUidMap().catch(e => console.error('[remote-browser] connection log map:', e.message));
         flushMissed();
         if (Date.now() - _lastPurge > 3_600_000) {
             _lastPurge = Date.now();
@@ -797,8 +817,7 @@ const _missed = new Map();
 const _held = [];
 let _holdTimer = null;
 let _queued = 0;
-let _lastRefresh = 0;
-let _refreshing = null;
+
 let _connServer = null;
 let _eventChain = Promise.resolve();
 
@@ -843,13 +862,6 @@ async function refreshUidMap() {
     for (const [uid, s] of _uidSessions) if (!live.has(s.id)) _uidSessions.delete(uid);
 }
 
-function requestUidRefresh() {
-    if (_refreshing || Date.now() - _lastRefresh < UID_REFRESH_GAP_MS) return;
-    _lastRefresh = Date.now();
-    _refreshing = refreshUidMap()
-        .catch(e => console.error('[remote-browser] connection log map:', e.message))
-        .finally(() => { _refreshing = null; });
-}
 
 function enqueueWrite(task) {
     if (_queued >= QUEUED_RECORDS_MAX) return false;
@@ -873,7 +885,13 @@ function flushMissed() {
         const event = session
             ? gapEvent(session, `${missed} connection${missed === 1 ? '' : 's'} of this session arrived faster than they could be recorded, so they were not recorded.`, { missed })
             : unattributedGapEvent(missed);
-        if (!writeEvent(event)) return;
+        const queued = enqueueWrite(async () => {
+            try { await addEvent(event); } catch (e) {
+                countMissed(session, missed);
+                throw e;
+            }
+        });
+        if (!queued) return;
         _missed.delete(key);
     }
 }
@@ -995,7 +1013,6 @@ function handleRecord(line) {
     if (_queued >= QUEUED_RECORDS_MAX) { countMissed(null, 1); return; }
     _queued++;
     _held.push({ rec, until: Date.now() + RECORD_HOLD_MS });
-    requestUidRefresh();
     scheduleHeldRelease();
 }
 
@@ -1007,7 +1024,6 @@ function releaseHeld(now = Date.now()) {
         _queued--;
         if (session) logConnection(session, held.rec); else countMissed(null, 1);
     }
-    if (_held.length) requestUidRefresh();
     scheduleHeldRelease();
 }
 
@@ -1106,7 +1122,7 @@ module.exports = {
     _internal: {
         setEndpointsForTest: (p) => { _endpoints = { ...DEFAULT_ENDPOINTS, ...(p || {}) }; },
         resetForTest: () => {
-            _attached.clear(); _uidSessions.clear(); _missed.clear(); _lastRefresh = 0;
+            _attached.clear(); _uidSessions.clear(); _missed.clear(); _sessionLocks.clear();
             _queued -= _held.length; _held.length = 0; clearTimeout(_holdTimer); _holdTimer = null;
             _ticking = false; _shuttingDown = false; _health = null; _supervisorInstance = '';
         },
