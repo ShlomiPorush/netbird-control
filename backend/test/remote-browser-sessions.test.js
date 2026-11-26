@@ -73,7 +73,14 @@ const supervisor = net.createServer((sock) => {
             buf = buf.slice(i + 1);
             sup.requests.push({ ...req, at: Date.now() });
             if (sup.down) { sock.destroy(); return; }
-            const delay = sup.delays.get(req.op + ':' + req.session);
+            req.receivedAt = Date.now();
+            if (req.op === 'start' && sup.dropNextStart) {
+                sup.dropNextStart = false;
+                answer(req);
+                sock.destroy();
+                return;
+            }
+            const delay = sup.delays.get(req.op + ':' + req.session) ?? sup.delays.get(req.op + ':*');
             const reply = () => sock.write(JSON.stringify(answer(req)) + '\n');
             if (delay) setTimeout(reply, delay); else reply();
         }
@@ -88,7 +95,7 @@ function answer(req) {
             if (sup.tombstones.has(req.session)) return { ok: false, error: 'ENDED' };
             if (!sup.sessions.has(req.session)) {
                 const uid = sup.nextUid++;
-                sup.sessions.set(req.session, { uid, port: 5901 + uid - 62000, password: crypto.randomBytes(4).toString('hex'), startedAt: Date.now() });
+                sup.sessions.set(req.session, { uid, port: 5901 + uid - 62000, password: crypto.randomBytes(4).toString('hex'), startedAt: req.receivedAt || Date.now() });
             }
             const s = sup.sessions.get(req.session);
             return { ok: true, port: s.port, password: s.password, uid: s.uid, instance: sup.instance, startedAt: s.startedAt };
@@ -183,6 +190,7 @@ async function buildSnapshot() {
 }
 
 async function reset({ maxSessions = 5, keepAliveMin = 15 } = {}) {
+
     rb._internal.resetForTest();
     table.rows.clear();
     recorded.length = 0;
@@ -191,6 +199,7 @@ async function reset({ maxSessions = 5, keepAliveMin = 15 } = {}) {
     onSelect = null;
     Object.assign(sup, { requests: [], failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, clock: () => Date.now() });
     sup.delays.clear();
+    sup.dropNextStart = false;
     insertedIds.clear();
     attemptedIds.length = 0;
     failingWrites = 0;
@@ -482,22 +491,7 @@ test('a start the supervisor did not answer is stopped, so no browser is left be
     sup.down = true;
     await rejects(rb.createWebSession(USER, {}, ''), 503, 'GATEWAY_NOT_READY');
     sup.down = false;
-    const realStart = answer;
-    let dropped = false;
-    supervisor.removeAllListeners('connection');
-    supervisor.on('connection', (sock) => {
-        sock.setEncoding('utf8');
-        sock.on('error', () => { });
-        sock.on('data', (chunk) => {
-            for (const line of chunk.split('\n').filter(Boolean)) {
-                const req = JSON.parse(line);
-                sup.requests.push({ ...req, at: Date.now() });
-                const reply = realStart(req);
-                if (req.op === 'start' && !dropped) { dropped = true; sock.destroy(); continue; }
-                sock.write(JSON.stringify(reply) + '\n');
-            }
-        });
-    });
+    sup.dropNextStart = true;
     await rejects(rb.createWebSession(USER, {}, ''), 503, 'BROWSER_UNAVAILABLE');
     const row = [...table.rows.values()][0];
     assert.equal(row.state, 'ended');
@@ -723,6 +717,7 @@ test('a supervisor restart ends the old sessions as restarted, and their connect
     assert.equal(table.rows.get(old.sessionId).end_reason, 'The remote browser restarted, so the session ended.');
     const record = (port) => JSON.stringify({ 'oob.uid': uid, 'ip.protocol': 6, src_ip: '100.92.0.7', src_port: port, dest_ip: '93.184.215.14', dest_port: 443 });
     rb._internal.handleRecord(record(41000));
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     assert.equal(recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'connection').length, 0);
@@ -751,6 +746,7 @@ test('a record whose uid maps to no open session becomes a gap with the number m
     rb._internal.handleRecord(record(42000));
     rb._internal.handleRecord(record(42001));
     rb._internal.handleRecord(JSON.stringify({ 'oob.uid': 62777, 'ip.protocol': 17, dest_ip: '1.1.1.1', dest_port: 53 }));
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     assert.equal(recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'connection').length, 0);
@@ -850,6 +846,7 @@ test('a record from an earlier holder of the uid becomes a gap, and one from aft
     rb._internal.handleRecord(record(startedAt - 10_000, 44000));
     rb._internal.handleRecord(record(startedAt + 1_000, 44001));
     await rb._internal.eventsIdleForTest();
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     const conns = recorded.filter(e => e.remoteAccess && e.remoteAccess.kind === 'connection');
@@ -894,14 +891,18 @@ test('a flood of connection records with a slow database stays bounded and ends 
         }
     }
     assert.equal(rb._internal.queuedForTest(), 5000);
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
     assert.equal(rb._internal.queuedForTest(), 5000, 'gap records wait for room instead of passing the budget');
     connectGate.open();
     connectGate = null;
     await until(async () => { await rb._internal.eventsIdleForTest(); return rb._internal.queuedForTest() === 0; }, 20_000);
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     assert.equal(recorded.filter(e => e.remoteAccess.kind === 'connection').length, 4000);
@@ -1040,8 +1041,36 @@ test('a record from an unknown uid refreshes the map from the supervisor at most
     await sleep(30);
     assert.equal(sup.requests.filter(r => r.op === 'list').length, 1);
     recorded.length = 0;
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
     rb._internal.flushMissedForTest();
     await rb._internal.eventsIdleForTest();
     assert.deepEqual(recorded.map(e => e.remoteAccess.missed), [3]);
+    await rb._internal.closeConnectionsForTest();
+});
+
+test('records that arrive while the browser starts are held, then given to the new session; unmatched or older ones become a gap', async () => {
+    await reset();
+    assert.equal(await rb._internal.bindConnections(), true);
+    await rb._internal.eventsIdleForTest();
+    recorded.length = 0;
+    const uid = sup.nextUid;
+    sup.delays.set('start:*', 150);
+    const opening = rb.createWebSession(USER, {}, '');
+    await until(() => sup.requests.some(r => r.op === 'start'));
+    const startedAt = sup.requests.find(r => r.op === 'start').at;
+    const record = (at, port, recordUid = uid) => JSON.stringify({ timestamp: ulogdTime(at), 'oob.uid': recordUid, 'ip.protocol': 6, src_ip: '100.92.0.7', src_port: port, dest_ip: '93.184.215.14', dest_port: 443 });
+    rb._internal.handleRecord(record(startedAt + 10, 46000));
+    rb._internal.handleRecord(record(startedAt - 10_000, 46001));
+    rb._internal.handleRecord(record(startedAt + 10, 46002, 62888));
+    assert.equal(rb._internal.queuedForTest(), 3, 'held records use the write budget');
+    const out = await opening;
+    await rb._internal.eventsIdleForTest();
+    rb._internal.releaseHeldForTest(Date.now() + 6_000);
+    rb._internal.flushMissedForTest();
+    await rb._internal.eventsIdleForTest();
+    const conns = recorded.filter(e => e.remoteAccess.kind === 'connection');
+    assert.deepEqual(conns.map(e => [e.remoteAccess.sessionId, e.meta.source_addr]), [[out.sessionId, '100.92.0.7:46000']]);
+    assert.deepEqual(recorded.filter(e => e.remoteAccess.kind === 'gap').map(e => [e.remoteAccess.sessionId, e.remoteAccess.missed]), [[undefined, 2]]);
+    assert.equal(rb._internal.queuedForTest(), 0);
     await rb._internal.closeConnectionsForTest();
 });

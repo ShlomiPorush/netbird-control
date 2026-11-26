@@ -33,6 +33,7 @@ const CONNECTIONS_PER_SESSION = 2000;
 const QUEUED_RECORDS_MAX = 5000;
 const LEADER_CONCURRENCY = 5;
 const UID_REFRESH_GAP_MS = 5000;
+const RECORD_HOLD_MS = 5000;
 const COLLECTOR_LINE_MAX = 64 * 1024;
 const SOURCE_TYPE = 'BROWSER_GATEWAY';
 const SESSION_REFERENCE = 'remote-access:web';
@@ -319,12 +320,12 @@ async function createWebSession(viewer, body, clientIp) {
             throw httpError(503, 'BROWSER_UNAVAILABLE');
         }
         if (!started || started.ok !== true) throw httpError(started && started.error === 'CAPACITY' ? 429 : 503, started && started.error === 'CAPACITY' ? 'BROWSER_CAPACITY' : 'BROWSER_UNAVAILABLE');
+        mapFromSupervisor({ id: row.id, user_id: row.userId, user_email: row.userEmail, user_name: row.userName }, started);
         const u = await pool.query(
             `UPDATE browser_sessions SET state = 'detached', detached_at = NOW(), uid = $2, port = $3, supervisor_instance = $4 WHERE id = $1 AND state = 'starting' RETURNING *`,
             [row.id, started.uid, started.port, String(started.instance || '')]);
         const stored = rowsOf(u)[0];
         if (!stored) throw httpError(409, 'SESSION_CLOSED');
-        if (_connServer) noteUid({ ...stored, startedAt: started.startedAt });
         try {
             await addEvent(webSessionEvent(stored, 'start'));
             await pool.query('UPDATE browser_sessions SET recorded = true WHERE id = $1', [row.id]);
@@ -382,6 +383,7 @@ async function resumeWebSession(viewer, id, body) {
         throw httpError(410, 'BROWSER_ENDED');
     }
     if (!creds) throw httpError(503, 'BROWSER_UNAVAILABLE');
+    mapFromSupervisor(row, creds);
     const size = screen(body);
     const attachment = crypto.randomUUID();
     const token = crypto.randomBytes(32).toString('base64url');
@@ -792,6 +794,8 @@ async function leaderTick() {
 
 const _uidSessions = new Map();
 const _missed = new Map();
+const _held = [];
+let _holdTimer = null;
 let _queued = 0;
 let _lastRefresh = 0;
 let _refreshing = null;
@@ -808,6 +812,11 @@ function noteUid(row) {
         id: row.id, startedAt: row.startedAt, userId: row.user_id, user: row.user_email || row.user_name || '',
         seen: new Set(), capped: false,
     });
+    if (_held.length) releaseHeld();
+}
+
+function mapFromSupervisor(row, reply) {
+    if (_connServer) noteUid({ ...row, uid: reply.uid, startedAt: reply.startedAt, supervisor_instance: reply.instance });
 }
 
 function forgetUid(row) {
@@ -821,7 +830,7 @@ async function refreshUidMap() {
     if (!listed || listed.ok !== true || !Array.isArray(listed.sessions)) return;
     const ids = listed.sessions.filter(s => s && typeof s.session === 'string').map(s => s.session);
     const rows = ids.length
-        ? rowsOf(await pool.query('SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY($1) AND state = ANY($2)', [ids, OPEN_STATES]))
+        ? rowsOf(await pool.query('SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY($1) AND state = ANY($2)', [ids, ['starting', ...OPEN_STATES]]))
         : [];
     const byId = new Map(rows.map(r => [r.id, r]));
     const live = new Set();
@@ -983,8 +992,29 @@ function handleRecord(line) {
     if (!rec) return;
     const session = _uidSessions.get(rec.uid);
     if (session) { logConnection(session, rec); return; }
-    countMissed(null, 1);
+    if (_queued >= QUEUED_RECORDS_MAX) { countMissed(null, 1); return; }
+    _queued++;
+    _held.push({ rec, until: Date.now() + RECORD_HOLD_MS });
     requestUidRefresh();
+    scheduleHeldRelease();
+}
+
+function releaseHeld(now = Date.now()) {
+    const waiting = _held.splice(0);
+    for (const held of waiting) {
+        const session = _uidSessions.get(held.rec.uid);
+        if (!session && held.until > now) { _held.push(held); continue; }
+        _queued--;
+        if (session) logConnection(session, held.rec); else countMissed(null, 1);
+    }
+    if (_held.length) requestUidRefresh();
+    scheduleHeldRelease();
+}
+
+function scheduleHeldRelease() {
+    if (_holdTimer || !_held.length) return;
+    _holdTimer = setTimeout(() => { _holdTimer = null; releaseHeld(); }, Math.max(0, _held[0].until - Date.now()));
+    if (_holdTimer.unref) _holdTimer.unref();
 }
 
 function onCollector(sock) {
@@ -1076,10 +1106,12 @@ module.exports = {
     _internal: {
         setEndpointsForTest: (p) => { _endpoints = { ...DEFAULT_ENDPOINTS, ...(p || {}) }; },
         resetForTest: () => {
-            _attached.clear(); _uidSessions.clear(); _missed.clear(); _queued = 0; _lastRefresh = 0;
+            _attached.clear(); _uidSessions.clear(); _missed.clear(); _lastRefresh = 0;
+            _queued -= _held.length; _held.length = 0; clearTimeout(_holdTimer); _holdTimer = null;
             _ticking = false; _shuttingDown = false; _health = null; _supervisorInstance = '';
         },
         stopsIdleForTest: stopsIdle,
+        releaseHeldForTest: releaseHeld,
         flushMissedForTest: flushMissed,
         closeConnectionsForTest: () => new Promise(r => { if (!_connServer) return r(); _connServer.close(() => r()); _connServer = null; }),
         eventsIdleForTest: () => _eventChain,
