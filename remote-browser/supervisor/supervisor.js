@@ -7,11 +7,12 @@ const { memoryStore } = require('./state');
 const LEASE_MS = 150_000;
 const MAX_SESSIONS = 50;
 const MAX_TOMBSTONES = 10_000;
+const SLOT_COOLDOWN_MS = 10 * 60_000;
 
 const expiredFailure = () => failure('EXPIRED', "The user's authorization has expired.");
 
 class Supervisor {
-  constructor({ runtime, store = memoryStore(), instance = crypto.randomUUID(), now = Date.now, log = () => {}, leaseMs = LEASE_MS, maxSessions = MAX_SESSIONS, slotCount = SLOT_COUNT, maxTombstones = MAX_TOMBSTONES }) {
+  constructor({ runtime, store = memoryStore(), instance = crypto.randomUUID(), now = Date.now, log = () => {}, leaseMs = LEASE_MS, maxSessions = MAX_SESSIONS, slotCount = SLOT_COUNT, maxTombstones = MAX_TOMBSTONES, slotCooldownMs = SLOT_COOLDOWN_MS }) {
     this.runtime = runtime;
     this.store = store;
     this.instance = instance;
@@ -25,6 +26,8 @@ class Supervisor {
     this.tombstones = new Set();
     this.queues = new Map();
     this.heldSlots = new Set();
+    this.freedAt = new Map();
+    this.slotCooldownMs = slotCooldownMs;
     const saved = store.load();
     this.nextSlot = Number.isInteger(saved) && saved >= 0 && saved < slotCount ? saved : 0;
   }
@@ -170,6 +173,7 @@ class Supervisor {
     if (refusal) return refusal;
     if (record.state !== 'running') return failure('ENDED', 'The session is ending.');
     if (!this.authorizedUntil(record, until)) return expiredFailure();
+    record.leaseExpiresAt = this.leaseUntil(record.until);
     return this.grant(record);
   }
 
@@ -190,6 +194,7 @@ class Supervisor {
     }
     this.sessions.delete(session);
     this.heldSlots.delete(record.ids.slot);
+    this.freedAt.set(record.ids.slot, this.now());
     this.log(`session ${session}: stopped (${reason})`);
     return { ok: true, state: 'stopped' };
   }
@@ -232,10 +237,18 @@ class Supervisor {
     }
   }
 
+  coolingDown(slot) {
+    const freedAt = this.freedAt.get(slot);
+    if (freedAt === undefined) return false;
+    if (this.now() - freedAt < this.slotCooldownMs) return true;
+    this.freedAt.delete(slot);
+    return false;
+  }
+
   async allocate() {
     for (let step = 0; step < this.slotCount; step += 1) {
       const slot = (this.nextSlot + step) % this.slotCount;
-      if (this.heldSlots.has(slot)) continue;
+      if (this.heldSlots.has(slot) || this.coolingDown(slot)) continue;
       this.heldSlots.add(slot);
       let free = false;
       try {

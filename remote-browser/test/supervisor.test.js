@@ -160,13 +160,17 @@ test('slots are handed out in order and are not reused at once', async () => {
   assert.equal((await startOf('b')).uid, 62001);
 });
 
-test('allocation wraps around only to a slot that is free', async () => {
-  const { startOf, supervisor, runtime } = setup({ slotCount: 3 });
+test('allocation wraps around only to a slot that is free and whose session ended at least 10 minutes ago', async () => {
+  const { startOf, supervisor, runtime, advance } = setup({ slotCount: 3 });
   await startOf('a');
   await startOf('b');
   await startOf('c');
   await supervisor.handle({ op: 'stop', session: 'b' });
   runtime.busy.add(0);
+  assert.equal((await startOf('d')).error, 'CAPACITY', 'the freed slot cools down');
+  advance(10 * 60_000 - 1);
+  assert.equal((await startOf('d')).error, 'CAPACITY');
+  advance(1);
   assert.equal((await startOf('d')).uid, 62001);
   assert.equal((await startOf('e')).error, 'CAPACITY');
 });
@@ -196,7 +200,7 @@ test('a failed launch is cleaned up and the id is not reused', async () => {
 });
 
 test('a teardown that leaves processes keeps the slot and reports STOP_FAILED until it succeeds', async () => {
-  const { startOf, renewOf, supervisor, runtime } = setup({ slotCount: 2 });
+  const { startOf, renewOf, supervisor, runtime, advance } = setup({ slotCount: 2 });
   await startOf('a');
   runtime.teardownResult = false;
   assert.equal((await supervisor.handle({ op: 'stop', session: 'a' })).error, 'STOP_FAILED');
@@ -206,6 +210,8 @@ test('a teardown that leaves processes keeps the slot and reports STOP_FAILED un
   assert.equal((await startOf('c')).error, 'CAPACITY');
   runtime.teardownResult = true;
   assert.deepEqual(await supervisor.handle({ op: 'stop', session: 'a' }), { ok: true, state: 'stopped' });
+  assert.equal((await startOf('c')).error, 'CAPACITY');
+  advance(10 * 60_000);
   assert.equal((await startOf('c')).uid, 62000);
 });
 
@@ -302,12 +308,24 @@ test('status reports running, UNKNOWN and ENDED', async () => {
   assert.equal((await supervisor.handle({ op: 'status', session: 'a' })).error, 'ENDED');
 });
 
-test('status and credentials do not extend the lease', async () => {
+test('status does not extend the lease', async () => {
   const { startOf, supervisor, advance } = setup();
   await startOf('a');
   advance(149_999);
   assert.equal((await supervisor.handle({ op: 'status', session: 'a' })).ok, true);
-  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: FAR })).ok, true);
+  advance(1);
+  await expire(supervisor);
+  assert.deepEqual(await sessionsOf(supervisor), []);
+});
+
+test('credentials with a newer authorization extend the lease like renew, up to 150 s and never past it', async () => {
+  const { startOf, supervisor, advance, now } = setup();
+  await startOf('a', { until: now() + 100_000 });
+  advance(90_000);
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: now() + 60_000 })).ok, true);
+  advance(59_999);
+  await expire(supervisor);
+  assert.deepEqual(await sessionsOf(supervisor), ['a'], 'extended past the first authorization');
   advance(1);
   await expire(supervisor);
   assert.deepEqual(await sessionsOf(supervisor), []);
