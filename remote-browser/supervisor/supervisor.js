@@ -8,6 +8,8 @@ const LEASE_MS = 150_000;
 const MAX_SESSIONS = 50;
 const MAX_TOMBSTONES = 10_000;
 
+const expiredFailure = () => failure('EXPIRED', "The user's authorization has expired.");
+
 class Supervisor {
   constructor({ runtime, store = memoryStore(), instance = crypto.randomUUID(), now = Date.now, log = () => {}, leaseMs = LEASE_MS, maxSessions = MAX_SESSIONS, slotCount = SLOT_COUNT, maxTombstones = MAX_TOMBSTONES }) {
     this.runtime = runtime;
@@ -36,7 +38,7 @@ class Supervisor {
       case 'status':
         return Promise.resolve(this.status(request.session));
       case 'credentials':
-        return this.serialize(request.session, () => this.credentials(request.session));
+        return this.serialize(request.session, () => this.credentials(request.session, request.until));
       case 'stop':
         return this.serialize(request.session, () => this.stop(request.session, 'requested'));
       case 'list':
@@ -61,6 +63,7 @@ class Supervisor {
 
   async start({ session, width, height, scale, terminal, until }) {
     if (terminal) return failure('TERMINAL', 'The session has ended and cannot start again.');
+    if (this.expired(until)) return expiredFailure();
     if (this.tombstones.has(session)) return failure('ENDED', 'The session has ended and cannot start again.');
     const existing = this.sessions.get(session);
     if (existing) {
@@ -114,7 +117,17 @@ class Supervisor {
   }
 
   grant(record) {
-    return { ok: true, port: record.ids.port, password: record.password, uid: record.ids.chromiumUid, instance: this.instance };
+    return { ok: true, port: record.ids.port, password: record.password, uid: record.ids.chromiumUid, instance: this.instance, startedAt: record.startedAt };
+  }
+
+  expired(until) {
+    return until <= this.now();
+  }
+
+  async stopExpired(session) {
+    this.log(`session ${session}: its authorization expired`);
+    await this.stop(session, 'authorization expired');
+    return expiredFailure();
   }
 
   leaseUntil(until) {
@@ -137,6 +150,7 @@ class Supervisor {
   renew(session, until) {
     const { record, refusal } = this.live(session);
     if (refusal) return refusal;
+    if (this.expired(until)) return this.stopExpired(session);
     record.leaseExpiresAt = this.leaseUntil(until);
     return { ok: true };
   }
@@ -147,10 +161,11 @@ class Supervisor {
     return { ok: true, state: record.state };
   }
 
-  credentials(session) {
+  credentials(session, until) {
     const { record, refusal } = this.live(session);
     if (refusal) return refusal;
     if (record.state !== 'running') return failure('ENDED', 'The session is ending.');
+    if (this.expired(until)) return this.stopExpired(session);
     return this.grant(record);
   }
 

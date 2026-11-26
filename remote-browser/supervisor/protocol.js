@@ -72,9 +72,9 @@ function parseRequest(line) {
       };
     }
     case 'renew':
-      return { op: 'renew', session: sessionId(request.session), until: positiveInteger(request.until, 'until') };
-    case 'status':
     case 'credentials':
+      return { op: request.op, session: sessionId(request.session), until: positiveInteger(request.until, 'until') };
+    case 'status':
     case 'stop':
       return { op: request.op, session: sessionId(request.session) };
     case 'list':

@@ -168,6 +168,21 @@ function watchChild(child, name, onExit) {
   child.unref();
 }
 
+function xvncArgs({ display, port, dir, width, height }) {
+  return [
+    `:${display}`,
+    '-localhost',
+    '-rfbport', String(port),
+    '-SecurityTypes', 'VncAuth',
+    '-PasswordFile', path.join(dir, 'passwd'),
+    '-auth', path.join(dir, 'xauth'),
+    '-geometry', `${width}x${height}`,
+    '-depth', '24',
+    '-nolisten', 'tcp',
+    '-NeverShared',
+  ];
+}
+
 async function launch({ ids, width, height, scale, onExit }) {
   const { display, port, displayUid, chromiumUid } = ids;
   const [displayDir, chromiumDir] = sessionDirs(ids);
@@ -181,17 +196,7 @@ async function launch({ ids, width, height, scale, onExit }) {
   createOwnedDir(chromiumDir.dir, chromiumUid, { xauth: auth });
 
   const displayEnv = { DISPLAY: `:${display}`, XAUTHORITY: path.join(displayDir.dir, 'xauth'), HOME: displayDir.dir };
-  const xvnc = spawnAs(displayUid, 'Xvnc', [
-    `:${display}`,
-    '-localhost',
-    '-rfbport', String(port),
-    '-SecurityTypes', 'VncAuth',
-    '-PasswordFile', path.join(displayDir.dir, 'passwd'),
-    '-auth', displayEnv.XAUTHORITY,
-    '-geometry', `${width}x${height}`,
-    '-depth', '24',
-    '-nolisten', 'tcp',
-  ], displayEnv);
+  const xvnc = spawnAs(displayUid, 'Xvnc', xvncArgs({ display, port, dir: displayDir.dir, width, height }), displayEnv);
   watchChild(xvnc, 'Xvnc', onExit);
 
   await waitFor(
@@ -304,4 +309,4 @@ function prepareHost() {
   fs.chmodSync(X_SOCKET_DIR, 0o1777);
 }
 
-module.exports = { launch, teardown, slotIsFree, ready, prepareHost, randomPassword, watchChild, exited };
+module.exports = { launch, teardown, slotIsFree, ready, prepareHost, randomPassword, watchChild, exited, xvncArgs };

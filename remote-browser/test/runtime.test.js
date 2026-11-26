@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { exited, watchChild } = require('../supervisor/runtime');
+const { exited, watchChild, xvncArgs } = require('../supervisor/runtime');
 
 function fakeChild() {
   const child = new EventEmitter();
@@ -43,4 +43,11 @@ test('a child that exits ends the session with its code or signal', () => {
   child.emit('exit', 1, null);
   child.emit('exit', null, 'SIGKILL');
   assert.deepEqual(reasons, ['the window manager exited (1)', 'the window manager exited (SIGKILL)']);
+});
+
+test('Xvnc never shares a session, so a new viewer disconnects the one before', () => {
+  const args = xvncArgs({ display: 1, port: 5901, dir: '/run/browser/display-0', width: 1280, height: 720 });
+  assert.ok(args.includes('-NeverShared'));
+  assert.ok(!args.some((a) => /AlwaysShared|DisconnectClients/.test(a)), 'DisconnectClients keeps its default, on');
+  assert.deepEqual(args.slice(0, 3), [':1', '-localhost', '-rfbport']);
 });

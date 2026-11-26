@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { Supervisor } = require('../supervisor/supervisor');
 const { memoryStore } = require('../supervisor/state');
 
-const FAR = 10 ** 12;
+const FAR = 10 ** 13;
 const INSTANCE = 'instance-1';
 
 function deferred() {
@@ -69,8 +69,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 test('start returns the port, password and Chromium uid of the first free slot', async () => {
   const { startOf } = setup();
-  assert.deepEqual(await startOf('a'), { ok: true, port: 5901, password: 'pw0', uid: 62000, instance: INSTANCE });
-  assert.deepEqual(await startOf('b'), { ok: true, port: 5902, password: 'pw1', uid: 62001, instance: INSTANCE });
+  assert.deepEqual(await startOf('a'), { ok: true, port: 5901, password: 'pw0', uid: 62000, instance: INSTANCE, startedAt: 1_000 });
+  assert.deepEqual(await startOf('b'), { ok: true, port: 5902, password: 'pw1', uid: 62001, instance: INSTANCE, startedAt: 1_000 });
 });
 
 test('start for a running session returns the same credentials without a second launch', async () => {
@@ -320,7 +320,7 @@ test('status and credentials do not extend the lease', async () => {
   await startOf('a');
   advance(149_999);
   assert.equal((await supervisor.handle({ op: 'status', session: 'a' })).ok, true);
-  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a' })).ok, true);
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: FAR })).ok, true);
   advance(1);
   await expire(supervisor);
   assert.deepEqual(await sessionsOf(supervisor), []);
@@ -333,7 +333,7 @@ test('status answers at once during a start while credentials waits for it', asy
   await flush();
   assert.deepEqual(await supervisor.handle({ op: 'status', session: 'a' }), { ok: true, state: 'starting' });
   let answered = null;
-  const credentials = supervisor.handle({ op: 'credentials', session: 'a' }).then((response) => {
+  const credentials = supervisor.handle({ op: 'credentials', session: 'a', until: FAR }).then((response) => {
     answered = response;
   });
   await flush();
@@ -346,10 +346,10 @@ test('status answers at once during a start while credentials waits for it', asy
 test('credentials return the start credentials without a launch', async () => {
   const { startOf, supervisor, runtime } = setup();
   const started = await startOf('a');
-  assert.deepEqual(await supervisor.handle({ op: 'credentials', session: 'a' }), started);
-  assert.equal((await supervisor.handle({ op: 'credentials', session: 'nobody' })).error, 'UNKNOWN');
+  assert.deepEqual(await supervisor.handle({ op: 'credentials', session: 'a', until: FAR }), started);
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'nobody', until: FAR })).error, 'UNKNOWN');
   await supervisor.handle({ op: 'stop', session: 'a' });
-  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a' })).error, 'ENDED');
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: FAR })).error, 'ENDED');
   assert.deepEqual(runtime.calls, ['launch 0', 'teardown 0']);
 });
 
@@ -392,4 +392,25 @@ test('a start whose state cannot be recorded fails before any launch and frees i
   broken = false;
   assert.equal((await startOf('a')).uid, 62000);
   assert.deepEqual(saved, [1]);
+});
+
+test('start, renew and credentials refuse an authorization that has already expired, and the last two stop the session', async () => {
+  const { startOf, supervisor, runtime, advance } = setup();
+  assert.equal((await startOf('late', { until: 1_000 })).error, 'EXPIRED');
+  assert.deepEqual(runtime.calls, []);
+  await startOf('a');
+  await startOf('b');
+  advance(10_000);
+  assert.equal((await supervisor.handle({ op: 'renew', session: 'a', until: 11_000 })).error, 'EXPIRED');
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'b', until: 5_000 })).error, 'EXPIRED');
+  assert.deepEqual((await supervisor.handle({ op: 'list' })).sessions, []);
+  assert.deepEqual(runtime.calls, ['launch 0', 'launch 1', 'teardown 0', 'teardown 1']);
+  assert.equal((await startOf('a')).error, 'ENDED');
+});
+
+test('credentials report when the session started', async () => {
+  const { startOf, supervisor, advance } = setup();
+  await startOf('a');
+  advance(5_000);
+  assert.equal((await supervisor.handle({ op: 'credentials', session: 'a', until: FAR })).startedAt, 1_000);
 });

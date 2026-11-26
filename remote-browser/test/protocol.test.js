@@ -49,7 +49,7 @@ test('session ids are limited to 64 safe characters', () => {
 test('renew, status, credentials, stop, list and ready keep only what they need', () => {
   assert.deepEqual(parseRequest('{"op":"renew","session":"s1","until":5000,"extra":1}'), { op: 'renew', session: 's1', until: 5000 });
   assert.deepEqual(parseRequest('{"op":"status","session":"s1","until":5000}'), { op: 'status', session: 's1' });
-  assert.deepEqual(parseRequest('{"op":"credentials","session":"s1"}'), { op: 'credentials', session: 's1' });
+  assert.deepEqual(parseRequest('{"op":"credentials","session":"s1","until":5000}'), { op: 'credentials', session: 's1', until: 5000 });
   assert.deepEqual(parseRequest('{"op":"stop","session":"s1"}'), { op: 'stop', session: 's1' });
   assert.deepEqual(parseRequest('{"op":"list","session":"ignored"}'), { op: 'list' });
   assert.deepEqual(parseRequest('{"op":"ready"}'), { op: 'ready' });
@@ -58,10 +58,11 @@ test('renew, status, credentials, stop, list and ready keep only what they need'
   rejects('{"op":"credentials","session":"a b"}');
 });
 
-test('start and renew require until as a positive integer', () => {
+test('start, renew and credentials require until as a positive integer', () => {
   for (const until of [undefined, null, '5000', 0, -1, 1.5]) {
     rejects(start({ until }));
     rejects(JSON.stringify({ op: 'renew', session: 's1', until }));
+    rejects(JSON.stringify({ op: 'credentials', session: 's1', until }));
   }
 });
 
