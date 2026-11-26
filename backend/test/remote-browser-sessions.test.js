@@ -196,7 +196,7 @@ async function buildSnapshot() {
     };
 }
 
-async function reset({ maxSessions = 5, maxPerUser = 5, keepAliveMin = 15 } = {}) {
+async function reset({ maxSessions = 5, maxPerUser = 5, keepAliveMin = 15, startPage = '' } = {}) {
 
     rb._internal.resetForTest();
     table.rows.clear();
@@ -222,7 +222,7 @@ async function reset({ maxSessions = 5, maxPerUser = 5, keepAliveMin = 15 } = {}
     settings.remote_access_nb = JSON.stringify(WEB_IDS);
     settings.remote_access_web_peer = JSON.stringify({ id: 'web-gw', ip: '100.92.0.7' });
     ra._internal.setManagedForTest(WEB_IDS);
-    const saved = { enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions, maxPerUser, keepAliveMin } };
+    const saved = { enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions, maxPerUser, keepAliveMin, startPage } };
     settings.remote_access_config = JSON.stringify(saved);
     ra._internal.setConfigForTest(saved);
     ra.invalidateSnapshot();
@@ -311,6 +311,12 @@ test('a closed gate or no capacity: no session, and nothing held', async () => {
     await rb.createWebSession(USER, {}, '');
     await rejects(rb.createWebSession(USER, {}, ''), 429, 'BROWSER_CAPACITY');
     assert.equal([...table.rows.values()].filter(r => r.state !== 'ended').length, 1);
+});
+
+test('a new browser opens on the start page the administrator chose', async () => {
+    await reset({ startPage: 'https://portal.example.com/login' });
+    await rb.createWebSession(USER, {}, '');
+    assert.equal(sup.requests.find(r => r.op === 'start').startPage, 'https://portal.example.com/login');
 });
 
 test('a user at the per-user limit opens no new browser, while others still can', async () => {

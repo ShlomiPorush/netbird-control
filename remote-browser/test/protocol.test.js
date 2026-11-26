@@ -8,7 +8,7 @@ const start = (fields) => JSON.stringify({ op: 'start', session: 'abc', width: 1
 const rejects = (line, code = 'BAD_REQUEST') => assert.throws(() => parseRequest(line), (error) => error.code === code);
 
 test('a start request is parsed with its screen and scale', () => {
-  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000 });
+  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000, startPage: '' });
 });
 
 test('the screen is capped at 1920x1080 and raised to the minimum', () => {
@@ -86,4 +86,13 @@ test('a slot pairs a display uid, a Chromium uid, a display and a VNC port', () 
   assert.throws(() => slotIds(1000), RangeError);
   assert.throws(() => slotIds(-1), RangeError);
   assert.throws(() => slotIds(1.5), RangeError);
+});
+
+test('a start page is an http or https address, never a switch, a file or a sign-in', () => {
+  assert.equal(parseRequest(start({ startPage: 'https://portal.example.com/login?a=1' })).startPage, 'https://portal.example.com/login?a=1');
+  assert.equal(parseRequest(start({ startPage: 'http://Example.com' })).startPage, 'http://example.com/');
+  assert.equal(parseRequest(start({ startPage: '' })).startPage, '');
+  for (const bad of ['--remote-debugging-port=9222', 'file:///etc/passwd', 'javascript:alert(1)', 'chrome://settings', 'https://user:pass@example.com/', 'example.com', 42, `https://example.com/${'a'.repeat(2048)}`]) {
+    assert.throws(() => parseRequest(start({ startPage: bad })), { code: 'BAD_REQUEST' });
+  }
 });

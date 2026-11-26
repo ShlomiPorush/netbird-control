@@ -97,7 +97,7 @@ const DEFAULTS = {
     ssh: { fontSize: 12, colorScheme: 'gray-black' },
     // networkId is set by the Choose Network actions only, groupId by resolving the chosen profile.
     createResources: { enabled: false, networkId: '', profileId: 0, groupId: '', max: 50 },
-    browser: { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15 },
+    browser: { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '' },
 };
 
 // What guacd 1.6 accepts (its built-in keymaps and terminal color schemes).
@@ -152,6 +152,16 @@ function normConfig(c) {
     };
 }
 
+function webStartPage(value) {
+    const text = String(value || '').trim();
+    if (!text || text.length > 2048) return '';
+    try {
+        const url = new URL(text);
+        if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.href.length > 2048) return '';
+        return url.href;
+    } catch { return ''; }
+}
+
 function normBrowser(v) {
     const x = v && typeof v === 'object' ? v : {};
     const d = DEFAULTS.browser;
@@ -162,6 +172,7 @@ function normBrowser(v) {
         maxSessions: clampInt(x.maxSessions, 1, 50, d.maxSessions),
         maxPerUser: clampInt(x.maxPerUser, 1, 10, d.maxPerUser),
         keepAliveMin: clampInt(x.keepAliveMin, 1, 120, d.keepAliveMin),
+        startPage: webStartPage(x.startPage),
     };
 }
 

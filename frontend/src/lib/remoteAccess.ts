@@ -34,6 +34,7 @@ export interface BrowserConfig {
   maxSessions: number;
   maxPerUser: number;
   keepAliveMin: number;
+  startPage: string;
 }
 
 export interface BrowserStatus {

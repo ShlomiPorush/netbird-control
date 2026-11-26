@@ -313,7 +313,10 @@ async function createWebSession(viewer, body, clientIp) {
     try {
         let started;
         try {
-            started = await supervisorRequest({ op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false, until: authorizedAt.getTime() + AUTH_GRACE_MS });
+            started = await supervisorRequest({
+                op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false, until: authorizedAt.getTime() + AUTH_GRACE_MS,
+                ...(config().browser.startPage ? { startPage: config().browser.startPage } : {}),
+            });
         } catch (e) {
             console.error('[remote-browser] start failed:', e.message);
             throw httpError(503, 'BROWSER_UNAVAILABLE');
@@ -1082,7 +1085,7 @@ let _health = null;
 async function getBrowserStatus() {
     const cfg = config();
     const out = {
-        enabled: browserActive(), routerGroupId: cfg.browser.routerGroupId, maxSessions: cfg.browser.maxSessions, maxPerUser: cfg.browser.maxPerUser, keepAliveMin: cfg.browser.keepAliveMin,
+        enabled: browserActive(), routerGroupId: cfg.browser.routerGroupId, maxSessions: cfg.browser.maxSessions, maxPerUser: cfg.browser.maxPerUser, keepAliveMin: cfg.browser.keepAliveMin, startPage: cfg.browser.startPage,
         enrolled: false, online: false, ready: false, code: '', reason: '', peer: null,
         sessions: { active: 0, detached: 0, total: 0 },
     };

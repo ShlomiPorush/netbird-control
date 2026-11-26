@@ -9,6 +9,7 @@ const SLOT_COUNT = 1000;
 const DISPLAY_UID_BASE = 61000;
 const CHROMIUM_UID_BASE = 62000;
 const VNC_PORT_BASE = 5900;
+const START_PAGE_MAX = 2048;
 
 class RequestError extends Error {
   constructor(code, message) {
@@ -42,6 +43,16 @@ function screenSize(width, height) {
   };
 }
 
+function startPage(value) {
+  if (value === undefined || value === '') return '';
+  const fail = () => { throw new RequestError('BAD_REQUEST', `startPage must be an http or https address of at most ${START_PAGE_MAX} characters.`); };
+  if (typeof value !== 'string' || value.length > START_PAGE_MAX) fail();
+  let url;
+  try { url = new URL(value); } catch { fail(); }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.href.length > START_PAGE_MAX) fail();
+  return url.href;
+}
+
 function scaleFactor(dpi) {
   const raw = positiveInteger(dpi, 'dpi') / BASE_DPI;
   return Math.round(clamp(raw, SCALE.min, SCALE.max) * 100) / 100;
@@ -69,6 +80,7 @@ function parseRequest(line) {
         scale: scaleFactor(request.dpi),
         terminal: request.terminal,
         until: positiveInteger(request.until, 'until'),
+        startPage: startPage(request.startPage),
       };
     }
     case 'renew':

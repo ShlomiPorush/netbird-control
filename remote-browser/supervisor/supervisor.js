@@ -64,7 +64,7 @@ class Supervisor {
     return result;
   }
 
-  async start({ session, width, height, scale, terminal, until }) {
+  async start({ session, width, height, scale, terminal, until, startPage = '' }) {
     if (terminal) return failure('TERMINAL', 'The session has ended and cannot start again.');
     if (this.expired(until)) return expiredFailure();
     if (this.tombstones.has(session)) return failure('ENDED', 'The session has ended and cannot start again.');
@@ -103,6 +103,7 @@ class Supervisor {
         width,
         height,
         scale,
+        startPage,
         onExit: (reason) => this.ended(session, record, reason),
       });
       record.password = password;

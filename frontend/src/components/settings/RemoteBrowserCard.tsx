@@ -8,7 +8,7 @@ import { Badge, Button, Card, CopyButton, Field, Input, Modal, SelectMenu, type 
 import { StepRow } from './LaunchNetworkPanel';
 import { Toggle } from './NetbirdFields';
 
-const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15 };
+const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '' };
 const DEFAULT_ROUTER_GROUP = 'Office Peers';
 const MAX_SESSIONS = { min: 1, max: 50 };
 const MAX_PER_USER = { min: 1, max: 10 };
@@ -16,6 +16,14 @@ const KEEP_ALIVE = { min: 1, max: 120 };
 const muted = 'text-sm text-nb-gray-500 dark:text-nb-gray-400';
 
 const inRange = (value: string, r: { min: number; max: number }) => /^\d+$/.test(value) && Number(value) >= r.min && Number(value) <= r.max;
+const validStartPage = (value: string) => {
+  const text = value.trim();
+  if (!text) return true;
+  try {
+    const url = new URL(text);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password && url.href.length <= 2048;
+  } catch { return false; }
+};
 
 function gatewayState(st: BrowserStatus | undefined, loading: boolean): { tone: 'ok' | 'warn' | 'bad' | 'unknown'; label: string; detail?: string } {
   if (!st) return { tone: 'unknown', label: loading ? 'Checking…' : 'Status Unavailable' };
@@ -47,7 +55,7 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
   const [modalError, setModalError] = useState('');
   const [setupKey, setSetupKey] = useState('');
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', maxPerUser: '', keepAliveMin: '' });
+  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', maxPerUser: '', keepAliveMin: '', startPage: '' });
 
   const groups = groupsQ.data || [];
   const groupOptions: SelectOption[] = useMemo(() => groups
@@ -82,15 +90,15 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
 
   const openEditor = () => {
     const preset = saved.routerGroupId || groups.find((g) => g.name === DEFAULT_ROUTER_GROUP)?.id || '';
-    setDraft({ routerGroupId: preset, maxSessions: String(saved.maxSessions), maxPerUser: String(saved.maxPerUser), keepAliveMin: String(saved.keepAliveMin) });
+    setDraft({ routerGroupId: preset, maxSessions: String(saved.maxSessions), maxPerUser: String(saved.maxPerUser), keepAliveMin: String(saved.keepAliveMin), startPage: saved.startPage || '' });
     setModalError('');
     setEditing(true);
   };
-  const draftValid = !!draft.routerGroupId && inRange(draft.maxSessions, MAX_SESSIONS) && inRange(draft.maxPerUser, MAX_PER_USER) && inRange(draft.keepAliveMin, KEEP_ALIVE);
+  const draftValid = !!draft.routerGroupId && inRange(draft.maxSessions, MAX_SESSIONS) && inRange(draft.maxPerUser, MAX_PER_USER) && inRange(draft.keepAliveMin, KEEP_ALIVE) && validStartPage(draft.startPage);
   const saveDraft = async () => {
     if (!draftValid) return;
     setBusy('save'); setModalError('');
-    const message = await store({ ...saved, routerGroupId: draft.routerGroupId, maxSessions: Number(draft.maxSessions), maxPerUser: Number(draft.maxPerUser), keepAliveMin: Number(draft.keepAliveMin) });
+    const message = await store({ ...saved, routerGroupId: draft.routerGroupId, maxSessions: Number(draft.maxSessions), maxPerUser: Number(draft.maxPerUser), keepAliveMin: Number(draft.keepAliveMin), startPage: draft.startPage.trim() });
     setBusy('');
     if (message) setModalError(message); else setEditing(false);
   };
@@ -174,6 +182,9 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
         <div className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
           A browser keeps running {saved.keepAliveMin} minute{saved.keepAliveMin === 1 ? '' : 's'} after its user disconnects.
         </div>
+        <div className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400 break-all">
+          {saved.startPage ? <>New browsers open <span className="font-medium text-nb-gray-700 dark:text-nb-gray-200">{saved.startPage}</span></> : 'New browsers open a blank page.'}
+        </div>
       </StepRow>
 
       {error && <p role="alert" className="border-t border-nb-gray-100 dark:border-nb-gray-900 px-4 py-3 sm:px-5 text-sm text-red-500 break-words">{error}</p>}
@@ -217,6 +228,10 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
                 onChange={(e) => setDraft((d) => ({ ...d, keepAliveMin: e.target.value.replace(/\D/g, '') }))} />
             </Field>
           </div>
+          <Field label="Start Page" hint="The page a new browser opens on. Leave it empty for a blank page.">
+            <Input inputMode="url" placeholder="https://portal.example.com" value={draft.startPage} aria-invalid={!validStartPage(draft.startPage) || undefined}
+              onChange={(e) => setDraft((d) => ({ ...d, startPage: e.target.value }))} />
+          </Field>
           {modalError && <p role="alert" className="text-sm text-red-500 break-words">{modalError}</p>}
         </div>
       </Modal>

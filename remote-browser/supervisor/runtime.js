@@ -183,7 +183,7 @@ function xvncArgs({ display, port, dir, width, height }) {
   ];
 }
 
-async function launch({ ids, width, height, scale, onExit }) {
+async function launch({ ids, width, height, scale, startPage = '', onExit }) {
   const { display, port, displayUid, chromiumUid } = ids;
   const [displayDir, chromiumDir] = sessionDirs(ids);
   xFiles(display).forEach(removeIfPresent);
@@ -219,6 +219,7 @@ async function launch({ ids, width, height, scale, onExit }) {
     '--password-store=basic',
     `--force-device-scale-factor=${scale}`,
     `--disk-cache-size=${DISK_CACHE_BYTES}`,
+    ...(startPage ? [startPage] : []),
   ], {
     DISPLAY: `:${display}`,
     XAUTHORITY: path.join(chromiumDir.dir, 'xauth'),
