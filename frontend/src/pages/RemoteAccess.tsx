@@ -476,14 +476,9 @@ export default function RemoteAccess() {
       {sessions.count > 0 && (
         <div className={cn(FLOW_NOTICE, 'flex flex-wrap items-center gap-x-3.5 gap-y-3 p-3.5 sm:pr-4')}>
           <FlowTile icon={<MonitorPlay size={19} />} />
-          <div className="min-w-0 flex-1 basis-40">
-            <p className="text-[0.95rem] font-bold text-nb-gray-900 dark:text-nb-gray-50">
-              {sessions.count} {sessions.count === 1 ? 'Session' : 'Sessions'} Open
-            </p>
-            <p className="text-[0.8rem] leading-snug text-nb-gray-500 dark:text-nb-gray-400">
-              New ones open next to {sessions.count === 1 ? 'it' : 'them'}.
-            </p>
-          </div>
+          <p className="min-w-0 flex-1 basis-32 text-[0.95rem] font-bold text-nb-gray-900 dark:text-nb-gray-50">
+            {sessions.count} {sessions.count === 1 ? 'Session' : 'Sessions'} Open
+          </p>
           <Button size="sm" variant="primary" className="ml-auto shrink-0" onClick={sessions.show}>
             Return To Sessions <ArrowRight size={14} />
           </Button>
