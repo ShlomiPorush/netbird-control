@@ -10,7 +10,7 @@ This folder holds two kinds of Compose files:
 
 | File | Runs on | What it starts |
 |---|---|---|
-| [`docker-compose-remote-access.yml`](#docker-compose-remote-accessyml) | The NetBird Control host, with the main compose file | The Browser Gateways for RDP and SSH in the browser |
+| [`docker-compose-remote-access.yml`](#docker-compose-remote-accessyml) | The NetBird Control host, with the main compose file | The Browser Gateways for RDP and SSH in the browser, and the remote browser for web sessions |
 | [`remote-access-isolation`](remote-access-isolation) | The NetBird Control host, on the host (not Docker) | The firewall rules that keep the Browser Gateways away from internal networks, applied before Docker starts |
 | [`docker-compose-netbird.yml`](#docker-compose-netbirdyml) | A NetBird VM | A NetBird routing peer on the host network |
 | [`docker-compose-exit-node.yml`](#docker-compose-exit-nodeyml) | A NetBird VM | A NetBird exit node, isolated from the internal network |
@@ -37,6 +37,34 @@ in `.env`, created in **Settings → Remote Access**. It also needs the host iso
 the command that starts the gateways, and the security model are in
 [docs/remote-access.md](../docs/remote-access.md#set-it-up). Run that command from the repository
 root, so Compose reads `.env` from there.
+
+### Web Sessions (Profile `remote-browser`)
+
+Web sessions open a remote Chromium in the browser, for the public internet only. The
+`remote-browser` profile adds four containers, which all share one network namespace:
+
+- **`remote-browser-gateway`:** a NetBird peer whose only route is NetBird's `0.0.0.0/0` route to
+  your routing peers, so sites see the office address. Before NetBird starts, its start script
+  locks the namespace: each session's Chromium may only leave through NetBird, and never to a
+  private or reserved address.
+- **`remote-browser`:** the sessions. Each one runs Xvnc and Chromium under their own user IDs,
+  with Chromium's sandbox on and downloads, file access, printing and developer tools turned off.
+- **`remote-browser-guacd`:** guacd for the sessions, reachable only by the app.
+- **`remote-browser-collector`:** records each new connection a session opens, for the app's
+  event log.
+
+```sh
+docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-browser up -d
+```
+
+It needs `REMOTE_BROWSER_GATEWAY_SETUP_KEY` in `.env`, created in **Settings → Remote Access**, and
+`TAG`, because the `nbcontrol-browser` image runs the same release as the app. Run it from the
+repository root: the browser container reads `remote-browser/seccomp.json` and
+`remote-browser/resolv.conf` from there.
+
+Start, update and recreate the four containers together, with the command above. A container that
+shares the gateway's network keeps the gateway container it was created with, so recreating the
+gateway alone leaves the other three stopped.
 
 ## docker-compose-netbird.yml
 
