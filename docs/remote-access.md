@@ -290,12 +290,13 @@ check reads the new resource.
 
 ## Service status
 
-The connect card ends with one line: **NetBird** and **Browser Gateways**, each **Online**,
-**Offline** or **Unknown**, with a refresh button that turns while it checks. Browser Gateways is one
-item for both gateways (the names gateway counts only when it is set up): **Online** when every one
-is up, **Offline** when every one is down, **Partly Online** when some are up.
-`GET /api/remote-access/health` answers `{ netbird, gateway, namesGateway? }` (each `up`, `down` or
-`unknown`) and nothing else. It is refused to a user blocked in NetBird.
+The connect card ends with one line: **NetBird**, **Gateways** and, while web sessions are on,
+**Browser**, each **Online**, **Offline** or **Unknown**, with a refresh button that turns while it
+checks. Gateways is one item for the RDP and SSH gateways (the names gateway counts only when it is
+set up): **Online** when every one is up, **Offline** when every one is down, **Partly Online** when
+some are up. Browser is the remote browser's readiness gate.
+`GET /api/remote-access/health` answers `{ netbird, gateway, namesGateway?, browserGateway? }` (each
+`up`, `down` or `unknown`) and nothing else. It is refused to a user blocked in NetBird.
 
 - **NetBird**: is NetBird reachable? One request to the main account's NetBird URL, to an API path
   that needs a sign-in, sent **without** the token. Any answer below 500 (401 included) is up: NetBird

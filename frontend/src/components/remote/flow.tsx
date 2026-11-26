@@ -11,6 +11,11 @@ export const FLOW_INPUT = 'h-12! w-full min-w-0 rounded-lg! text-[0.95rem]';
 export const FLOW_BUTTON = 'h-11! w-full rounded-lg! text-[0.95rem] font-semibold';
 /** The quiet way out under the main button (Cancel). */
 export const FLOW_QUIET = 'h-9! w-full rounded-lg! text-sm';
+export const FLOW_NOTICE = cn(
+  'mb-4 w-full overflow-hidden rounded-2xl border border-nb-gray-100 bg-white',
+  'shadow-[0_1px_2px_rgba(0,0,0,0.04),0_12px_32px_-18px_rgba(0,0,0,0.2)]',
+  'dark:border-nb-gray-900 dark:bg-nb-gray-940 dark:shadow-[0_12px_32px_-18px_rgba(0,0,0,0.7)]',
+);
 
 export function FlowCard({ children, className }: { children: ReactNode; className?: string }) {
   return (

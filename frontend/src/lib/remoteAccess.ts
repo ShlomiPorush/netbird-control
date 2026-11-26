@@ -64,7 +64,7 @@ export interface RemoteAddNetwork { id: string; name: string }
 
 export type ServiceState = 'up' | 'down' | 'unknown';
 /** The service status line; namesGateway only when that gateway is set up. */
-export interface RemoteHealth { netbird: ServiceState; gateway: ServiceState; namesGateway?: ServiceState }
+export interface RemoteHealth { netbird: ServiceState; gateway: ServiceState; namesGateway?: ServiceState; browserGateway?: ServiceState }
 
 export interface RemoteCheck {
   steps: RemoteStep[];

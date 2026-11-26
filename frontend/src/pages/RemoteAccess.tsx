@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { CheckCircle2, Globe, Loader2, Lock, MonitorPlay, Plus, Terminal, X as XIcon, XCircle } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Globe, Loader2, Lock, MonitorPlay, Plus, Terminal, X as XIcon, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
 import { apiText, remoteApi, cleanAddressInput, type RemoteHealth, type RemoteInfo, type RemoteProtocol, type RemoteSession, type TargetProtocol } from '@/lib/remoteAccess';
 import { cn } from '@/lib/cn';
 import { Button, Field, Input, LoadingState, PasswordInput, Textarea } from '@/components/ui';
 import { PROTOCOL_ICON, WEB_ENDED_TEXT, WEB_SESSIONS_KEY, WEB_TITLE, closesIn, isWebEnded, launchScreenSize, minutesLeft, sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
-import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from '@/components/remote/flow';
+import { FLOW_BUTTON, FLOW_INPUT, FLOW_NOTICE, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from '@/components/remote/flow';
 import { ServiceStatus } from '@/components/remote/ServiceStatus';
 import { AddResourceModal } from '@/components/networks/AddResourceModal';
 import {
@@ -79,7 +79,11 @@ export default function RemoteAccess() {
   const healthHidden = health.error instanceof ApiError && health.error.status === 403;
   // A refresh that failed shows every part as unknown, not the earlier answer.
   const healthShown: RemoteHealth | null = health.isError
-    ? { netbird: 'unknown', gateway: 'unknown', ...(health.data?.namesGateway ? { namesGateway: 'unknown' as const } : {}) }
+    ? {
+      netbird: 'unknown', gateway: 'unknown',
+      ...(health.data?.namesGateway ? { namesGateway: 'unknown' as const } : {}),
+      ...(health.data?.browserGateway ? { browserGateway: 'unknown' as const } : {}),
+    }
     : health.data || null;
   const sessions = useRemoteSessions();
   const [protocol, setProtocol] = useState<RemoteProtocol>('rdp');
@@ -470,12 +474,19 @@ export default function RemoteAccess() {
       {launchBanner}
 
       {sessions.count > 0 && (
-        <div className="mb-4 flex items-center gap-3 rounded-xl border border-netbird/40 bg-netbird/5 px-4 py-3">
-          <MonitorPlay size={18} className="text-netbird shrink-0" />
-          <span className="text-sm text-nb-gray-700 dark:text-nb-gray-200">
-            {sessions.count} session{sessions.count === 1 ? ' is' : 's are'} open. A new connection opens next to {sessions.count === 1 ? 'it' : 'them'}.
-          </span>
-          <Button size="sm" className="ml-auto" onClick={sessions.show}>Return To Sessions</Button>
+        <div className={cn(FLOW_NOTICE, 'flex flex-wrap items-center gap-x-3.5 gap-y-3 p-3.5 sm:pr-4')}>
+          <FlowTile icon={<MonitorPlay size={19} />} />
+          <div className="min-w-0 flex-1 basis-40">
+            <p className="text-[0.95rem] font-bold text-nb-gray-900 dark:text-nb-gray-50">
+              {sessions.count} {sessions.count === 1 ? 'Session' : 'Sessions'} Open
+            </p>
+            <p className="text-[0.8rem] leading-snug text-nb-gray-500 dark:text-nb-gray-400">
+              New ones open next to {sessions.count === 1 ? 'it' : 'them'}.
+            </p>
+          </div>
+          <Button size="sm" variant="primary" className="ml-auto shrink-0" onClick={sessions.show}>
+            Return To Sessions <ArrowRight size={14} />
+          </Button>
         </div>
       )}
 
@@ -488,7 +499,10 @@ export default function RemoteAccess() {
           : <h1 className="sr-only">Remote Access</h1>}
 
         <form ref={formRef} onSubmit={start} className="flex flex-col">
-          <fieldset disabled={locked} className={cn('mb-4 grid gap-1 rounded-xl bg-nb-gray-100 p-1 dark:bg-nb-gray-920', browserOn ? 'grid-cols-3' : 'grid-cols-2')}>
+          <fieldset disabled={locked} className={cn(
+            'mb-4 grid gap-1 rounded-xl bg-netbird-50 p-1 ring-1 ring-netbird-100 ring-inset dark:bg-nb-gray-920 dark:ring-nb-gray-900',
+            browserOn ? 'grid-cols-3' : 'grid-cols-2',
+          )}>
             <legend className="sr-only">Protocol</legend>
             {(browserOn ? ['rdp', 'ssh', 'web'] as const : ['rdp', 'ssh'] as const).map((p) => {
               const Icon = PROTOCOL_ICON[p];
@@ -496,15 +510,10 @@ export default function RemoteAccess() {
               return (
                 <label key={p} className={cn(
                   'flex h-10 cursor-pointer items-center justify-center gap-2 rounded-lg text-sm font-semibold transition-colors',
-                  // The chosen one is styled from state: the dark-mode gray text remap (index.css,
-                  // !important) would otherwise beat its colors, the forced ones included.
-                  // The chosen one also gets an edge with at least 3:1 contrast, not only a lighter fill.
                   on
-                    ? 'bg-white text-nb-gray-900 shadow-sm ring-1 ring-nb-gray-400 dark:bg-nb-gray-800 dark:text-white dark:ring-nb-gray-500'
-                    : 'text-nb-gray-600 hover:text-nb-gray-800 dark:text-nb-gray-400',
-                  // Forced colors (Windows High Contrast) drop the backgrounds: mark the choice with system colors.
+                    ? 'bg-white text-nb-gray-900 shadow-[0_1px_3px_rgba(229,83,17,0.22)] ring-1 ring-netbird-600 dark:bg-nb-gray-800 dark:text-white dark:ring-netbird-400'
+                    : 'text-nb-gray-600 hover:bg-white/60 hover:text-nb-gray-900 dark:text-nb-gray-400 dark:hover:bg-nb-gray-900',
                   on && 'forced-colors:forced-color-adjust-none forced-colors:bg-[Highlight]! forced-colors:text-[HighlightText]!',
-                  // An outline (not a shadow ring) so focus stays visible in forced colors too.
                   'has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-netbird-700 dark:has-focus-visible:outline-netbird-400 forced-colors:has-focus-visible:outline-[CanvasText]!',
                   'has-disabled:cursor-not-allowed has-disabled:opacity-60',
                 )}>
@@ -701,20 +710,20 @@ function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
   };
 
   return (
-    <div className="mb-4 overflow-hidden rounded-xl border border-netbird/40 bg-netbird/5">
+    <div className={FLOW_NOTICE}>
       {shown.map((s, i) => {
         const left = minutesLeft(s.expiresAt, now);
         const ago = openedAgo(s.createdAt, now);
         const ending = s.state === 'ending';
         return (
-          <div key={s.sessionId} className={cn('px-4 py-3', i > 0 && 'border-t border-netbird/20')}>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-              <Globe size={18} className="shrink-0 text-netbird" />
+          <div key={s.sessionId} className={cn('p-3.5 sm:pr-4', i > 0 && 'border-t border-nb-gray-100 dark:border-nb-gray-900')}>
+            <div className="flex flex-wrap items-center gap-x-3.5 gap-y-3">
+              <FlowTile icon={<Globe size={19} />} />
               <div className="min-w-0 flex-1 basis-48">
-                <p className="text-sm font-semibold text-nb-gray-900 dark:text-nb-gray-50">
+                <p className="text-[0.95rem] font-bold text-nb-gray-900 dark:text-nb-gray-50">
                   {shown.length > 1 && ago ? `Browser Opened ${ago}` : 'Your Browser Is Still Open'}
                 </p>
-                <p className="text-[0.8rem] leading-snug text-nb-gray-600 dark:text-nb-gray-400">
+                <p className="text-[0.8rem] leading-snug text-nb-gray-500 dark:text-nb-gray-400">
                   {ending ? 'Closing…' : s.state === 'active' ? 'Open in another window.' : `Disconnected. ${left === null ? 'It keeps running for a while.' : `${closesIn(left)}.`}`}
                 </p>
               </div>
