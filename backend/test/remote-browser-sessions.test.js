@@ -196,7 +196,7 @@ async function buildSnapshot() {
     };
 }
 
-async function reset({ maxSessions = 5, keepAliveMin = 15 } = {}) {
+async function reset({ maxSessions = 5, maxPerUser = 5, keepAliveMin = 15 } = {}) {
 
     rb._internal.resetForTest();
     table.rows.clear();
@@ -222,7 +222,7 @@ async function reset({ maxSessions = 5, keepAliveMin = 15 } = {}) {
     settings.remote_access_nb = JSON.stringify(WEB_IDS);
     settings.remote_access_web_peer = JSON.stringify({ id: 'web-gw', ip: '100.92.0.7' });
     ra._internal.setManagedForTest(WEB_IDS);
-    const saved = { enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions, keepAliveMin } };
+    const saved = { enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions, maxPerUser, keepAliveMin } };
     settings.remote_access_config = JSON.stringify(saved);
     ra._internal.setConfigForTest(saved);
     ra.invalidateSnapshot();
@@ -311,6 +311,16 @@ test('a closed gate or no capacity: no session, and nothing held', async () => {
     await rb.createWebSession(USER, {}, '');
     await rejects(rb.createWebSession(USER, {}, ''), 429, 'BROWSER_CAPACITY');
     assert.equal([...table.rows.values()].filter(r => r.state !== 'ended').length, 1);
+});
+
+test('a user at the per-user limit opens no new browser, while others still can', async () => {
+    await reset({ maxSessions: 5, maxPerUser: 1 });
+    const first = await rb.createWebSession(USER, {}, '');
+    await rejects(rb.createWebSession(USER, {}, ''), 429, 'BROWSER_USER_LIMIT');
+    await rb.createWebSession(OTHER, {}, '');
+    assert.equal([...table.rows.values()].filter(r => r.state !== 'ended' && r.user_id === USER.user_id).length, 1);
+    table.rows.get(first.sessionId).state = 'ended';
+    await rb.createWebSession(USER, {}, '');
 });
 
 test('the connection check reports each web step the way the page shows it, and opens nothing', async () => {

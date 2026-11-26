@@ -15,7 +15,7 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   Access page opens Chromium in the portal. Websites see the office's address, because the browser
   goes out through a route the app creates through the routing peers you choose; it never reaches
   private or internal addresses. A disconnected browser keeps running for 15 minutes (a setting) and
-  can be resumed. Downloads, uploads, printing and developer tools are blocked, and each new
+  can be resumed. Each user may have one browser open at a time (a setting). Downloads, uploads, printing and developer tools are blocked, and each new
   connection is recorded. Anyone with the Remote Access permission may open one.
   Pasting Hebrew text is not supported yet. Needs the new `remote-browser` Compose profile and
   image: setup in docs/remote-access.md.

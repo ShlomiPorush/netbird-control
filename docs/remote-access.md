@@ -713,6 +713,10 @@ Anyone who may use RDP and SSH: sign-in, a live and unblocked NetBird user, and 
 permission. The user's own devices and their Exit Node access play no part, because the browser goes
 out through its own gateway. The check runs when the session opens and every minute after.
 
+Each user may have one browser open at a time, and all users together five. Both limits are settings
+(**Browsers Per User**, 1 to 10, and **Browsers At A Time**, 1 to 50). A disconnected browser that
+still runs counts, so a user at the limit resumes it or closes it first.
+
 ### Disconnect, resume and close
 
 - Closing the tab, refreshing the page or losing the network **disconnects** the browser: it keeps

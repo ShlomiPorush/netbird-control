@@ -52,6 +52,7 @@ const MESSAGES = {
     GATEWAY_NOT_READY: "The browser gateway isn't ready, so web sessions can't open right now. Try again later, or tell an administrator.",
     GUACD_UNREACHABLE: "NetBird Control can't reach the remote browser's display service, so web sessions can't open right now. Try again later, or tell an administrator.",
     BROWSER_CAPACITY: 'Every web session is in use right now. Try again later.',
+    BROWSER_USER_LIMIT: 'You already have the most browsers you may open. Resume one, or close one to open a new one.',
     BROWSER_UNAVAILABLE: "The remote browser isn't answering right now. Try again in a minute, or tell an administrator.",
     RECORD_FAILED: "Remote Access couldn't record the session, so it wasn't opened. Try again.",
     SESSION_NOT_FOUND: 'This web session was not found.',
@@ -220,22 +221,24 @@ function screen(body) {
 
 const fitSize = (w, h) => (w > 0 && h > 0 ? [Math.min(Math.floor(w), SCREEN.maxWidth), Math.min(Math.floor(h), SCREEN.maxHeight)] : null);
 
-async function reserveSlot(row, max) {
+async function reserveSlot(row, { max, perUser }) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         await client.query('SELECT pg_advisory_xact_lock($1)', [CAPACITY_LOCK]);
-        const n = Number((rowsOf(await client.query(`SELECT COUNT(*)::int AS n FROM browser_sessions WHERE state <> 'ended'`))[0] || {}).n) || 0;
-        if (n >= max) {
+        const counts = rowsOf(await client.query(
+            `SELECT COUNT(*)::int AS n, (COUNT(*) FILTER (WHERE user_id = $1))::int AS mine FROM browser_sessions WHERE state <> 'ended'`, [row.userId]))[0] || {};
+        const full = (Number(counts.mine) || 0) >= perUser ? 'BROWSER_USER_LIMIT' : (Number(counts.n) || 0) >= max ? 'BROWSER_CAPACITY' : '';
+        if (full) {
             await client.query('ROLLBACK');
-            return false;
+            return full;
         }
         await client.query(
             `INSERT INTO browser_sessions (id, user_id, user_email, user_name, oid, client_ip, state, width, height, dpi, attachment, last_auth_ok_at, created_at)
              VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10, $11, NOW())`,
             [row.id, row.userId, row.userEmail, row.userName, row.oid, row.clientIp, row.width, row.height, row.dpi, row.attachment, row.authorizedAt]);
         await client.query('COMMIT');
-        return true;
+        return '';
     } catch (e) {
         await client.query('ROLLBACK').catch(() => { });
         throw e;
@@ -301,12 +304,12 @@ async function createWebSession(viewer, body, clientIp) {
         userId: viewer.user_id, userEmail: viewer.email || '', userName: viewer.name || '', oid: viewer.oid || '',
         clientIp: String(clientIp || ''), ...size,
     };
-    let reserved;
-    try { reserved = await reserveSlot(row, config().browser.maxSessions); } catch (e) {
+    let full;
+    try { full = await reserveSlot(row, { max: config().browser.maxSessions, perUser: config().browser.maxPerUser }); } catch (e) {
         console.error('[remote-browser] could not reserve a session:', e.message);
         throw httpError(503, 'RECORD_FAILED');
     }
-    if (!reserved) throw httpError(429, 'BROWSER_CAPACITY');
+    if (full) throw httpError(429, full);
     try {
         let started;
         try {
@@ -1079,7 +1082,7 @@ let _health = null;
 async function getBrowserStatus() {
     const cfg = config();
     const out = {
-        enabled: browserActive(), routerGroupId: cfg.browser.routerGroupId, maxSessions: cfg.browser.maxSessions, keepAliveMin: cfg.browser.keepAliveMin,
+        enabled: browserActive(), routerGroupId: cfg.browser.routerGroupId, maxSessions: cfg.browser.maxSessions, maxPerUser: cfg.browser.maxPerUser, keepAliveMin: cfg.browser.keepAliveMin,
         enrolled: false, online: false, ready: false, code: '', reason: '', peer: null,
         sessions: { active: 0, detached: 0, total: 0 },
     };

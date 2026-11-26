@@ -229,14 +229,14 @@ test('the web group keeps exactly the first enrolled peer; other members and eve
 
 test('the browser settings are normalized, clamped and merged', async () => {
     const norm = ra._internal.normConfig;
-    assert.deepEqual(norm({}).browser, { enabled: false, routerGroupId: '', maxSessions: 5, keepAliveMin: 15 });
-    assert.deepEqual(norm({ browser: { enabled: 1, routerGroupId: 'bad id!', maxSessions: 99, keepAliveMin: 0 } }).browser, { enabled: true, routerGroupId: '', maxSessions: 50, keepAliveMin: 1 });
+    assert.deepEqual(norm({}).browser, { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15 });
+    assert.deepEqual(norm({ browser: { enabled: 1, routerGroupId: 'bad id!', maxSessions: 99, maxPerUser: 0, keepAliveMin: 0 } }).browser, { enabled: true, routerGroupId: '', maxSessions: 50, maxPerUser: 1, keepAliveMin: 1 });
     assert.equal('browserGuacdHost' in norm({ browserGuacdHost: '10.0.0.1' }), false);
     assert.equal('browserGuacdPort' in norm({ browserGuacdPort: 1 }), false);
-    reset({ browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, keepAliveMin: 30 } });
-    ra._internal.setConfigForTest({ enabled: false, browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, keepAliveMin: 30 } });
+    reset({ browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } });
+    ra._internal.setConfigForTest({ enabled: false, browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } });
     const out = await ra.setRemoteAccessConfig({ browser: { keepAliveMin: 20 } });
-    assert.deepEqual(out.config.browser, { enabled: false, routerGroupId: 'g-office', maxSessions: 7, keepAliveMin: 20 });
+    assert.deepEqual(out.config.browser, { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 20 });
 });
 
 test('a new web setup key needs an empty web group, and revokes every still-valid key for that group first', async () => {

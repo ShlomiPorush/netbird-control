@@ -18,7 +18,10 @@ function browserTable() {
         const p = params;
         if (/^SELECT pg_advisory_xact_lock/.test(s) || /^(BEGIN|COMMIT|ROLLBACK)$/.test(s)) return { rows: [] };
         if (!/browser_sessions/.test(s)) return null;
-        if (/^SELECT COUNT\(\*\)::int AS n FROM browser_sessions WHERE state <> 'ended'$/.test(s)) return { rows: [{ n: [...rows.values()].filter(open).length }] };
+        if (/^SELECT COUNT\(\*\)::int AS n, \(COUNT\(\*\) FILTER \(WHERE user_id = \$1\)\)::int AS mine FROM browser_sessions WHERE state <> 'ended'$/.test(s)) {
+            const live = [...rows.values()].filter(open);
+            return { rows: [{ n: live.length, mine: live.filter(r => r.user_id === p[0]).length }] };
+        }
         if (/^INSERT INTO browser_sessions/.test(s)) {
             if (rows.has(p[0])) throw new Error('duplicate key');
             rows.set(p[0], {

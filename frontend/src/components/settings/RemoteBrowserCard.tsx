@@ -8,9 +8,10 @@ import { Badge, Button, Card, CopyButton, Field, Input, Modal, SelectMenu, type 
 import { StepRow } from './LaunchNetworkPanel';
 import { Toggle } from './NetbirdFields';
 
-const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, keepAliveMin: 15 };
+const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15 };
 const DEFAULT_ROUTER_GROUP = 'Office Peers';
 const MAX_SESSIONS = { min: 1, max: 50 };
+const MAX_PER_USER = { min: 1, max: 10 };
 const KEEP_ALIVE = { min: 1, max: 120 };
 const muted = 'text-sm text-nb-gray-500 dark:text-nb-gray-400';
 
@@ -46,7 +47,7 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
   const [modalError, setModalError] = useState('');
   const [setupKey, setSetupKey] = useState('');
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', keepAliveMin: '' });
+  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', maxPerUser: '', keepAliveMin: '' });
 
   const groups = groupsQ.data || [];
   const groupOptions: SelectOption[] = useMemo(() => groups
@@ -81,15 +82,15 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
 
   const openEditor = () => {
     const preset = saved.routerGroupId || groups.find((g) => g.name === DEFAULT_ROUTER_GROUP)?.id || '';
-    setDraft({ routerGroupId: preset, maxSessions: String(saved.maxSessions), keepAliveMin: String(saved.keepAliveMin) });
+    setDraft({ routerGroupId: preset, maxSessions: String(saved.maxSessions), maxPerUser: String(saved.maxPerUser), keepAliveMin: String(saved.keepAliveMin) });
     setModalError('');
     setEditing(true);
   };
-  const draftValid = !!draft.routerGroupId && inRange(draft.maxSessions, MAX_SESSIONS) && inRange(draft.keepAliveMin, KEEP_ALIVE);
+  const draftValid = !!draft.routerGroupId && inRange(draft.maxSessions, MAX_SESSIONS) && inRange(draft.maxPerUser, MAX_PER_USER) && inRange(draft.keepAliveMin, KEEP_ALIVE);
   const saveDraft = async () => {
     if (!draftValid) return;
     setBusy('save'); setModalError('');
-    const message = await store({ ...saved, routerGroupId: draft.routerGroupId, maxSessions: Number(draft.maxSessions), keepAliveMin: Number(draft.keepAliveMin) });
+    const message = await store({ ...saved, routerGroupId: draft.routerGroupId, maxSessions: Number(draft.maxSessions), maxPerUser: Number(draft.maxPerUser), keepAliveMin: Number(draft.keepAliveMin) });
     setBusy('');
     if (message) setModalError(message); else setEditing(false);
   };
@@ -168,7 +169,7 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
         <Button size="sm" onClick={openEditor} disabled={readonly || !!busy}>Change</Button>
       )}>
         <div className="text-sm text-nb-gray-700 dark:text-nb-gray-200">
-          Up to <b>{saved.maxSessions}</b> browser{saved.maxSessions === 1 ? '' : 's'} at a time
+          Up to <b>{saved.maxSessions}</b> browser{saved.maxSessions === 1 ? '' : 's'} at a time, <b>{saved.maxPerUser}</b> per user
         </div>
         <div className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
           A browser keeps running {saved.keepAliveMin} minute{saved.keepAliveMin === 1 ? '' : 's'} after its user disconnects.
@@ -206,6 +207,10 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
             <Field label="Browsers At A Time" hint="For all users together, 1 to 50.">
               <Input inputMode="numeric" value={draft.maxSessions} aria-invalid={!inRange(draft.maxSessions, MAX_SESSIONS) || undefined}
                 onChange={(e) => setDraft((d) => ({ ...d, maxSessions: e.target.value.replace(/\D/g, '') }))} />
+            </Field>
+            <Field label="Browsers Per User" hint="How many one user may have open, 1 to 10.">
+              <Input inputMode="numeric" value={draft.maxPerUser} aria-invalid={!inRange(draft.maxPerUser, MAX_PER_USER) || undefined}
+                onChange={(e) => setDraft((d) => ({ ...d, maxPerUser: e.target.value.replace(/\D/g, '') }))} />
             </Field>
             <Field label="Keep Running After Disconnect (Minutes)" hint="So the user can come back to it, 1 to 120.">
               <Input inputMode="numeric" value={draft.keepAliveMin} aria-invalid={!inRange(draft.keepAliveMin, KEEP_ALIVE) || undefined}

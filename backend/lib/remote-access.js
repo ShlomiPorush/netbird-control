@@ -97,7 +97,7 @@ const DEFAULTS = {
     ssh: { fontSize: 12, colorScheme: 'gray-black' },
     // networkId is set by the Choose Network actions only, groupId by resolving the chosen profile.
     createResources: { enabled: false, networkId: '', profileId: 0, groupId: '', max: 50 },
-    browser: { enabled: false, routerGroupId: '', maxSessions: 5, keepAliveMin: 15 },
+    browser: { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15 },
 };
 
 // What guacd 1.6 accepts (its built-in keymaps and terminal color schemes).
@@ -160,6 +160,7 @@ function normBrowser(v) {
         enabled: !!x.enabled,
         routerGroupId: /^[A-Za-z0-9_|:.@-]{1,200}$/.test(routerGroupId) ? routerGroupId : '',
         maxSessions: clampInt(x.maxSessions, 1, 50, d.maxSessions),
+        maxPerUser: clampInt(x.maxPerUser, 1, 10, d.maxPerUser),
         keepAliveMin: clampInt(x.keepAliveMin, 1, 120, d.keepAliveMin),
     };
 }

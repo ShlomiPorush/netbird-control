@@ -32,6 +32,7 @@ export interface BrowserConfig {
   enabled: boolean;
   routerGroupId: string;
   maxSessions: number;
+  maxPerUser: number;
   keepAliveMin: number;
 }
 

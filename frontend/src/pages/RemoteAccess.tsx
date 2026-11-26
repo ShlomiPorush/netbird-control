@@ -28,6 +28,7 @@ const WEB_FALLBACK: Record<string, string> = {
   BROWSER_DISABLED: 'Browser sessions are turned off. Ask an administrator.',
   GATEWAY_NOT_READY: "The browser service isn't ready. Try again in a few minutes, or tell an administrator.",
   BROWSER_CAPACITY: 'All browsers are in use right now. Try again in a few minutes.',
+  BROWSER_USER_LIMIT: 'You already have the most browsers you may open. Resume one, or close one to open a new one.',
 };
 const timezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 // While remote access is getting ready, ask again this often, for at most this long.
