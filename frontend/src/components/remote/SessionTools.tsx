@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import { createPortal } from 'react-dom';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { loadGuacamole, loadKeyboardLayout, type Guac } from '@/lib/remoteAccess';
+import { loadGuacamole, loadKeyboardLayout, type Guac, type RemoteProtocol } from '@/lib/remoteAccess';
 import type { ScreenApi } from './GuacScreen';
 
 // The session bar's tools: its menus, the special keys, the on-screen keyboard, the device
@@ -10,14 +10,14 @@ import type { ScreenApi } from './GuacScreen';
 
 const K = {
   ctrl: 0xffe3, alt: 0xffe9, shift: 0xffe1, win: 0xffeb, del: 0xffff, tab: 0xff09, esc: 0xff1b,
-  f4: 0xffc1, print: 0xff61,
+  f4: 0xffc1, f5: 0xffc2, print: 0xff61, left: 0xff51, right: 0xff53,
 };
 const ch = (c: string) => c.charCodeAt(0);
 
 interface SpecialKey { label: string; combo: string; keys: number[] }
 
 /** Key combinations a browser can't send itself (the local system takes them) or a phone has no key for. */
-export const SPECIAL_KEYS: Record<'rdp' | 'ssh', SpecialKey[]> = {
+export const SPECIAL_KEYS: Record<RemoteProtocol, SpecialKey[]> = {
   rdp: [
     { label: 'Security Options', combo: 'Ctrl+Alt+Del', keys: [K.ctrl, K.alt, K.del] },
     { label: 'Start Menu', combo: 'Win', keys: [K.win] },
@@ -35,6 +35,16 @@ export const SPECIAL_KEYS: Record<'rdp' | 'ssh', SpecialKey[]> = {
     { label: 'Clear Screen', combo: 'Ctrl+L', keys: [K.ctrl, ch('l')] },
     { label: 'Escape', combo: 'Esc', keys: [K.esc] },
     { label: 'Tab', combo: 'Tab', keys: [K.tab] },
+  ],
+  web: [
+    { label: 'Address Bar', combo: 'Ctrl+L', keys: [K.ctrl, ch('l')] },
+    { label: 'New Tab', combo: 'Ctrl+T', keys: [K.ctrl, ch('t')] },
+    { label: 'Close Tab', combo: 'Ctrl+W', keys: [K.ctrl, ch('w')] },
+    { label: 'Next Tab', combo: 'Ctrl+Tab', keys: [K.ctrl, K.tab] },
+    { label: 'Previous Tab', combo: 'Ctrl+Shift+Tab', keys: [K.ctrl, K.shift, K.tab] },
+    { label: 'Reload', combo: 'F5', keys: [K.f5] },
+    { label: 'Back', combo: 'Alt+Left', keys: [K.alt, K.left] },
+    { label: 'Forward', combo: 'Alt+Right', keys: [K.alt, K.right] },
   ],
 };
 
@@ -224,7 +234,7 @@ const ROW_KEYS = [
 ];
 
 export function KeyRow({ protocol, latched, onKey, onLatch }: {
-  protocol: 'rdp' | 'ssh'; latched: number[]; onKey: (keysym: number) => void; onLatch: (modifiers: number[]) => void;
+  protocol: RemoteProtocol; latched: number[]; onKey: (keysym: number) => void; onLatch: (modifiers: number[]) => void;
 }) {
   const keepKeyboardOpen = (e: ReactPointerEvent) => e.preventDefault();
   const key = 'flex h-9 min-w-0 max-w-16 flex-1 items-center justify-center rounded-lg text-[0.78rem] font-semibold text-nb-gray-200 ring-1 ring-inset ring-nb-gray-800 active:bg-nb-gray-800';

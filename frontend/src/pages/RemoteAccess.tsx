@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { CheckCircle2, Loader2, Lock, MonitorPlay, Plus, Terminal, X as XIcon, XCircle } from 'lucide-react';
+import { CheckCircle2, Globe, Loader2, Lock, MonitorPlay, Plus, Terminal, X as XIcon, XCircle } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { requestAccessLink } from '@/lib/requestAccess';
-import { apiText, remoteApi, cleanAddressInput, type RemoteHealth, type RemoteInfo, type RemoteProtocol, type RemoteSession } from '@/lib/remoteAccess';
+import { apiText, remoteApi, cleanAddressInput, type RemoteHealth, type RemoteInfo, type RemoteProtocol, type RemoteSession, type TargetProtocol } from '@/lib/remoteAccess';
 import { cn } from '@/lib/cn';
 import { Button, Field, Input, LoadingState, PasswordInput, Textarea } from '@/components/ui';
-import { launchScreenSize, sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
+import { PROTOCOL_ICON, WEB_ENDED_TEXT, WEB_SESSIONS_KEY, WEB_TITLE, closesIn, isWebEnded, launchScreenSize, minutesLeft, sessionScreenSize, useRemoteSessions } from '@/components/remote/RemoteSessions';
 import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from '@/components/remote/flow';
 import { ServiceStatus } from '@/components/remote/ServiceStatus';
 import { AddResourceModal } from '@/components/networks/AddResourceModal';
@@ -16,7 +16,21 @@ import {
   type Failure, type Step, type StepKey, type StepState,
 } from '@/components/remote/steps';
 
-const DEFAULT_PORT: Record<RemoteProtocol, number> = { rdp: 3389, ssh: 22 };
+const DEFAULT_PORT: Record<TargetProtocol, number> = { rdp: 3389, ssh: 22 };
+const PROTOCOL_LABEL: Record<RemoteProtocol, string> = { rdp: 'RDP', ssh: 'SSH', web: 'Browser' };
+const HERO_TEXT: Record<RemoteProtocol, string> = {
+  rdp: 'Open an RDP or SSH session to any server your NetBird access allows.',
+  ssh: 'Open an RDP or SSH session to any server your NetBird access allows.',
+  web: "Open a browser for public websites. Sites see the office's internet address.",
+};
+const WEB_READY_CODES = new Set(['BROWSER_DISABLED', 'BROWSER_NOT_READY']);
+const WEB_FALLBACK: Record<string, string> = {
+  BROWSER_DISABLED: 'Browser sessions are turned off. Ask an administrator.',
+  BROWSER_NOT_READY: "The browser service isn't ready. Try again in a few minutes, or tell an administrator.",
+  BROWSER_CAPACITY: 'All browsers are in use right now. Try again in a few minutes.',
+  EXIT_NODE_REQUIRED: 'Browser sessions need one of your devices to use the office Exit Node. Ask an administrator.',
+};
+const timezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 // While remote access is getting ready, ask again this often, for at most this long.
 const READY_RETRY_MS = 5000;
 const READY_WAIT_MS = 150_000;
@@ -86,7 +100,10 @@ export default function RemoteAccess() {
   const [sshKey, setSshKey] = useState('');
   const [sshPassphrase, setSshPassphrase] = useState('');
 
-  useEffect(() => { if (!portTouched) setPort(String(DEFAULT_PORT[protocol])); }, [protocol, portTouched]);
+  useEffect(() => { if (!portTouched && protocol !== 'web') setPort(String(DEFAULT_PORT[protocol])); }, [protocol, portTouched]);
+  const browserOn = !!info.data?.browser;
+  useEffect(() => { if (info.data && !info.data.browser) setProtocol((p) => (p === 'web' ? 'rdp' : p)); }, [info.data]);
+  const runProtocol = useRef<RemoteProtocol>('rdp');
 
   // A launch link from another system (/remote-access?launch=<ticket>): opened once, with the
   // credentials the server already holds. The server uses a link up on its first try, so the page
@@ -255,6 +272,8 @@ export default function RemoteAccess() {
       : st))
     : shown;
 
+  const flowSubtitle = runProtocol.current === 'web' ? WEB_TITLE : `${targetRef.current.address}:${targetRef.current.port}`;
+
   const start = (e: FormEvent) => {
     e.preventDefault();
     void runCheck(false);
@@ -266,9 +285,11 @@ export default function RemoteAccess() {
   };
 
   const runCheck = async (checkOnly: boolean) => {
-    let target: string;
-    let targetPort: number;
-    if (checkOnly) {
+    let target = '';
+    let targetPort = 0;
+    if (protocol === 'web') {
+      checkOnly = false;
+    } else if (checkOnly) {
       ({ address: target, port: targetPort } = targetRef.current);
     } else {
       const typed = applyAddress(address);
@@ -281,11 +302,13 @@ export default function RemoteAccess() {
     // now (DNS), and they must never go to a server they were not typed for. The user name stays.
     setSshPass(''); setSshKey(''); setSshPassphrase('');
     targetRef.current = { address: target, port: targetPort };
+    runProtocol.current = protocol;
+    const checkBody = protocol === 'web' ? { protocol } : { protocol, address: target, port: targetPort };
     setFailure(null);
     setAddOffer(null);
     setCheckOnlyRun(checkOnly);
     void health.refetch();
-    setSteps(freshSteps());
+    setSteps(freshSteps(protocol));
     setDwell(pickDwell());
     try { sessionStorage.setItem(PACE_KEY, '1'); } catch { /* private mode: every connection is paced as the first */ }
     setPhase('checking');
@@ -295,7 +318,7 @@ export default function RemoteAccess() {
     try {
       // Remote access itself first: while it is getting ready (a recent change, a restart), the
       // check is asked again every few seconds instead of failing.
-      const first = await bounded(remoteApi.check({ protocol, address: target, port: targetPort }), Date.now() + 20_000);
+      const first = await bounded(remoteApi.check(checkBody), Date.now() + 20_000);
       if (attempt.current !== mine) return;
       if (first === TIMED_OUT) { fail('ready', { message: 'The connection check took too long. Try again.' }); return; }
       let r = first;
@@ -318,7 +341,7 @@ export default function RemoteAccess() {
         await new Promise((done) => window.setTimeout(done, READY_RETRY_MS));
         if (attempt.current !== mine) return;
         if (Date.now() >= deadline) { setWaiting(false); fail('ready', { message: NOT_READY }); return; }
-        const next = await bounded(remoteApi.check({ protocol, address: target, port: targetPort }), deadline);
+        const next = await bounded(remoteApi.check(checkBody), deadline);
         if (attempt.current !== mine) return;
         if (next === TIMED_OUT) { setWaiting(false); fail('ready', { message: NOT_READY }); return; }
         r = next;
@@ -330,7 +353,7 @@ export default function RemoteAccess() {
       // A name the portal looked up shows where it leads: "name -> ip".
       const t = r.target;
       const where = t?.name && t.gateway === 'ip' && t.address && t.address !== t.name ? `${t.name} → ${t.address}` : (t?.name || target);
-      checked.current = { label: t?.resource ? `${t.resource.name} (${where}:${targetPort})` : `${where}:${targetPort}` };
+      checked.current = { label: protocol === 'web' ? WEB_TITLE : t?.resource ? `${t.resource.name} (${where}:${targetPort})` : `${where}:${targetPort}` };
       if (!access || access.status === 'fail') {
         // The denied resource goes along, so the request page opens with it chosen.
         const requestLink = access?.requestable
@@ -365,29 +388,41 @@ export default function RemoteAccess() {
     setPhase('opening');
     setStep('route', 'running');
     const c = checked.current;
-    const handoff = handoffSteps({ access: c.access, path: c.path });
+    const handoff = handoffSteps({ access: c.access, path: c.path }, protocol);
+    const web = protocol === 'web';
     try {
-      const s = await remoteApi.createSession({
-        protocol, address: targetRef.current.address, port: targetRef.current.port,
-        // The session view uses the whole window (the bar floats over it).
-        ...sessionScreenSize(protocol),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        ...(creds || {}),
-      });
+      const s = await remoteApi.createSession(web
+        ? { protocol, ...sessionScreenSize('web'), timezone: timezone() }
+        : {
+          protocol, address: targetRef.current.address, port: targetRef.current.port,
+          // The session view uses the whole window (the bar floats over it).
+          ...sessionScreenSize(protocol),
+          timezone: timezone(),
+          ...(creds || {}),
+        });
       sessions.add({
-        sessionId: s.sessionId, token: s.token, protocol, title: sessionTitle(s, targetRef.current.port) || c.label || `${targetRef.current.address}:${targetRef.current.port}`,
+        sessionId: s.sessionId, token: s.token, protocol,
+        title: web ? WEB_TITLE : sessionTitle(s, targetRef.current.port) || c.label || `${targetRef.current.address}:${targetRef.current.port}`,
         clipboard: !!info.data?.clipboard, steps: handoff, dwell,
         target: { ...targetRef.current }, user: creds?.username,
       });
       reset();
     } catch (err) {
+      const code = err instanceof ApiError ? err.code || '' : '';
+      if (web && code) {
+        const key: StepKey = WEB_READY_CODES.has(code) ? 'ready' : code === 'EXIT_NODE_REQUIRED' ? 'access' : 'route';
+        if (key !== 'route') setStep('route', 'pending');
+        fail(key, { message: apiText(err, WEB_FALLBACK[code] || "The browser couldn't be started. Try again.") });
+        setPhase('checking');
+        return;
+      }
       // Settling (or NetBird gone) after the checks passed is the environment, not the route: Try
       // Again checks everything again and waits for it.
       if (err instanceof ApiError && (err.code === 'TARGETS_SETTLING' || err.code === 'SNAPSHOT_FAILED')) {
         setStep('route', 'pending');
         fail('ready', { message: apiText(err, "Remote Access isn't ready. Try again in a minute.") });
       } else {
-        fail('route', { message: apiText(err, "The session couldn't be opened. Try again.") });
+        fail('route', { message: apiText(err, web ? "The browser couldn't be started. Try again." : "The session couldn't be opened. Try again.") });
       }
       setPhase('checking');
     }
@@ -444,19 +479,19 @@ export default function RemoteAccess() {
         </div>
       )}
 
+      {ra.browser && <OpenBrowsers clipboard={ra.clipboard} />}
+
       <FlowCard>
         {/* The big heading steps aside while a connection is checked, so the steps fit on screen. */}
         {phase === 'form' && (!launch || launch.state === 'failed')
-          ? <Hero protocol={protocol} description="Open an RDP or SSH session to any server your NetBird access allows." />
+          ? <Hero protocol={protocol} description={HERO_TEXT[protocol]} />
           : <h1 className="sr-only">Remote Access</h1>}
 
         <form ref={formRef} onSubmit={start} className="flex flex-col">
-          {/* Two choices: visible radio buttons, styled as one switch. The radios stay real inputs
-              (visually hidden, still in the accessibility tree) so the arrow keys move between them. */}
-          <fieldset disabled={locked} className="mb-4 grid grid-cols-2 gap-1 rounded-xl bg-nb-gray-100 p-1 dark:bg-nb-gray-920">
+          <fieldset disabled={locked} className={cn('mb-4 grid gap-1 rounded-xl bg-nb-gray-100 p-1 dark:bg-nb-gray-920', browserOn ? 'grid-cols-3' : 'grid-cols-2')}>
             <legend className="sr-only">Protocol</legend>
-            {(['rdp', 'ssh'] as const).map((p) => {
-              const Icon = p === 'rdp' ? MonitorPlay : Terminal;
+            {(browserOn ? ['rdp', 'ssh', 'web'] as const : ['rdp', 'ssh'] as const).map((p) => {
+              const Icon = PROTOCOL_ICON[p];
               const on = protocol === p;
               return (
                 <label key={p} className={cn(
@@ -476,13 +511,13 @@ export default function RemoteAccess() {
                   <input type="radio" name="protocol" value={p} className="sr-only"
                     checked={on} onChange={() => { setProtocol(p); setAddOffer(null); }} />
                   <Icon size={16} className={on ? 'text-netbird-600 dark:text-netbird forced-colors:text-current!' : undefined} />
-                  {p.toUpperCase()}
+                  {PROTOCOL_LABEL[p]}
                 </label>
               );
             })}
           </fieldset>
 
-          <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-3">
+          {protocol !== 'web' && <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-3">
             <Field label="Server Address">
               <Input
                 value={address}
@@ -512,16 +547,18 @@ export default function RemoteAccess() {
                 inputMode="numeric" className={cn(FLOW_INPUT, 'aria-invalid:border-red-500! aria-invalid:ring-red-500/30')} required disabled={locked}
                 aria-invalid={(port !== '' && !validPort(portNum)) || undefined} title="A port from 1 to 65535" />
             </Field>
-          </div>
+          </div>}
 
           {/* While a connection is checked, the next step has its own buttons below. */}
           {phase === 'form' && <>
-            <Button type="submit" variant="primary" className="mt-5 h-12! w-full rounded-lg! text-base font-semibold"
-              disabled={locked || !address.trim() || !validPort(portNum)}>
-              {protocol === 'rdp' ? <MonitorPlay size={18} /> : <Terminal size={18} />} Connect
+            <Button type="submit" variant="primary" className={cn('h-12! w-full rounded-lg! text-base font-semibold', protocol === 'web' ? 'mt-1' : 'mt-5')}
+              disabled={locked || (protocol !== 'web' && (!address.trim() || !validPort(portNum)))}>
+              <ProtocolGlyph protocol={protocol} size={18} /> {protocol === 'web' ? 'Open Browser' : 'Connect'}
             </Button>
             <p className="mt-3 text-center text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
-              Sessions close after {ra.idleTimeoutMin} idle minutes and after {ra.maxDurationHours} hours.
+              {protocol === 'web' && ra.browser
+                ? `After you disconnect, your browser keeps running for ${ra.browser.keepAliveMin} minutes.`
+                : `Sessions close after ${ra.idleTimeoutMin} idle minutes and after ${ra.maxDurationHours} hours.`}
             </p>
           </>}
         </form>
@@ -531,10 +568,10 @@ export default function RemoteAccess() {
             {phase === 'ssh-creds' && caughtUp ? <StepSummary steps={shown} /> : <>
               {/* The big heading is away while the steps run: say what is happening. */}
               {failure && caughtUp
-                ? <FlowHeader icon={<XIcon size={20} />} tone="danger" title={checkOnlyRun ? 'Not Ready Yet' : "Couldn't Connect"} subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />
+                ? <FlowHeader icon={<XIcon size={20} />} tone="danger" title={checkOnlyRun ? 'Not Ready Yet' : "Couldn't Connect"} subtitle={flowSubtitle} />
                 : phase === 'checked' && caughtUp
-                  ? <FlowHeader icon={<CheckCircle2 size={20} />} title="Ready To Connect" subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />
-                  : <FlowHeader icon={protocol === 'rdp' ? <MonitorPlay size={19} /> : <Terminal size={19} />} title={checkOnlyRun ? 'Checking Again' : 'Connecting'} subtitle={`${targetRef.current.address}:${targetRef.current.port}`} />}
+                  ? <FlowHeader icon={<CheckCircle2 size={20} />} title="Ready To Connect" subtitle={flowSubtitle} />
+                  : <FlowHeader icon={<ProtocolGlyph protocol={runProtocol.current} size={19} />} title={checkOnlyRun ? 'Checking Again' : 'Connecting'} subtitle={flowSubtitle} />}
               <StepList steps={listed} action={failure && caughtUp && offerShown ? {
                 key: 'access', label: 'Add As Resource', icon: <Plus size={14} />,
                 onClick: () => setAdding({ address: addOffer!.address, key: addOffer!.key }),
@@ -544,7 +581,7 @@ export default function RemoteAccess() {
             {phase === 'checked' && caughtUp && !failure && (
               <div className="mt-5 flex flex-col gap-1">
                 <Button variant="primary" className={FLOW_BUTTON} onClick={() => formRef.current?.requestSubmit()}>
-                  {protocol === 'rdp' ? <MonitorPlay size={17} /> : <Terminal size={17} />} Connect
+                  <ProtocolGlyph protocol={protocol} size={17} /> Connect
                 </Button>
                 <Button variant="ghost" className={FLOW_QUIET} onClick={reset}>Cancel</Button>
               </div>
@@ -592,8 +629,116 @@ export default function RemoteAccess() {
   );
 }
 
+const openedAgo = (iso: string, now: number) => {
+  const min = Math.floor((now - new Date(iso).getTime()) / 60_000);
+  if (!Number.isFinite(min) || min < 0) return '';
+  if (min < 1) return 'Just Now';
+  if (min < 60) return `${min} Minute${min === 1 ? '' : 's'} Ago`;
+  const h = Math.floor(min / 60);
+  return `${h} Hour${h === 1 ? '' : 's'} Ago`;
+};
+
+function OpenBrowsers({ clipboard }: { clipboard: boolean }) {
+  const sessions = useRemoteSessions();
+  const qc = useQueryClient();
+  const list = useQuery({
+    queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(),
+    refetchInterval: (q) => (q.state.data?.sessions?.length ? 15_000 : false), retry: false,
+  });
+  const idKey = sessions.ids.join(' ');
+  const seenIds = useRef(idKey);
+  useEffect(() => {
+    if (seenIds.current === idKey) return;
+    seenIds.current = idKey;
+    void qc.invalidateQueries({ queryKey: WEB_SESSIONS_KEY });
+  }, [idKey, qc]);
+  const [now, setNow] = useState(Date.now);
+  const [busy, setBusy] = useState('');
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const shown = (list.data?.sessions || []).filter((s) => {
+    if (sessions.ids.includes(s.sessionId)) return false;
+    if (s.state === 'active') return true;
+    if (s.state !== 'detached') return false;
+    const left = minutesLeft(s.expiresAt, now);
+    return left === null || left > 0;
+  });
+  const hasRows = shown.length > 0;
+  useEffect(() => {
+    if (!hasRows) return;
+    const t = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(t);
+  }, [hasRows]);
+  if (!hasRows) return null;
+
+  const setError = (id: string, message: string) => setErrors((m) => ({ ...m, [id]: message }));
+  const refresh = () => qc.invalidateQueries({ queryKey: WEB_SESSIONS_KEY });
+  const resume = async (id: string) => {
+    setBusy(id); setError(id, '');
+    try {
+      const s = await remoteApi.resumeWeb(id, { ...sessionScreenSize('web'), timezone: timezone() });
+      sessions.add({
+        sessionId: s.sessionId, token: s.token, protocol: 'web', title: WEB_TITLE, clipboard,
+        steps: handoffSteps({}, 'web'), dwell: pickDwell(), target: { address: '', port: 0 },
+      });
+    } catch (err) {
+      setError(id, isWebEnded(err) ? WEB_ENDED_TEXT : apiText(err, "Your browser couldn't be resumed. Try again."));
+      void refresh();
+    } finally {
+      setBusy('');
+    }
+  };
+  const close = async (id: string) => {
+    setBusy(id); setError(id, '');
+    try {
+      await remoteApi.end(id);
+    } catch (err) {
+      setError(id, apiText(err, "The browser couldn't be closed. Try again."));
+    } finally {
+      setBusy('');
+      void refresh();
+    }
+  };
+
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl border border-netbird/40 bg-netbird/5">
+      {shown.map((s, i) => {
+        const left = minutesLeft(s.expiresAt, now);
+        const ago = openedAgo(s.createdAt, now);
+        return (
+          <div key={s.sessionId} className={cn('px-4 py-3', i > 0 && 'border-t border-netbird/20')}>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <Globe size={18} className="shrink-0 text-netbird" />
+              <div className="min-w-0 flex-1 basis-48">
+                <p className="text-sm font-semibold text-nb-gray-900 dark:text-nb-gray-50">
+                  {shown.length > 1 && ago ? `Browser Opened ${ago}` : 'Your Browser Is Still Open'}
+                </p>
+                <p className="text-[0.8rem] leading-snug text-nb-gray-600 dark:text-nb-gray-400">
+                  {s.state === 'active' ? 'Open in another window.' : `Disconnected. ${left === null ? 'It keeps running for a while.' : `${closesIn(left)}.`}`}
+                </p>
+              </div>
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                <Button size="sm" variant="primary" disabled={!!busy} onClick={() => { void resume(s.sessionId); }}>
+                  {busy === s.sessionId ? <Loader2 size={14} className="animate-spin" /> : null}
+                  {s.state === 'active' ? 'Open Here' : 'Resume'}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { void close(s.sessionId); }}>Close Browser</Button>
+              </div>
+            </div>
+            {errors[s.sessionId] && <p role="alert" className="mt-2 text-[0.8rem] text-red-600 dark:text-red-400">{errors[s.sessionId]}</p>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProtocolGlyph({ protocol, size }: { protocol: RemoteProtocol; size: number }) {
+  const Icon = PROTOCOL_ICON[protocol];
+  return <Icon size={size} />;
+}
+
 function Hero({ protocol, description }: { protocol: RemoteProtocol; description: ReactNode }) {
-  const Icon = protocol === 'rdp' ? MonitorPlay : Terminal;
+  const Icon = PROTOCOL_ICON[protocol];
   return (
     <div className="mb-6 flex flex-col items-center text-center last:mb-0">
       <FlowTile icon={<Icon size={28} />} large />
