@@ -611,6 +611,13 @@ if (AUTH_ENABLED) {
 app.use('/api', apiLimiter);
 app.use(spaLimiter);
 
+const sendInstallFile = (name) => (req, res) => res.sendFile(path.join(__dirname, 'public', name), { maxAge: '1d' }, (err) => {
+    if (err && !res.headersSent) res.sendStatus(404);
+});
+app.get('/manifest.webmanifest', sendInstallFile('manifest.webmanifest'));
+app.get('/favicon-192.png', sendInstallFile('favicon-192.png'));
+app.get('/favicon.png', sendInstallFile('favicon.png'));
+
 if (AUTH_ENABLED) {
     // Equivalent to auth()'s authRequired: true - every route below requires login. A visitor who is
     // not signed in is sent to login (a page load, see isPageLoad) or refused with 401 here, before
@@ -3488,7 +3495,7 @@ app.post('/api/remote-access/launch/redeem', requireRemoteUser, async (req, res)
     try {
         const b = req.body || {};
         res.json(await remoteAccessLib.redeemLaunch(req.remoteViewer, {
-            ticket: b.ticket, width: b.width, height: b.height, dpi: b.dpi, timezone: b.timezone,
+            ticket: b.ticket, width: b.width, height: b.height, dpi: b.dpi, rdp: b.rdp, timezone: b.timezone,
         }, req.ip));
     } catch (e) { sendRemoteError(res, e); }
 });

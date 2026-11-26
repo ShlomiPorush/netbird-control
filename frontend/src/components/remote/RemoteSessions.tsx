@@ -1,15 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Keyboard, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, Pin, PinOff, Plus, Power, Smartphone, Terminal, X } from 'lucide-react';
+import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Expand, Hand, Keyboard, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, MousePointer2, Pin, PinOff, Plus, Power, Smartphone, Terminal, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useScrollLock } from '@/lib/useScrollLock';
 import { apiText, remoteApi, GUAC, type RemoteProtocol } from '@/lib/remoteAccess';
 import { Button, Field, Input, PasswordInput, Textarea } from '@/components/ui';
-import { GuacScreen, deviceSize, type ScreenApi, type ViewerEvent } from './GuacScreen';
+import { GuacScreen, coarsePointer, deviceSize, isPhone, phoneDesktop, remoteScreen, type PointerMode, type ScreenApi, type ViewerEvent } from './GuacScreen';
 import { ARG_LABELS, FailureBox, StepList, StepSummary, explain, usePacedSteps, withStep, type Failure, type Step } from './steps';
 import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from './flow';
-import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN, MenuRow, SPECIAL_KEYS, ScreenKeyboard, hasTouch, saveScreenshot } from './SessionTools';
+import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN, KEY_ROW_HEIGHT, KeyRow, MenuRow, SPECIAL_KEYS, ScreenKeyboard, hasTouch, saveScreenshot } from './SessionTools';
 
 // Open browser sessions live here, above the routes: moving to another page of the portal keeps
 // them running, and they show as tabs in one full-screen session view. Closing the browser tab
@@ -49,10 +49,44 @@ const HANDLE_DWELL_MS = 500;
 
 const readPinned = () => { try { return localStorage.getItem(PIN_KEY) === '1'; } catch { return false; } };
 
+const POINTER_KEY = 'nbc.remote.pointer';
+const defaultPointer = (): PointerMode => (isPhone() ? 'touchpad' : 'touchscreen');
+const readPointer = (): PointerMode => {
+  try {
+    const saved = localStorage.getItem(POINTER_KEY);
+    return saved === 'touchpad' || saved === 'touchscreen' ? saved : defaultPointer();
+  } catch { return defaultPointer(); }
+};
+
+const KEYBOARD_MIN_HEIGHT = 150;
+
 /** The size a new session asks for: the session box in device pixels, and the screen's DPI. The
  * session always has the whole window: the bar floats over it, also when pinned. */
-export function sessionScreenSize() {
-  return deviceSize(window.innerWidth, window.innerHeight);
+export function sessionScreenSize(protocol: RemoteProtocol) {
+  return remoteScreen(protocol, { width: window.innerWidth, height: window.innerHeight });
+}
+
+export function launchScreenSize() {
+  const general = deviceSize(window.innerWidth, window.innerHeight);
+  return isPhone() ? { ...general, rdp: phoneDesktop(window.innerWidth, window.innerHeight) } : general;
+}
+
+function useVisibleArea(enabled: boolean) {
+  const [area, setArea] = useState<{ top: number; height: number } | null>(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!enabled || !vv) return;
+    const update = () => setArea({ top: vv.offsetTop, height: vv.height });
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+      setArea(null);
+    };
+  }, [enabled]);
+  return area;
 }
 
 export function RemoteSessionsProvider({ children }: { children: ReactNode }) {
@@ -124,6 +158,22 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const [oskHeight, setOskHeight] = useState(0);
   const [shotFailed, setShotFailed] = useState(false);
   const touch = useMemo(hasTouch, []);
+  const coarse = useMemo(coarsePointer, []);
+  const phone = useMemo(isPhone, []);
+  const [pointer, setPointer] = useState<PointerMode>(readPointer);
+  const choosePointer = (mode: PointerMode) => {
+    setPointer(mode);
+    try { localStorage.setItem(POINTER_KEY, mode); } catch { }
+  };
+  const area = useVisibleArea(touch && open);
+  const keyboardShown = !!area && window.innerHeight - area.height > KEYBOARD_MIN_HEIGHT;
+  const keyRow = deviceKbd && keyboardShown;
+  const [latched, setLatched] = useState<number[]>([]);
+  useEffect(() => { if (!keyRow) activeApi()?.latchForNextKey([]); }, [keyRow]);
+  useEffect(() => setLatched([]), [activeId]);
+  const openDeviceKeys = () => { setOskOpen(false); deviceKeys.current?.open(); };
+  const toggleDeviceKeys = () => { if (keyRow) deviceKeys.current?.close(); else openDeviceKeys(); };
+  const toggleOsk = () => { if (!oskOpen) deviceKeys.current?.close(); setOskOpen(!oskOpen); };
   // SSH text size per tab: the one chosen in the bar, else the terminal's as guacd reports it.
   const [fonts, setFonts] = useState<Record<string, number>>({});
   const [termFonts, setTermFonts] = useState<Record<string, number>>({});
@@ -200,7 +250,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const menuChanged = (o: boolean) => { setMenuOpen(o); setShotFailed(false); if (!o && !pinned) scheduleHide(1500); };
   const openDeviceKeyboard = (close: () => void) => {
     close();
-    if (deviceKbd) deviceKeys.current?.close(); else deviceKeys.current?.open();
+    if (deviceKbd) deviceKeys.current?.close(); else openDeviceKeys();
   };
 
   const dot = (s: TabStatus | undefined) => cn('h-2 w-2 shrink-0 rounded-full',
@@ -213,14 +263,19 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
       // No browser menu on a right click anywhere in the session view (the remote screen already
       // takes its right clicks); text fields keep theirs, for paste.
       onContextMenu={(e) => { if (!(e.target as HTMLElement).closest('input, textarea, [contenteditable="true"]')) e.preventDefault(); }}>
+      <div className="absolute inset-x-0" style={area ? { top: area.top, height: area.height } : { top: 0, bottom: 0 }}>
       {sessions.map((s) => (
         <div key={s.sessionId}
           className={cn('absolute inset-x-0 top-0', s.sessionId !== active?.sessionId && 'invisible pointer-events-none')}
-          // Only the session in front makes room for the keyboard: one in the back keeps its size.
-          style={{ bottom: oskOpen && s.sessionId === active?.sessionId ? oskHeight : 0 }}>
+          style={s.sessionId !== active?.sessionId
+            ? (area ? { height: window.innerHeight } : { bottom: 0 })
+            : { bottom: oskOpen ? oskHeight : keyRow ? KEY_ROW_HEIGHT : 0 }}>
           <SessionPane
             entry={s}
             active={open && s.sessionId === active?.sessionId}
+            pointer={pointer}
+            onLatchChange={(m) => { if (s.sessionId === active?.sessionId) setLatched(m); }}
+            onTouchTap={s.protocol === 'ssh' && s.sessionId === active?.sessionId ? openDeviceKeys : undefined}
             apiRef={apiFor(s.sessionId)}
             onStatus={(st) => setStatus((m) => (m[s.sessionId] === st ? m : { ...m, [s.sessionId]: st }))}
             onRemoteClipboard={(t) => setClips((m) => ({ ...m, [s.sessionId]: t }))}
@@ -241,7 +296,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
 
       {/* The handle brings the bar back: a click, or the pointer resting on it. */}
       {!barVisible && active && (
-        <button onClick={reveal} onMouseEnter={handleEnter} onMouseLeave={handleLeave} aria-label="Show the session bar"
+        <button onClick={reveal} onPointerDown={(e) => e.preventDefault()} onMouseEnter={handleEnter} onMouseLeave={handleLeave} aria-label="Show the session bar"
           className="absolute left-1/2 top-0 z-30 -translate-x-1/2 inline-flex h-7 max-w-[70vw] items-center gap-2 rounded-b-xl border border-t-0 border-nb-gray-800 bg-nb-gray-940/95 px-3 text-[0.75rem] font-medium text-nb-gray-200 shadow-lg backdrop-blur-md">
           <span className={dot(status[active.sessionId])} />
           {active.protocol === 'rdp' ? <MonitorPlay size={13} className="shrink-0" /> : <Terminal size={13} className="shrink-0" />}
@@ -253,8 +308,8 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
 
       {/* The bar floats above the session, like a dock. */}
       <div
-        onMouseEnter={() => { hovering.current = true; reveal(); }}
-        onMouseLeave={() => { hovering.current = false; if (!keepBar) scheduleHide(1500); }}
+        onPointerEnter={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = true; reveal(); }}
+        onPointerLeave={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = false; if (!keepBar) scheduleHide(1500); }}
         className={cn('absolute left-1/2 top-2 z-30 flex h-[46px] w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-2xl border border-nb-gray-800 bg-nb-gray-940/92 px-1.5 shadow-[0_16px_40px_-14px_rgba(0,0,0,0.7)] backdrop-blur-md transition-transform duration-200 sm:w-auto sm:max-w-[calc(100%-1rem)]',
           barVisible ? 'translate-y-0' : '-translate-y-[calc(100%+1rem)]')}>
         {/* The NetBird mark is the way back to the portal. */}
@@ -284,8 +339,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             {sessions.map((s) => <option key={s.sessionId} value={s.sessionId}>{s.title}</option>)}
           </select>
         </div>
-        {/* The narrowest phones have room for it only in the More menu. */}
-        <BarButton onClick={newSession} title="New Session" className="hidden min-[360px]:flex border border-dashed border-nb-gray-700"><Plus size={15} /></BarButton>
+        <BarButton onClick={newSession} title="New Session" className="hidden sm:flex border border-dashed border-nb-gray-700"><Plus size={15} /></BarButton>
 
         <span className="mx-0.5 h-5 w-px shrink-0 bg-nb-gray-800" />
         {active && (
@@ -296,13 +350,14 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                   onClick={() => { activeApi()?.sendKeys(k.keys); close(); }} />
               ))}
             </BarMenu>
-            {/* A touch screen can also use its own keyboard; elsewhere the button opens the on-screen one. */}
-            {touch ? (
+            {phone ? (
+              <BarButton onClick={toggleDeviceKeys} keepFocus title="Keyboard" pressed={keyRow}><Keyboard size={16} /></BarButton>
+            ) : touch ? (
               <BarMenu title="Keyboard" icon={<Keyboard size={16} />} pressed={oskOpen || deviceKbd} container={rootRef} onOpenChange={menuChanged} width={232}>
                 {(close) => (
                   <>
                     <MenuRow icon={<Keyboard size={15} />} label="On-Screen Keyboard" checked={oskOpen}
-                      onClick={() => { setOskOpen((v) => !v); close(); }} />
+                      onClick={() => { toggleOsk(); close(); }} />
                     <MenuRow icon={<Smartphone size={15} />} label="Device Keyboard" checked={deviceKbd}
                       onClick={() => openDeviceKeyboard(close)} />
                   </>
@@ -311,10 +366,21 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             ) : (
               <BarButton onClick={() => setOskOpen((v) => !v)} title='On-Screen Keyboard' pressed={oskOpen}><Keyboard size={16} /></BarButton>
             )}
+            {active.protocol === 'rdp' && coarse && pointer === 'touchpad' && (
+              <BarMenu title="Zoom" icon={<ZoomIn size={16} />} container={rootRef} onOpenChange={menuChanged} width={200}>
+                {(close) => (
+                  <>
+                    <MenuRow icon={<ZoomIn size={15} />} label="Zoom In" onClick={() => { activeApi()?.zoom('in'); close(); }} />
+                    <MenuRow icon={<ZoomOut size={15} />} label="Zoom Out" onClick={() => { activeApi()?.zoom('out'); close(); }} />
+                    <MenuRow icon={<Expand size={15} />} label="Fit To Screen" onClick={() => { activeApi()?.zoom('fit'); close(); }} />
+                  </>
+                )}
+              </BarMenu>
+            )}
             {active.clipboard && (
               <BarButton buttonRef={clipButton} onClick={() => setClipOpen((v) => !v)} title="Clipboard" pressed={clipOpen}><ClipboardPaste size={16} /></BarButton>
             )}
-            <BarButton className="hidden sm:flex" onClick={fullscreen} title="Full Screen"><Maximize2 size={16} /></BarButton>
+            <BarButton className={coarse ? 'hidden min-[400px]:flex' : 'hidden sm:flex'} onClick={fullscreen} title="Full Screen"><Maximize2 size={16} /></BarButton>
             <BarButton className="hidden sm:flex" onClick={togglePin} title={pinned ? 'Let The Bar Hide' : 'Keep The Bar Open'} pressed={pinned}>{pinned ? <PinOff size={16} /> : <Pin size={16} />}</BarButton>
             <BarMenu title="More" icon={<MoreHorizontal size={16} />} container={rootRef} onOpenChange={menuChanged} width={236}>
               {(close) => (
@@ -337,13 +403,26 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                         className="flex h-7 w-7 items-center justify-center rounded-md ring-1 ring-inset ring-nb-gray-800 hover:bg-nb-gray-900 focus-visible:bg-nb-gray-900 focus-visible:outline-hidden disabled:opacity-40"><Plus size={14} /></button>
                     </div>
                   )}
+                  {active.protocol === 'rdp' && coarse && (
+                    <>
+                      <div className="my-1 h-px bg-nb-gray-800" />
+                      <MenuRow icon={<MousePointer2 size={15} />} label="Touchpad Mode" checked={pointer === 'touchpad'}
+                        onClick={() => { choosePointer('touchpad'); close(); }} />
+                      <MenuRow icon={<Hand size={15} />} label="Direct Touch Mode" checked={pointer === 'touchscreen'}
+                        onClick={() => { choosePointer('touchscreen'); close(); }} />
+                    </>
+                  )}
+                  {phone && (
+                    <MenuRow icon={<Keyboard size={15} />} label="On-Screen Keyboard" checked={oskOpen}
+                      onClick={() => { toggleOsk(); close(); }} />
+                  )}
                   {/* What the bar has no room for on a narrow screen. */}
                   <div className="sm:hidden">
                     <div className="my-1 h-px bg-nb-gray-800" />
-                    <MenuRow icon={<Maximize2 size={15} />} label="Full Screen" onClick={() => { close(); fullscreen(); }} />
+                    <MenuRow className={coarse ? 'min-[400px]:hidden' : undefined} icon={<Maximize2 size={15} />} label="Full Screen" onClick={() => { close(); fullscreen(); }} />
                     <MenuRow icon={<Pin size={15} />} label="Keep The Bar Open" checked={pinned}
                       onClick={() => { togglePin(); close(); }} />
-                    <MenuRow className="min-[360px]:hidden" icon={<Plus size={15} />} label="New Session" onClick={() => { close(); newSession(); }} />
+                    <MenuRow icon={<Plus size={15} />} label="New Session" onClick={() => { close(); newSession(); }} />
                   </div>
                 </>
               )}
@@ -362,6 +441,10 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
       {oskOpen && active && (
         <ScreenKeyboard key={active.sessionId} target={apiFor(active.sessionId)} onClose={() => setOskOpen(false)} onHeight={setOskHeight} />
       )}
+      {keyRow && active && (
+        <KeyRow protocol={active.protocol} latched={latched}
+          onKey={(k) => activeApi()?.sendKeys([k])} onLatch={(m) => activeApi()?.latchForNextKey(m)} />
+      )}
       {touch && <DeviceKeyboard control={deviceKeys} onOpenChange={setDeviceKbd} />}
 
       {clipOpen && active?.clipboard && (
@@ -373,17 +456,19 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           onClose={() => { setClipOpen(false); if (!pinned) scheduleHide(1500); }}
         />
       )}
+      </div>
     </div>,
     document.body,
   );
 }
 
-function BarButton({ title, onClick, pressed, className, children, buttonRef }: {
+function BarButton({ title, onClick, pressed, className, children, buttonRef, keepFocus }: {
   title: string; onClick: () => void; pressed?: boolean; className?: string; children: ReactNode;
-  buttonRef?: RefObject<HTMLButtonElement | null>;
+  buttonRef?: RefObject<HTMLButtonElement | null>; keepFocus?: boolean;
 }) {
   return (
     <button ref={buttonRef} type="button" onClick={onClick} title={title} aria-label={title} aria-pressed={pressed}
+      onPointerDown={keepFocus ? (e) => e.preventDefault() : undefined}
       className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-300 transition-colors hover:bg-nb-gray-800 hover:text-white focus-visible:outline-2 focus-visible:outline-netbird-400',
         pressed && 'bg-nb-gray-800 text-white', className)}>
       {children}
@@ -440,8 +525,9 @@ const SSH_KEY_NOTE = 'To sign in with a private key instead, close this tab and 
 // One session: its screen, and on top of it the remaining steps, the sign-in form the server
 // asks for, or how it ended. A failed sign-in asks again in the same tab: a new session to the
 // same server, which the portal checks again like any other.
-function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClose, onSession, onLeave, fontSize, onFontSize, onPainted }: {
+function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onSession, onLeave, fontSize, onFontSize, onPainted }: {
   entry: SessionEntry; active: boolean; apiRef: { current: ScreenApi | null };
+  pointer: PointerMode; onLatchChange: (modifiers: number[]) => void; onTouchTap?: () => void;
   /** SSH: the text size chosen in the session bar, and the terminal's as guacd reports it. */
   fontSize?: number;
   onFontSize?: (size: number) => void;
@@ -597,7 +683,7 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
     try {
       const s = await remoteApi.createSession({
         protocol: entry.protocol, address: entry.target.address, port: entry.target.port,
-        ...sessionScreenSize(),
+        ...sessionScreenSize(entry.protocol),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(ssh ? { username: (values.username || '').trim(), password: values.password || '' } : {}),
       });
@@ -701,7 +787,8 @@ function SessionPane({ entry, active, apiRef, onStatus, onRemoteClipboard, onClo
   const formUp = !!retry || (!!required && caughtUp);
   return (
     <>
-      <GuacScreen sessionId={conn.sessionId} token={conn.token} active={active && !formUp} clipboard={entry.clipboard}
+      <GuacScreen sessionId={conn.sessionId} token={conn.token} protocol={entry.protocol} pointer={pointer} active={active && !formUp} clipboard={entry.clipboard}
+        onLatchChange={onLatchChange} onTouchTap={onTouchTap}
         fontSize={fontSize} onFontSize={ssh ? onFontSize : undefined}
         onEvent={onEvent} onRemoteClipboard={onRemoteClipboard} apiRef={apiRef} />
       {overlay && (

@@ -216,8 +216,7 @@ export const remoteApi = {
   setUpNetwork: (body: { peers: string[]; peerGroups: string[] } | { networkId: string }) =>
     api.post<LaunchNetworkResult>('/api/remote-access/create-resources/network', body),
   setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
-  /** Open a launch link from another system. Only the ticket and the screen size are sent. */
-  redeemLaunch: (body: { ticket: string; width: number; height: number; dpi: number; timezone: string }) =>
+  redeemLaunch: (body: { ticket: string; width: number; height: number; dpi: number; rdp?: { width: number; height: number; dpi: number }; timezone: string }) =>
     api.post<LaunchSession>('/api/remote-access/launch/redeem', body),
 };
 

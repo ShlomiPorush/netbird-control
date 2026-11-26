@@ -155,6 +155,9 @@ const PUBLIC_ROUTES = new Set([
     'POST /api/webhook/t/:acct',
     'GET /api/health',
     'GET /login-wait.js',
+    'GET /manifest.webmanifest',
+    'GET /favicon-192.png',
+    'GET /favicon.png',
     'POST /api/integrations/telegram/callback',
 ]);
 
