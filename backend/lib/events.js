@@ -183,7 +183,7 @@ function deriveTrafficMessage(meta) {
     return null;
 }
 
-async function addEvent(payload) {
+async function addEvent(payload, db = pool) {
     const meta = payload.meta || {};
     const idx = _typeIndex.get(tnt());
     const message = payload.Message === 'TYPE_UNKNOWN' ? (deriveTrafficMessage(meta) || payload.Message) : payload.Message;
@@ -249,7 +249,7 @@ async function addEvent(payload) {
         tnt(), // the active account - main ('') or a tenant (webhook resolved from its token)
     ];
 
-    return pool.query(query, values);
+    return db.query(query, values);
 }
 
 // Split into scalar subqueries on purpose: earliest/latest are then single index probes on

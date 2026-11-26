@@ -494,6 +494,7 @@ async function ensureNamedPolicy(knownId, body, unchanged = () => false) {
     return r.body.id;
 }
 
+const WEB_ENROLLMENT_LOCK = 0x4e424745;
 const WEB = { group: 'Browser Gateway Web', acl: 'Browser Gateway Web ACL', policy: 'Browser Gateway Web', routing: 'Browser Gateway Web Routing' };
 const webObjectIds = () => [_nb.webGroupId, _nb.webAclGroupId, _nb.webRouteId, _nb.webPolicyId, _nb.webRoutingPolicyId].filter(Boolean);
 const browserWanted = () => _cfg.enabled && _cfg.browser.enabled;
@@ -821,18 +822,38 @@ async function createGatewaySetupKey(kind = 'ip') {
     if (!_nb[k.groupKey]) await applyGatewayObjects();
     if (!_nb[k.groupKey]) throw new Error(`The "${nbName(k.group)}" group could not be created. Save the Remote Access settings again, then create the setup key.`);
     await loadInstallName();
-    if (web) await prepareWebEnrollment();
-    return _deps.createSetupKey({ name: nbName(k.group), type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
+    const issue = () => _deps.createSetupKey({ name: nbName(k.group), type: 'one-off', expiresInDays: 1, usageLimit: 1, ephemeral: false, autoGroups: [_nb[k.groupKey]] });
+    return web ? withWebEnrollmentLock(async () => { await prepareWebEnrollment(); return issue(); }) : issue();
 }
 
-async function prepareWebEnrollment() {
-    const groupId = _nb.webGroupId;
-    const name = nbName(WEB.group);
+async function withWebEnrollmentLock(task) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)', [WEB_ENROLLMENT_LOCK]);
+        const result = await task();
+        await client.query('COMMIT');
+        return result;
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => { });
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+
+async function refuseWebGroupMember(groupId, name) {
     const group = await netbirdGet('/api/groups/' + encodeURIComponent(groupId));
     if (!group || group.id !== groupId || !Array.isArray(group.peers)) throw new Error(`Couldn't read the "${name}" group from NetBird. Try again in a minute.`);
     if (group.peers.length) {
         throw new Error(`The "${name}" group already has a peer. Delete the old browser gateway peer in NetBird first, then create a new setup key.`);
     }
+}
+
+async function prepareWebEnrollment() {
+    const groupId = _nb.webGroupId;
+    const name = nbName(WEB.group);
+    await refuseWebGroupMember(groupId, name);
     const keys = await netbirdGet('/api/setup-keys');
     if (!Array.isArray(keys)) throw new Error("Couldn't read the setup keys from NetBird. Try again in a minute.");
     const open = keys.filter(key => key && key.id && key.valid === true && !key.revoked && Array.isArray(key.auto_groups) && key.auto_groups.includes(groupId));
@@ -840,6 +861,7 @@ async function prepareWebEnrollment() {
         const r = await netbirdReq('PUT', '/api/setup-keys/' + encodeURIComponent(key.id), { revoked: true, auto_groups: key.auto_groups });
         if (!nbOk(r)) throw nbErr(`Revoking the earlier setup key "${key.name || key.id}" of the "${name}" group`, r);
     }
+    await refuseWebGroupMember(groupId, name);
 }
 
 // ─── Members added outside the app ───

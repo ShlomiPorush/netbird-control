@@ -13,6 +13,12 @@ core.pool.query = async (sql, params) => {
     return { rows: [] };
 };
 
+const lockQueries = [];
+core.pool.connect = async () => ({
+    query: async (sql, params) => { lockQueries.push([sql.replace(/\s+/g, ' ').trim(), params]); return { rows: [] }; },
+    release: () => { },
+});
+
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
 nb.bustNbCaches = () => { };
@@ -22,6 +28,7 @@ let calls;
 let seq = 0;
 const listOf = (p) => ({ '/api/groups': 'groups', '/api/policies': 'policies', '/api/routes': 'routes', '/api/setup-keys': 'setupKeys' }[p]);
 let failSetupKeyPut = false;
+let onSetupKeyPut = null;
 nb.netbirdGet = async (p) => {
     if (listOf(p)) return clone(state[listOf(p)]);
     const g = /^\/api\/groups\/(.+)$/.exec(p);
@@ -41,6 +48,7 @@ nb.netbirdReq = async (method, p, body) => {
     const m = /^\/api\/(groups|policies|routes|setup-keys)\/(.+)$/.exec(p);
     if (!m) return { status: 404 };
     if (m[1] === 'setup-keys' && failSetupKeyPut) return { status: 500, raw: 'NetBird refused' };
+    if (m[1] === 'setup-keys' && onSetupKeyPut) onSetupKeyPut();
     const list = state[m[1] === 'setup-keys' ? 'setupKeys' : m[1]];
     const i = list.findIndex(x => x.id === decodeURIComponent(m[2]));
     if (method === 'DELETE') { if (i >= 0) list.splice(i, 1); return { status: i >= 0 ? 200 : 404 }; }
@@ -86,6 +94,8 @@ function reset({ browser = { enabled: true, routerGroupId: 'g-office' }, managed
         setupKeys: [],
     };
     failSetupKeyPut = false;
+    onSetupKeyPut = null;
+    lockQueries.length = 0;
 }
 const stored = () => JSON.parse(settings.remote_access_nb);
 
@@ -252,4 +262,24 @@ test('a new web setup key needs an empty web group, and revokes every still-vali
     state.groups = state.groups.filter(g => g.id !== webGroupId);
     await assert.rejects(ra.createGatewaySetupKey('web'), /Couldn't read the "Browser Gateway Web \(NetBird Control\)" group/);
     assert.equal(keys.length, 1);
+});
+
+test('web key issuance runs under one advisory lock and checks the group again after revoking the earlier keys', async () => {
+    reset();
+    await ra._internal.applyGatewayObjects();
+    const webGroupId = stored().webGroupId;
+    state.setupKeys.push({ id: 'k-open', name: 'Browser Gateway Web (NetBird Control)', valid: true, revoked: false, state: 'valid', auto_groups: [webGroupId] });
+    onSetupKeyPut = () => { state.groups.find(g => g.id === webGroupId).peers = [{ id: 'enrolled-meanwhile' }]; };
+    await assert.rejects(ra.createGatewaySetupKey('web'), /already has a peer/);
+    assert.equal(keys.length, 0, 'a peer that enrolled with the old key before it was revoked stops the new key');
+    assert.deepEqual(lockQueries.map(q => q[0]), ['BEGIN', 'SELECT pg_advisory_xact_lock($1)', 'ROLLBACK']);
+    state.groups.find(g => g.id === webGroupId).peers = [];
+    onSetupKeyPut = null;
+    lockQueries.length = 0;
+    await ra.createGatewaySetupKey('web');
+    assert.equal(keys.length, 1);
+    assert.deepEqual(lockQueries.map(q => q[0]), ['BEGIN', 'SELECT pg_advisory_xact_lock($1)', 'COMMIT']);
+    lockQueries.length = 0;
+    await ra.createGatewaySetupKey('ip');
+    assert.deepEqual(lockQueries, [], 'other gateways need no lock');
 });

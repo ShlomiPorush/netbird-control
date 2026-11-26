@@ -30,6 +30,8 @@ const ENDED_KEEP_DAYS = 30;
 const CAPACITY_LOCK = 0x4e424252;
 const SCREEN = { minWidth: 320, minHeight: 240, maxWidth: 1920, maxHeight: 1080 };
 const CONNECTIONS_PER_SESSION = 2000;
+const QUEUED_RECORDS_MAX = 5000;
+const LEADER_CONCURRENCY = 5;
 const PENDING_RECORD_MS = 30_000;
 const PENDING_RECORDS_MAX = 5000;
 const UID_LOOKUP_GAP_MS = 1000;
@@ -42,6 +44,7 @@ const CODE = { ended: 0x020B, takenOver: 0x0205, denied: 0x0303, restarting: 0x0
 const TAKEN_OVER = 'Your browser was opened in another window.';
 const BROWSER_CLOSED = 'The browser was closed.';
 const BROWSER_RESTARTED = 'The remote browser restarted, so the session ended.';
+const UNVERIFIED = "Your access couldn't be verified with NetBird, so the session ended.";
 
 const MESSAGES = {
     BROWSER_DISABLED: 'Web sessions are turned off. Ask an administrator to turn them on in Settings > Remote Access.',
@@ -137,6 +140,7 @@ function noteInstance(reply) {
     for (const [uid, s] of _uidSessions) if (s.instance !== instance) _uidSessions.delete(uid);
 }
 
+const isExpired = (reply) => !!reply && reply.ok !== true && reply.error === 'EXPIRED';
 const isGone = (reply) => !!reply && reply.ok !== true && (reply.error === 'ENDED' || reply.error === 'UNKNOWN');
 
 function guacdReachable() {
@@ -234,8 +238,8 @@ async function reserveSlot(row, max) {
         }
         await client.query(
             `INSERT INTO browser_sessions (id, user_id, user_email, user_name, oid, client_ip, state, width, height, dpi, attachment, last_auth_ok_at, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10, NOW(), NOW())`,
-            [row.id, row.userId, row.userEmail, row.userName, row.oid, row.clientIp, row.width, row.height, row.dpi, row.attachment]);
+             VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10, $11, NOW())`,
+            [row.id, row.userId, row.userEmail, row.userName, row.oid, row.clientIp, row.width, row.height, row.dpi, row.attachment, row.authorizedAt]);
         await client.query('COMMIT');
         return true;
     } catch (e) {
@@ -294,11 +298,11 @@ async function takeToken(token) {
 }
 
 async function createWebSession(viewer, body, clientIp) {
-    const authorizedAt = Date.now();
+    const authorizedAt = new Date();
     await authorize(viewer);
     const size = screen(body);
     const row = {
-        id: crypto.randomUUID(), attachment: crypto.randomUUID(),
+        id: crypto.randomUUID(), attachment: crypto.randomUUID(), authorizedAt,
         userId: viewer.user_id, userEmail: viewer.email || '', userName: viewer.name || '', oid: viewer.oid || '',
         clientIp: String(clientIp || ''), ...size,
     };
@@ -311,15 +315,16 @@ async function createWebSession(viewer, body, clientIp) {
     try {
         let started;
         try {
-            started = await supervisorRequest({ op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false, until: authorizedAt + AUTH_GRACE_MS });
+            started = await supervisorRequest({ op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false, until: authorizedAt.getTime() + AUTH_GRACE_MS });
         } catch (e) {
             console.error('[remote-browser] start failed:', e.message);
             throw httpError(503, 'BROWSER_UNAVAILABLE');
         }
         if (!started || started.ok !== true) throw httpError(started && started.error === 'CAPACITY' ? 429 : 503, started && started.error === 'CAPACITY' ? 'BROWSER_CAPACITY' : 'BROWSER_UNAVAILABLE');
         const u = await pool.query(
-            `UPDATE browser_sessions SET state = 'detached', detached_at = NOW(), uid = $2, port = $3, supervisor_instance = $4 WHERE id = $1 AND state = 'starting' RETURNING *`,
-            [row.id, started.uid, started.port, String(started.instance || '')]);
+            `UPDATE browser_sessions SET state = 'detached', detached_at = NOW(), uid = $2, port = $3, supervisor_instance = $4, browser_started_at = $5
+             WHERE id = $1 AND state = 'starting' RETURNING *`,
+            [row.id, started.uid, started.port, String(started.instance || ''), Number.isFinite(started.startedAt) ? new Date(started.startedAt) : null]);
         const stored = rowsOf(u)[0];
         if (!stored) throw httpError(409, 'SESSION_CLOSED');
         if (_connServer) noteUid(stored);
@@ -344,11 +349,12 @@ async function sessionRow(id) {
     return rowsOf(await pool.query('SELECT * FROM browser_sessions WHERE id = $1', [String(id)]))[0] || null;
 }
 
-async function browserCredentials(id) {
+async function browserCredentials(id, until) {
     try {
-        const r = await supervisorRequest({ op: 'credentials', session: id });
+        const r = await supervisorRequest({ op: 'credentials', session: id, until });
         if (r && r.ok === true) return r;
         if (isGone(r)) return 'gone';
+        if (isExpired(r)) return 'expired';
         console.error('[remote-browser] session %s: credentials refused: %s', id, (r && r.error) || 'no answer');
     } catch (e) {
         console.error('[remote-browser] session %s: credentials failed: %s', id, e.message);
@@ -371,10 +377,11 @@ async function resumeWebSession(viewer, id, body) {
     if (row.state === 'ended') throw httpError(410, 'BROWSER_ENDED');
     if (row.state === 'ending') throw httpError(409, 'SESSION_ENDING');
     if (row.state === 'starting') throw httpError(409, 'SESSION_STARTING');
+    const authorizedAt = new Date();
     await authorize(viewer);
-    const creds = await browserCredentials(row.id);
-    if (creds === 'gone') {
-        await endWebSession(row.id, BROWSER_CLOSED).catch(() => { });
+    const creds = await browserCredentials(row.id, authorizedAt.getTime() + AUTH_GRACE_MS);
+    if (creds === 'gone' || creds === 'expired') {
+        await endWebSession(row.id, creds === 'gone' ? BROWSER_CLOSED : UNVERIFIED, creds === 'gone' ? CODE.ended : CODE.denied).catch(() => { });
         throw httpError(410, 'BROWSER_ENDED');
     }
     if (!creds) throw httpError(503, 'BROWSER_UNAVAILABLE');
@@ -382,10 +389,10 @@ async function resumeWebSession(viewer, id, body) {
     const attachment = crypto.randomUUID();
     const token = crypto.randomBytes(32).toString('base64url');
     const u = await pool.query(
-        `UPDATE browser_sessions SET attachment = $5, last_auth_ok_at = NOW(), width = $6, height = $7, dpi = $8,
+        `UPDATE browser_sessions SET attachment = $5, last_auth_ok_at = GREATEST(last_auth_ok_at, $10), width = $6, height = $7, dpi = $8,
             token_hash = $9, token_expires = NOW() + interval '${TOKEN_TTL_S} seconds'
          WHERE id = $1 AND user_id = $4 AND ${RESUMABLE} RETURNING id`,
-        [row.id, OPEN_STATES, keepAliveMin(), viewer.user_id, attachment, size.width, size.height, size.dpi, tokenHash(token)]);
+        [row.id, OPEN_STATES, keepAliveMin(), viewer.user_id, attachment, size.width, size.height, size.dpi, tokenHash(token), authorizedAt]);
     if (!rowsOf(u).length) {
         await endIfKeepAlivePassed(row.id);
         throw httpError(410, 'BROWSER_ENDED');
@@ -521,10 +528,11 @@ async function attachWebTunnel(entry, ws) {
         const takenOver = !!row && row.attachment !== entry.attachment && OPEN_STATES.includes(row.state);
         return refuse(takenOver ? TAKEN_OVER : (row && row.end_reason) || 'This session is no longer available.', takenOver ? CODE.takenOver : (row && row.end_code) || CODE.ended);
     }
-    let creds = await browserCredentials(row.id);
-    if (creds === 'gone') {
-        await endWebSession(row.id, BROWSER_CLOSED).catch(() => { });
-        return refuse(BROWSER_CLOSED, CODE.ended);
+    let creds = await browserCredentials(row.id, msOf(row.last_auth_ok_at) + AUTH_GRACE_MS);
+    if (creds === 'gone' || creds === 'expired') {
+        const [reason, code] = creds === 'gone' ? [BROWSER_CLOSED, CODE.ended] : [UNVERIFIED, CODE.denied];
+        await endWebSession(row.id, reason, code).catch(() => { });
+        return refuse(reason, code);
     }
     if (!creds) return refuse(MESSAGES.BROWSER_UNAVAILABLE, CODE.lost);
     const u = await pool.query(
@@ -570,13 +578,12 @@ async function attachWebTunnel(entry, ws) {
 
 async function watchAttached() {
     if (!_attached.size) return;
-    const ids = [..._attached.keys()];
+    const watched = [..._attached.entries()];
     let rows;
-    try { rows = rowsOf(await pool.query('SELECT id, state, attachment, end_reason, end_code FROM browser_sessions WHERE id = ANY($1)', [ids])); } catch { return; }
+    try { rows = rowsOf(await pool.query('SELECT id, state, attachment, end_reason, end_code FROM browser_sessions WHERE id = ANY($1)', [watched.map(([id]) => id)])); } catch { return; }
     const byId = new Map(rows.map(r => [r.id, r]));
-    for (const id of ids) {
-        const s = _attached.get(id);
-        if (!s || s.closed) continue;
+    for (const [id, s] of watched) {
+        if (s.closed || _attached.get(id) !== s) continue;
         const row = byId.get(id);
         if (!row || row.state === 'ending' || row.state === 'ended') closeLocal(s, (row && row.end_reason) || 'The session ended.', (row && row.end_code) || CODE.ended);
         else if (row.attachment !== s.attachment) closeLocal(s, TAKEN_OVER, CODE.takenOver);
@@ -616,45 +623,57 @@ async function recheckWebSessions() {
     const gate = await checkGate(snap, { probeGuacd: false });
     if (!gate.ok) {
         console.warn('[remote-browser] the browser gateway is not ready (%s): ending the web sessions', gate.code);
-        for (const row of rows) await endWebSession(row.id, `The session ended because the browser gateway isn't ready. ${GATE_REASONS[gate.code] || ''}`.trim(), CODE.denied).catch(() => { });
+        await forEachLimited(rows, async (row) => {
+            await endWebSession(row.id, `The session ended because the browser gateway isn't ready. ${GATE_REASONS[gate.code] || ''}`.trim(), CODE.denied).catch(() => { });
+        });
         return;
     }
     const cfg = entitlementCfg();
+    const verdicts = new Map();
+    const verdictFor = (row) => {
+        if (!verdicts.has(row.user_id)) verdicts.set(row.user_id, userVerdict(snap, cfg, row));
+        return verdicts.get(row.user_id);
+    };
     const kept = [];
-    for (const row of rows) {
-        const entitlement = evaluateExitNodeEntitlement(snap, cfg, { userId: row.user_id });
-        if (!entitlement.ok) {
-            await endWebSession(row.id, `Your session ended. ${MESSAGES[entitlement.code] || ''}`.trim(), CODE.denied).catch(() => { });
-            continue;
-        }
-        let permitted = true;
-        if (_deps.stillPermitted) {
-            permitted = await ra.withDeadline(Promise.resolve(_deps.stillPermitted({ oid: row.oid, email: row.user_email, userId: row.user_id, snap })), 15_000, 'Checking the permission')
-                .then(ok => !!ok, () => false);
-        }
-        if (!permitted) {
-            await endWebSession(row.id, "Your session ended because your Remote Access permission was removed or couldn't be confirmed. Ask an administrator if you need it.", CODE.denied).catch(() => { });
-            continue;
-        }
-        kept.push(row.id);
-    }
+    await forEachLimited(rows, async (row) => {
+        const reason = await verdictFor(row);
+        if (reason) await endWebSession(row.id, reason, CODE.denied).catch(() => { });
+        else kept.push(row.id);
+    });
     if (kept.length) await pool.query(`UPDATE browser_sessions SET last_auth_ok_at = $2 WHERE id = ANY($1) AND state <> 'ended'`, [kept, checkedAt]);
+}
+
+async function userVerdict(snap, cfg, row) {
+    const entitlement = evaluateExitNodeEntitlement(snap, cfg, { userId: row.user_id });
+    if (!entitlement.ok) return `Your session ended. ${MESSAGES[entitlement.code] || ''}`.trim();
+    if (!_deps.stillPermitted) return '';
+    const permitted = await ra.withDeadline(Promise.resolve(_deps.stillPermitted({ oid: row.oid, email: row.user_email, userId: row.user_id, snap })), 15_000, 'Checking the permission')
+        .then(ok => !!ok, () => false);
+    return permitted ? '' : "Your session ended because your Remote Access permission was removed or couldn't be confirmed. Ask an administrator if you need it.";
+}
+
+async function forEachLimited(items, task, limit = LEADER_CONCURRENCY) {
+    let next = 0;
+    const worker = async () => {
+        while (next < items.length) await task(items[next++]);
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
 async function maintainWebSessions(now = Date.now()) {
     const rows = rowsOf(await pool.query(`SELECT * FROM browser_sessions WHERE state <> 'ended'`));
     const keepAliveMs = config().browser.keepAliveMin * 60_000;
-    for (const row of rows) {
+    await forEachLimited(rows, async (row) => {
         try {
-            if (!browserActive()) { await endWebSession(row.id, 'Web sessions were turned off by an administrator.', CODE.denied); continue; }
-            if (row.state === 'ending') { await endWebSession(row.id, row.end_reason || 'The session ended.'); continue; }
+            if (!browserActive()) { await endWebSession(row.id, 'Web sessions were turned off by an administrator.', CODE.denied); return; }
+            if (row.state === 'ending') { await endWebSession(row.id, row.end_reason || 'The session ended.'); return; }
             if (row.state === 'starting') {
                 if (now - msOf(row.created_at) > STARTING_STALE_MS) await endWebSession(row.id, 'The session did not open.');
-                continue;
+                return;
             }
             if (now - msOf(row.last_auth_ok_at) > AUTH_GRACE_MS) {
-                await endWebSession(row.id, "Your access couldn't be verified with NetBird, so the session ended.", CODE.denied);
-                continue;
+                await endWebSession(row.id, UNVERIFIED, CODE.denied);
+                return;
             }
             let state = row.state;
             let detachedAt = msOf(row.detached_at);
@@ -667,17 +686,18 @@ async function maintainWebSessions(now = Date.now()) {
             }
             if (state === 'detached' && now - detachedAt > keepAliveMs) {
                 await endWebSession(row.id, keepAliveText());
-                continue;
+                return;
             }
             const renewed = await supervisorRequest({ op: 'renew', session: row.id, until: msOf(row.last_auth_ok_at) + AUTH_GRACE_MS }).catch((e) => {
                 console.error('[remote-browser] session %s: renew failed: %s', row.id, e.message);
                 return null;
             });
             if (isGone(renewed)) await endWebSession(row.id, BROWSER_CLOSED);
+            else if (isExpired(renewed)) await endWebSession(row.id, UNVERIFIED, CODE.denied);
         } catch (e) {
             console.error('[remote-browser] session %s: %s', row.id, e.message);
         }
-    }
+    });
 }
 
 async function reconcileWithSupervisor(now = Date.now()) {
@@ -701,14 +721,13 @@ async function reconcileWithSupervisor(now = Date.now()) {
         if (fresh === undefined || (fresh && fresh.state !== 'ended')) continue;
         await supervisorRequest({ op: 'stop', session: s.session }, SUPERVISOR_STOP_TIMEOUT_MS).catch(e => console.error('[remote-browser] reconcile: could not stop %s: %s', s.session, e.message));
     }
-    for (const row of rows) {
-        if (running.has(row.id)) continue;
-        if (row.state === 'starting' && now - msOf(row.created_at) <= STARTING_STALE_MS) continue;
-        if (row.state !== 'ending' && !(await browserClosed(row.id))) continue;
+    await forEachLimited(rows.filter(row => !running.has(row.id)), async (row) => {
+        if (row.state === 'starting' && now - msOf(row.created_at) <= STARTING_STALE_MS) return;
+        if (row.state !== 'ending' && !(await browserClosed(row.id))) return;
         const reason = row.end_reason
             || (row.state === 'starting' ? 'The session did not open.' : row.supervisor_instance === instance ? BROWSER_CLOSED : BROWSER_RESTARTED);
         await endWebSession(row.id, reason).catch(() => { });
-    }
+    });
     return true;
 }
 
@@ -724,6 +743,7 @@ async function leaderTick() {
         await recheckWebSessions().catch(e => console.error('[remote-browser] re-check:', e.message));
         await maintainWebSessions();
         await refreshUidMap().catch(() => { });
+        for (const session of _uidSessions.values()) if (!session.queued) flushDropped(session);
         if (Date.now() - _lastPurge > 3_600_000) {
             _lastPurge = Date.now();
             await pool.query(`DELETE FROM browser_sessions WHERE state = 'ended' AND ended_at < NOW() - interval '${ENDED_KEEP_DAYS} days'`).catch(() => { });
@@ -737,6 +757,7 @@ const _uidSessions = new Map();
 const _pending = new Map();
 let _pendingCount = 0;
 let _unattributed = 0;
+let _queued = 0;
 let _lookupTimer = null;
 let _lastLookup = 0;
 let _connServer = null;
@@ -746,21 +767,28 @@ function noteUid(row) {
     const uid = Number(row && row.uid);
     if (!Number.isInteger(uid) || !row.id) return;
     if (!_supervisorInstance || row.supervisor_instance !== _supervisorInstance) return;
+    const startedAt = msOf(row.browser_started_at) || (Number.isFinite(row.startedAt) ? row.startedAt : 0);
+    if (!startedAt) return;
     const known = _uidSessions.get(uid);
     if (known && known.id === row.id) return;
-    _uidSessions.set(uid, { id: row.id, instance: row.supervisor_instance, userId: row.user_id, user: row.user_email || row.user_name || '', seen: new Set(), capped: false });
+    _uidSessions.set(uid, {
+        id: row.id, instance: row.supervisor_instance, startedAt, userId: row.user_id, user: row.user_email || row.user_name || '',
+        seen: new Set(), capped: false, queued: 0, dropped: 0,
+    });
     flushPending(uid);
 }
 
 function forgetUid(row) {
     const uid = Number(row && row.uid);
     const known = _uidSessions.get(uid);
-    if (known && known.id === row.id) _uidSessions.delete(uid);
+    if (!known || known.id !== row.id) return;
+    _uidSessions.delete(uid);
+    if (!known.queued) flushDropped(known);
 }
 
 async function refreshUidMap() {
     const rows = rowsOf(await pool.query(
-        `SELECT id, uid, user_id, user_email, user_name, supervisor_instance FROM browser_sessions WHERE state = ANY($1) AND uid IS NOT NULL`, [OPEN_STATES]));
+        `SELECT id, uid, user_id, user_email, user_name, supervisor_instance, browser_started_at FROM browser_sessions WHERE state = ANY($1) AND uid IS NOT NULL`, [OPEN_STATES]));
     const live = new Set(rows.map(r => r.id));
     for (const [uid, s] of _uidSessions) if (!live.has(s.id)) _uidSessions.delete(uid);
     for (const r of rows) noteUid(r);
@@ -772,14 +800,14 @@ function enqueue(task) {
 }
 const writeEvent = (event) => enqueue(() => addEvent(event));
 
-function gapEvent(session, reason, id = `${session.id}:gap:${crypto.randomUUID()}`) {
+function gapEvent(session, reason, { id = `${session.id}:gap:${crypto.randomUUID()}`, missed } = {}) {
     return {
         ID: id,
         Timestamp: new Date().toISOString(),
         Message: 'TYPE_UNKNOWN',
         reference: CONNECTION_REFERENCE,
         meta: { flow_id: id, protocol: 0, direction: 'EGRESS', source_name: 'Browser Gateway Web', source_type: SOURCE_TYPE, user_id: session.userId },
-        remoteAccess: { protocol: 'web', kind: 'gap', sessionId: session.id, user: session.user, reason },
+        remoteAccess: { protocol: 'web', kind: 'gap', sessionId: session.id, user: session.user, reason, ...(missed ? { missed } : {}) },
     };
 }
 
@@ -831,23 +859,71 @@ function parseRecord(line) {
     };
 }
 
+const wholeSeconds = (ms) => Math.floor(ms / 1000);
+
+function countUnattributed(n) {
+    _unattributed += n;
+    scheduleUidLookup();
+}
+
+function flushDropped(session) {
+    if (!session.dropped) return;
+    const missed = session.dropped;
+    session.dropped = 0;
+    writeEvent(gapEvent(session, `${missed} connection${missed === 1 ? '' : 's'} arrived faster than they could be recorded, so they were not recorded.`, { missed }));
+}
+
 function logConnection(session, rec) {
+    if (wholeSeconds(rec.at.getTime()) < wholeSeconds(session.startedAt)) { countUnattributed(1); return; }
     if (session.capped) return;
     const tuple = tupleOf(rec);
     if (session.seen.has(tuple)) return;
+    if (_queued >= QUEUED_RECORDS_MAX || session.queued >= CONNECTIONS_PER_SESSION) { session.dropped++; return; }
     session.seen.add(tuple);
+    session.queued++;
+    _queued++;
     enqueue(async () => {
-        const counted = rowsOf(await pool.query(
-            `UPDATE browser_sessions SET conn_count = conn_count + 1 WHERE id = $1 RETURNING conn_count`, [session.id]))[0];
-        const n = Number(counted && counted.conn_count) || 0;
-        if (!n) return;
-        if (n <= CONNECTIONS_PER_SESSION) { await addEvent(connectionEvent(session, rec)); return; }
-        session.capped = true;
-        session.seen.clear();
-        if (n === CONNECTIONS_PER_SESSION + 1) {
-            await addEvent(gapEvent(session, `More than ${CONNECTIONS_PER_SESSION} connections: the later connections of this session are not recorded.`, `web-gap:${session.id}:cap`));
+        try {
+            await recordConnection(session, rec);
+        } catch (e) {
+            session.seen.delete(tuple);
+            throw e;
+        } finally {
+            session.queued--;
+            _queued--;
+            if (!session.queued) flushDropped(session);
         }
     });
+}
+
+async function recordConnection(session, rec) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const row = rowsOf(await client.query('SELECT conn_count FROM browser_sessions WHERE id = $1 FOR UPDATE', [session.id]))[0];
+        const count = row ? Number(row.conn_count) || 0 : -1;
+        if (count < 0 || count > CONNECTIONS_PER_SESSION) {
+            await client.query('ROLLBACK');
+            if (count >= 0) session.capped = true;
+            return;
+        }
+        const atCap = count === CONNECTIONS_PER_SESSION;
+        const event = atCap
+            ? gapEvent(session, `More than ${CONNECTIONS_PER_SESSION} connections: the later connections of this session are not recorded.`, { id: `web-gap:${session.id}:cap` })
+            : connectionEvent(session, rec);
+        const inserted = await addEvent(event, client);
+        if (inserted && inserted.rowCount === 1) await client.query('UPDATE browser_sessions SET conn_count = conn_count + 1 WHERE id = $1', [session.id]);
+        await client.query('COMMIT');
+        if (atCap) {
+            session.capped = true;
+            session.seen.clear();
+        }
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => { });
+        throw e;
+    } finally {
+        client.release();
+    }
 }
 
 function handleRecord(line) {
@@ -906,10 +982,10 @@ async function lookupPendingUids(now = Date.now()) {
     const ids = sessions.filter(s => s && _pending.has(Number(s.uid))).map(s => s.session);
     if (ids.length) {
         const rows = rowsOf(await pool.query(
-            'SELECT id, user_id, user_email, user_name, supervisor_instance FROM browser_sessions WHERE id = ANY($1) AND state = ANY($2)', [ids, OPEN_STATES]));
+            'SELECT id, user_id, user_email, user_name, supervisor_instance, browser_started_at FROM browser_sessions WHERE id = ANY($1) AND state = ANY($2)', [ids, OPEN_STATES]));
         for (const s of sessions) {
             const row = rows.find(r => r.id === s.session);
-            if (row) noteUid({ ...row, uid: s.uid });
+            if (row) noteUid({ ...row, uid: s.uid, startedAt: s.startedAt });
         }
     }
     if (_pending.size) scheduleUidLookup();
@@ -1004,12 +1080,13 @@ module.exports = {
     _internal: {
         setEndpointsForTest: (p) => { _endpoints = { ...DEFAULT_ENDPOINTS, ...(p || {}) }; },
         resetForTest: () => {
-            _attached.clear(); _uidSessions.clear(); _pending.clear(); _pendingCount = 0; _unattributed = 0;
+            _attached.clear(); _uidSessions.clear(); _pending.clear(); _pendingCount = 0; _unattributed = 0; _queued = 0;
             _ticking = false; _shuttingDown = false; _health = null; _supervisorInstance = '';
             clearTimeout(_lookupTimer); _lookupTimer = null; _lastLookup = 0;
         },
         closeConnectionsForTest: () => new Promise(r => { if (!_connServer) return r(); _connServer.close(() => r()); _connServer = null; }),
         eventsIdleForTest: () => _eventChain,
+        queuedForTest: () => _queued,
         attachedForTest: (id) => _attached.get(id),
         supervisorRequest, checkGate, reconcileWithSupervisor, maintainWebSessions, recheckWebSessions, bindConnections, handleRecord, parseRecord, lookupPendingUids,
         vncArgs, fitSize, webSessionEvent, CAPACITY_LOCK, CONNECTIONS_PER_SESSION, INSTANCE,
