@@ -1,6 +1,7 @@
-# Browser Remote Access (RDP and SSH)
+# Browser Remote Access (RDP, SSH and Web)
 
-Users open RDP and SSH sessions from the browser, on the **Remote Access** page. The page opens
+Users open RDP and SSH sessions from the browser, on the **Remote Access** page, and a remote web
+browser for public websites (see [Web sessions](#web-sessions-remote-browser)). The page opens
 on its own, without the portal's menu: only **Back To Portal**, the theme switch and the account
 menu stay above the connection form. They need no
 NetBird client on their device, and the servers need no NetBird client either: sessions reach
@@ -681,6 +682,104 @@ usual.
 
 When the app restarts during a session, the session is closed on start-up and its end record says
 that the real end time is unknown.
+
+## Web sessions (remote browser)
+
+A **Browser** session opens a Chromium browser that runs next to the app and shows it on the
+Remote Access page, in the same viewer as RDP. Users browse public websites with the normal address
+bar and tabs, and the sites see the office's public address. Typical use: a customer portal that
+accepts only the office's address.
+
+### What a web session can and cannot reach
+
+- **The public internet only.** Every private, shared (CGNAT), loopback, link-local and other
+  special-purpose IPv4 range is refused, and so are the Docker networks, Docker's DNS and the NetBird
+  addresses of other peers. There is no access to internal servers in this version.
+- **Through the office.** The browser's own NetBird peer (the *browser gateway*) sends everything
+  through a route that the app creates: `0.0.0.0/0` through the routing peers you choose in
+  Settings (for example *Office Peers*), distributed only to the browser gateway's group. The route
+  has its own access-control group, so the routing peers forward this traffic only for the browser
+  gateway and for no other peer. The shared Exit Node route is never changed.
+- **One layer protects the LAN, by design.** The routing peers can reach the office LAN. What keeps
+  the browser away from it is the egress lock in the browser gateway's network namespace, installed
+  before NetBird starts and checked every 10 seconds. When the lock is missing or changed, no web
+  session opens and the open ones close.
+- **When the route disappears, nothing leaves.** Without the route, the browser's traffic has no
+  way out (it never falls back to the Docker host's own internet connection).
+
+### Who may open one
+
+The same checks as RDP and SSH (sign-in, a live and unblocked NetBird user, the Remote Access
+permission), plus: one of the user's own devices must be entitled to the office Exit Node in
+NetBird. That device must be in the distribution groups of an enabled `0.0.0.0/0` route (other than
+the app's own), and an enabled policy without posture checks must let it reach that route's routing
+peers. When the route has access-control groups, a policy with all protocols must also lead to one of
+them, and a drop policy for the same device cancels it. A device whose NetBird login expired, or that waits for approval, does not
+count. The check runs when the session opens and every minute after.
+
+### Disconnect, resume and close
+
+- Closing the tab, refreshing the page or losing the network **disconnects** the browser: it keeps
+  running, with its tabs and sign-ins, for the keep-alive time (default 15 minutes). The Remote
+  Access page lists the user's open browsers with **Resume** and **Close Browser**. Only the same
+  user can resume, and the access checks run again first.
+- **Close Browser** ends the browser at once and wipes its profile. A browser also ends when the
+  user closes its last window, when the keep-alive passes, or when access is lost.
+- Opening the same browser in another window moves it there; the first window shows that it moved.
+
+### Inside the browser
+
+- Downloads, saving pages, uploads (file dialogs), printing, developer tools, extensions and saved
+  passwords are blocked by Chromium's managed policies. Websites cannot read the clipboard by
+  themselves.
+- Self-signed certificates show Chromium's usual warning, and **Proceed** works.
+- Copy and paste follow the Remote Access clipboard setting, like RDP. **Pasting Hebrew text is not
+  supported yet** (guacd 1.6.0 sends VNC clipboard text as Latin-1; the fix is expected in guacd
+  1.6.1). Typing Hebrew works.
+- Every session runs as its own Linux users (one for the display, one for Chromium), with Chromium's
+  sandbox on and no capabilities. A session cannot see another session's screen or connect to it.
+
+### Session and connection records
+
+A web session has start and end records like RDP and SSH (destination *Remote Browser*). Each new
+connection the browser opens is also recorded once: the destination address, port and protocol,
+with the session and the user. Connections are not counted in the traffic summaries. When the
+recorder misses connections (for example while the app restarts), a gap record says so.
+
+### Set it up
+
+1. **Settings → Remote Access → Remote Browser:** choose the routing-peer group (the office routing
+   peers) and turn web sessions on. The app creates its groups, route and policies in NetBird.
+2. **Create Setup Key** in the same card and put it in `.env` as
+   `REMOTE_BROWSER_GATEWAY_SETUP_KEY` (one-time key, valid for one day). Keep `.env` readable by its
+   owner only.
+3. `.env` must also set `TAG` (the release `update.sh` installs), because the browser image follows
+   the app's version.
+4. Start the browser gateway and its containers together, from the folder that holds
+   `docker-compose.yml` (the files `remote-browser/seccomp.json` and `remote-browser/resolv.conf` are
+   read from there):
+
+   ```bash
+   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-browser up -d
+   ```
+
+   Add `--profile remote-names` if you use the names gateway.
+5. The host isolation rules (below) already cover the browser gateway (`172.31.250.4` and the
+   gateways' egress network).
+6. **Check the sandbox on the host.** Chromium's sandbox needs unprivileged user namespaces. If the
+   host restricts them (for example Ubuntu's AppArmor setting
+   `kernel.apparmor_restrict_unprivileged_userns=1`), browsers do not start and Settings shows the
+   gateway as not ready.
+
+**Settings → Remote Access → Remote Browser** shows whether the gateway is enrolled, online and
+ready, and why not.
+
+### Known limits
+
+- Pasting Hebrew text does not work (see above).
+- Restarting the `remote-browser` container ends every open browser.
+- Re-create the browser gateway's four containers together (the command above); re-creating only
+  the gateway leaves the others stopped.
 
 ## Settings
 

@@ -11,6 +11,14 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 ## [Unreleased]
 
 ### Added
+- **Web sessions: a remote browser for public websites.** A new **Browser** choice on the Remote
+  Access page opens Chromium in the portal. Websites see the office's address, because the browser
+  goes out through a route the app creates through the routing peers you choose; it never reaches
+  private or internal addresses. A disconnected browser keeps running for 15 minutes (a setting) and
+  can be resumed. Downloads, uploads, printing and developer tools are blocked, and each new
+  connection is recorded. Only users with a device entitled to the office Exit Node may open one.
+  Pasting Hebrew text is not supported yet. Needs the new `remote-browser` Compose profile and
+  image: setup in docs/remote-access.md.
 - **The Browser Gateways' host isolation rules come as a script and a systemd unit.**
   `netbird-docker-compose-files/remote-access-isolation` holds a script that sets the rules and a
   unit that runs it before Docker starts, so the rules survive a reboot. They now block the
