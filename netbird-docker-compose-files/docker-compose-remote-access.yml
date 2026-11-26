@@ -1,14 +1,10 @@
-# Browser Remote Access (optional) - the Browser Gateways, added on top of docker-compose.yml:
-#
-#   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml up -d
-#
+# Browser Remote Access (optional) - the Browser Gateways, added on top of docker-compose.yml.
 # Connecting by host name to NetBird domain resources also needs the names gateway (profile
-# "remote-names"):
+# "remote-names").
 #
-#   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-names up -d
-#
-# Without this file nothing changes for an existing deployment. Setup, the REQUIRED host
-# firewall rules and the security model are in docs/remote-access.md.
+# Without this file nothing changes for an existing deployment. Setup, with the command that starts
+# the gateways, the REQUIRED host isolation rules and the security model are in
+# docs/remote-access.md.
 
 # Each gateway runs NetBird in the foreground with its settings given on every start (a value
 # changed later in the environment would not reach an already enrolled peer otherwise), after it
@@ -75,6 +71,10 @@ x-guacd-start: &guacd-start |
 x-guacd: &guacd
   image: guacamole/guacd:${REMOTE_GUACD_TAG:-1.6.0}
   restart: unless-stopped
+  # A restarted gateway leaves guacd in the old network namespace, where its health check fails
+  # until guacd restarts. On a host that runs autoheal, this label has it restarted.
+  labels:
+    - autoheal=true
   mem_limit: 2g
   cpus: 2
   pids_limit: 512
@@ -172,9 +172,9 @@ volumes:
   remote-gateway-state:
   remote-names-gateway-state:
 
-# Both subnets are pinned: guacd binds to the gateways' fixed addresses, and the host's
-# DOCKER-USER rules (docs/remote-access.md) are keyed to them. If either overlaps a network on
-# your host, change it here AND in those rules.
+# Both subnets are pinned, so do not change them: guacd binds to the gateways' fixed addresses, the
+# host's isolation rules (remote-access-isolation/netbird-control-gateway-isolation.sh) are keyed to
+# them, and the app refuses them as targets.
 networks:
   # App <-> guacd only. internal: no route out of the host through this network.
   remote-access:

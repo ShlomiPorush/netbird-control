@@ -25,7 +25,7 @@ Two things that look like "access" but are **not** data-plane access:
 | [Temporary Access](temporary-access.md) | Time-boxed user access to resources, auto-revoked. How each target type is wired. |
 | [Access Requests](access-requests.md) | Self-service request → admin approval (in-app or via Telegram buttons), which creates a temporary grant. |
 | [Address Blocklist](blocklist.md) | Addresses that may not be added as resources; enforcing the block on existing resources. |
-| [Browser Remote Access](remote-access.md) | RDP and SSH from the browser through the Browser Gateway: who may connect, setup, the required host firewall rules, known limits. |
+| [Browser Remote Access](remote-access.md) | RDP and SSH from the browser through the Browser Gateway: who may connect, setup, the required host isolation rules, known limits. |
 | [Public API](api.md) | API keys, authentication, error codes, and `POST /api/v1/remote-access/launch`. |
 | [Open remote sessions from another system](remote-launch-integration.md) | Adding a Connect button to another application, such as a customer file. |
 | [Automation](automation.md) | Auto-provision NetBird resources from an external HTTP source, on a schedule. |
