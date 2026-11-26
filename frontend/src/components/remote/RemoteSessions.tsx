@@ -338,8 +338,9 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const filesOn = webActive && filesAllowed;
   useEffect(() => setFilesOpen(false), [activeId]);
   const toggleFiles = () => { setClipOpen(false); setFilesOpen((v) => !v); };
-  const showFiles = (id: string) => {
-    if (!filesOn || id !== active?.sessionId) return;
+  const showFiles = async (id: string) => {
+    if (!open || !webActive || id !== active?.sessionId) return;
+    if (!filesAllowed && !(await info.refetch()).data?.browser?.files) return;
     setClipOpen(false);
     setFilesOpen(true);
     reveal();
@@ -389,7 +390,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             pointer={pointer}
             onLatchChange={(m) => { if (s.sessionId === active?.sessionId) setLatched(m); }}
             onTouchTap={s.protocol === 'ssh' && s.sessionId === active?.sessionId ? openDeviceKeys : undefined}
-            onShowFiles={s.protocol === 'web' ? () => showFiles(s.sessionId) : undefined}
+            onShowFiles={s.protocol === 'web' ? () => { void showFiles(s.sessionId); } : undefined}
             apiRef={apiFor(s.sessionId)}
             onStatus={(st) => setStatus((m) => (m[s.sessionId] === st ? m : { ...m, [s.sessionId]: st }))}
             onRemoteClipboard={(t) => setClips((m) => ({ ...m, [s.sessionId]: t }))}

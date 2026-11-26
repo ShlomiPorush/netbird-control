@@ -791,9 +791,12 @@ Two settings in **Settings → Remote Access → Remote Browser → Files**, bot
 Anyone who may open a web session gets these features when they are on. Turning a setting off takes
 effect in open browsers within about a minute; a download that already started finishes.
 
-**Show in folder.** The browser has no file manager of its own. With **Files In The Browser** on,
-**Show in folder** and **Open** on a download in the browser's download list open the session bar's
-**Files** panel instead, within about two seconds, when that browser is the one in front. Other
+**Show in folder and Open.** The browser has no file manager of its own. With **Files In The
+Browser** on, **Show in folder** on a download, and **Open** on a file the browser can't show
+itself, open the session bar's **Files** panel instead, within about two seconds, while the session
+view is open and that browser is the one in front. **Open** on a file the browser can show, such as
+a PDF, opens it in a browser tab: while the setting is on, the browser may open files of its own
+folder, and no other local files. Each browser's folder is readable only by that browser. Other
 requests to open something outside the browser, such as a `mailto:` link, do nothing.
 
 **Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger

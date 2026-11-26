@@ -387,6 +387,28 @@ test('a browser that asks to show its files gets one nbc-files on its own tunnel
     assert.equal(sup.requests.filter(r => r.op === 'requests').length, 0);
 });
 
+test('the files requests poll waits for a slow answer before it asks again, and stops when told to', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    const c = connect(out.token);
+    await c.opened;
+    await until(() => table.rows.get(out.sessionId).state === 'active');
+    sup.delays.set('requests:*', 500);
+    const asked = () => sup.requests.filter(r => r.op === 'requests');
+    rb.startFileRequests();
+    try {
+        await until(() => asked().length === 2, 8000);
+    } finally {
+        rb._internal.stopFileRequestsForTest();
+    }
+    const [first, second] = asked();
+    assert.ok(second.at - first.at >= 2400, `the second ask came ${second.at - first.at} ms after the first`);
+    await sleep(2700);
+    assert.equal(asked().length, 2);
+    c.ws.send(encodeInstruction('disconnect'));
+    await c.closed;
+});
+
 test('a user at the per-user limit opens no new browser, while others still can', async () => {
     await reset({ maxSessions: 5, maxPerUser: 1 });
     const first = await rb.createWebSession(USER, {}, '');

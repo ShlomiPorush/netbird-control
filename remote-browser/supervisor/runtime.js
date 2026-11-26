@@ -33,6 +33,7 @@ const ENABLED_POLICY = {
   DownloadDirectory: `${FILES_ROOT}/\${user_name}`,
   DefaultFileSystemReadGuardSetting: 2,
   DefaultFileSystemWriteGuardSetting: 2,
+  URLAllowlist: [`file://${FILES_ROOT}/`],
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

@@ -643,13 +643,23 @@ async function pollFileRequests() {
 
 let _fileRequests = null;
 function startFileRequests() {
-    if (!_fileRequests) _fileRequests = setInterval(() => pollFileRequests().catch(e => console.error('[remote-browser] files requests:', e.message)), FILE_REQUESTS_INTERVAL_MS);
+    if (_fileRequests) return;
+    const next = () => {
+        _fileRequests = setTimeout(() => pollFileRequests()
+            .catch(e => console.error('[remote-browser] files requests:', e.message))
+            .finally(() => { if (_fileRequests) next(); }), FILE_REQUESTS_INTERVAL_MS);
+    };
+    next();
+}
+
+function stopFileRequests() {
+    clearTimeout(_fileRequests);
+    _fileRequests = null;
 }
 
 async function shutdownWebTunnels(message) {
     _shuttingDown = true;
-    clearInterval(_fileRequests);
-    _fileRequests = null;
+    stopFileRequests();
     const open = [..._attached.values()];
     for (const s of open) closeLocal(s, message, CODE.restarting);
     await Promise.allSettled(open.map(detach));
@@ -1264,6 +1274,7 @@ module.exports = {
         queuedForTest: () => _queued,
         attachedForTest: (id) => _attached.get(id),
         pollFileRequests,
+        stopFileRequestsForTest: stopFileRequests,
         reconcileWithSupervisor: async (now) => {
             const listed = await reconcileWithSupervisor(now);
             if (listed) await recordListedJournals(listed);

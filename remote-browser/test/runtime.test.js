@@ -98,6 +98,7 @@ test('the files policy is replaced whole, blocked or enabled, and no temporary f
     DownloadDirectory: '/var/lib/browser-files/${user_name}',
     DefaultFileSystemReadGuardSetting: 2,
     DefaultFileSystemWriteGuardSetting: 2,
+    URLAllowlist: ['file:///var/lib/browser-files/'],
   });
   assert.equal(fs.existsSync(temporary), false);
 });
@@ -115,6 +116,8 @@ test('the image ships the blocked files policy, and the base policy leaves both 
   assert.deepEqual(readJson(path.join(__dirname, '..', 'policies', 'files.json')), BLOCKED_POLICY);
   const managed = readJson(path.join(__dirname, '..', 'policies', 'managed.json'));
   for (const key of Object.keys(ENABLED_POLICY)) assert.equal(key in managed, false, key);
+  assert.equal('URLAllowlist' in BLOCKED_POLICY, false);
+  assert.deepEqual(managed.URLBlocklist, ['file://*']);
 });
 
 test('Chromium runs under the files limit with SIGXFSZ ignored', () => {

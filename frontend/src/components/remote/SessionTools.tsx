@@ -148,7 +148,7 @@ export function useBarPanelPosition(anchor: RefObject<HTMLElement | null>, maxWi
       else if (r.top < 0) setPos(null);
       else setPos({ left: Math.max(8, Math.min(r.right - width, viewport - width - 8)), top: r.bottom + 10, width });
     };
-    const placeAfterSlide = (e: TransitionEvent) => { if (e.propertyName === 'transform') place(); };
+    const placeAfterSlide = (e: TransitionEvent) => { if (e.propertyName === 'translate' || e.propertyName === 'transform') place(); };
     place();
     window.addEventListener('resize', place);
     window.addEventListener('transitionend', placeAfterSlide);
