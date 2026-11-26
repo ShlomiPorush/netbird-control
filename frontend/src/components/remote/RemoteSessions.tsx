@@ -1034,7 +1034,7 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
         fontSize={fontSize} onFontSize={ssh ? onFontSize : undefined}
         onEvent={onEvent} onRemoteClipboard={onRemoteClipboard} apiRef={apiRef} />
       {overlay && (
-        <div className="absolute inset-0 z-20 overflow-y-auto bg-nb-gray-950/80 backdrop-blur-xs">
+        <div className="nb-follow-theme absolute inset-0 z-20 overflow-y-auto bg-nb-gray-100/85 text-nb-gray-900 backdrop-blur-xs dark:bg-nb-gray-950/80 dark:text-nb-gray-100">
           <div className="flex min-h-full items-center justify-center p-4">{overlay}</div>
         </div>
       )}
