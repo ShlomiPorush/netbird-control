@@ -881,6 +881,11 @@ async function recordListedJournals(listed) {
 }
 
 let _ticking = false;
+let _drain = null;
+function drainInBackground(listed) {
+    if (_drain) return;
+    _drain = drainJournals(listed).catch(e => console.error('[remote-browser] file log:', e.message)).finally(() => { _drain = null; });
+}
 let _lastPurge = 0;
 async function leaderTick() {
     if (_ticking || _shuttingDown) return;
@@ -899,7 +904,7 @@ async function leaderTick() {
             return null;
         }) : null;
         await superviseWebSessions().catch(e => console.error('[remote-browser] supervise:', e.message));
-        if (listed) await drainJournals(listed).catch(e => console.error('[remote-browser] file log:', e.message));
+        if (listed) drainInBackground(listed);
         if (_connServer && _mapNeedsRebuild) await refreshUidMap().catch(e => console.error('[remote-browser] connection log map:', e.message));
         flushMissed();
         if (Date.now() - _lastPurge > 3_600_000) {
@@ -1236,6 +1241,7 @@ module.exports = {
         flushMissedForTest: flushMissed,
         closeConnectionsForTest: () => new Promise(r => { if (!_connServer) return r(); _connServer.close(() => r()); _connServer = null; }),
         eventsIdleForTest: () => _eventChain,
+        drainIdleForTest: () => _drain || Promise.resolve(),
         queuedForTest: () => _queued,
         attachedForTest: (id) => _attached.get(id),
         reconcileWithSupervisor: async (now) => {

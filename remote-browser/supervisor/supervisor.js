@@ -35,6 +35,7 @@ class Supervisor {
     this.slotCooldownMs = slotCooldownMs;
     this.filesPolicy = { enabled: false, transfer: false, rev: -1 };
     this.policyFailed = false;
+    this.failedRev = -1;
     this.endings = new Map();
     const saved = store.load();
     this.nextSlot = Number.isInteger(saved) && saved >= 0 && saved < slotCount ? saved : 0;
@@ -75,7 +76,7 @@ class Supervisor {
   }
 
   async setFilesPolicy({ enabled, transfer, rev }) {
-    if (rev < this.filesPolicy.rev) return { ok: true, rev: this.filesPolicy.rev };
+    if (rev < this.filesPolicy.rev || rev < this.failedRev) return { ok: true, rev: this.filesPolicy.rev };
     if (this.policyFailed || this.filesPolicy.enabled !== enabled) {
       try {
         this.runtime.writeFilesPolicy(enabled);
@@ -83,6 +84,7 @@ class Supervisor {
         this.log(`files policy (rev ${rev}) could not be written: ${error.message}`);
         if (!enabled) {
           this.policyFailed = true;
+          this.failedRev = rev;
           this.endAll('the files policy could not be blocked');
         }
         return failure('POLICY_FAILED', 'The files policy could not be written.');

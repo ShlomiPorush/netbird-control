@@ -489,6 +489,23 @@ test('a policy write that fails to block files stops every session, refuses new 
   assert.equal(supervisor.filesAccess('c', true).record, supervisor.sessions.get('c'));
 });
 
+test('a late setting older than a block that failed to write cannot lift the block', async () => {
+  const { supervisor, runtime, startOf } = setup();
+  await filesOp(supervisor, { rev: 4 });
+  const writeFilesPolicy = runtime.writeFilesPolicy;
+  runtime.writeFilesPolicy = () => {
+    throw new Error('no space left on device');
+  };
+  assert.equal((await filesOp(supervisor, { rev: 5, enabled: false })).error, 'POLICY_FAILED');
+  runtime.writeFilesPolicy = writeFilesPolicy;
+  assert.deepEqual(await filesOp(supervisor, { rev: 4 }), { ok: true, rev: 4 });
+  assert.equal(supervisor.policyFailed, true);
+  assert.equal((await startOf('a')).error, 'POLICY_FAILED');
+  assert.deepEqual(await filesOp(supervisor, { rev: 5, enabled: false }), { ok: true, rev: 5 });
+  assert.equal(supervisor.policyFailed, false);
+  assert.deepEqual(supervisor.filesPolicy, { enabled: false, transfer: false, rev: 5 });
+});
+
 test('while a failed block is pending the files channel is off for a session that is still running', async () => {
   const { supervisor, runtime, startOf } = setup();
   await filesOp(supervisor, { rev: 0 });

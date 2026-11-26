@@ -1359,6 +1359,7 @@ test('the leader tick drains a long journal in bounded lists, acknowledging each
     sup.journal.set(out.sessionId, Array.from({ length: 250 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
     sup.requests.length = 0;
     await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
     await rb._internal.closeConnectionsForTest();
     assert.equal(fileRecords().length, 250);
     assert.deepEqual(sup.journal.get(out.sessionId).length, 0);
@@ -1372,9 +1373,11 @@ test('the drain stops after 20 lists in one tick and goes on in the next', async
     sup.journal.set(out.sessionId, Array.from({ length: 500 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
     sup.requests.length = 0;
     await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
     assert.equal(listRequests().filter(r => r.ack).length, 19, 'the list of the tick and 19 more');
     assert.equal(fileRecords().length, 400);
     await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
     await rb._internal.closeConnectionsForTest();
     assert.equal(fileRecords().length, 500);
 });
@@ -1387,6 +1390,7 @@ test('the drain stops when a round records nothing new', async () => {
     failingIds.add(`web-file:${out.sessionId}:21`);
     sup.requests.length = 0;
     await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
     await rb._internal.closeConnectionsForTest();
     assert.equal(fileRecords().length, 20);
     assert.equal(listRequests().filter(r => r.ack).length, 1);
@@ -1414,7 +1418,7 @@ test('the leader tick sends the files setting from a fresh read of the saved set
     await rb._internal.closeConnectionsForTest();
 });
 
-test('the leader tick renews the sessions before it writes the files they saved', async () => {
+test('the leader tick renews the sessions without waiting for the files they saved to be written', async () => {
     await reset();
     const out = await rb.createWebSession(USER, {}, '');
     sup.journal.set(out.sessionId, [{ seq: 1, name: 'a.bin', size: 1 }]);
@@ -1422,11 +1426,14 @@ test('the leader tick renews the sessions before it writes the files they saved'
     fileWriteGate = new Promise(r => { release = r; });
     sup.requests.length = 0;
     try {
-        const tick = rb.leaderTick();
-        await until(() => sup.requests.some(r => r.op === 'renew' && r.session === out.sessionId));
-        assert.deepEqual(fileRecords(), [], 'renewed while the file write waits');
+        await rb.leaderTick();
+        assert.ok(sup.requests.some(r => r.op === 'renew' && r.session === out.sessionId));
+        assert.deepEqual(fileRecords(), [], 'the tick ended while the file write waits');
+        sup.requests.length = 0;
+        await rb.leaderTick();
+        assert.ok(sup.requests.some(r => r.op === 'renew' && r.session === out.sessionId), 'the next tick renews while the earlier file write still waits');
         release();
-        await tick;
+        await rb._internal.drainIdleForTest();
     } finally {
         release();
         fileWriteGate = null;
