@@ -11,6 +11,7 @@ This folder holds two kinds of Compose files:
 | File | Runs on | What it starts |
 |---|---|---|
 | [`docker-compose-remote-access.yml`](#docker-compose-remote-accessyml) | The NetBird Control host, with the main compose file | The Browser Gateways for RDP and SSH in the browser |
+| [`remote-access-isolation`](remote-access-isolation) | The NetBird Control host, on the host (not Docker) | The firewall rules that keep the Browser Gateways away from internal networks, applied before Docker starts |
 | [`docker-compose-netbird.yml`](#docker-compose-netbirdyml) | A NetBird VM | A NetBird routing peer on the host network |
 | [`docker-compose-exit-node.yml`](#docker-compose-exit-nodeyml) | A NetBird VM | A NetBird exit node, isolated from the internal network |
 | [`exit-node-isolation`](#isolate-the-exit-node) | The exit node's VM, on the host (not Docker) | The firewall rules that keep the exit node away from internal networks, applied before Docker starts |
@@ -30,19 +31,12 @@ The IP gateway (`remote-gateway` and `remote-guacd`) always starts with this fil
 gateway (`remote-names-gateway` and `remote-names-guacd`) starts only with the `remote-names`
 profile and reaches NetBird domain resources by host name.
 
-Run it from the repository root, with the main file first. Compose then reads `.env` from the
-repository root:
-
-```sh
-docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml up -d
-# With the names gateway:
-docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-names up -d
-```
-
 It needs `REMOTE_GATEWAY_SETUP_KEY` (and `REMOTE_NAMES_GATEWAY_SETUP_KEY` for the names gateway)
-in `.env`, created in **Settings → Remote Access**. It also needs host firewall rules that this
-file cannot set. The setup, the firewall rules and the security model are in
-[docs/remote-access.md](../docs/remote-access.md).
+in `.env`, created in **Settings → Remote Access**. It also needs the host isolation rules in
+[`remote-access-isolation`](remote-access-isolation), which this file cannot set. The setup, with
+the command that starts the gateways, and the security model are in
+[docs/remote-access.md](../docs/remote-access.md#set-it-up). Run that command from the repository
+root, so Compose reads `.env` from there.
 
 ## docker-compose-netbird.yml
 

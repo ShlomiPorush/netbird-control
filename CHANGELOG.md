@@ -10,7 +10,25 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
 
 ## [Unreleased]
 
+### Added
+- **The Browser Gateways' host isolation rules come as a script and a systemd unit.**
+  `netbird-docker-compose-files/remote-access-isolation` holds a script that sets the rules and a
+  unit that runs it before Docker starts, so the rules survive a reboot. They now block the
+  private and special-purpose IPv4 ranges and the host's other Docker bridges, not only the ranges
+  you listed by hand, and touch only the gateways' own subnets. They are in the `mangle` table,
+  which Docker and ufw (with its default settings) leave alone, and every run ends with a check of
+  the active rules. **Before you install them:** they also block a self-hosted NetBird server at an
+  internal address, even if an `ACCEPT` rule of yours allows it. Requirements, installation and
+  checks: docs/remote-access.md.
+- **Add to the home screen.** The portal can be added to a phone's home screen and opens there in its
+  own window, without the browser's address bar.
+
 ### Changed
+- **autoheal can recover guacd after its gateway restarts.** A restarted gateway leaves guacd in the
+  old network namespace, unhealthy and unreachable until it restarts too. Both guacd services now
+  carry the label `autoheal=true`, so a host that runs
+  [autoheal](https://github.com/willfarrell/docker-autoheal) with its default label restarts them.
+  Without autoheal the label does nothing.
 - **Remote sessions on a phone.** RDP from a phone now asks for a desktop-sized screen at 100% scaling
   (720 pixels on the short side) instead of the phone's own resolution and scaling, which gave Windows
   a desktop about 400 pixels wide. The pointer works like a touchpad by default, with a visible
@@ -18,10 +36,6 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   **More**. The keyboard button opens the phone's keyboard in one tap, the session ends where the
   keyboard starts, and a row above it adds Esc, Tab, Ctrl, Alt, Win, the arrows and Del. Over SSH a
   finger scrolls the terminal's history and a tap opens the keyboard.
-
-### Added
-- **Add to the home screen.** The portal can be added to a phone's home screen and opens there in its
-  own window, without the browser's address bar.
 
 ---
 
