@@ -6,7 +6,7 @@ const net = require('net');
 const { pool } = require('./core');
 const { addEvent } = require('./events');
 const ra = require('./remote-access');
-const { evaluateExitNodeEntitlement, browserGateProblem, browserLiveProblem } = require('./remote-access-auth');
+const { browserGateProblem, browserLiveProblem } = require('./remote-access-auth');
 
 const DEFAULT_ENDPOINTS = {
     supervisor: '/run/nbc-control/supervisor.sock',
@@ -48,9 +48,6 @@ const UNVERIFIED = "Your access couldn't be verified with NetBird, so the sessio
 
 const MESSAGES = {
     BROWSER_DISABLED: 'Web sessions are turned off. Ask an administrator to turn them on in Settings > Remote Access.',
-    USER_NOT_FOUND: "Your account wasn't found in NetBird, so your access can't be checked. Ask an administrator to check your NetBird account.",
-    USER_BLOCKED: 'Your NetBird account is blocked. Ask an administrator to unblock it.',
-    NO_EXIT_NODE: 'Web sessions are only for people whose device may use the office exit node in NetBird. Ask an administrator if you need it.',
     SNAPSHOT_FAILED: "Remote Access couldn't read NetBird to check your access. Try again in a minute.",
     GATEWAY_NOT_READY: "The browser gateway isn't ready, so web sessions can't open right now. Try again later, or tell an administrator.",
     GUACD_UNREACHABLE: "NetBird Control can't reach the remote browser's display service, so web sessions can't open right now. Try again later, or tell an administrator.",
@@ -179,46 +176,33 @@ async function checkGate(snap, { probeGuacd = true } = {}) {
     return { ...base, ok: true, code: 'OK' };
 }
 
-function entitlementCfg() {
-    const managed = config().managed || {};
-    return {
-        webRouteId: managed.webRouteId || '',
-        managedPolicyIds: [managed.policyId, managed.namesPolicyId, managed.webPolicyId, managed.webRoutingPolicyId].filter(Boolean),
-    };
-}
-
 const notReadyMessage = (gateCode) => (gateCode === 'GUACD_UNREACHABLE' ? MESSAGES.GUACD_UNREACHABLE : MESSAGES.GATEWAY_NOT_READY);
 
-async function authorize(viewer) {
+async function authorize() {
     if (!browserActive()) throw httpError(403, 'BROWSER_DISABLED');
     if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
     let snap;
     try { snap = await ra.freshSnapshot(ra.CHECK_SNAPSHOT_TTL_MS); } catch { throw httpError(503, 'SNAPSHOT_FAILED'); }
-    const entitlement = evaluateExitNodeEntitlement(snap, entitlementCfg(), { userId: viewer.user_id });
-    if (!entitlement.ok) throw httpError(403, entitlement.code);
     const gate = await checkGate(snap);
     if (!gate.ok) {
         console.warn('[remote-browser] the browser gateway is not ready: %s', gate.code);
         throw httpError(503, 'GATEWAY_NOT_READY', notReadyMessage(gate.code));
     }
     if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
-    return entitlement;
 }
 
-async function checkWebAccess(viewer) {
+async function checkWebAccess() {
     const ready = (code, retry = false, message = MESSAGES[code]) => ({ steps: [{ key: 'ready', status: 'fail', code, message, retry }] });
     if (!browserActive()) return ready('BROWSER_DISABLED');
     if (_shuttingDown || !leading()) return ready('SERVER_RESTARTING', true);
     let snap;
     try { snap = await ra.freshSnapshot(ra.CHECK_SNAPSHOT_TTL_MS); } catch { return ready('SNAPSHOT_FAILED', true); }
-    const entitlement = evaluateExitNodeEntitlement(snap, entitlementCfg(), { userId: viewer.user_id });
-    if (!entitlement.ok) return { steps: [{ key: 'access', status: 'fail', code: entitlement.code, message: MESSAGES[entitlement.code] }] };
     const gate = await checkGate(snap);
     if (!gate.ok) return ready('GATEWAY_NOT_READY', false, notReadyMessage(gate.code));
     return {
         ok: true,
         steps: [
-            { key: 'access', status: 'pass', detail: 'Your device may use the office exit node' },
+            { key: 'access', status: 'pass', detail: 'You may use Remote Access' },
             { key: 'path', status: 'pass', detail: 'The browser gateway is ready' },
         ],
     };
@@ -310,7 +294,7 @@ async function takeToken(token) {
 async function createWebSession(viewer, body, clientIp) {
     if (!leading()) throw httpError(503, 'SERVER_RESTARTING');
     const authorizedAt = new Date();
-    await authorize(viewer);
+    await authorize();
     const size = screen(body);
     const row = {
         id: crypto.randomUUID(), attachment: crypto.randomUUID(), authorizedAt,
@@ -393,7 +377,7 @@ async function resumeWebSession(viewer, id, body) {
 
 async function resumeLocked(viewer, row, body) {
     const authorizedAt = new Date();
-    await authorize(viewer);
+    await authorize();
     const creds = await browserCredentials(row.id, authorizedAt.getTime() + AUTH_GRACE_MS);
     if (creds === 'expired') throw httpError(410, 'BROWSER_ENDED');
     if (creds === 'gone') {
@@ -644,9 +628,7 @@ function onConfigChanged() {
         .catch(e => console.error('[remote-browser] could not end the web sessions:', e.message));
 }
 
-async function userVerdict(snap, cfg, row) {
-    const entitlement = evaluateExitNodeEntitlement(snap, cfg, { userId: row.user_id });
-    if (!entitlement.ok) return { denied: `Your session ended. ${MESSAGES[entitlement.code] || ''}`.trim() };
+async function userVerdict(snap, row) {
     if (!_deps.stillPermitted) return { ok: true };
     const permitted = await ra.withDeadline(Promise.resolve(_deps.stillPermitted({ oid: row.oid, email: row.user_email, userId: row.user_id, snap })), 15_000, 'Checking the permission')
         .then(ok => ok, () => null);
@@ -697,7 +679,7 @@ async function readAuthorization() {
         console.warn('[remote-browser] the browser gateway is not ready (%s): ending the web sessions', gate.code);
         return { gateReason: `The session ended because the browser gateway isn't ready. ${GATE_REASONS[gate.code] || ''}`.trim() };
     }
-    return { checkedAt, snap, cfg: entitlementCfg() };
+    return { checkedAt, snap };
 }
 
 async function superviseSession(row, now, auth, verdict) {
@@ -763,7 +745,7 @@ async function superviseWebSessions(now = Date.now()) {
             byIdentity.get(key).push(row);
         }
         for (const group of byIdentity.values()) {
-            work.push(checks(() => userVerdict(auth.snap, auth.cfg, group[0]))
+            work.push(checks(() => userVerdict(auth.snap, group[0]))
                 .then(verdict => Promise.all(group.map(row => supervise(row, verdict)))));
         }
     } else {

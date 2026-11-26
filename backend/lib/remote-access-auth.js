@@ -88,11 +88,7 @@ function userSourceGroups(snap, userId, now) {
         for (const g of arr(p.groups)) if (idOf(g)) groups.add(idOf(g));
     }
     for (const id of allGroupIds(snap)) groups.add(id);
-    dropLapsedGrantGroups(snap, userId, groups, now);
-    return { groups, user };
-}
 
-function dropLapsedGrantGroups(snap, userId, groups, now) {
     const grants = arr(snap.grants);
     const grantById = new Map(grants.map(g => [String(g.id), g]));
     const held = (g) => [g.group_id, ...arr(g.assigned_groups)].filter(Boolean);
@@ -110,7 +106,7 @@ function dropLapsedGrantGroups(snap, userId, groups, now) {
         const m = TEMP_GROUP_RE.exec(nameOf.get(gid) || '');
         if (m && !grantIsValid(grantById.get(m[1]), now)) groups.delete(gid);
     }
-    return groups;
+    return { groups, user };
 }
 
 // Does this rule open TCP `port`? Unknown shapes never do.
@@ -609,90 +605,8 @@ function browserLiveProblem(ready, { peerIp, nowSec }) {
     return null;
 }
 
-const isWebRoute = (route, webRouteId) => !!route && (route.id === webRouteId || String(route.network_id || '').startsWith(WEB_ROUTE_NETWORK_PREFIX));
-
-const isPeerRef = (ref, peerIds) => !isEmptyValue(ref) && peerIds.has(idOf(ref)) && (typeof ref !== 'object' || ref.type === undefined || ref.type === 'peer');
-const ruleFrom = (rule, groupIds, peerIds) => arr(rule.sources).some(s => groupIds.has(idOf(s))) || isPeerRef(rule.sourceResource, peerIds);
-const ruleReaches = (rule, groupIds, peerIds) => arr(rule.destinations).some(d => groupIds.has(idOf(d))) || isPeerRef(rule.destinationResource, peerIds);
-
-function routingPeerIds(route, groupsById) {
-    if (route.peer) return new Set([String(route.peer)]);
-    const ids = new Set();
-    for (const gid of arr(route.peer_groups).map(idOf)) for (const m of arr((groupsById.get(gid) || {}).peers)) if (idOf(m)) ids.add(idOf(m));
-    return ids;
-}
-
-function groupsHolding(peerIds, groups) {
-    return new Set(groups.filter(g => g && g.id && arr(g.peers).some(m => peerIds.has(idOf(m)))).map(g => g.id));
-}
-
-function evaluateExitNodeEntitlement(snap, cfg, { userId, now = Date.now() }) {
-    const user = arr(snap.users).find(u => u && u.id === userId);
-    if (!user) return { ok: false, code: 'USER_NOT_FOUND' };
-    if (user.is_blocked || user.status === 'blocked') return { ok: false, code: 'USER_BLOCKED' };
-    const groupsList = arr(snap.groups);
-    const groupsById = new Map(groupsList.filter(g => g && g.id).map(g => [g.id, g]));
-    const managed = managedPolicyIds(cfg);
-    const grantById = new Map(arr(snap.grants).map(g => [String(g.id), g]));
-    const policies = arr(snap.policies).filter(p => {
-        if (!p || p.enabled === false) return false;
-        const tm = TEMP_POLICY_RE.exec(p.name || '');
-        return !(tm && !grantIsValid(grantById.get(tm[1]), now));
-    });
-    const exitRoutes = arr(snap.routes).filter(r => r && r.enabled !== false && r.network === EXIT_NETWORK
-        && !arr(r.domains).length && !isWebRoute(r, cfg && cfg.webRouteId));
-
-    const devices = arr(snap.peers).filter(p => p && p.id && p.user_id === userId && p.login_expired !== true && p.approval_required !== true);
-    for (const peer of devices) {
-        const groups = new Set(arr(peer.groups).map(idOf).filter(Boolean));
-        for (const id of allGroupIds(snap)) groups.add(id);
-        dropLapsedGrantGroups(snap, userId, groups, now);
-        const peerSelf = new Set([peer.id]);
-        const peerGroups = groupsHolding(peerSelf, groupsList);
-        for (const g of groups) peerGroups.add(g);
-        const covers = (rule, targetGroups, targetPeers) => (ruleFrom(rule, groups, peerSelf) && ruleReaches(rule, targetGroups, targetPeers))
-            || (rule.bidirectional === true && ruleReaches(rule, peerGroups, peerSelf) && ruleFrom(rule, targetGroups, targetPeers));
-        const allowed = (targetGroups, targetPeers, needAll) => {
-            let granted = null;
-            for (const p of policies) {
-                const infra = managed.has(p.id) || isManagedGatewayName(p.name, 'policy');
-                const posture = arr(p.source_posture_checks).length > 0;
-                for (const rule of arr(p.rules)) {
-                    if (!rule || rule.enabled === false) continue;
-                    const action = rule.action || 'accept';
-                    if (action === 'drop') {
-                        if (covers(rule, targetGroups, targetPeers)) return null;
-                        continue;
-                    }
-                    if (action !== 'accept' || infra || posture || granted) continue;
-                    if (needAll && String(rule.protocol || '').toLowerCase() !== 'all') continue;
-                    if (ruleFrom(rule, groups, peerSelf) && ruleReaches(rule, targetGroups, targetPeers)) granted = p.name || p.id;
-                }
-            }
-            return granted;
-        };
-        for (const route of exitRoutes) {
-            if (!arr(route.groups).some(g => groups.has(idOf(g)))) continue;
-            const routers = routingPeerIds(route, groupsById);
-            if (!routers.size) continue;
-            const toRouters = allowed(groupsHolding(routers, groupsList), routers, false);
-            if (!toRouters) continue;
-            const acl = idSet(route.access_control_groups);
-            const toAcl = acl.size ? allowed(acl, new Set(), true) : 'none';
-            if (!toAcl) continue;
-            return {
-                ok: true, code: 'OK',
-                peer: { id: peer.id, name: peer.name || peer.id },
-                route: { id: route.id, networkId: route.network_id || '' },
-                policies: [...new Set([toRouters, ...(acl.size ? [toAcl] : [])])],
-            };
-        }
-    }
-    return { ok: false, code: 'NO_EXIT_NODE' };
-}
-
 module.exports = {
-    evaluateExitNodeEntitlement, browserGateProblem, browserLiveProblem, webRouteBody, webPolicyBody, webRouteMatches, webPolicyMatches, WEB_ROUTE_NETWORK_PREFIX,
+    browserGateProblem, browserLiveProblem, webRouteBody, webPolicyBody, webRouteMatches, webPolicyMatches, WEB_ROUTE_NETWORK_PREFIX,
     evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
     gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt, evaluatePolicies, patternMatches,

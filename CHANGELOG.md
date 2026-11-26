@@ -16,7 +16,7 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   goes out through a route the app creates through the routing peers you choose; it never reaches
   private or internal addresses. A disconnected browser keeps running for 15 minutes (a setting) and
   can be resumed. Downloads, uploads, printing and developer tools are blocked, and each new
-  connection is recorded. Only users with a device entitled to the office Exit Node may open one.
+  connection is recorded. Anyone with the Remote Access permission may open one.
   Pasting Hebrew text is not supported yet. Needs the new `remote-browser` Compose profile and
   image: setup in docs/remote-access.md.
 - **The Browser Gateways' host isolation rules come as a script and a systemd unit.**

@@ -3455,7 +3455,7 @@ app.get('/api/remote-access/info', async (req, res) => {
 app.post('/api/remote-access/check', requireRemoteUser, async (req, res) => {
     try {
         const body = req.body || {};
-        res.json(body.protocol === 'web' ? await remoteBrowser.checkWebAccess(req.remoteViewer) : await checkRemoteAccess(req.remoteViewer, body));
+        res.json(body.protocol === 'web' ? await remoteBrowser.checkWebAccess() : await checkRemoteAccess(req.remoteViewer, body));
     }
     catch (e) { sendRemoteError(res, e); }
 });

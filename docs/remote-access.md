@@ -709,13 +709,9 @@ accepts only the office's address.
 
 ### Who may open one
 
-The same checks as RDP and SSH (sign-in, a live and unblocked NetBird user, the Remote Access
-permission), plus: one of the user's own devices must be entitled to the office Exit Node in
-NetBird. That device must be in the distribution groups of an enabled `0.0.0.0/0` route (other than
-the app's own), and an enabled policy without posture checks must let it reach that route's routing
-peers. When the route has access-control groups, a policy with all protocols must also lead to one of
-them, and a drop policy for the same device cancels it. A device whose NetBird login expired, or that waits for approval, does not
-count. The check runs when the session opens and every minute after.
+Anyone who may use RDP and SSH: sign-in, a live and unblocked NetBird user, and the Remote Access
+permission. The user's own devices and their Exit Node access play no part, because the browser goes
+out through its own gateway. The check runs when the session opens and every minute after.
 
 ### Disconnect, resume and close
 

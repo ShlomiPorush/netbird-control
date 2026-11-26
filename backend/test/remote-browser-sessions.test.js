@@ -297,13 +297,8 @@ test('a web session opens without any target: checks, a slot, the supervisor, a 
     assert.equal((await rb.listWebSessions(OTHER)).sessions.length, 0);
 });
 
-test('no exit node for the same device, a closed gate or no capacity: no session, and nothing held', async () => {
+test('a closed gate or no capacity: no session, and nothing held', async () => {
     await reset({ maxSessions: 1 });
-    snapshot['/api/policies'][0].enabled = false;
-    ra.invalidateSnapshot();
-    await rejects(rb.createWebSession(USER, {}, ''), 403, 'NO_EXIT_NODE');
-    await buildSnapshot();
-    ra.invalidateSnapshot();
     sup.table7120 = ['default dev wt0', '10.0.0.0/8 dev wt0'];
     await rejects(rb.createWebSession(USER, {}, ''), 503, 'GATEWAY_NOT_READY');
     sup.table7120 = ['default dev wt0'];
@@ -323,11 +318,6 @@ test('the connection check reports each web step the way the page shows it, and 
     const ok = await rb.checkWebAccess(USER);
     assert.equal(ok.ok, true);
     assert.deepEqual(ok.steps.map(s => [s.key, s.status]), [['access', 'pass'], ['path', 'pass']]);
-    snapshot['/api/policies'][0].enabled = false;
-    ra.invalidateSnapshot();
-    assert.deepEqual((await rb.checkWebAccess(USER)).steps.map(s => [s.key, s.status, s.code]), [['access', 'fail', 'NO_EXIT_NODE']]);
-    await buildSnapshot();
-    ra.invalidateSnapshot();
     sup.table7120 = ['default dev wt0', '10.0.0.0/8 dev wt0'];
     assert.deepEqual((await rb.checkWebAccess(USER)).steps.map(s => [s.key, s.status, s.code]), [['ready', 'fail', 'GATEWAY_NOT_READY']]);
     sup.table7120 = ['default dev wt0'];
@@ -558,16 +548,18 @@ test('startup reconcile stops browsers without a row and ends rows without a bro
     assert.equal(table.rows.get('young').state, 'starting');
 });
 
-test('the re-check ends sessions whose exit node entitlement is gone, and refreshes the others', async () => {
+test("web sessions don't depend on the user's devices or the office exit node", async () => {
     await reset();
+    snapshot['/api/peers'][0].login_expired = true;
+    snapshot['/api/policies'][0].enabled = false;
+    ra.invalidateSnapshot();
+    assert.equal((await rb.checkWebAccess(USER)).ok, true);
     const out = await rb.createWebSession(USER, {}, '');
     table.rows.get(out.sessionId).last_auth_ok_at = new Date(Date.now() - 100_000);
+    snapshot['/api/peers'] = snapshot['/api/peers'].filter(p => p.user_id !== USER.user_id);
     await rb._internal.superviseWebSessions();
+    assert.notEqual(table.rows.get(out.sessionId).state, 'ended');
     assert.ok(Date.now() - table.rows.get(out.sessionId).last_auth_ok_at < 5000);
-    snapshot['/api/peers'][0].login_expired = true;
-    await rb._internal.superviseWebSessions();
-    assert.equal(table.rows.get(out.sessionId).state, 'ended');
-    assert.equal(table.rows.get(out.sessionId).end_code, 0x0303);
 });
 
 test('the re-check stops every web session when the gate closes', async () => {
