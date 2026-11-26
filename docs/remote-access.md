@@ -734,6 +734,7 @@ count. The check runs when the session opens and every minute after.
 - Downloads, saving pages, uploads (file dialogs), printing, developer tools, extensions and saved
   passwords are blocked by Chromium's managed policies. Websites cannot read the clipboard by
   themselves.
+- The browser opens on a blank page.
 - Self-signed certificates show Chromium's usual warning, and **Proceed** works.
 - Copy and paste follow the Remote Access clipboard setting, like RDP. **Pasting Hebrew text is not
   supported yet** (guacd 1.6.0 sends VNC clipboard text as Latin-1; the fix is expected in guacd

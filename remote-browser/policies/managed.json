@@ -11,5 +11,8 @@
   "SyncDisabled": true,
   "PromotionalTabsEnabled": false,
   "DefaultBrowserSettingEnabled": false,
-  "MetricsReportingEnabled": false
+  "MetricsReportingEnabled": false,
+  "RestoreOnStartup": 5,
+  "HomepageIsNewTabPage": true,
+  "NewTabPageLocation": "about:blank"
 }
