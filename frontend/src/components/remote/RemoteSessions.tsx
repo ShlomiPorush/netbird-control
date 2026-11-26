@@ -943,7 +943,6 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
         <div className="mt-6 flex w-full flex-col gap-2">
           <Button variant="primary" className={FLOW_BUTTON} onClick={() => { void resumeWeb(); }} disabled={busy}>{busy ? 'Resuming…' : 'Resume'}</Button>
           <Button className={FLOW_BUTTON} onClick={onCloseBrowser} disabled={busy}>Close Browser</Button>
-          <Button variant="ghost" className={FLOW_QUIET} onClick={onClose} disabled={busy}>Leave It Running</Button>
         </div>
       </FlowCard>
     );
