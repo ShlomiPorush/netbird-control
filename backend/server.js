@@ -342,13 +342,6 @@ app.get('/login-wait.js', (req, res) => {
         "document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('a')){s=true;clearTimeout(t)}});");
 });
 
-const sendInstallFile = (name) => (req, res) => res.sendFile(path.join(__dirname, 'public', name), { maxAge: '1d' }, (err) => {
-    if (err && !res.headersSent) res.sendStatus(404);
-});
-app.get('/manifest.webmanifest', sendInstallFile('manifest.webmanifest'));
-app.get('/favicon-192.png', sendInstallFile('favicon-192.png'));
-app.get('/favicon.png', sendInstallFile('favicon.png'));
-
 // Telegram webhook - receives inline-button presses (callback_query). Public (Telegram can't
 // log in), but authenticated by the secret token Telegram echoes in a header, and each press is
 // re-checked against the approver allow-list inside handleTelegramCallback.
@@ -617,6 +610,13 @@ if (AUTH_ENABLED) {
 // Keyed by the signed-in user, else by client IP (always by IP without SSO).
 app.use('/api', apiLimiter);
 app.use(spaLimiter);
+
+const sendInstallFile = (name) => (req, res) => res.sendFile(path.join(__dirname, 'public', name), { maxAge: '1d' }, (err) => {
+    if (err && !res.headersSent) res.sendStatus(404);
+});
+app.get('/manifest.webmanifest', sendInstallFile('manifest.webmanifest'));
+app.get('/favicon-192.png', sendInstallFile('favicon-192.png'));
+app.get('/favicon.png', sendInstallFile('favicon.png'));
 
 if (AUTH_ENABLED) {
     // Equivalent to auth()'s authRequired: true - every route below requires login. A visitor who is
