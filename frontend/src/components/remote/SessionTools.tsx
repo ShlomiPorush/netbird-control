@@ -145,11 +145,17 @@ export function useBarPanelPosition(anchor: RefObject<HTMLElement | null>, maxWi
       const viewport = document.documentElement.clientWidth;
       const width = Math.min(maxWidth, viewport - 16);
       if (!r || !r.width) setPos({ left: Math.max(8, (viewport - width) / 2), top: BELOW_BAR, width });
+      else if (r.top < 0) setPos(null);
       else setPos({ left: Math.max(8, Math.min(r.right - width, viewport - width - 8)), top: r.bottom + 10, width });
     };
+    const placeAfterSlide = (e: TransitionEvent) => { if (e.propertyName === 'transform') place(); };
     place();
     window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
+    window.addEventListener('transitionend', placeAfterSlide);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('transitionend', placeAfterSlide);
+    };
   }, [anchor, maxWidth, shown]);
   return pos;
 }

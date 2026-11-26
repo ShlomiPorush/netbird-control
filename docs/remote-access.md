@@ -735,6 +735,11 @@ A new browser opens on the **Start Page** set in the same card, or on a blank pa
 Only an `http` or `https` address without a user name or password is accepted. A resumed browser
 keeps its own tabs.
 
+**Browser Language** in the same card (English, Hebrew, Arabic or Russian; default English) is the
+language of a new browser's menus. Websites are asked for that language first and English second,
+so a site that offers it shows it. A changed language applies to browsers opened after the change;
+a resumed browser keeps the language it started with.
+
 ### Disconnect, resume and close
 
 - Closing the tab, refreshing the page or losing the network **disconnects** the browser: it keeps
@@ -785,6 +790,11 @@ Two settings in **Settings → Remote Access → Remote Browser → Files**, bot
 
 Anyone who may open a web session gets these features when they are on. Turning a setting off takes
 effect in open browsers within about a minute; a download that already started finishes.
+
+**Show in folder.** The browser has no file manager of its own. With **Files In The Browser** on,
+**Show in folder** and **Open** on a download in the browser's download list open the session bar's
+**Files** panel instead, within about two seconds, when that browser is the one in front. Other
+requests to open something outside the browser, such as a `mailto:` link, do nothing.
 
 **Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger
 than the limit fails to download. The total is checked every 3 seconds, and a browser whose files

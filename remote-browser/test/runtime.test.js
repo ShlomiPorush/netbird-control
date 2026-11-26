@@ -5,14 +5,20 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const {
   BLOCKED_POLICY,
   ENABLED_POLICY,
+  chromiumArgs,
   chromiumCommand,
+  chromiumEnv,
+  closeFilesRequests,
   exited,
+  listenForFilesRequests,
   parseScan,
+  removeFilesRequestSockets,
   scanCommand,
   temporaryLeftovers,
   watchChild,
@@ -116,6 +122,58 @@ test('Chromium runs under the files limit with SIGXFSZ ignored', () => {
     'prlimit',
     ['--fsize=2147483648', '--', 'sh', '-c', 'trap "" XFSZ; exec chromium "$@"', 'chromium', '--no-first-run', 'https://example.com/'],
   ]);
+});
+
+test('Chromium gets the browser language in its environment and asks websites for it before English', () => {
+  const dir = '/run/browser/chromium-4';
+  const hebrew = chromiumArgs({ dir, scale: 1.5, startPage: 'https://example.com/', language: 'he' });
+  assert.ok(hebrew.includes('--accept-lang=he,en-US'));
+  assert.equal(hebrew.at(-1), 'https://example.com/');
+  assert.ok(chromiumArgs({ dir, scale: 1, startPage: '', language: 'en-US' }).includes('--accept-lang=en-US'));
+  assert.equal(chromiumArgs({ dir, scale: 1, startPage: '', language: 'ar' }).filter((arg) => arg.startsWith('--accept-lang=')).length, 1);
+  assert.deepEqual(chromiumEnv({ display: 5, dir, language: 'ru' }), {
+    DISPLAY: ':5',
+    XAUTHORITY: path.join(dir, 'xauth'),
+    HOME: dir,
+    TMPDIR: dir,
+    LANG: 'C.UTF-8',
+    LANGUAGE: 'ru',
+  });
+  assert.equal(chromiumEnv({ display: 5, dir, language: 'en-US' }).LANGUAGE, 'en-US');
+});
+
+const knock = (file) => new Promise((resolve, reject) => {
+  const socket = net.connect(file);
+  socket.on('error', reject);
+  socket.on('close', resolve);
+  socket.end();
+});
+
+test('a session gets a files request socket that only its Chromium user may use, and closing it removes it', onLinux, async (t) => {
+  const dir = scratch(t);
+  const uid = process.getuid() === 0 ? 62007 : process.getuid();
+  const file = path.join(dir, 'files-request-7.sock');
+  fs.writeFileSync(file, 'stale');
+  let requests = 0;
+  await listenForFilesRequests({ slot: 7, chromiumUid: uid }, () => { requests += 1; }, dir);
+  t.after(() => closeFilesRequests(7, dir));
+  const stat = fs.statSync(file);
+  assert.equal(stat.isSocket(), true);
+  assert.equal(stat.mode & 0o777, 0o600);
+  assert.equal(stat.uid, uid);
+  assert.equal(stat.gid, uid);
+  await knock(file);
+  await knock(file);
+  assert.equal(requests, 2);
+  closeFilesRequests(7, dir);
+  assert.equal(fs.existsSync(file), false);
+});
+
+test('leftover files request sockets are removed and nothing else in the folder', (t) => {
+  const dir = scratch(t);
+  for (const name of ['files-request-0.sock', 'files-request-999.sock', 'chromium-0', 'files-request-x.sock']) fs.writeFileSync(path.join(dir, name), '');
+  removeFilesRequestSockets(dir);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['chromium-0', 'files-request-x.sock']);
 });
 
 test('a scan sums the blocks of the whole tree and lists visible top-level regular files', () => {

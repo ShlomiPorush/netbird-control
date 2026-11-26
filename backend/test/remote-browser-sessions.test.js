@@ -63,7 +63,7 @@ const socketPath = (name) => (process.platform === 'win32'
     ? `\\\\.\\pipe\\nbc-test-${name}-${crypto.randomBytes(6).toString('hex')}`
     : path.join(os.tmpdir(), `nbc-test-${name}-${crypto.randomBytes(6).toString('hex')}.sock`));
 
-const sup = { journal: new Map(), codes: new Map(), limits: new Map(), endedIds: new Set(), rev: -1, sessions: new Map(), tombstones: new Set(), requests: [], nextUid: 62000, failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, unlisted: new Set(), started: new Map(), delays: new Map(), clock: () => Date.now() };
+const sup = { fileRequests: new Set(), journal: new Map(), codes: new Map(), limits: new Map(), endedIds: new Set(), rev: -1, sessions: new Map(), tombstones: new Set(), requests: [], nextUid: 62000, failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, unlisted: new Set(), started: new Map(), delays: new Map(), clock: () => Date.now() };
 const expired = (req) => req.until <= sup.clock();
 const gone = (id) => ({ ok: false, error: sup.tombstones.has(id) ? 'ENDED' : 'UNKNOWN', ...(sup.codes.has(id) ? { code: sup.codes.get(id), limit: sup.limits.get(id) } : {}) });
 const journalOf = (id) => sup.journal.get(id) || [];
@@ -143,6 +143,11 @@ function answer(req) {
         case 'files':
             if (req.rev >= sup.rev) sup.rev = req.rev;
             return { ok: true, rev: sup.rev };
+        case 'requests': {
+            const sessions = [...sup.fileRequests];
+            sup.fileRequests.clear();
+            return { ok: true, sessions };
+        }
         case 'ready':
             return { ok: true, instance: sup.instance, netns: 4026532001, gateway: { ts: Math.floor(Date.now() / 1000), netns: 4026532001, wt0: '100.92.0.7', lock: true, table7120: ['default dev wt0'] }, table7120: sup.table7120 };
         default:
@@ -241,6 +246,7 @@ async function reset({ maxSessions = 5, maxPerUser = 5, keepAliveMin = 15, start
     sup.codes.clear();
     sup.limits.clear();
     sup.endedIds.clear();
+    sup.fileRequests.clear();
     sup.rev = -1;
     failingIds.clear();
     for (const k of Object.keys(settings)) delete settings[k];
@@ -299,7 +305,7 @@ test('a web session opens without any target: checks, a slot, the supervisor, a 
     assert.match(out.token, /^[A-Za-z0-9_-]{43}$/);
     const start = sup.requests.find(r => r.op === 'start');
     const { until, at, ...rest } = start;
-    assert.deepEqual(rest, { op: 'start', session: out.sessionId, width: 1920, height: 1080, dpi: 144, terminal: false, filesLimit: 2 * 1024 ** 3 });
+    assert.deepEqual(rest, { op: 'start', session: out.sessionId, width: 1920, height: 1080, dpi: 144, terminal: false, filesLimit: 2 * 1024 ** 3, language: 'en-US' });
     assert.ok(until >= before + 150_000 && until <= Date.now() + 150_000, 'the first lease ends 150 s after the authorization');
     const row = table.rows.get(out.sessionId);
     assert.equal(out.attachment, row.attachment);
@@ -342,6 +348,43 @@ test('a new browser opens on the start page the administrator chose', async () =
     await reset({ startPage: 'https://portal.example.com/login' });
     await rb.createWebSession(USER, {}, '');
     assert.equal(sup.requests.find(r => r.op === 'start').startPage, 'https://portal.example.com/login');
+});
+
+test('a new browser starts in the language the administrator chose', async () => {
+    await reset();
+    ra._internal.setConfigForTest({ enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions: 5, maxPerUser: 5, keepAliveMin: 15, language: 'he' } });
+    await rb.createWebSession(USER, {}, '');
+    assert.equal(sup.requests.find(r => r.op === 'start').language, 'he');
+});
+
+test('a browser that asks to show its files gets one nbc-files on its own tunnel, and nothing is asked with no tunnel attached', async () => {
+    await reset();
+    const shown = await rb.createWebSession(USER, {}, '');
+    const other = await rb.createWebSession(USER, {}, '');
+    const c = connect(shown.token);
+    await c.opened;
+    await until(() => table.rows.get(shown.sessionId).state === 'active' && c.got.some(i => i.opcode === 'sync'));
+    sup.fileRequests.add(shown.sessionId);
+    sup.fileRequests.add(other.sessionId);
+    await rb._internal.pollFileRequests();
+    await until(() => c.got.some(i => i.opcode === 'nbc-files'));
+    await rb._internal.pollFileRequests();
+    await sleep(50);
+    assert.deepEqual(c.got.filter(i => i.opcode === 'nbc-files').map(i => i.args), [[]]);
+    assert.equal(sup.requests.filter(r => r.op === 'requests').length, 2);
+    rb.setRemoteBrowserDeps({ isLeader: () => false });
+    try {
+        await rb._internal.pollFileRequests();
+    } finally {
+        rb.setRemoteBrowserDeps({ isLeader: undefined });
+    }
+    assert.equal(sup.requests.filter(r => r.op === 'requests').length, 2, 'only the leader asks');
+    c.ws.send(encodeInstruction('disconnect'));
+    await c.closed;
+    await until(() => table.rows.get(shown.sessionId).state === 'detached' && !rb._internal.attachedForTest(shown.sessionId));
+    sup.requests = [];
+    await rb._internal.pollFileRequests();
+    assert.equal(sup.requests.filter(r => r.op === 'requests').length, 0);
 });
 
 test('a user at the per-user limit opens no new browser, while others still can', async () => {

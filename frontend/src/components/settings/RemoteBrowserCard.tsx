@@ -8,7 +8,14 @@ import { Badge, Button, Card, CopyButton, Field, Input, Modal, SelectMenu, type 
 import { StepRow } from './LaunchNetworkPanel';
 import { SettingRow, Toggle } from './NetbirdFields';
 
-const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', files: false, transfer: false, filesLimitGb: 2 };
+const BROWSER_DEFAULTS: BrowserConfig = { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', files: false, transfer: false, filesLimitGb: 2, language: 'en-US' };
+const LANGUAGE_OPTIONS: SelectOption[] = [
+  { value: 'en-US', label: 'English' },
+  { value: 'he', label: 'עברית' },
+  { value: 'ar', label: 'العربية' },
+  { value: 'ru', label: 'Русский' },
+];
+const languageName = (language: string) => LANGUAGE_OPTIONS.find((o) => o.value === language)?.label ?? LANGUAGE_OPTIONS[0].label;
 const DEFAULT_ROUTER_GROUP = 'Office Peers';
 const MAX_SESSIONS = { min: 1, max: 50 };
 const MAX_PER_USER = { min: 1, max: 10 };
@@ -56,7 +63,7 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
   const [modalError, setModalError] = useState('');
   const [setupKey, setSetupKey] = useState('');
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', maxPerUser: '', keepAliveMin: '', startPage: '', files: false, transfer: false, filesLimitGb: '' });
+  const [draft, setDraft] = useState({ routerGroupId: '', maxSessions: '', maxPerUser: '', keepAliveMin: '', startPage: '', files: false, transfer: false, filesLimitGb: '', language: BROWSER_DEFAULTS.language });
 
   const groups = groupsQ.data || [];
   const groupOptions: SelectOption[] = useMemo(() => groups
@@ -94,6 +101,7 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
     setDraft({
       routerGroupId: preset, maxSessions: String(saved.maxSessions), maxPerUser: String(saved.maxPerUser), keepAliveMin: String(saved.keepAliveMin), startPage: saved.startPage || '',
       files: !!saved.files, transfer: !!saved.files && !!saved.transfer, filesLimitGb: String(saved.filesLimitGb || BROWSER_DEFAULTS.filesLimitGb),
+      language: saved.language || BROWSER_DEFAULTS.language,
     });
     setModalError('');
     setEditing(true);
@@ -104,7 +112,7 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
     setBusy('save'); setModalError('');
     const message = await store({
       ...saved, routerGroupId: draft.routerGroupId, maxSessions: Number(draft.maxSessions), maxPerUser: Number(draft.maxPerUser), keepAliveMin: Number(draft.keepAliveMin), startPage: draft.startPage.trim(),
-      files: draft.files, transfer: draft.files && draft.transfer, filesLimitGb: Number(draft.filesLimitGb),
+      files: draft.files, transfer: draft.files && draft.transfer, filesLimitGb: Number(draft.filesLimitGb), language: draft.language,
     });
     setBusy('');
     if (message) setModalError(message); else setEditing(false);
@@ -192,6 +200,9 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
         <div className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400 break-all">
           {saved.startPage ? <>New browsers open <span className="font-medium text-nb-gray-700 dark:text-nb-gray-200">{saved.startPage}</span></> : 'New browsers open a blank page.'}
         </div>
+        <div className="text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
+          New browsers use <bdi className="font-medium text-nb-gray-700 dark:text-nb-gray-200">{languageName(saved.language)}</bdi>.
+        </div>
       </StepRow>
 
       <StepRow n={4} done label="Files" actions={(
@@ -257,6 +268,10 @@ export function RemoteBrowserCard({ config, status, statusLoading, readonly, man
           <Field label="Start Page" hint="The page a new browser opens on. Leave it empty for a blank page.">
             <Input inputMode="url" placeholder="https://portal.example.com" value={draft.startPage} aria-invalid={!validStartPage(draft.startPage) || undefined}
               onChange={(e) => setDraft((d) => ({ ...d, startPage: e.target.value }))} />
+          </Field>
+          <Field label="Browser Language" hint="The language of the browser's menus and the language websites are asked for. New browsers only.">
+            <SelectMenu options={LANGUAGE_OPTIONS} value={draft.language}
+              onChange={(v) => setDraft((d) => ({ ...d, language: v }))} />
           </Field>
           <div className="border-t border-nb-gray-100 pt-4 dark:border-nb-gray-900">
             <SettingRow title="Files In The Browser" checked={draft.files}

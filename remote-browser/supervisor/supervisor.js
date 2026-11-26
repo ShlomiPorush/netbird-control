@@ -57,6 +57,8 @@ class Supervisor {
         return Promise.resolve(this.list(request.ack));
       case 'files':
         return this.setFilesPolicy(request);
+      case 'requests':
+        return Promise.resolve(this.requests());
       case 'ready':
         return this.runtime.ready().then((state) => ({ ok: true, instance: this.instance, ...state }));
       default:
@@ -100,7 +102,7 @@ class Supervisor {
     for (const [session, record] of this.sessions) this.endWith(session, record, reason, null);
   }
 
-  async start({ session, width, height, scale, terminal, until, startPage = '', filesLimit = FILES_LIMIT.fallback }) {
+  async start({ session, width, height, scale, terminal, until, startPage = '', filesLimit = FILES_LIMIT.fallback, language = 'en-US' }) {
     if (terminal) return failure('TERMINAL', 'The session has ended and cannot start again.');
     if (this.policyFailed) return failure('POLICY_FAILED', 'The files policy could not be blocked, so no browser starts.');
     if (this.expired(until)) return expiredFailure();
@@ -138,6 +140,7 @@ class Supervisor {
       published: new Map(),
       streams: new Map(),
       polling: false,
+      filesRequested: false,
     };
     this.sessions.set(session, record);
     try {
@@ -148,7 +151,9 @@ class Supervisor {
         scale,
         startPage,
         filesLimit,
+        language,
         onExit: (reason) => this.ended(session, record, reason),
+        onFilesRequest: () => this.noteFilesRequest(record),
       });
       record.password = password;
     } catch (error) {
@@ -167,6 +172,20 @@ class Supervisor {
     record.state = 'running';
     this.log(`session ${session}: running on display :${ids.display} as uid ${ids.chromiumUid}`);
     return this.grant(record);
+  }
+
+  noteFilesRequest(record) {
+    if (this.filesPolicy.enabled && !this.policyFailed) record.filesRequested = true;
+  }
+
+  requests() {
+    const sessions = [];
+    for (const record of this.sessions.values()) {
+      if (!record.filesRequested) continue;
+      record.filesRequested = false;
+      sessions.push(record.session);
+    }
+    return { ok: true, sessions };
   }
 
   grant(record) {

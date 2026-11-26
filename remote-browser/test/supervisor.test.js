@@ -30,6 +30,52 @@ function setup(options = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+const filesOn = (supervisor, rev = 1) => supervisor.handle({ op: 'files', enabled: true, transfer: false, rev });
+const requests = (supervisor) => supervisor.handle({ op: 'requests' });
+
+test('a new browser gets the language of its start, English when the start has none', async () => {
+  const { startOf, runtime } = setup();
+  await startOf('a', { language: 'he' });
+  await startOf('b');
+  assert.deepEqual(runtime.launches.map((launch) => launch.language), ['he', 'en-US']);
+});
+
+test('a files request from a browser is reported once by requests, only while files are on', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  await startOf('b');
+  const [a, b] = runtime.launches;
+  a.onFilesRequest();
+  assert.deepEqual(await requests(supervisor), { ok: true, sessions: [] });
+  await filesOn(supervisor);
+  a.onFilesRequest();
+  a.onFilesRequest();
+  assert.deepEqual(await requests(supervisor), { ok: true, sessions: ['a'] });
+  assert.deepEqual(await requests(supervisor), { ok: true, sessions: [] });
+  a.onFilesRequest();
+  b.onFilesRequest();
+  assert.deepEqual(await requests(supervisor), { ok: true, sessions: ['a', 'b'] });
+});
+
+test('a files request is ignored while the files policy could not be blocked', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await filesOn(supervisor);
+  await startOf('a');
+  runtime.writeFilesPolicy = () => { throw new Error('read-only file system'); };
+  await supervisor.handle({ op: 'files', enabled: false, transfer: false, rev: 2 });
+  runtime.launches[0].onFilesRequest();
+  assert.deepEqual(await requests(supervisor), { ok: true, sessions: [] });
+});
+
+test('a stopped browser is no longer reported by requests', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await filesOn(supervisor);
+  await startOf('a');
+  runtime.launches[0].onFilesRequest();
+  await supervisor.handle({ op: 'stop', session: 'a' });
+  assert.deepEqual(await requests(supervisor), { ok: true, sessions: [] });
+});
+
 test('start returns the port, password and Chromium uid of the first free slot', async () => {
   const { startOf } = setup();
   assert.deepEqual(await startOf('a'), { ok: true, port: 5901, password: 'pw0', uid: 62000, instance: INSTANCE, startedAt: 1_000 });

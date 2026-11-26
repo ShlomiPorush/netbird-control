@@ -25,6 +25,7 @@ const VIEWER_LEASE_S = 150;
 const AUTH_GRACE_MS = 150_000;
 const LOOP_INTERVAL_MS = 60_000;
 const WATCH_INTERVAL_MS = 5_000;
+const FILE_REQUESTS_INTERVAL_MS = 2_000;
 const STARTING_STALE_MS = 2 * 60_000;
 const DISPLAY_TIMEOUT_MS = 20_000;
 const HEALTH_TTL_MS = 15_000;
@@ -328,6 +329,7 @@ async function createWebSession(viewer, body, clientIp) {
             started = await supervisorRequest({
                 op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false, until: authorizedAt.getTime() + AUTH_GRACE_MS,
                 filesLimit: config().browser.filesLimitGb * GIB,
+                language: config().browser.language,
                 ...(config().browser.startPage ? { startPage: config().browser.startPage } : {}),
             });
         } catch (e) {
@@ -629,8 +631,25 @@ async function watchAttached() {
     for (const s of [..._attached.values()]) closeLocal(s, MESSAGES.SERVER_RESTARTING, CODE.restarting);
 }
 
+async function pollFileRequests() {
+    if (_shuttingDown || !leading() || _attached.size === 0) return;
+    const reply = await supervisorRequest({ op: 'requests' }).catch(() => null);
+    if (!reply || reply.ok !== true || !Array.isArray(reply.sessions)) return;
+    for (const id of reply.sessions) {
+        const s = _attached.get(id);
+        if (s && !s.closed && s.ws && s.ws.readyState === 1) s.ws.send(ra.encodeInstruction('nbc-files'));
+    }
+}
+
+let _fileRequests = null;
+function startFileRequests() {
+    if (!_fileRequests) _fileRequests = setInterval(() => pollFileRequests().catch(e => console.error('[remote-browser] files requests:', e.message)), FILE_REQUESTS_INTERVAL_MS);
+}
+
 async function shutdownWebTunnels(message) {
     _shuttingDown = true;
+    clearInterval(_fileRequests);
+    _fileRequests = null;
     const open = [..._attached.values()];
     for (const s of open) closeLocal(s, message, CODE.restarting);
     await Promise.allSettled(open.map(detach));
@@ -1227,7 +1246,7 @@ async function getBrowserHealth() {
 
 module.exports = {
     setRemoteBrowserDeps, checkWebAccess, createWebSession, resumeWebSession, listWebSessions, renewWebLease, endWebSessionByUser, endWebSession, ownedWebSession,
-    takeToken, attachWebTunnel, watchAttached, shutdownWebTunnels, onConfigChanged, leaderTick, getBrowserStatus, getBrowserHealth,
+    takeToken, attachWebTunnel, watchAttached, startFileRequests, shutdownWebTunnels, onConfigChanged, leaderTick, getBrowserStatus, getBrowserHealth,
     LOOP_INTERVAL_MS, WATCH_INTERVAL_MS, MESSAGES, GATE_REASONS, CODE,
     _internal: {
         setEndpointsForTest: (p) => { _endpoints = { ...DEFAULT_ENDPOINTS, ...(p || {}) }; },
@@ -1244,6 +1263,7 @@ module.exports = {
         drainIdleForTest: () => _drain || Promise.resolve(),
         queuedForTest: () => _queued,
         attachedForTest: (id) => _attached.get(id),
+        pollFileRequests,
         reconcileWithSupervisor: async (now) => {
             const listed = await reconcileWithSupervisor(now);
             if (listed) await recordListedJournals(listed);

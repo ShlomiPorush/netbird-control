@@ -64,6 +64,7 @@ const WS_BUFFER_HIGH = 4 * 1024 * 1024;  // pause guacd while the browser is thi
 const WS_BUFFER_LOW = 1 * 1024 * 1024;
 const STALL_LIMIT_MS = 30_000;           // a consumer stuck above the cap this long is disconnected
 const MAX_WIDTH = 7680, MAX_HEIGHT = 4320;
+const BROWSER_LANGUAGES = ['en-US', 'he', 'ar', 'ru'];
 
 const DEFAULTS = {
     enabled: false,
@@ -97,7 +98,7 @@ const DEFAULTS = {
     ssh: { fontSize: 12, colorScheme: 'gray-black' },
     // networkId is set by the Choose Network actions only, groupId by resolving the chosen profile.
     createResources: { enabled: false, networkId: '', profileId: 0, groupId: '', max: 50 },
-    browser: { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', files: false, transfer: false, filesLimitGb: 2 },
+    browser: { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', files: false, transfer: false, filesLimitGb: 2, language: 'en-US' },
     rev: 0,
 };
 
@@ -178,6 +179,7 @@ function normBrowser(v) {
         files: !!x.files,
         transfer: !!x.files && !!x.transfer,
         filesLimitGb: clampInt(x.filesLimitGb, 1, 10, d.filesLimitGb),
+        language: BROWSER_LANGUAGES.includes(x.language) ? x.language : d.language,
     };
 }
 

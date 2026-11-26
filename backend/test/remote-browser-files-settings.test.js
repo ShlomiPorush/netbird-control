@@ -39,6 +39,13 @@ function reset(saved, cached = saved) {
     ra._internal.setConfigForTest(cached || {});
 }
 
+test('the browser language is English unless it is one of the four offered', () => {
+    const language = (value) => normConfig({ browser: { language: value } }).browser.language;
+    assert.equal(normConfig({}).browser.language, 'en-US');
+    for (const value of ['en-US', 'he', 'ar', 'ru']) assert.equal(language(value), value);
+    for (const value of ['fr', 'HE', 'he,en-US', '', null, 7, ['he']]) assert.equal(language(value), 'en-US');
+});
+
 test('the files settings are off by default, transfer needs files, and the limit stays within 1 to 10 GB', () => {
     const browser = (b) => normConfig({ browser: b }).browser;
     const pick = ({ files, transfer, filesLimitGb }) => ({ files, transfer, filesLimitGb });

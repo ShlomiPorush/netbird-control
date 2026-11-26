@@ -338,6 +338,12 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const filesOn = webActive && filesAllowed;
   useEffect(() => setFilesOpen(false), [activeId]);
   const toggleFiles = () => { setClipOpen(false); setFilesOpen((v) => !v); };
+  const showFiles = (id: string) => {
+    if (!filesOn || id !== active?.sessionId) return;
+    setClipOpen(false);
+    setFilesOpen(true);
+    reveal();
+  };
   const toggleClipboard = () => { setFilesOpen(false); setClipOpen((v) => !v); };
   const leave = () => {
     setClipOpen(false);
@@ -383,6 +389,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             pointer={pointer}
             onLatchChange={(m) => { if (s.sessionId === active?.sessionId) setLatched(m); }}
             onTouchTap={s.protocol === 'ssh' && s.sessionId === active?.sessionId ? openDeviceKeys : undefined}
+            onShowFiles={s.protocol === 'web' ? () => showFiles(s.sessionId) : undefined}
             apiRef={apiFor(s.sessionId)}
             onStatus={(st) => setStatus((m) => (m[s.sessionId] === st ? m : { ...m, [s.sessionId]: st }))}
             onRemoteClipboard={(t) => setClips((m) => ({ ...m, [s.sessionId]: t }))}
@@ -661,9 +668,9 @@ type WebEnd = { reason: string; live: boolean; found?: WebSessionInfo | null | '
 interface ClosingBrowser { sessionId: string; settled: boolean; since: number }
 interface CloseProblem { message: string; unknown: boolean }
 
-function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onCloseBrowser, closing, closeProblem, onDismissCloseProblem, onCheckAgain, onCloseTab, onSession, onLeave, fontSize, onFontSize, onPainted }: {
+function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, onShowFiles, apiRef, onStatus, onRemoteClipboard, onClose, onCloseBrowser, closing, closeProblem, onDismissCloseProblem, onCheckAgain, onCloseTab, onSession, onLeave, fontSize, onFontSize, onPainted }: {
   entry: SessionEntry; active: boolean; apiRef: { current: ScreenApi | null };
-  pointer: PointerMode; onLatchChange: (modifiers: number[]) => void; onTouchTap?: () => void;
+  pointer: PointerMode; onLatchChange: (modifiers: number[]) => void; onTouchTap?: () => void; onShowFiles?: () => void;
   /** SSH: the text size chosen in the session bar, and the terminal's as guacd reports it. */
   fontSize?: number;
   onFontSize?: (size: number) => void;
@@ -1042,7 +1049,7 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
   return (
     <>
       <GuacScreen sessionId={conn.sessionId} token={conn.token} attachment={conn.attachment} protocol={entry.protocol} pointer={pointer} active={active && !overlay} clipboard={entry.clipboard}
-        onLatchChange={onLatchChange} onTouchTap={onTouchTap}
+        onLatchChange={onLatchChange} onTouchTap={onTouchTap} onShowFiles={onShowFiles}
         fontSize={fontSize} onFontSize={ssh ? onFontSize : undefined}
         onEvent={onEvent} onRemoteClipboard={onRemoteClipboard} apiRef={apiRef} />
       {overlay && (

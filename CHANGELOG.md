@@ -26,6 +26,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   2 GB for its files (a setting, 1 to 10 GB), and its files are deleted when it closes. Files that
   land in the browser and every transfer and delete are recorded. A reverse proxy must allow 1 MiB
   request bodies on the upload route (8 MiB recommended): see docs/remote-access.md.
+- **Show in folder opens the Files panel.** With **Files In The Browser** on, **Show in folder** and
+  **Open** on a download in the remote browser open the session bar's **Files** panel, instead of a
+  blocked page.
+- **A language for the remote browser.** The new **Browser Language** setting (English, Hebrew,
+  Arabic or Russian; default English) sets the language of the browser's menus and the language
+  websites are asked for. It applies to browsers opened after the change.
 - **The Browser Gateways' host isolation rules come as a script and a systemd unit.**
   `netbird-docker-compose-files/remote-access-isolation` holds a script that sets the rules and a
   unit that runs it before Docker starts, so the rules survive a reboot. They now block the

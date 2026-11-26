@@ -38,6 +38,7 @@ export interface BrowserConfig {
   files: boolean;
   transfer: boolean;
   filesLimitGb: number;
+  language: string;
 }
 
 export interface BrowserFile {

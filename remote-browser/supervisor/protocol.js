@@ -13,6 +13,7 @@ const START_PAGE_MAX = 2048;
 const GIB = 1024 ** 3;
 const FILES_LIMIT = { min: GIB, max: 10 * GIB, fallback: 2 * GIB };
 const FILE_NAME_MAX_BYTES = 255;
+const LANGUAGES = ['en-US', 'he', 'ar', 'ru'];
 
 class RequestError extends Error {
   constructor(code, message) {
@@ -80,6 +81,12 @@ function filesLimit(value) {
   return value;
 }
 
+function language(value) {
+  if (value === undefined) return 'en-US';
+  if (!LANGUAGES.includes(value)) throw new RequestError('BAD_REQUEST', `language must be one of ${LANGUAGES.join(', ')}.`);
+  return value;
+}
+
 function acks(value) {
   if (value === undefined) return {};
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -127,6 +134,7 @@ function parseRequest(line) {
         until: positiveInteger(request.until, 'until'),
         startPage: startPage(request.startPage),
         filesLimit: filesLimit(request.filesLimit),
+        language: language(request.language),
       };
     case 'renew':
     case 'credentials':
@@ -138,6 +146,8 @@ function parseRequest(line) {
       return { op: 'list', ack: acks(request.ack) };
     case 'ready':
       return { op: 'ready' };
+    case 'requests':
+      return { op: 'requests' };
     case 'files':
       return {
         op: 'files',
@@ -146,7 +156,7 @@ function parseRequest(line) {
         rev: nonNegativeInteger(request.rev, 'rev'),
       };
     default:
-      throw new RequestError('BAD_REQUEST', 'op must be start, renew, status, credentials, stop, list, ready or files.');
+      throw new RequestError('BAD_REQUEST', 'op must be start, renew, status, credentials, stop, list, ready, files or requests.');
   }
 }
 

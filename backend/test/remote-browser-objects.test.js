@@ -230,7 +230,7 @@ test('the web group keeps exactly the first enrolled peer; other members and eve
 
 test('the browser settings are normalized, clamped and merged', async () => {
     const norm = ra._internal.normConfig;
-    const filesOff = { files: false, transfer: false, filesLimitGb: 2 };
+    const filesOff = { files: false, transfer: false, filesLimitGb: 2, language: 'en-US' };
     assert.deepEqual(norm({}).browser, { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', ...filesOff });
     assert.equal(norm({ browser: { startPage: ' https://Portal.example.com/a ' } }).browser.startPage, 'https://portal.example.com/a');
     for (const bad of ['file:///etc/passwd', '--flag', 'https://u:p@example.com/', 'portal.example.com']) assert.equal(norm({ browser: { startPage: bad } }).browser.startPage, '');

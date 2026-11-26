@@ -9,7 +9,7 @@ const GIB = 1024 ** 3;
 const rejects = (line, code = 'BAD_REQUEST') => assert.throws(() => parseRequest(line), (error) => error.code === code);
 
 test('a start request is parsed with its screen and scale', () => {
-  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000, startPage: '', filesLimit: 2 * GIB });
+  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000, startPage: '', filesLimit: 2 * GIB, language: 'en-US' });
 });
 
 test('the screen is capped at 1920x1080 and raised to the minimum', () => {
@@ -54,6 +54,7 @@ test('renew, status, credentials, stop, list and ready keep only what they need'
   assert.deepEqual(parseRequest('{"op":"stop","session":"s1"}'), { op: 'stop', session: 's1' });
   assert.deepEqual(parseRequest('{"op":"list","session":"ignored"}'), { op: 'list', ack: {} });
   assert.deepEqual(parseRequest('{"op":"ready"}'), { op: 'ready' });
+  assert.deepEqual(parseRequest('{"op":"requests","session":"ignored"}'), { op: 'requests' });
   rejects('{"op":"renew","until":5000}');
   rejects('{"op":"status"}');
   rejects('{"op":"credentials","session":"a b"}');
@@ -68,7 +69,7 @@ test('start, renew and credentials require until as a positive integer', () => {
 });
 
 test('an unknown op names every op', () => {
-  assert.throws(() => parseRequest('{"op":"explode"}'), { message: 'op must be start, renew, status, credentials, stop, list, ready or files.' });
+  assert.throws(() => parseRequest('{"op":"explode"}'), { message: 'op must be start, renew, status, credentials, stop, list, ready, files or requests.' });
 });
 
 test('malformed requests are refused', () => {
@@ -104,6 +105,12 @@ test('the files limit of a start is a whole number of bytes from 1 to 10 GiB', (
   for (const filesLimit of [GIB - 1, 10 * GIB + 1, 1.5 * GIB + 0.5, '2147483648', null, 0]) {
     rejects(start({ filesLimit }));
   }
+});
+
+test('the browser language of a start is one of four, and English when it is missing', () => {
+  for (const language of ['en-US', 'he', 'ar', 'ru']) assert.equal(parseRequest(start({ language })).language, language);
+  assert.equal(parseRequest(start()).language, 'en-US');
+  for (const language of ['fr', 'en', 'HE', 'he,en-US', '', null, 7, ['he']]) rejects(start({ language }));
 });
 
 test('a files request carries enabled, transfer and a non-negative rev', () => {
