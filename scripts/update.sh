@@ -55,6 +55,7 @@ OPT_OUT_LABEL="netbird-control.rollout"
 DRAIN_LABEL="docker-rollout.pre-stop-hook"
 HOST_FILES_LABEL="netbird-control.host-files"
 HOST_FILES_DIR="/usr/share/netbird-control/host"
+HOST_FILES=(remote-browser/seccomp.json remote-browser/resolv.conf)
 
 log() { printf '\033[36m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*"; }
@@ -179,7 +180,9 @@ write_tag() {
   rm -f "$env_tmp"
   env_tmp=""
 }
+host_tmps=()
 cleanup() {
+  ((${#host_tmps[@]} == 0)) || rm -f "${host_tmps[@]}"
   [[ -n $env_tmp ]] || return 0
   if [[ -n $env_partial ]]; then
     err "Writing .env was cut short. Its full text with $tag_var=$env_value is in $env_tmp: put it in place with: cat $env_tmp > .env && rm $env_tmp"
@@ -472,35 +475,36 @@ plan_service() {
 }
 
 copy_host_files() {
-  local image="$1" name="$2" listed path tmp
-  listed="$(docker image inspect -f "{{index .Config.Labels \"$HOST_FILES_LABEL\"}}" "$image")" || return 1
-  for path in $listed; do
-    if [[ ! $path =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$ ]]; then
-      err "$name lists '$path' as a file for the host, which is not a plain path inside this folder."
-      return 1
-    fi
+  local image="$1" name="$2" path i
+  [[ $(docker image inspect -f "{{index .Config.Labels \"$HOST_FILES_LABEL\"}}" "$image") == "1" ]] || return 0
+  for path in "${HOST_FILES[@]}"; do
     if [[ -d $path ]]; then
       err "$path is a folder, not a file. Docker makes one when a file it should mount is missing. Remove it (rmdir $path) and run this again."
       return 1
     fi
-    mkdir -p "$(dirname "$path")" || return 1
-    tmp="$(mktemp "$path.update.XXXXXX")" || return 1
-    if ! docker run --rm --network none --entrypoint cat "$image" "$HOST_FILES_DIR/$path" >"$tmp"; then
-      rm -f "$tmp"
-      return 1
-    fi
-    if cmp -s "$tmp" "$path"; then
-      rm -f "$tmp"
+  done
+  mkdir -p "${HOST_FILES[@]%/*}" || return 1
+  for i in "${!HOST_FILES[@]}"; do
+    path="${HOST_FILES[$i]}"
+    host_tmps[i]="$(mktemp "$path.update.XXXXXX")" || return 1
+    docker run --rm --network none --entrypoint cat "$image" "$HOST_FILES_DIR/$path" >"${host_tmps[i]}" || return 1
+    chmod 0644 "${host_tmps[i]}" || return 1
+  done
+  for i in "${!HOST_FILES[@]}"; do
+    path="${HOST_FILES[$i]}"
+    if cmp -s "${host_tmps[i]}" "$path"; then
+      chmod 0644 "$path" || return 1
       continue
     fi
-    chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
     if [[ -e $path ]]; then
       warn "Replacing $path with the copy from $name (it was different)."
     else
       log "Adding $path from $name."
     fi
-    mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+    mv -f "${host_tmps[i]}" "$path" || return 1
   done
+  rm -f "${host_tmps[@]}"
+  host_tmps=()
 }
 
 need_rollout=""
@@ -517,10 +521,7 @@ if [[ -n $need_rollout ]]; then
   [[ $have == "docker-rollout version $ROLLOUT_VERSION" ]] || stop "This script is tested with docker rollout $ROLLOUT_VERSION, and '${have:-unknown}' is installed. Install $ROLLOUT_VERSION."
 fi
 
-declare -A copied=()
 for service in "${services[@]}"; do
-  [[ -z ${copied[${new_id[$service]}]:-} ]] || continue
-  copied[${new_id[$service]}]=1
   copy_host_files "${new_id[$service]}" "${image_of[$service]}" || stop "Could not copy the files ${image_of[$service]} needs beside the Compose file. No service was updated."
 done
 

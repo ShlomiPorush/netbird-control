@@ -867,17 +867,20 @@ recorder misses connections (for example while the app restarts), a gap record s
 4. **Put the browser's two host files in place.** Docker reads `remote-browser/seccomp.json` (the
    browser container's seccomp profile) and `remote-browser/resolv.conf` (its DNS server) from the
    folder that holds `docker-compose.yml`, so they can't stay inside the image. The browser image
-   carries both. Copy them out once, with the release you run instead of `1.9.2`:
+   carries both. Copy them out, with the release you run instead of `1.9.2`. Each file is written
+   beside the old one first and replaces it only when the copy succeeded:
 
    ```bash
    mkdir -p remote-browser
-   docker run --rm --network none --entrypoint cat ghcr.io/shlomiporush/nbcontrol-browser:1.9.2 /usr/share/netbird-control/host/remote-browser/seccomp.json > remote-browser/seccomp.json
-   docker run --rm --network none --entrypoint cat ghcr.io/shlomiporush/nbcontrol-browser:1.9.2 /usr/share/netbird-control/host/remote-browser/resolv.conf > remote-browser/resolv.conf
+   for f in seccomp.json resolv.conf; do
+     docker run --rm --network none --entrypoint cat ghcr.io/shlomiporush/nbcontrol-browser:1.9.2 "/usr/share/netbird-control/host/remote-browser/$f" > "remote-browser/$f.new" &&
+       chmod 0644 "remote-browser/$f.new" && mv -f "remote-browser/$f.new" "remote-browser/$f"
+   done
    ```
 
    After that, `update.sh` copies both from each new browser image before it updates the browser
-   containers, and replaces a copy that differs (it says so). Without `update.sh`, run these
-   commands again with the new release before `docker compose up -d`.
+   containers, and says when it replaces a copy that differs. Without `update.sh`, run the commands
+   again with the new release before `docker compose up -d`.
 5. Start the browser gateway and its containers together, from the folder that holds
    `docker-compose.yml`:
 

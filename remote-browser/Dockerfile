@@ -38,5 +38,5 @@ COPY supervisor/ /opt/supervisor/
 COPY --chmod=0644 seccomp.json resolv.conf /usr/share/netbird-control/host/remote-browser/
 ENV LANG=C.UTF-8
 LABEL netbird-control.zero-downtime-update="1"
-LABEL netbird-control.host-files="remote-browser/seccomp.json remote-browser/resolv.conf"
+LABEL netbird-control.host-files="1"
 CMD ["node", "/opt/supervisor/main.js"]
