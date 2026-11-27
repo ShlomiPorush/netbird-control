@@ -143,7 +143,7 @@ The first sync after upgrading from 1.4.x takes out, in one write per group, eve
 1.4.x added for the selected networks: there are no holds yet. Sessions don't survive the restart,
 so nothing in use is lost; the next session to a server opens it again.
 
-Settings → Remote Access lists the servers that are open right now: **In Use** when a session of
+Operations → Remote Access lists the servers that are open right now: **In Use** when a session of
 the instance that answered uses it, otherwise until when it stays open. When NetBird can't be read,
 the list is empty and the page shows the error.
 
@@ -469,8 +469,8 @@ peers: it uses the copy as it is.
 
    Leave out `--profile remote-names` to run without the names gateway; host names of domain
    resources are then refused.
-6. **Check the status** on Settings → Remote Access: both gateways are online, both guacd are
-   reachable, and no warning is shown.
+6. **Check the status:** Settings → Remote Access shows **Gateways Online**. Operations → Remote
+   Access has the details: both gateways online, both guacd reachable, and no warning.
 7. **Reverse proxy.** The session runs over a WebSocket at `/api/remote-access/tunnel`. Traefik and
    Caddy pass WebSockets through by default. nginx needs the `Upgrade` and `Connection` headers:
 
@@ -528,7 +528,7 @@ Each gateway container runs a short start script (in
 guacd joins its gateway's network namespace when it starts, so it has to follow the gateway:
 
 - **A gateway restarted:** restart its guacd. Until then guacd stays in the old namespace, its
-  container is unhealthy and **Settings → Remote Access** shows "guacd Not Reachable". Both guacd
+  container is unhealthy and **Operations → Remote Access** shows "guacd Not Reachable". Both guacd
   services carry the label `autoheal=true`, so a host that runs
   [autoheal](https://github.com/willfarrell/docker-autoheal) with its default label restarts them.
   Without autoheal the label does nothing. If the gateway is still down when autoheal restarts
@@ -731,6 +731,11 @@ out through its own gateway. The check runs when the session opens and every min
 Each user may have one browser open at a time, and all users together five. Both limits are settings
 (**Browsers Per User**, 1 to 10, and **Browsers At A Time**, 1 to 50). A disconnected browser that
 still runs counts, so a user at the limit resumes it or closes it first.
+
+Operations → Remote Access shows how many browsers are open, of the **Browsers At A Time** limit,
+and how many of them are disconnected, with the browser gateway's state under **Gateways**. A browser
+gateway that is not ready also turns the status line in Settings → Remote Access to **Needs
+Attention**.
 
 A new browser opens on the **Start Page** set in the same card, or on a blank page when it is empty.
 Only an `http` or `https` address without a user name or password is accepted. A resumed browser
@@ -1049,7 +1054,7 @@ on. Turn it on with a save on this page, which checks the profile and the networ
 (encrypted) backup carries the `ra_created_resources` table; the plaintext settings export doesn't.
 A restore adds the backup's rows that aren't there yet and never removes the rows tracked now.
 
-**The list.** Settings > Remote Access lists every resource created by the API that still exists (or may),
+**The list.** Operations > Remote Access lists every resource created by the API that still exists (or may),
 and the latest 50 finished entries (failed, removed, gone), with a note when older ones were left
 out.
 

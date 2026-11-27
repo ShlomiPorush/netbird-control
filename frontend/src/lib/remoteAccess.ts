@@ -55,10 +55,14 @@ export interface BrowserFiles {
 }
 
 export interface BrowserStatus {
+  enabled: boolean;
+  maxSessions: number;
   enrolled: boolean;
   online: boolean;
   ready: boolean;
   reason: string;
+  peer: { id: string; name: string; ip: string; connected: boolean } | null;
+  sessions: { active: number; detached: number; total: number };
 }
 
 export interface RemoteStep {
