@@ -9,7 +9,7 @@ const GIB = 1024 ** 3;
 const rejects = (line, code = 'BAD_REQUEST') => assert.throws(() => parseRequest(line), (error) => error.code === code);
 
 test('a start request is parsed with its screen and scale', () => {
-  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000, startPage: '', filesLimit: 2 * GIB, language: 'en-US' });
+  assert.deepEqual(parseRequest(start()), { op: 'start', session: 'abc', width: 1280, height: 720, scale: 1, terminal: false, until: 2_000_000, startPage: '', filesLimit: 2 * GIB, language: 'en-US', theme: 'light' });
 });
 
 test('the screen is capped at 1920x1080 and raised to the minimum', () => {
@@ -105,6 +105,12 @@ test('the files limit of a start is a whole number of bytes from 1 to 10 GiB', (
   for (const filesLimit of [GIB - 1, 10 * GIB + 1, 1.5 * GIB + 0.5, '2147483648', null, 0]) {
     rejects(start({ filesLimit }));
   }
+});
+
+test('the theme of a start is light or dark, and light when it is missing', () => {
+  for (const theme of ['light', 'dark']) assert.equal(parseRequest(start({ theme })).theme, theme);
+  assert.equal(parseRequest(start()).theme, 'light');
+  for (const theme of ['Dark', 'system', '', null, 1, ['dark']]) rejects(start({ theme }));
 });
 
 test('the browser language of a start is one of four, and English when it is missing', () => {

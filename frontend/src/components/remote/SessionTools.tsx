@@ -114,8 +114,8 @@ export function BarMenu({ title, icon, container, width = 248, pressed, onOpenCh
   return (
     <>
       <button ref={btn} type="button" onClick={toggle} title={title} aria-label={title} aria-haspopup="menu" aria-expanded={open}
-        className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-300 transition-colors hover:bg-nb-gray-800 hover:text-white focus-visible:outline-2 focus-visible:outline-netbird-400',
-          (open || pressed) && 'bg-nb-gray-800 text-white')}>
+        className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-600 transition-colors hover:bg-nb-gray-100 hover:text-nb-gray-900 dark:text-nb-gray-300 dark:hover:bg-nb-gray-800 dark:hover:text-white focus-visible:outline-2 focus-visible:outline-netbird-400',
+          (open || pressed) && 'bg-nb-gray-100 text-nb-gray-900 dark:bg-nb-gray-800 dark:text-white')}>
         {icon}
       </button>
       {open && container.current && createPortal(
@@ -124,7 +124,7 @@ export function BarMenu({ title, icon, container, width = 248, pressed, onOpenCh
           <div ref={panel} role="menu" aria-label={title} tabIndex={-1} style={{ left: pos.left, top: pos.top, width }}
             // Focus moving out of the menu (a click elsewhere) closes it.
             onBlur={(e) => { if (!panel.current?.contains(e.relatedTarget as Node | null)) close(); }}
-            className="fixed z-50 max-h-[calc(100dvh-5rem)] overflow-y-auto rounded-xl border border-nb-gray-800 bg-nb-gray-940 p-1.5 shadow-2xl outline-hidden">
+            className="nb-follow-theme fixed z-50 max-h-[calc(100dvh-5rem)] overflow-y-auto rounded-xl border border-nb-gray-200 bg-white text-nb-gray-900 dark:border-nb-gray-800 dark:bg-nb-gray-940 dark:text-nb-gray-100 p-1.5 shadow-2xl outline-hidden">
             {children(close)}
           </div>
         </>,
@@ -165,11 +165,11 @@ export function MenuRow({ icon, label, hint, checked, disabled, onClick, classNa
 }) {
   return (
     <button type="button" role={checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={checked} onClick={onClick} disabled={disabled}
-      className={cn('flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-nb-gray-200 hover:bg-nb-gray-900 focus-visible:bg-nb-gray-900 focus-visible:outline-hidden disabled:opacity-40 disabled:hover:bg-transparent', className)}>
-      {icon && <span className="shrink-0 text-nb-gray-400">{icon}</span>}
+      className={cn('flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-nb-gray-800 hover:bg-nb-gray-100 focus-visible:bg-nb-gray-100 focus-visible:outline-hidden disabled:opacity-40 disabled:hover:bg-transparent dark:text-nb-gray-200 dark:hover:bg-nb-gray-900 dark:focus-visible:bg-nb-gray-900', className)}>
+      {icon && <span className="shrink-0 text-nb-gray-500 dark:text-nb-gray-400">{icon}</span>}
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {hint && <kbd className="shrink-0 rounded-md bg-nb-gray-900 px-1.5 py-0.5 font-mono text-[0.7rem] text-nb-gray-400 ring-1 ring-inset ring-nb-gray-800">{hint}</kbd>}
-      {checked && <Check size={15} className="shrink-0 text-netbird-400" />}
+      {hint && <kbd className="shrink-0 rounded-md bg-nb-gray-100 px-1.5 py-0.5 font-mono text-[0.7rem] text-nb-gray-500 ring-1 ring-inset ring-nb-gray-200 dark:bg-nb-gray-900 dark:text-nb-gray-400 dark:ring-nb-gray-800">{hint}</kbd>}
+      {checked && <Check size={15} className="shrink-0 text-netbird-600 dark:text-netbird-400" />}
     </button>
   );
 }

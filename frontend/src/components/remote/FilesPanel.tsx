@@ -130,28 +130,28 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
 
   return (
     <div style={pos ? { left: pos.left, top: pos.top, width: pos.width, maxHeight: `calc(100dvh - ${pos.top + 8}px)` } : { visibility: 'hidden' }}
-      className={cn('fixed z-40 flex-col overflow-y-auto rounded-2xl border border-nb-gray-800 bg-nb-gray-940 p-4 shadow-2xl', open ? 'flex' : 'hidden')}>
+      className={cn('nb-follow-theme fixed z-40 flex-col overflow-y-auto rounded-2xl border border-nb-gray-200 bg-white text-nb-gray-900 dark:border-nb-gray-800 dark:bg-nb-gray-940 dark:text-nb-gray-100 p-4 shadow-2xl', open ? 'flex' : 'hidden')}>
       <div className="mb-3 flex items-center justify-between">
         <span className="text-sm font-semibold">Files</span>
-        <button onClick={onClose} aria-label="Close The Files" className="rounded-md p-1 text-nb-gray-400 hover:bg-nb-gray-800 hover:text-white"><X size={16} /></button>
+        <button onClick={onClose} aria-label="Close The Files" className="rounded-md p-1 text-nb-gray-500 hover:bg-nb-gray-100 hover:text-nb-gray-900 dark:text-nb-gray-400 dark:hover:bg-nb-gray-800 dark:hover:text-white"><X size={16} /></button>
       </div>
 
       {data && (
         <div className="mb-3">
-          <div className="mb-1 flex items-baseline justify-between gap-2 text-[0.78rem] text-nb-gray-400">
+          <div className="mb-1 flex items-baseline justify-between gap-2 text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400">
             <span>Storage</span>
             <span className="tabular-nums">{formatBytes(data.used)} of {formatBytes(data.limit)}</span>
           </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-nb-gray-800" role="meter" aria-label="Storage used" aria-valuemin={0} aria-valuemax={data.limit} aria-valuenow={data.used}>
+          <div className="h-1.5 overflow-hidden rounded-full bg-nb-gray-200 dark:bg-nb-gray-800" role="meter" aria-label="Storage used" aria-valuemin={0} aria-valuemax={data.limit} aria-valuenow={data.used}>
             <div className={cn('h-full rounded-full', usedShare >= 90 ? 'bg-red-500' : usedShare >= 75 ? 'bg-amber-400' : 'bg-netbird')} style={{ width: `${usedShare}%` }} />
           </div>
         </div>
       )}
 
-      {!data && !listProblem && <p className="flex items-center gap-2 py-3 text-sm text-nb-gray-400"><Loader2 size={15} className="animate-spin" /> Reading the files…</p>}
+      {!data && !listProblem && <p className="flex items-center gap-2 py-3 text-sm text-nb-gray-500 dark:text-nb-gray-400"><Loader2 size={15} className="animate-spin" /> Reading the files…</p>}
 
       {data && !data.files.length && (
-        <p className="py-3 text-sm text-nb-gray-400">
+        <p className="py-3 text-sm text-nb-gray-500 dark:text-nb-gray-400">
           No files yet. {transfer ? 'Files the browser downloads, and files you upload here, show up in this list.' : 'Files the browser downloads show up in this list.'}
         </p>
       )}
@@ -159,21 +159,21 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
       {data && data.files.length > 0 && (
         <ul className="-mx-1 flex flex-col">
           {data.files.map((f) => (
-            <li key={f.name} className="flex items-center gap-2 rounded-lg px-1 py-1.5 hover:bg-nb-gray-900/60">
-              <FileText size={15} className="shrink-0 text-nb-gray-500" />
+            <li key={f.name} className="flex items-center gap-2 rounded-lg px-1 py-1.5 hover:bg-nb-gray-100 dark:hover:bg-nb-gray-900/60">
+              <FileText size={15} className="shrink-0 text-nb-gray-400 dark:text-nb-gray-500" />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm text-nb-gray-100" title={f.name}>{f.partial ? f.name.replace(/.crdownload$/, '') : f.name}</div>
+                <div className="truncate text-sm text-nb-gray-900 dark:text-nb-gray-100" title={f.name}>{f.partial ? f.name.replace(/.crdownload$/, '') : f.name}</div>
                 <div className="text-[0.72rem] text-nb-gray-500 tabular-nums">{f.partial ? 'Downloading…' : formatBytes(f.size)}</div>
               </div>
               {!f.partial && transfer && (
                 <a href={browserFileUrl(sessionId, f.name)} download={f.name} title="Download To This Computer" aria-label={`Download ${f.name}`}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-300 hover:bg-nb-gray-800 hover:text-white">
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-600 hover:bg-nb-gray-200 hover:text-nb-gray-900 dark:text-nb-gray-300 dark:hover:bg-nb-gray-800 dark:hover:text-white">
                   <Download size={15} />
                 </a>
               )}
               {!f.partial && (
                 <button type="button" onClick={() => { void remove(f); }} disabled={!!deleting} title="Delete" aria-label={`Delete ${f.name}`}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-400 hover:bg-red-500/15 hover:text-red-300 disabled:opacity-40">
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-500 hover:bg-red-500/15 hover:text-red-600 disabled:opacity-40 dark:text-nb-gray-400 dark:hover:text-red-300">
                   {deleting === f.name ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
                 </button>
               )}
@@ -187,19 +187,19 @@ export function FilesPanel({ sessionId, transfer, anchor, open, onClose }: {
       )}
 
       {upload && (
-        <div className="mt-3 rounded-lg border border-nb-gray-800 bg-nb-gray-900/50 p-3">
+        <div className="mt-3 rounded-lg border border-nb-gray-200 bg-nb-gray-50 p-3 dark:border-nb-gray-800 dark:bg-nb-gray-900/50">
           <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.8rem]">
-            <span className="min-w-0 truncate text-nb-gray-200" title={upload.name}>Uploading {upload.name}</span>
-            <span className="shrink-0 tabular-nums text-nb-gray-400">{Math.floor(uploadShare)}%</span>
+            <span className="min-w-0 truncate text-nb-gray-800 dark:text-nb-gray-200" title={upload.name}>Uploading {upload.name}</span>
+            <span className="shrink-0 tabular-nums text-nb-gray-500 dark:text-nb-gray-400">{Math.floor(uploadShare)}%</span>
           </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-nb-gray-800" role="progressbar" aria-label="Upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(uploadShare)}>
+          <div className="h-1.5 overflow-hidden rounded-full bg-nb-gray-200 dark:bg-nb-gray-800" role="progressbar" aria-label="Upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(uploadShare)}>
             <div className="h-full rounded-full bg-netbird transition-[width]" style={{ width: `${uploadShare}%` }} />
           </div>
         </div>
       )}
 
       {(problem || listProblem) && (
-        <p role="alert" className="mt-3 flex items-start gap-1.5 text-[0.8rem] text-red-300"><AlertCircle size={14} className="mt-px shrink-0" />{problem || listProblem}</p>
+        <p role="alert" className="mt-3 flex items-start gap-1.5 text-[0.8rem] text-red-600 dark:text-red-300"><AlertCircle size={14} className="mt-px shrink-0" />{problem || listProblem}</p>
       )}
 
       {transfer && (

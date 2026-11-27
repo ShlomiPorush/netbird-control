@@ -32,6 +32,9 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   file the browser can display in a tab, from the browser's own folder only, and selects other
   files in the same window. The browser's file dialogs open in its downloads folder and have a
   **Downloads** shortcut.
+- **Light and dark.** The session bar, its menus and its panels follow the portal's light or dark
+  theme. A new remote browser opens in the same theme, with a dark toolbar, menus and file windows
+  in dark, and websites are told the user prefers dark.
 - **A language for the remote browser.** The new **Browser Language** setting (English or
   Hebrew; default English) sets the language of the browser's menus and the language
   websites are asked for. It applies to browsers opened after the change.

@@ -227,6 +227,7 @@ function screen(body) {
         width: clampInt(b.width, SCREEN.minWidth, SCREEN.maxWidth, 1280),
         height: clampInt(b.height, SCREEN.minHeight, SCREEN.maxHeight, 720),
         dpi: clampInt(b.dpi, 72, 480, 96),
+        theme: b.theme === 'dark' ? 'dark' : 'light',
         timezone: /^[A-Za-z0-9_+\-/]{1,64}$/.test(String(b.timezone || '')) ? String(b.timezone) : '',
     };
 }
@@ -329,6 +330,7 @@ async function createWebSession(viewer, body, clientIp) {
                 op: 'start', session: row.id, width: row.width, height: row.height, dpi: row.dpi, terminal: false, until: authorizedAt.getTime() + AUTH_GRACE_MS,
                 filesLimit: config().browser.filesLimitGb * GIB,
                 language: config().browser.language,
+                theme: row.theme,
                 ...(config().browser.startPage ? { startPage: config().browser.startPage } : {}),
             });
         } catch (e) {

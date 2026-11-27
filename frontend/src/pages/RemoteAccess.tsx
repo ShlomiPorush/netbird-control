@@ -396,7 +396,7 @@ export default function RemoteAccess() {
     const web = protocol === 'web';
     try {
       const s = await remoteApi.createSession(web
-        ? { protocol, ...sessionScreenSize('web'), timezone: timezone() }
+        ? { protocol, ...sessionScreenSize('web'), timezone: timezone(), theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light' }
         : {
           protocol, address: targetRef.current.address, port: targetRef.current.port,
           // The session view uses the whole window (the bar floats over it).

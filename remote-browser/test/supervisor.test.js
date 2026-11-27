@@ -38,6 +38,13 @@ test('a new browser gets the language of its start, English when the start has n
   assert.deepEqual(runtime.launches.map((launch) => launch.language), ['he', 'en-US']);
 });
 
+test('a new browser gets the theme of its start, light when the start has none', async () => {
+  const { startOf, runtime } = setup();
+  await startOf('a', { theme: 'dark' });
+  await startOf('b');
+  assert.deepEqual(runtime.launches.map((launch) => launch.theme), ['dark', 'light']);
+});
+
 test('start returns the port, password and Chromium uid of the first free slot', async () => {
   const { startOf } = setup();
   assert.deepEqual(await startOf('a'), { ok: true, port: 5901, password: 'pw0', uid: 62000, instance: INSTANCE, startedAt: 1_000 });

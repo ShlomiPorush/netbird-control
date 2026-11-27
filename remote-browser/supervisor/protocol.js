@@ -14,6 +14,7 @@ const GIB = 1024 ** 3;
 const FILES_LIMIT = { min: GIB, max: 10 * GIB, fallback: 2 * GIB };
 const FILE_NAME_MAX_BYTES = 255;
 const LANGUAGES = ['en-US', 'he'];
+const THEMES = ['light', 'dark'];
 
 class RequestError extends Error {
   constructor(code, message) {
@@ -87,6 +88,12 @@ function language(value) {
   return value;
 }
 
+function theme(value) {
+  if (value === undefined) return 'light';
+  if (!THEMES.includes(value)) throw new RequestError('BAD_REQUEST', `theme must be one of ${THEMES.join(', ')}.`);
+  return value;
+}
+
 function acks(value) {
   if (value === undefined) return {};
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -135,6 +142,7 @@ function parseRequest(line) {
         startPage: startPage(request.startPage),
         filesLimit: filesLimit(request.filesLimit),
         language: language(request.language),
+        theme: theme(request.theme),
       };
     case 'renew':
     case 'credentials':

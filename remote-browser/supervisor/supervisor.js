@@ -100,7 +100,7 @@ class Supervisor {
     for (const [session, record] of this.sessions) this.endWith(session, record, reason, null);
   }
 
-  async start({ session, width, height, scale, terminal, until, startPage = '', filesLimit = FILES_LIMIT.fallback, language = 'en-US' }) {
+  async start({ session, width, height, scale, terminal, until, startPage = '', filesLimit = FILES_LIMIT.fallback, language = 'en-US', theme = 'light' }) {
     if (terminal) return failure('TERMINAL', 'The session has ended and cannot start again.');
     if (this.policyFailed) return failure('POLICY_FAILED', 'The files policy could not be blocked, so no browser starts.');
     if (this.expired(until)) return expiredFailure();
@@ -149,6 +149,7 @@ class Supervisor {
         startPage,
         filesLimit,
         language,
+        theme,
         onExit: (reason) => this.ended(session, record, reason),
       });
       record.password = password;

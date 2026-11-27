@@ -249,7 +249,7 @@ function xvncArgs({ display, port, dir, width, height }) {
 
 const acceptLanguage = (language) => (language === 'en-US' ? 'en-US' : `${language},en-US`);
 
-function chromiumArgs({ dir, scale, startPage, language }) {
+function chromiumArgs({ dir, scale, startPage, language, theme }) {
   return [
     `--user-data-dir=${path.join(dir, 'profile')}`,
     '--start-maximized',
@@ -259,11 +259,12 @@ function chromiumArgs({ dir, scale, startPage, language }) {
     `--force-device-scale-factor=${scale}`,
     `--disk-cache-size=${DISK_CACHE_BYTES}`,
     `--accept-lang=${acceptLanguage(language)}`,
+    ...(theme === 'dark' ? ['--force-dark-mode'] : []),
     ...(startPage ? [startPage] : []),
   ];
 }
 
-function chromiumEnv({ display, dir, language }) {
+function chromiumEnv({ display, dir, language, theme }) {
   return {
     DISPLAY: `:${display}`,
     XAUTHORITY: path.join(dir, 'xauth'),
@@ -271,6 +272,7 @@ function chromiumEnv({ display, dir, language }) {
     TMPDIR: dir,
     LANG: 'C.UTF-8',
     LANGUAGE: language,
+    ...(theme === 'dark' ? { GTK_THEME: 'Adwaita:dark' } : {}),
   };
 }
 
@@ -278,7 +280,7 @@ function chromiumCommand(filesLimit, args) {
   return ['prlimit', [`--fsize=${filesLimit}`, '--', 'sh', '-c', 'trap "" XFSZ; exec chromium "$@"', 'chromium', ...args]];
 }
 
-async function launch({ ids, width, height, scale, startPage = '', filesLimit, language = 'en-US', onExit }) {
+async function launch({ ids, width, height, scale, startPage = '', filesLimit, language = 'en-US', theme = 'light', onExit }) {
   const { display, port, displayUid, chromiumUid } = ids;
   const [displayDir, chromiumDir] = sessionDirs(ids);
   xFiles(display).forEach(removeIfPresent);
@@ -309,8 +311,8 @@ async function launch({ ids, width, height, scale, startPage = '', filesLimit, l
 
   const chromium = spawnAs(
     chromiumUid,
-    ...chromiumCommand(filesLimit, chromiumArgs({ dir: chromiumDir.dir, scale, startPage, language })),
-    chromiumEnv({ display, dir: chromiumDir.dir, language }),
+    ...chromiumCommand(filesLimit, chromiumArgs({ dir: chromiumDir.dir, scale, startPage, language, theme })),
+    chromiumEnv({ display, dir: chromiumDir.dir, language, theme }),
   );
   watchChild(chromium, 'Chromium', onExit);
   return { password };

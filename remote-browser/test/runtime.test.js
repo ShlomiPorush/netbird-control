@@ -178,6 +178,14 @@ test('Chromium gets the browser language in its environment and asks websites fo
   assert.equal(chromiumEnv({ display: 5, dir, language: 'en-US' }).LANGUAGE, 'en-US');
 });
 
+test('a dark browser gets a dark Chromium and dark GTK windows, and a light one gets neither', () => {
+  const dir = '/run/browser/chromium-4';
+  assert.ok(chromiumArgs({ dir, scale: 1, startPage: '', language: 'en-US', theme: 'dark' }).includes('--force-dark-mode'));
+  assert.equal(chromiumEnv({ display: 5, dir, language: 'en-US', theme: 'dark' }).GTK_THEME, 'Adwaita:dark');
+  assert.ok(!chromiumArgs({ dir, scale: 1, startPage: '', language: 'en-US', theme: 'light' }).includes('--force-dark-mode'));
+  assert.equal('GTK_THEME' in chromiumEnv({ display: 5, dir, language: 'en-US', theme: 'light' }), false);
+});
+
 test('a scan sums the blocks of the whole tree and lists visible top-level regular files', () => {
   const line = (depth, type, size, blocks, mtime, name) => `${depth}\t${type}\t${size}\t${blocks}\t${mtime}\t${name}\0`;
   const scan = parseScan([

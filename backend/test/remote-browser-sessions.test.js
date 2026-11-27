@@ -299,7 +299,7 @@ test('a web session opens without any target: checks, a slot, the supervisor, a 
     assert.match(out.token, /^[A-Za-z0-9_-]{43}$/);
     const start = sup.requests.find(r => r.op === 'start');
     const { until, at, ...rest } = start;
-    assert.deepEqual(rest, { op: 'start', session: out.sessionId, width: 1920, height: 1080, dpi: 144, terminal: false, filesLimit: 2 * 1024 ** 3, language: 'en-US' });
+    assert.deepEqual(rest, { op: 'start', session: out.sessionId, width: 1920, height: 1080, dpi: 144, terminal: false, filesLimit: 2 * 1024 ** 3, language: 'en-US', theme: 'light' });
     assert.ok(until >= before + 150_000 && until <= Date.now() + 150_000, 'the first lease ends 150 s after the authorization');
     const row = table.rows.get(out.sessionId);
     assert.equal(out.attachment, row.attachment);
@@ -349,6 +349,14 @@ test('a new browser starts in the language the administrator chose', async () =>
     ra._internal.setConfigForTest({ enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions: 5, maxPerUser: 5, keepAliveMin: 15, language: 'he' } });
     await rb.createWebSession(USER, {}, '');
     assert.equal(sup.requests.find(r => r.op === 'start').language, 'he');
+});
+
+test('a new browser opens in the theme the portal showed, and light for anything else', async () => {
+    await reset({ maxSessions: 5, maxPerUser: 5 });
+    await rb.createWebSession(USER, { theme: 'dark' }, '');
+    await rb.createWebSession(USER, { theme: 'purple' }, '');
+    await rb.createWebSession(USER, {}, '');
+    assert.deepEqual(sup.requests.filter(r => r.op === 'start').map(r => r.theme), ['dark', 'light', 'light']);
 });
 
 test('a user at the per-user limit opens no new browser, while others still can', async () => {

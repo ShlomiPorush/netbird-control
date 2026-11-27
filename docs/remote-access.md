@@ -380,7 +380,8 @@ peers: it uses the copy as it is.
   ends the session instead; SSH servers report every refused sign-in the same way, so SSH always
   asks again. SSH asks for a user name and password only; to use a private key, connect again
   from the Remote Access page. Every password field has a button that shows what was typed.
-- **The session bar.** It hides itself a few seconds after a session comes to the front. A click
+- **The session bar.** It follows the portal's light or dark theme, and so do its menus and the
+  Clipboard and Files panels. It hides itself a few seconds after a session comes to the front. A click
   on its handle at the top of the screen, or the pointer resting there for half a second, brings it
   back. Pinned, it stays on top of the session; the session keeps the whole window. The NetBird
   mark at its start goes back to the portal while the sessions keep running. On a narrow screen,
@@ -739,6 +740,10 @@ keeps its own tabs.
 language of a new browser's menus. Websites are asked for that language first and English second,
 so a site that offers it shows it. A changed language applies to browsers opened after the change;
 a resumed browser keeps the language it started with.
+
+A new browser opens in the portal's theme at that moment, light or dark. In dark, its toolbar,
+menus and file windows are dark, and websites are told the user prefers dark. A browser keeps the
+theme it started with: Chromium can't change it while it runs.
 
 ### Disconnect, resume and close
 
