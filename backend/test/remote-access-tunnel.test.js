@@ -618,7 +618,6 @@ test('a shutdown closes open sessions, waits for their end records, and refuses 
     const t = await openReady(port);
     const gate = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
     const target = { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' };
-    // End records take a while, so the shutdown has something to wait for.
     let slowEnd = false;
     const insertSeen = gate(); const insertGo = gate();
     let holdStart = true;
@@ -626,8 +625,6 @@ test('a shutdown closes open sessions, waits for their end records, and refuses 
         if (e.Message === 'TYPE_END') { slowEnd = true; await new Promise(r => setTimeout(r, 150)); }
         if (e.Message === 'TYPE_START' && holdStart) { holdStart = false; insertSeen.open(); await insertGo.p; }
     };
-    const query = core.pool.query;
-    // Request 2 stops between its first checks and the session map (the routers read).
     const routersSeen = gate(); const routersGo = gate();
     let holdRouters = false;
     onNetbirdGet = async (p) => {
@@ -644,14 +641,12 @@ test('a shutdown closes open sessions, waits for their end records, and refuses 
         const shutdown = ra.shutdownSessions('The server is restarting.');
         routersGo.open();
         await assert.rejects(second, (e) => e.code === 'SERVER_RESTARTING');
-        // A start that is still being recorded does not hold back the open session.
         await waitFor(() => t.closed());
         insertGo.open();
         await assert.rejects(first, (e) => e.code === 'SERVER_RESTARTING');
         await shutdown;
         assert.ok(slowEnd, 'the open session was closed');
         await waitFor(() => t.closed());
-        // The session of request 1: start recorded first, then its end, then its row removed.
         const mine = recorded.slice(before);
         const start = mine.find(e => e.Message === 'TYPE_START');
         assert.ok(start, 'the start of request 1 was recorded');
@@ -663,7 +658,6 @@ test('a shutdown closes open sessions, waits for their end records, and refuses 
         assert.ok(tail.lastIndexOf('DELETE:remote_sessions') > tail.indexOf('INSERT:remote_sessions'), 'no live-state row is left behind');
         await assert.rejects(ra.createSession(viewer, target, '203.0.113.9'), (e) => e.code === 'SERVER_RESTARTING');
     } finally {
-        core.pool.query = query;
         beforeEvent = null;
         onNetbirdGet = null;
     }

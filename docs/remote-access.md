@@ -221,8 +221,12 @@ wildcard domain resource (possible before this rule existed) closes at the next 
 
 **After an instance starts, and after a resource change that NetBird did not answer,** new sessions
 wait on every instance: for 90 seconds, and then until the instance that runs the background jobs
-has synced the target groups again. The wait is kept in the database, so a restart keeps it. The user is told to try again in a
-minute. A change that NetBird did not
+has synced the target groups again. The wait is kept in the database, so a restart keeps it. A
+change that NetBird answers with a 5xx, or whose answer was lost, counts as not answered. A session
+start that reaches a resource change still on its way to NetBird waits for its answer. A change
+whose instance stopped before the answer came holds new sessions back, and counts as not answered
+from 90 seconds after it was sent. The user is told
+to try again in a minute. A change that NetBird did not
 answer may still be applied later, and the app can't tell when, so it does not approve sessions
 from what it read before. A change applied more than 90 seconds after it was sent is caught by
 the next check of open sessions or the next sync.

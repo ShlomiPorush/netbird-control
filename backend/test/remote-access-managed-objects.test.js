@@ -307,6 +307,21 @@ test('a resource write that got no answer holds new sessions back until a later 
     ra._internal.resetSettlingForTest();
 });
 
+test('a resource write answered with a 5xx, or a lost answer after a 429, holds new sessions back too', async () => {
+    for (const answer of [{ status: 503, raw: 'unavailable' }, { status: 429, raw: 'too many requests', answerLost: true }]) {
+        reset();
+        state.putHook = async () => answer;
+        await assert.rejects(db.setResourceEnabled('n1', 'r1', true));
+        assert.equal(ra._internal.settlingForTest(), true, JSON.stringify(answer));
+    }
+    reset();
+    state.putHook = async () => ({ status: 400, raw: 'bad request' });
+    await assert.rejects(db.setResourceEnabled('n1', 'r1', true));
+    assert.equal(ra._internal.settlingForTest(), false, 'a refusal is an answer');
+    state.putHook = null;
+    ra._internal.resetSettlingForTest();
+});
+
 // ─── Grants ───
 test('no grant puts anyone into a managed group, and nothing is recorded or written for one', async () => {
     for (const id of ['g-gw', 'g-gwt', 'g-ngw', 'g-ngwt']) {

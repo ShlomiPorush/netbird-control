@@ -41,7 +41,7 @@ const { splitPortTokens, mergeRulePorts, comboKey, combosForResource, ALL_COMBO,
 // gateway and target groups are app-owned: exposure-mirroring code skips the policies, and resource
 // writes, grants and routers never add, remove or reuse the groups (helpers below).
 const {
-    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
+    isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, sendTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
     API_NETWORK_MESSAGE, linkGuardNetworkIds, countCreatedInUse, createdInUseMessage, createdResourceIds, sessionResourceIds,
     noteCreatedResourceDeleted, noteCreatedNetworkDeleted, storeCreateSection, launchNetworkName, importedRemoteAccessConfig,
@@ -188,17 +188,9 @@ async function refuseManagedPolicySources(policies) {
         e.status = 400; throw e;
     }
 }
-// Resource writes run under the target lock. They never add a managed target group, and keep one the
-// resource has only while its network is open and the write keeps its address (withManagedTargets).
-// `currentAddress` comes from the writer's own fresh read; null for a resource that doesn't exist
-// yet (create, and the copy a move makes).
 const withTargets = (fn) => (raMain() ? withTargetLock(fn) : fn());
 const targetsFor = (currentAddress, networkId, address, ids) => (raMain() ? withManagedTargets(currentAddress, networkId, address, ids) : ids);
-// No answer is not "not written": a resource write that timed out may still land.
-async function noteResourceWrite(resp) {
-    if (raMain() && resp && resp.status === 0) await noteUncertainTargetWrite();
-    return resp;
-}
+const sendResourceWrite = (send) => (raMain() ? sendTargetWrite(send) : send());
 // The network that holds the servers Remote Access launch links add is changed by
 // lib/remote-access.js alone: every other app write to its resources is refused, here for all of
 // them, and earlier in the few places that write something else first. The network's name, description
@@ -221,20 +213,17 @@ async function refuseLinkNetworkTargets(targets) {
     const servers = await createdResourceIds();
     if (list.some(t => servers.has(String(t.id || t.target_id || '').trim()))) throw linkNetworkError();
 }
-// Every resource or network write and delete of the main account raises the Remote Access targets
-// generation right before it is sent: a session start that read NetBird before it gets no token and
-// tries again (lib/remote-access.js).
 async function beforeResourceWrite(apiPath, linkWrite) {
     if (!linkWrite) await refuseLinkNetwork(decodeURIComponent(apiPath.split('/')[3] || ''));
     if (raMain()) await noteTargetsChanged();
 }
 async function resourceReq(method, apiPath, body, { linkWrite = false } = {}) {
     await beforeResourceWrite(apiPath, linkWrite);
-    return netbirdReq(method, apiPath, body);
+    return sendResourceWrite(() => netbirdReq(method, apiPath, body));
 }
 async function resourcePost(apiPath, body, { linkWrite = false } = {}) {
     await beforeResourceWrite(apiPath, linkWrite);
-    return netbirdPost(apiPath, body);
+    return sendResourceWrite(() => netbirdPost(apiPath, body));
 }
 const sameIdSet = (a, b) => { const A = new Set(a), B = new Set(b); return A.size === B.size && [...A].every(x => B.has(x)); };
 // resetNbCaches (delegated to lib/netbird.js) must also drop db.js's own peers/users caches to
@@ -7200,7 +7189,7 @@ async function createClientResource(networkId, { name, address, description, gro
             };
             // Not configured and read-only answer without sending anything.
             sent = netbirdApiConfigured() && !NETBIRD_READONLY;
-            return noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body, { linkWrite }));
+            return resourcePost(`/api/networks/${encodeURIComponent(networkId)}/resources`, body, { linkWrite });
         });
         // No answer, or a 5xx: NetBird can save the resource and then fail building its answer.
         if (sent && resp && (resp.status === 0 || resp.status >= 500)) throw createOutcomeError('RESOURCE_UNCONFIRMED', CREATE_UNCONFIRMED, resp.error || resp.raw || String(resp.status || 'no answer'));
@@ -7475,10 +7464,10 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
             // at this point - so create under a temporary name and rename back at the end,
             // after the original is gone.
             const tempName = `${r.name} [moving]`;
-            const resp = await noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(target)}/resources`, {
+            const resp = await resourcePost(`/api/networks/${encodeURIComponent(target)}/resources`, {
                 name: tempName, address: r.address, description: r.description || '',
                 enabled: r.enabled !== false, groups,
-            }));
+            });
             if (!resp || resp.status >= 300 || !resp.body || !resp.body.id) {
                 throw new Error('create in target failed: ' + (resp && (resp.raw || resp.error || resp.status)));
             }
@@ -7532,7 +7521,7 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
                 const rn = await resourceReq('PUT', `/api/networks/${encodeURIComponent(target)}/resources/${encodeURIComponent(newId)}`, {
                     name: r.name, address: r.address, description: r.description || '',
                     enabled: r.enabled !== false, groups,
-                }).then(noteResourceWrite).catch(() => null);
+                }).catch(() => null);
                 if (!rn || rn.status >= 300) {
                     moved.push(`${label} (moved, but renaming back failed - currently named "${tempName}")`);
                 } else {
@@ -8727,7 +8716,7 @@ async function editResource(networkId, resourceId, { name, address, description,
     });
 }
 async function putEditedResource(networkId, resourceId, body) {
-    const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+    const resp = await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
     if (!nbWriteOk(resp)) throw new Error('Failed to update resource: ' + (resp && (resp.raw || resp.error || resp.status)));
     bustNbCaches('policies', 'gref', 'usage');
     return resp.body;
@@ -8740,7 +8729,7 @@ async function setResourceEnabled(networkId, resourceId, enabled) {
         if (!r || !r.id) throw new Error('Resource not found');
         const groups = targetsFor(r.address, networkId, r.address, groupIdsOf(r.groups));
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: !!enabled, groups };
-        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
         if (!nbWriteOk(resp)) throw new Error('Failed to set resource enabled: ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies');
         return resp.body;
@@ -8757,7 +8746,7 @@ async function renameResource(networkId, resourceId, name, description) {
             name, address: r.address, description: description || r.description || '',
             enabled: r.enabled !== false, groups: targetsFor(r.address, networkId, r.address, groupIdsOf(r.groups)),
         };
-        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
         if (!nbWriteOk(resp)) throw new Error('Failed to rename resource: ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies');
         return resp.body;
@@ -8794,7 +8783,7 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
         const next = targetsFor(r.address, networkId, r.address, [...current, ...missing]);
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
-        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
         if (!nbWriteOk(resp)) throw new Error('Failed to assign access-profile group(s): ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies', 'gref', 'usage');
         return missing.some(g => next.includes(g));
@@ -8819,7 +8808,7 @@ async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
         const next = targetsFor(r.address, networkId, r.address, current.filter(g => !drop.has(g) || (raMain() && isRemoteAccessManagedGroup(g, ''))));
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
-        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body);
         if (!nbWriteOk(resp)) throw new Error('Failed to detach resource group: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
         bustNbCaches('policies', 'gref', 'usage');
         return current.some(g => drop.has(g) && !next.includes(g));

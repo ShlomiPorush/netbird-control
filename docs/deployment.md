@@ -86,7 +86,7 @@ requests. What would otherwise go wrong is coordinated through PostgreSQL:
 | An access request approval | Recorded as being approved first, so a deny on the other instance cannot decide it too; the leader finishes one that a stopped instance left behind. |
 | Settings | A change on one instance is in effect on the other from its next request. A restore applies all of its settings and tables or none. |
 | Remote Access target groups | Writes to the Browser Gateway target groups and to resources run one at a time across both instances, under one PostgreSQL lock. The writer reads the settings and the server holds again first. |
-| Remote Access session starts | A session start on either instance stops when the target groups or the settings changed on the other one. After a write that NetBird did not answer, both instances wait for the leader's next target sync. |
+| Remote Access session starts | A session start on either instance stops when the target groups or the settings changed on the other one. After a write that NetBird did not answer, also one whose instance stopped before the answer came, both instances wait for the leader's next target sync. |
 | Remote Access session limits | The limits per user and in total count the open sessions of both instances, under one lock, when a session starts. |
 | The sign-in idle timeout | The last activity is kept in the session itself, so both instances see it. |
 | A page that the old release served | It reloads once into the new release when it needs a file only the old release had. |

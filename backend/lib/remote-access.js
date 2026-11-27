@@ -346,13 +346,29 @@ function withTargetLock(fn) {
 const TARGETS_GEN_KEY = 'ra_targets_gen';
 const SETTLE_UNTIL_KEY = 'ra_settle_until';
 const SYNC_START_OK_KEY = 'ra_sync_start_ok';
+const PENDING_PREFIX = 'ra_pending:';
+const INSTANCE = crypto.randomUUID();
 async function readTargetsState() {
-    const r = await pool.query('SELECT key, value FROM coordination WHERE key = ANY($1)', [[TARGETS_GEN_KEY, SETTLE_UNTIL_KEY, SYNC_START_OK_KEY]]);
+    const r = await pool.query('SELECT key, value FROM coordination WHERE key = ANY($1) OR key LIKE $2', [[TARGETS_GEN_KEY, SETTLE_UNTIL_KEY, SYNC_START_OK_KEY], `${PENDING_PREFIX}%`]);
     const value = (key) => (r.rows.find(row => row.key === key) || {}).value || '';
     const settleUntil = Number(value(SETTLE_UNTIL_KEY)) || 0;
     if (settleUntil > _settleUntil) { _settleUntil = settleUntil; invalidateSnapshot(); }
     _lastSyncStartOk = Math.max(_lastSyncStartOk, Number(value(SYNC_START_OK_KEY)) || 0);
-    return { gen: value(TARGETS_GEN_KEY) };
+    const pending = r.rows.filter(row => row.key.startsWith(PENDING_PREFIX)).map(row => ({ key: row.key, value: row.value, at: Number(row.value) || 0 }));
+    return { gen: value(TARGETS_GEN_KEY), pending };
+}
+const answerUnknown = (r) => !r || !r.status || r.status >= 500 || r.answerLost === true;
+async function sendTargetWrite(send) {
+    const key = `${PENDING_PREFIX}${INSTANCE}:${crypto.randomBytes(8).toString('hex')}`;
+    await pool.query('INSERT INTO coordination (key, value) VALUES ($1, $2)', [key, String(Date.now())]);
+    let answer = null;
+    try {
+        answer = await send();
+        return answer;
+    } finally {
+        if (answerUnknown(answer)) await noteUncertainTargetWrite();
+        await pool.query('DELETE FROM coordination WHERE key = $1', [key]);
+    }
 }
 async function noteTargetsChanged() {
     await pool.query(
@@ -372,10 +388,8 @@ function scheduleSettleSync(delayMs = untilDeadline()) {
     clearTimeout(_settleTimer);
     _settleTimer = outsideLocks(() => setTimeout(() => {
         _settleTimer = null;
-        if (!targetGroupIds().length || !netbirdApiConfigured() || NETBIRD_READONLY) return; // the next apply syncs
-        // Only the leader writes to NetBird (lib/leader.js). A standby asks again until it leads or
-        // shuts down; until a sync ends, it keeps refusing new sessions, as during any settling.
-        if (_deps.isLeader && !_deps.isLeader()) { scheduleSettleSync(5000); return; }
+        if (!targetGroupIds().length || !netbirdApiConfigured() || NETBIRD_READONLY) return;
+        if (_deps.isLeader && !_deps.isLeader()) return;
         syncTargetGroup().catch(e => {
             console.error('[remote-access] target sync after an unanswered write failed:', e.message);
             if (!_settleTimer) scheduleSettleSync(Math.max(60_000, untilDeadline()));
@@ -391,12 +405,15 @@ async function noteUncertainTargetWrite() {
     await raiseTime(SETTLE_UNTIL_KEY, until);
 }
 async function followSharedSettling() {
-    await readTargetsState();
+    const { pending } = await readTargetsState();
+    for (const p of pending.filter(row => row.at + SETTLE_MS <= Date.now())) {
+        await raiseTime(SETTLE_UNTIL_KEY, p.at + SETTLE_MS);
+        _settleUntil = Math.max(_settleUntil, p.at + SETTLE_MS);
+        await pool.query('DELETE FROM coordination WHERE key = $1 AND value = $2', [p.key, p.value]);
+    }
     if (_lastSyncStartOk < _settleUntil && !_settleTimer) scheduleSettleSync();
 }
 const settlingNow = () => readTargetsState().then(() => targetsSettling(), () => true);
-// Read-only: this process never writes, but a write sent before a restart may still land, so the
-// deadline still holds; with no sync to wait for, a snapshot read after it is enough.
 const targetsSettling = () => Date.now() < _settleUntil || (!NETBIRD_READONLY && _lastSyncStartOk < _settleUntil);
 
 function remoteAccessAvailable() { return _cfg.enabled && netbirdApiConfigured(); }
@@ -450,9 +467,7 @@ async function putManagedGroup(id, change) {
     if (!next) return null;
     const after = { name: next.name, peers: targetGroupIds().includes(id) ? [] : next.peers, resources: next.resources || g.resources };
     await noteTargetsChanged();
-    const r = await netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), after);
-    // Any answer but success leaves the write uncertain: NetBird builds its answer after the save,
-    // so even an error answer (or none) may follow a saved group.
+    const r = await sendTargetWrite(() => netbirdReq('PUT', '/api/groups/' + encodeURIComponent(id), after));
     if (!nbOk(r)) { await noteUncertainTargetWrite(); throw nbErr(`Updating the "${g.name}" group`, r); }
     bustNbCaches('gref', 'groups', 'usage');
     invalidateSnapshot();
@@ -813,9 +828,9 @@ async function setRemoteAccessConfig(input) {
         const next = normConfig({ ..._cfg, ...rest, browser, createResources });
         // The network launch links use stays open to the gateway.
         if (createResources.networkId) next.networks = [...new Set([...next.networks, createResources.networkId])];
+        await noteTargetsChanged();
         await setSetting('remote_access_config', JSON.stringify(next));
         _cfg = next;
-        await noteTargetsChanged();
     } catch (e) {
         if (e.status) throw e;
         console.error('[remote-access] saving the settings:', e.message);
@@ -935,7 +950,6 @@ function enforceManagedMembership(data = {}) {
         _membershipPending = { users: data.users || p.users, peers: data.peers || p.peers };
         return _membershipRun;
     }
-    // Started outside the caller's lock context, so it queues for the locks like everyone else.
     _membershipRun = outsideLocks(() => new Promise(r => setImmediate(r)).then(() => runMembership(data)))
         .catch(e => {
             console.error('[remote-access] membership clean-up failed:', e.message);
@@ -1409,23 +1423,17 @@ async function createSession(viewer, body, clientIp, opts = {}) {
     if (protocol === 'ssh' && !creds.username) throw httpError(400, 'USERNAME_REQUIRED', 'Enter the user name for the SSH server.');
 
     if (targetsSettling() || !snapshotCurrent(snap)) throw httpError(503, 'TARGETS_SETTLING');
-    // A shutdown that started during the reads above has already closed every session it saw.
     if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
     const s = {
         id: crypto.randomUUID(), protocol, address: rt.address, port, width, height, dpi, timezone, creds,
-        // A launch link that connects to an address found for a host name keeps that name, for the SSH
-        // host key set for it. Only the server supplies it.
         gateway: rt.gateway, targetName: rt.name || (rt.gateway === 'ip' && opts.targetName) || '',
         userId: viewer.user_id, userEmail: viewer.email || '', userName: viewer.name || '', oid: viewer.oid || '',
         clientIp: String(clientIp || ''),
         resourceId: verdict.resource.id, resourceName: verdict.resource.name || rt.address,
         resourceType: verdict.resource.type === 'subnet' ? 'SUBNET_RESOURCE' : verdict.resource.type === 'domain' ? 'DOMAIN_RESOURCE' : 'HOST_RESOURCE',
-        // The approved resource's identity: what its hold is kept for.
         resourceAddress: String(verdict.resource.address || ''), nbType: verdict.resource.type || '',
         networkId: verdict.network.id,
         startedAt: new Date(), leaseAt: Date.now(), lastInputAt: Date.now(),
-        // 'preparing' while its target is opened: it counts toward the quotas, has no token yet and
-        // is not re-checked. Every way out of here that is not a token closes it.
         state: 'preparing', ws: null, guacd: null, rx: 0, tx: 0, closed: false,
         started: Promise.resolve(false),
     };
@@ -1435,25 +1443,19 @@ async function createSession(viewer, body, clientIp, opts = {}) {
         const reserved = reserveSession(s);
         s.started = reserved.then(() => false, () => false);
         await reserved;
-        // A read-only instance too: it writes nothing to NetBird, but checks, holds, waits and
-        // approves the same way.
         await openTargetForSession(s, port);
-
-        // Whatever closes the session while its start is being recorded (a shutdown, a re-check),
-        // closeSession writes the end record only after this start record, and none if it failed.
         s.started = recordStart(s);
         if (!(await s.started)) throw httpError(503, 'RECORD_FAILED', RECORD_FAILED_MESSAGE);
         if (_shuttingDown) throw httpError(503, 'SERVER_RESTARTING');
-        const now = await readTargetsState().catch(() => null);
-        if (!now || targetsSettling() || now.gen !== s.targetsGen) throw httpError(503, 'TARGETS_SETTLING');
-        // Closed while its start was being written (a re-check, the feature turned off): no token for it.
-        if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it finished opening. Connect again.');
-
-        const token = crypto.randomBytes(32).toString('base64url');
-        _tokens.set(token, { sessionId: s.id, expiresAt: Date.now() + TOKEN_TTL_MS });
-        s.state = 'pending';
-        // Still pending after the token's lifetime (never used, or used by an upgrade that then
-        // failed): close it, so it never holds a quota slot.
+        const token = await targetLockForSession(async () => {
+            const now = await readTargetsState().catch(() => null);
+            if (!now || now.pending.length || targetsSettling() || now.gen !== s.targetsGen) throw httpError(503, 'TARGETS_SETTLING');
+            if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it finished opening. Connect again.');
+            const issuedToken = crypto.randomBytes(32).toString('base64url');
+            _tokens.set(issuedToken, { sessionId: s.id, expiresAt: Date.now() + TOKEN_TTL_MS });
+            s.state = 'pending';
+            return issuedToken;
+        });
         s.tokenTimer = setTimeout(() => {
             _tokens.delete(token);
             if (s.state === 'pending') closeSession(s, 'The session was not opened in time.');
@@ -1461,7 +1463,6 @@ async function createSession(viewer, body, clientIp, opts = {}) {
         issued = true;
         return { sessionId: s.id, token, resource: verdict.resource, network: verdict.network, address: s.address, name: s.targetName, gateway: s.gateway };
     } finally {
-        // Frees the quota slot (and, after a start record, writes the end record).
         if (!issued) closeSession(s, _shuttingDown ? 'The server is restarting.' : 'The session did not open.');
     }
 }
@@ -1616,10 +1617,9 @@ async function openTargetLocked(s) {
         throw httpError(503, 'TARGET_OPEN_FAILED');
     }
     if (s.closed) throw closedError();
-    const w = await netbirdReq('PUT', path, {
+    const w = await sendTargetWrite(() => netbirdReq('PUT', path, {
         name: res.name, address: res.address, description: res.description || '', enabled: res.enabled !== false, groups: [...groups, tg],
-    });
-    // Any answer but success leaves the write uncertain: it may still land.
+    }));
     if (!nbOk(w)) {
         await noteUncertainTargetWrite();
         console.error('[remote-access] could not add %s to the target group: %s', s.resourceId, (w && (w.raw || w.error || w.status)) || 'no response');
@@ -1843,8 +1843,6 @@ function sendError(ws, message, code) {
     try { if (ws && ws.readyState === 1) ws.send(encodeInstruction('error', message, String(code))); } catch { /* closing anyway */ }
 }
 
-// Attach an upgraded WebSocket to its pending session. Called by server.js after it consumed
-// the token with takeToken().
 function attachTunnel(sessionId, ws) {
     const s = _sessions.get(sessionId);
     if (!s || s.state !== 'pending' || s.closed) { sendError(ws, 'This session is no longer available. Connect again.', 0x0205); ws.close(); return; }
@@ -2052,11 +2050,9 @@ function closeSession(s, reason, code = 0) {
     clearTimeout(s.tokenTimer);
     for (const [tok, v] of _tokens) if (v.sessionId === s.id) _tokens.delete(tok);
     s.creds = {};
-    try { if (s.guacd) s.guacd.destroy(); } catch { /* already gone */ }
-    try { if (s.ws && s.ws.readyState <= 1) s.ws.close(1000, String(code)); } catch { /* already gone */ }
+    try { if (s.guacd) s.guacd.destroy(); } catch { }
+    try { if (s.ws && s.ws.readyState <= 1) s.ws.close(1000, String(code)); } catch { }
     const endedAt = new Date();
-    // After the start record (the session may close while its start is still being written), and
-    // none when the start failed. Kept until written, so a shutdown can wait for every end record.
     const p = Promise.resolve(s.started ?? true)
         .then((started) => (started ? recordEnd(s, endedAt, reason) : pool.query('DELETE FROM remote_sessions WHERE id = $1', [s.id])))
         .catch(e => console.error('[remote-access] could not record session end:', e.message));
@@ -3008,13 +3004,11 @@ async function deleteCreatedLocked(row, policies, settle) {
     // A session may have opened it while this waited for the lock.
     if (await createdResourceInUse(row.resource_id)) return;
     await noteTargetsChanged();
-    const d = await netbirdReq('DELETE', path);
+    const d = await sendTargetWrite(() => netbirdReq('DELETE', path));
     bustNbCaches('policies', 'gref', 'usage');
     invalidateSnapshot();
     if (nbOk(d) || (d && d.status === 404)) { await settle('deleted', { audit: 'resource.delete' }); return; }
-    if (!d || !d.status || d.status >= 500 || d.status === 429) {
-        // It may be gone: the next run sees.
-        await noteUncertainTargetWrite();
+    if (answerUnknown(d) || d.status === 429) {
         await auditCreated(REMOTE_ACCESS_ACTOR, 'resource.delete_unconfirmed', row.expected_address, { attemptId: row.attempt_id, resourceId: row.resource_id, networkId: row.network_id });
         return;
     }
@@ -3047,7 +3041,7 @@ module.exports = {
     listCreatedResources, maintainCreatedResources,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,
-    withTargetLock, noteUncertainTargetWrite, beginStartupSettling: noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, followSharedSettling, enforceManagedMembership,
+    withTargetLock, sendTargetWrite, noteUncertainTargetWrite, beginStartupSettling: noteUncertainTargetWrite, noteTargetsChanged, ROUTE_SETTLE_MS, followSharedSettling, enforceManagedMembership,
     remoteAccessAvailable, reconcileRemoteAccess, createGatewaySetupKey,
     checkAccess, createSession, renewLease, isSettling: settlingNow, endSession, takeToken, attachTunnel,
     recheckSessions, sweepSessions, closeOrphanSessions, closeAllSessions, shutdownSessions, getRemoteAccessStatus, getRemoteAccessStatusLite,

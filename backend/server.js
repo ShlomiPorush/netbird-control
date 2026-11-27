@@ -3680,10 +3680,11 @@ function handleRemoteUpgrade(req, socket, head) {
     try { originHost = new URL(String(req.headers.origin || '')).host.toLowerCase(); } catch { /* none */ }
     if (!originHost || !allowedHosts.has(originHost)) return reject(403, 'Forbidden');
     const token = url.searchParams.get('token');
+    const upgrade = (use) => remoteWss.handleUpgrade(req, socket, head, (ws) => { ws.on('error', () => { }); use(ws); });
     const sessionId = takeRemoteToken(token);
-    if (sessionId) return remoteWss.handleUpgrade(req, socket, head, (ws) => attachRemoteTunnel(sessionId, ws));
+    if (sessionId) return upgrade((ws) => attachRemoteTunnel(sessionId, ws));
     remoteBrowser.takeToken(token).then((web) => {
-        remoteWss.handleUpgrade(req, socket, head, (ws) => {
+        upgrade((ws) => {
             if (!web) return attachRemoteTunnel('', ws);
             remoteBrowser.attachWebTunnel(web, ws).catch((e) => {
                 console.error('[remote-browser] attach failed:', e.message);
@@ -5283,7 +5284,7 @@ async function start() {
         };
         setRemoteAccessDeps(remoteAccessDeps);
         remoteBrowser.setRemoteBrowserDeps({ stillPermitted: remoteAccessDeps.stillPermitted, isLeader: leaderReady });
-        beginRemoteTargetSettling().catch(e => console.error('[remote-access] could not record the start-up settling:', e.message));
+        await retryUntilStarted('record the Remote Access start-up settling', beginRemoteTargetSettling);
         // Orphaned sessions are closed by the leader (leaderStartup), not by every instance that starts.
         setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);
         setInterval(sweepRemoteSessions, 15000);
@@ -5462,4 +5463,4 @@ async function start() {
 // Tests load the app without starting it (no database, schedulers or listener).
 if (require.main === module) start();
 
-module.exports = { app, getViewer };
+module.exports = { app, getViewer, handleRemoteUpgrade };

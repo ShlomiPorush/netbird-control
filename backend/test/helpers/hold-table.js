@@ -1,6 +1,16 @@
 function coordinationAnswer(coordination, sql, params) {
-    if (/^\s*SELECT key, value FROM coordination WHERE key = ANY\(\$1\)/.test(sql)) {
-        return { rows: params[0].filter(k => coordination.has(k)).map(key => ({ key, value: coordination.get(key) })) };
+    if (/^\s*SELECT key, value FROM coordination WHERE key = ANY\(\$1\) OR key LIKE \$2/.test(sql)) {
+        const prefix = params[1].replace(/%$/, '');
+        return { rows: [...coordination].filter(([k]) => params[0].includes(k) || k.startsWith(prefix)).map(([key, value]) => ({ key, value })) };
+    }
+    if (/^\s*INSERT INTO coordination \(key, value\) VALUES \(\$1, \$2\)\s*$/.test(sql)) {
+        coordination.set(params[0], String(params[1]));
+        return { rows: [], rowCount: 1 };
+    }
+    if (/^\s*DELETE FROM coordination WHERE key = \$1/.test(sql)) {
+        const had = coordination.has(params[0]) && (params.length < 2 || coordination.get(params[0]) === params[1]);
+        if (had) coordination.delete(params[0]);
+        return { rows: [], rowCount: had ? 1 : 0 };
     }
     if (/^\s*INSERT INTO coordination/.test(sql) && /coordination\.value::bigint \+ 1/.test(sql)) {
         coordination.set(params[0], String(Number(coordination.get(params[0]) || 0) + 1));

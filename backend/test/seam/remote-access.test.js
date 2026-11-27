@@ -95,6 +95,61 @@ test('an unanswered target write on one instance makes the other refuse new sess
     assert.equal((await b.call('raSession', { viewer: U2, body: RDP })).ok, true);
 });
 
+test('an instance killed while its target write is on the way leaves the other refusing new sessions until the deadline passed and a later sync finished', { skip: seamSkipReason() }, async (t) => {
+    const { nb, a, b } = await setup(t, { warm: false });
+    await b.call('raLeader', { leader: true });
+    const held = nb.hold('PUT', RESOURCE, { who: 'a', when: 'before' });
+    a.call('raSession', { viewer: U1, body: RDP }).catch(() => { });
+    await held.reached;
+    await a.kill();
+    assert.equal((await b.call('raSession', { viewer: U2, body: RDP })).code, 'TARGETS_SETTLING', 'the check under the targets lock sees the write that never got an answer');
+    const pending = () => b.call('sql', { text: `SELECT key FROM coordination WHERE key LIKE 'ra_pending:%'` });
+    assert.equal((await pending()).length, 1);
+    await b.call('ra', { fn: 'followSharedSettling' });
+    assert.equal((await pending()).length, 1, 'a row younger than the settling time stays');
+    await b.call('sql', { text: `UPDATE coordination SET value = $1 WHERE key LIKE 'ra_pending:%'`, params: [String(Date.now() - 91_000)] });
+    await b.call('ra', { fn: 'followSharedSettling' });
+    assert.equal((await pending()).length, 0, 'the leader turned the row into a deadline');
+    assert.equal(await b.call('ra', { fn: 'isSettling' }), true, 'the deadline alone does not end it');
+    await b.call('raInternal', { fn: 'syncTargetGroup' });
+    assert.equal(await b.call('ra', { fn: 'isSettling' }), false);
+    assert.equal((await b.call('raSession', { viewer: U2, body: RDP })).ok, true);
+});
+
+test('a target write on its way on one instance does not refuse the other instance, whose session start waits for it under the targets lock', { skip: seamSkipReason() }, async (t) => {
+    const { nb, a, b } = await setup(t, { warm: false });
+    const held = nb.hold('PUT', RESOURCE, { who: 'a', when: 'before' });
+    const first = a.call('raSession', { viewer: U1, body: RDP });
+    await held.reached;
+    assert.equal(await b.call('ra', { fn: 'isSettling' }), false);
+    const check = await b.call('ra', { fn: 'checkAccess', args: [U2, RDP] });
+    assert.deepEqual(check.steps.map((s) => [s.key, s.status]), [['access', 'pass'], ['path', 'pass']]);
+    let answered = false;
+    const second = b.call('raSession', { viewer: U2, body: RDP }).then((out) => { answered = true; return out; });
+    await sleep(1500);
+    assert.equal(answered, false, 'the session start waits for the write');
+    held.release();
+    assert.equal((await first).ok, true);
+    assert.equal((await second).ok, true, JSON.stringify(await second));
+});
+
+test('a targets change on one instance while a session start on the other waits to issue its token makes it refuse', { skip: seamSkipReason() }, async (t) => {
+    const { nb, a, b } = await setup(t);
+    const resourceRead = nb.hold('GET', RESOURCE, { who: 'b', when: 'before' });
+    const starting = b.call('raSession', { viewer: U1, body: RDP });
+    await resourceRead.reached;
+    const lastRead = nb.hold('GET', /^\/api\/users$/, { who: 'b', when: 'after' });
+    resourceRead.release();
+    await lastRead.reached;
+    await a.call('holdLock', { kind: 'targets', parts: ['remote-access'], name: 'a-targets' });
+    lastRead.release();
+    await a.waitFor('held:a-targets');
+    await sleep(1000);
+    await a.call('ra', { fn: 'noteTargetsChanged' });
+    a.release('a-targets');
+    assert.equal((await starting).code, 'TARGETS_SETTLING');
+});
+
 test('an unanswered target write on a standby makes the leader schedule the follow-up sync', { skip: seamSkipReason() }, async (t) => {
     const { a, b } = await setup(t);
     await a.call('raLeader', { leader: true });
