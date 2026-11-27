@@ -22,7 +22,7 @@ let failKeyCheck = false;
 // The target holds a session start writes live in their own stand-in table.
 const holdTable = require('./helpers/hold-table').holdTable();
 core.pool.query = async (sql, params = []) => {
-    if (typeof sql === 'string' && /remote_access_targets/.test(sql)) return holdTable.query(sql, params);
+    if (typeof sql === 'string' && /remote_access_targets|coordination|remote_sessions/.test(sql)) return holdTable.query(sql, params);
     if (typeof sql !== 'string') {
         params = sql.values;
         if (/app_audit/.test(sql.text)) auditTimeouts.push([sql.values[3], sql.query_timeout]);
@@ -402,7 +402,7 @@ test('no refusal record when the link record itself failed, or when the discarde
 
 test('while remote access settles, a link for another user is still refused, recorded and used up', async () => {
     const t = ticketOf(await ra.issueLaunch(KEY, rdp({ user: 'alice@example.test' })));
-    ra.noteUncertainTargetWrite();
+    await ra.noteUncertainTargetWrite();
     try {
         const before = audits.length;
         await assert.rejects(ra.redeemLaunch(bob, { ticket: t }, '203.0.113.2'), (e) => e.status === 403 && e.code === 'WRONG_USER', 'no settling answer before the user check');
@@ -411,9 +411,15 @@ test('while remote access settles, a link for another user is still refused, rec
     } finally { ra._internal.resetSettlingForTest(); }
 });
 
-test('isSettling tells the browser to wait before it opens a link', () => {
-    assert.equal(ra.isSettling(), false);
-    ra.noteUncertainTargetWrite();
-    try { assert.equal(ra.isSettling(), true); } finally { ra._internal.resetSettlingForTest(); }
-    assert.equal(ra.isSettling(), false);
+test('isSettling tells the browser to wait before it opens a link', async () => {
+    assert.equal(await ra.isSettling(), false);
+    await ra.noteUncertainTargetWrite();
+    try { assert.equal(await ra.isSettling(), true); } finally { await ra._internal.resetSettlingForTest(); }
+    assert.equal(await ra.isSettling(), false);
+});
+
+test('a deadline another instance recorded makes isSettling wait too', async () => {
+    holdTable.coordination.set('ra_settle_until', String(Date.now() + 60_000));
+    try { assert.equal(await ra.isSettling(), true); } finally { await ra._internal.resetSettlingForTest(); }
+    assert.equal(await ra.isSettling(), false);
 });

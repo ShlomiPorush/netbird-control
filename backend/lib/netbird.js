@@ -290,6 +290,7 @@ const nb429Answer = () => ({ body: JSON.parse(NB_429_RAW), raw: NB_429_RAW });
 // Run `attempt` (one HTTP call that resolves { status, retryAfter, value })
 // and send it again while NetBird answers 429, within the limits above. Resolves the final
 // attempt's `value`; a call never sent because of the pause resolves `from429(nb429Answer())`.
+const lostAfter429 = (v) => (v && typeof v === 'object' && v.status === 429 ? { ...v, answerLost: true } : v);
 async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429) {
     let waited = 0;
     let last = null; // this call's own last 429
@@ -311,7 +312,7 @@ async function withNbRateLimitRetry(label, maxWaitMs, attempt, from429) {
         // A retry that ends in a network error or timeout reports the 429 the call already got:
         // the caller sees the same failure as before this retry existed, never a status 0 that some
         // callers read as "done".
-        if (r.status !== 429) return r.status === 0 && last ? last.value : r.value;
+        if (r.status !== 429) return r.status === 0 && last ? lostAfter429(last.value) : r.value;
         last = r;
         const retryAfter = parseRetryAfter(r.retryAfter, _nbTiming.wallNow());
         const wait = retryAfter !== null ? retryAfter : nbBackoffMs(n);

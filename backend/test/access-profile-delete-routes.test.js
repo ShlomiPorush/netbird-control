@@ -27,6 +27,7 @@ let leftover = [];
 // The stored recurring rule #3 targets profile #98, which no longer exists.
 const recurringRow = () => ({ id: 3, user_id: 'u1', user_label: 'Dana', targets: [{ type: 'profile', id: '98', name: 'Old' }], days: [1], start_time: '09:00', end_time: '17:00', enabled: true });
 let usageRows = null; // the profiles the usage route lists (default: #7 only)
+let storedRemoteAccess = null;
 
 before(async () => {
     await h.start({
@@ -36,6 +37,7 @@ before(async () => {
                 const sql = String(typeof q === 'string' ? q : q.text).replace(/\s+/g, ' ').trim();
                 queries.push(sql);
                 if (failProfiles && /access_profiles/.test(sql)) throw new Error('database unavailable');
+                if (sql.startsWith('SELECT value FROM app_settings WHERE key = $1') && params[0] === 'remote_access_config' && storedRemoteAccess) return { rows: [{ value: storedRemoteAccess }] };
                 if (sql.startsWith('SELECT id FROM access_profiles')) {
                     return { rows: [PROFILE, DIRECT].filter(x => !/shared IS NOT FALSE/.test(sql) || x.shared).map(x => ({ id: x.id })) };
                 }
@@ -345,13 +347,16 @@ test('a Remote Access save whose check could not read NetBird is not answered as
     Object.assign(h.netbird.answers, answers);
     const remoteAccess = require('../lib/remote-access');
     remoteAccess.setRemoteAccessDeps({ checkLaunchNetwork: require('../db').checkLaunchNetwork }); // server.js does it in start()
-    remoteAccess._internal.setConfigForTest({ networks: ['net-1'], createResources: { enabled: false, networkId: 'net-1', profileId: 7, groupId: 'pg-7', max: 50 } });
+    const stored = { networks: ['net-1'], createResources: { enabled: false, networkId: 'net-1', profileId: 7, groupId: 'pg-7', max: 50 } };
+    remoteAccess._internal.setConfigForTest(stored);
+    storedRemoteAccess = JSON.stringify(stored);
     try {
         const r = await h.call('admin', 'PUT', '/api/remote-access/config', { createResources: { enabled: true } });
         assert.equal(r.status, 503, r.text);
         assert.match(r.json.error, /Couldn't read the groups from NetBird/);
         assert.equal(remoteAccess.getRemoteAccessConfig().createResources.enabled, false);
     } finally {
+        storedRemoteAccess = null;
         remoteAccess._internal.setConfigForTest({});
         for (const k of Object.keys(answers)) delete h.netbird.answers[k];
     }

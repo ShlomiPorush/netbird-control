@@ -24,8 +24,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Test the changelog helper
-        run: node --test .github/scripts/changelog.test.js
+      - name: Test the release helpers
+        run: node --test .github/scripts/changelog.test.js .github/scripts/image-labels.test.js
 
       # The checkout is GitHub's test merge commit (base + this pull request): NEW is the VERSION
       # of that merge, and its first parent is the base it was built on. OLD is read from that

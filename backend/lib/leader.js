@@ -1,20 +1,3 @@
-// Leader election: only one app instance runs the background jobs.
-//
-// A zero-downtime update (scripts/update.sh, docker rollout) runs the new container beside the old
-// one until the new one is healthy. Both serve HTTP, but the schedulers, the crash recovery and
-// every other job that acts on shared state must run in one of them only. The instance that holds
-// a PostgreSQL session-level advisory lock is the leader. It holds the lock on a dedicated
-// connection for as long as it lives, so the old instance keeps it until it exits and the new one
-// takes over only then.
-//
-// Becoming the leader runs onLeader() first (cache reload and crash recovery); the instance is
-// "ready" (isReady) only once that has succeeded, and job ticks run only when ready. A failure in
-// onLeader, or losing the lock connection while holding it, calls onFatal: the process exits and
-// Docker starts it again. Exiting is the only safe answer to a lost lock, because another instance
-// may take the lock at once while this one still has work in flight.
-//
-// The lock needs a direct PostgreSQL connection or session pooling: a transaction-pooling proxy
-// (PgBouncer in transaction mode) cannot hold a session-level lock.
 
 // One bigint key for the whole deployment ("NBLD"). The other advisory locks of the app use other
 // keys (db.js LOG_INDEX_LOCK) or the two-key form (lib/events.js), which never collide with it.
@@ -94,10 +77,16 @@ function createLeader({ Client, connection, onLeader, onFatal, lockKey = LEADER_
             dropClient();
             return scheduleRetry();
         }
-        try {
-            await onLeader();
-        } catch (e) {
-            return die(`the leader start-up recovery failed: ${e.message}`);
+        for (;;) {
+            try {
+                await onLeader();
+                break;
+            } catch (e) {
+                if (stopped || fatal) return;
+                log.error(`[leader] the start-up recovery failed (${e.message}); trying again while holding the lock`);
+                await new Promise((r) => { const t = setTimeout(r, retryMs); if (t.unref) t.unref(); });
+                if (stopped || fatal) return;
+            }
         }
         if (stopped || fatal) return;
         ready = true;

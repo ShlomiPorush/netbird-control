@@ -65,6 +65,7 @@ tg.editTelegramReplyMarkup = async () => { tgCalls.push('editMarkup'); };
 // ── An in-memory stand-in for the users mirror and app_settings ──
 const core = require('../lib/core');
 const users = new Map();    // `${tenant}|${user_id}` → { tenant, user_id, display_name, email, raw_json }
+const intents = new Map();  // `${tenant}|${user_id}` → kind
 const settings = new Map(); // app_settings key → value
 let failSettingWrite = '';  // the next write to this key fails once
 let failUserUpdate = false; // the next direct mirror-row update fails once
@@ -95,7 +96,29 @@ async function query(sql, params = []) {
     }
     if (/DELETE FROM users WHERE tenant = \$2 AND user_id <> ALL/.test(sql)) {
         const [ids, t] = params;
-        for (const [k, r] of users) if (r.tenant === t && !ids.includes(r.user_id)) users.delete(k);
+        const keepService = /is_service_user/.test(sql);
+        for (const [k, r] of users) if (r.tenant === t && !ids.includes(r.user_id) && !(keepService && r.raw_json.is_service_user)) users.delete(k);
+        return { rows: [] };
+    }
+    if (/\) found ORDER BY rank LIMIT 1/.test(sql)) {
+        const [oid, email] = params;
+        const byOid = (id) => oid && (id === oid || id.endsWith('|' + oid));
+        const intent = [...intents.keys()].map(k => k.split('|')).find(([t, ...id]) => t === '' && byOid(id.join('|')));
+        if (intent) return { rows: [{ user_id: intent.slice(1).join('|'), email: '', display_name: '', role: null, auto_groups: null, is_blocked: true }] };
+        let r = [...users.values()].find(x => x.tenant === '' && byOid(x.user_id));
+        if (!r && email) {
+            emailLookups++;
+            r = [...users.values()].find(x => x.tenant === '' && String(x.email).toLowerCase() === String(email).toLowerCase());
+        }
+        return { rows: r ? [{ ...viewerRow(r, 'is_blocked'), is_blocked: r.raw_json.is_blocked === true }] : [] };
+    }
+    if (/INSERT INTO user_intents/.test(sql)) { intents.set(`${params[0]}|${params[1]}`, params[2]); return { rows: [] }; }
+    if (/DELETE FROM user_intents/.test(sql)) { intents.delete(`${params[0]}|${params[1]}`); return { rows: [] }; }
+    if (/FROM user_intents WHERE tenant = \$1/.test(sql)) {
+        return { rows: [...intents].filter(([k]) => k.startsWith(`${params[0]}|`)).map(([k, kind]) => ({ user_id: k.slice(k.indexOf('|') + 1), kind })) };
+    }
+    if (/DELETE FROM users WHERE tenant = \$1 AND user_id = \$2/.test(sql)) {
+        users.delete(`${params[0]}|${params[1]}`);
         return { rows: [] };
     }
     if (/DELETE FROM users WHERE tenant = \$2 AND user_id = \$1/.test(sql)) {
@@ -161,7 +184,7 @@ function withNetbirdApi(fn) {
 }
 
 beforeEach(async () => {
-    users.clear(); settings.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
+    users.clear(); settings.clear(); intents.clear(); liveUsers = []; gateOnce = null; gateSkip = 0; gateHit = false;
     failSettingWrite = ''; holdWrites = false; heldWrites.length = 0; emailLookups = 0; listDown = false; tgCalls.length = 0;
     failUserUpdate = false; holdPut = null; refreshDown = false; listOnlyServiceUsers = false;
     serviceListDown = false;
@@ -297,10 +320,9 @@ for (const key of ['feature_permissions', 'approver_config']) {
         assert.equal(v.canApprove, false);
         assert.equal(v.perms['networks.manage'], false);
 
-        // A failed permissions write stays in memory, so the next save persists it. A failed
-        // approver save changes nothing, so that entry stays until an admin removes it.
         await db.deleteUser('u-gone');
-        assert.deepEqual(savedJson('feature_permissions')['networks.manage'].users.map(u => u.id), [OTHER.id]);
+        assert.deepEqual(savedJson('feature_permissions')['networks.manage'].users.map(u => u.id),
+            key === 'feature_permissions' ? [ME.id, OTHER.id] : [OTHER.id]);
         assert.deepEqual(savedJson('approver_config').delegates.map(d => d.user.id),
             key === 'approver_config' ? [ME.id, OTHER.id] : [OTHER.id]);
     });
@@ -445,35 +467,33 @@ test('blocking a user in the app holds even when the user-list refresh after it 
     assert.equal(await tgActs(1), false);
 }));
 
-test('a block the mirror could not record still counts until a user-list refresh records it', withNetbirdApi(async () => {
+test('a block whose mirror write fails is not sent to NetBird, so the mirror and NetBird still agree', withNetbirdApi(async () => {
+    userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
+    liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
+    refreshDown = true; failUserUpdate = true;
+    await assert.rejects(db.setUserBlocked(ME.id, true), /mirror update failed/);
+    assert.equal(liveUsers[0].is_blocked, false);
+    assert.equal(users.get('|u-me').raw_json.is_blocked, false);
+    await db.setUserBlocked(ME.id, true);
+    assert.equal(liveUsers[0].is_blocked, true);
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal(await tgActs(1), false);
+}));
+
+test('a refresh that read the list before a block lands after it without opening the user again', withNetbirdApi(async () => {
     userRow(ME.id, ME.email, { role: 'admin', is_blocked: false });
     liveUsers = [{ id: ME.id, email: ME.email, role: 'admin', is_blocked: false }, { id: OTHER.id, email: OTHER.email, role: 'owner' }];
     db.resetNbCaches();
-    // A refresh reads the list (me still active) before the block and lands after NetBird took it;
-    // the update after NetBird's answer then fails, and later list reads fail.
     const open = holdListRead();
     const refresh = db.ensureUsersFresh();
     await untilHeld();
-    refreshDown = true; failUserUpdate = true; // the block reads the user first
     const blocking = db.setUserBlocked(ME.id, true);
-    while (!liveUsers[0].is_blocked) await tick();
+    for (let i = 0; i < 30; i++) await tick();
     open();
     await Promise.all([refresh, blocking]);
-    assert.equal(users.get('|u-me').raw_json.is_blocked, false); // nothing was recorded
-    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
-    assert.equal((await db.getAllUsers()).find(u => u.id === ME.id).is_blocked, true); // the Users page shows it
-    assert.equal(await tgActs(1), false);
-    // A refresh that returns only part of the list (here: just the service users) records nothing for me.
-    refreshDown = false; listOnlyServiceUsers = true; db.resetNbCaches();
-    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
-    assert.equal(await tgActs(1), false);
-    // Once the list can be read, a refresh records NetBird's state.
-    listOnlyServiceUsers = false; db.resetNbCaches();
-    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
+    assert.equal(liveUsers[0].is_blocked, true);
     assert.equal(users.get('|u-me').raw_json.is_blocked, true);
-    await db.setUserBlocked(ME.id, false);
-    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, true);
-    assert.equal(await tgActs(1), true);
+    assert.equal((await viewerFor(ME.id, ME.email)).isAdmin, false);
 }));
 
 test('an earlier unblock that answers late does not undo a newer block', withNetbirdApi(async () => {

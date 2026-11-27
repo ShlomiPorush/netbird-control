@@ -33,6 +33,7 @@ Two things that look like "access" but are **not** data-plane access:
 | [Email Notifications (SMTP)](email-notifications.md) | Emails users when access is approved / denied / granted / ends. SMTP via env or in-app. |
 | [Event Filtering & Cleanup](event-filtering.md) | Drop noise before storage; purge already-stored noise (gated). |
 | [Permissions & Security](permissions-and-security.md) | SSO, admin vs restricted, network grants, read-only mode, write-only secrets. |
+| [Releases and Deployment](deployment.md) | Image tags and labels, running two instances during an update, the host's Compose file for a zero-downtime rollout, updating by hand. |
 
 ## Conventions across features
 

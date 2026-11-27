@@ -44,7 +44,8 @@ function dbQuery(sql, params = []) {
     }
     if (/remote_access_targets/.test(s) && !/ra_created_resources/.test(s)) return holdTable.query(sql, params);
     if (/FROM address_blocklist/.test(s)) return { rows: clone(blockRows) };
-    if (s.startsWith('INSERT INTO remote_sessions')) { sessionRows.push({ id: params[0], resource_id: params[8] }); return { rows: [], rowCount: 1 }; }
+    if (/^SELECT COUNT\(\*\)::int AS total, \(COUNT\(\*\) FILTER \(WHERE user_id = \$1\)\)::int AS mine\s+FROM remote_sessions/.test(s)) return { rows: [{ total: sessionRows.length, mine: sessionRows.filter(r => r.user_id === params[0]).length }] };
+    if (s.startsWith('INSERT INTO remote_sessions')) { sessionRows.push({ id: params[0], user_id: params[1], resource_id: params[8] }); return { rows: [], rowCount: 1 }; }
     if (s.startsWith('DELETE FROM remote_sessions')) { sessionRows = sessionRows.filter(r => r.id !== params[0]); return { rows: [], rowCount: 1 }; }
     if (/^SELECT DISTINCT resource_id FROM remote_sessions/.test(s)) return { rows: [...new Set(sessionRows.map(r => r.resource_id).filter(Boolean))].map(resource_id => ({ resource_id })) };
     if (/remote_sessions/.test(s) && !/ra_created_resources/.test(s)) return { rows: [] };
@@ -1111,6 +1112,7 @@ test('a setting that cannot be stored leaves the new network and names it', asyn
 
 test('the first network on a clean install is added to an empty list', async () => {
     ra._internal.setConfigForTest({});
+    settings.remote_access_config = JSON.stringify(ra._internal.normConfig({}));
     const out = await setUp({ peers: ['p-r'] });
     assert.deepEqual(stored().networks, [out.network.id]);
     assert.equal(stored().createResources.networkId, out.network.id);

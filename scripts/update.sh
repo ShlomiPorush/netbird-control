@@ -13,7 +13,7 @@ TAG_VARIABLE="${TAG_VARIABLE:-}"
 # The services to update, separated by spaces. Empty: every NetBird Control service of the project.
 SERVICES="${SERVICES:-}"
 # Seconds a new container has to become healthy.
-ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180}"
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300}"
 # Seconds between "the new container is healthy" and draining the old one, so the reverse proxy
 # sends requests to the new one first (Traefik applies Docker changes after a short delay).
 SETTLE_SECONDS="${SETTLE_SECONDS:-10}"
@@ -441,6 +441,14 @@ plan_service() {
   [[ -n $hc ]] || reasons+=("it has no health check")
   old="$(head -n 1 <<<"$running")"
   [[ $(container_label "$old" "$ZERO_DOWNTIME_LABEL") == "1" ]] || reasons+=("the running version cannot run beside another instance yet")
+  local need have
+  need="$(docker image inspect -f '{{index .Config.Labels "netbird-control.rollout-from"}}' "${image_of[$service]}" 2>/dev/null)" || need=""
+  have="$(container_label "$old" "org.opencontainers.image.version")"
+  if [[ -z $need ]]; then
+    reasons+=("the new image does not say which running versions it can run beside")
+  elif [[ -z $have ]] || [[ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -n 1)" != "$need" ]]; then
+    reasons+=("the new version runs only beside ${need} or later, and ${have:-an unknown version} runs now")
+  fi
   [[ -n $(container_label "$old" "$DRAIN_LABEL") ]] || reasons+=("its running container has no $DRAIN_LABEL label")
   labels="$(docker inspect -f '{{range $k, $v := .Config.Labels}}{{println $k}}{{end}}' "$old")" || stop "Could not read the labels of $service from Docker."
   if grep -q '^traefik\.' <<<"$labels" &&

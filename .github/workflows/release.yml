@@ -80,6 +80,17 @@ jobs:
             echo '```'
           } > "$RUNNER_TEMP/notes.md"
 
+      - name: Compute the image labels
+        id: labels
+        run: |
+          LABELS=$(.github/scripts/image-labels.sh)
+          printf '%s\n' "$LABELS"
+          {
+            echo 'value<<LABELS_EOF'
+            printf '%s\n' "$LABELS"
+            echo 'LABELS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       # The tag is created before anything is built, so the image and the release always come
       # from the commit the tag points to. An existing tag must already point to this commit;
       # a tag is never moved or force-pushed. If pushing the tag is refused, push it to this exact
@@ -144,7 +155,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # A published release's image is never rebuilt, unless the registry says it is missing.
       - name: Check the version image
         id: image
         env:
@@ -153,22 +163,24 @@ jobs:
           IMAGE: ${{ steps.v.outputs.image }}
           TAG: ${{ steps.v.outputs.tag }}
         run: |
-          BUILD=true
-          if [ "$STATE" = "published" ]; then
-            set +e
-            OUT=$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1)
-            RC=$?
-            set -e
-            if [ "$RC" -eq 0 ]; then
-              BUILD=false
-              echo "Release $TAG is published and $IMAGE:$VERSION exists; not rebuilding it."
-            elif printf '%s\n' "$OUT" | grep -qiE 'manifest unknown|: not found$'; then
-              echo "Release $TAG is published but $IMAGE:$VERSION is missing; building it from $GITHUB_SHA."
-            else
-              printf '%s\n' "$OUT"
-              echo "::error::Could not check whether $IMAGE:$VERSION exists"
-              exit 1
-            fi
+          REPO=${IMAGE#ghcr.io/}
+          TOKEN=$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" "https://ghcr.io/token?scope=repository:$REPO:pull" | jq -er .token)
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -I \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/$REPO/manifests/$VERSION")
+          if [ "$CODE" = "200" ]; then
+            BUILD=false
+            echo "$IMAGE:$VERSION exists; not rebuilding it."
+          elif [ "$CODE" != "404" ]; then
+            echo "::error::Could not check whether $IMAGE:$VERSION exists (HTTP $CODE)"
+            exit 1
+          elif [ "$STATE" = "published" ]; then
+            echo "::error::Release $TAG is published but $IMAGE:$VERSION is missing. Restore the deleted package version in GitHub Packages, then re-run. A rebuild would publish another image under $VERSION."
+            exit 1
+          else
+            BUILD=true
+            echo "$IMAGE:$VERSION does not exist yet; building it from $GITHUB_SHA."
           fi
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
@@ -180,6 +192,7 @@ jobs:
           images: ${{ steps.v.outputs.image }}
           tags: type=raw,value=${{ steps.v.outputs.version }}
           flavor: latest=false
+          labels: ${{ steps.labels.outputs.value }}
 
       - name: Build and push the version image
         if: steps.image.outputs.build == 'true'

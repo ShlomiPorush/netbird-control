@@ -50,6 +50,13 @@ core.pool.query = async (sql, params = []) => {
     }
     if (/SELECT \* FROM access_requests WHERE id=\$1/.test(sql)) return { rows: rows.has(params[0]) ? [rows.get(params[0])] : [] };
     if (/nextval/.test(sql)) return { rows: [{ id: 900 }] };
+    if (/SET status='approving'/.test(sql)) {
+        const row = rows.get(params[0]);
+        if (!row || row.status !== 'pending') return { rows: [] };
+        row.status = 'approving';
+        return { rows: [{ id: row.id }] };
+    }
+    if (/SET status='pending'/.test(sql)) { const row = rows.get(params[0]); if (row && row.status === 'approving') row.status = 'pending'; return { rows: [] }; }
     // The grant's input targets are exactly what becomes memberships and policies - capture
     // them and stop before any NetBird object is created.
     if (/INSERT INTO temporary_access_grants/.test(sql)) { grantInputs.push(JSON.parse(params[4])); throw new Error('grant stopped by test'); }

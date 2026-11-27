@@ -278,6 +278,24 @@ test('a session ended by the idle timeout stays ended (every later API call 401,
     assert.equal((await call('POST', '/api/posture-checks/inspect-certificates', { cookie: fresh, accept: 'application/json', body: { pems: [] } })).status, 200);
 });
 
+test('another instance of the app sees the same idle clock, so an idle session ends there too', async (t) => {
+    const cookie = await signIn('idle-shared');
+    const active = await call('POST', '/api/posture-checks/inspect-certificates', { cookie, accept: 'application/json', body: { pems: [] } });
+    assert.equal(active.status, 200);
+    const updated = cookiesOf(active) || cookie;
+    for (const k of Object.keys(require.cache)) if (k.endsWith(`${path.sep}server.js`)) delete require.cache[k];
+    const other = http.createServer(require('../server').app);
+    const otherBase = `http://127.0.0.1:${await listen(other)}`;
+    t.after(() => new Promise((r) => { other.closeAllConnections(); other.close(r); }));
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 90 * 60_000 });
+    const res = await pageLoad(`${otherBase}/api/posture-checks/inspect-certificates`, {
+        method: 'POST', body: JSON.stringify({ pems: [] }),
+        headers: { accept: 'application/json', 'content-type': 'application/json', 'x-forwarded-for': freshIp(), cookie: updated },
+    });
+    assert.equal(res.status, 401);
+    assert.match(await res.text(), /inactivity/);
+});
+
 test('a session ended by the idle timeout stays ended when the timeout is raised or turned off later', async (t) => {
     const { _security } = require('../lib/security');
     const idleHours = _security.sessionIdleHours;

@@ -24,6 +24,7 @@ const hold = (id, networkId, address, hours = 1) => ({ resource_id: id, network_
 core.pool.query = async (sql, params) => {
     sqls.push({ sql, params });
     if (/FROM remote_access_targets/.test(sql)) return { rows: holdRows };
+    if (/^\s*SELECT COUNT\(\*\)::int AS total/.test(sql)) return { rows: [{ total: 0, mine: 0 }] };
     const r = rowsFor(sql, params);
     if (r) return { rows: r };
     if (/nextval/.test(sql)) return { rows: [{ id: 701 }] };
@@ -221,6 +222,17 @@ test('a writer keeps a target group the resource has while its network is open a
     assert.deepEqual(copy.groups, ['g-own']);
 });
 
+test("a resource write that NetBird answered keeps its answer when its pending row can't be deleted, so a move is not rolled back", async () => {
+    reset();
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1', 'n2'] });
+    rowsFor = (sql) => { if (/^\s*DELETE FROM coordination WHERE key = \$1/.test(sql)) throw new Error('database down'); return null; };
+    await db.moveResources('n1', ['r1'], 'n2');
+    assert.ok(lastBody('POST', /\/api\/networks\/n2\/resources$/), 'the copy was created');
+    assert.equal(writes('DELETE', /\/api\/networks\/n1\/resources\/r1$/).length, 1, 'the original was deleted');
+    assert.equal(writes('DELETE', /\/api\/networks\/n2\/resources\//).length, 0, 'the copy was kept');
+    rowsFor = () => null;
+});
+
 test('read-modify-write helpers set the target groups by the rule, not from their read', async () => {
     reset();
     await db.setResourceEnabled('n2', 'r2', false); // r2 is in a closed network but still carries the target group
@@ -303,9 +315,32 @@ test('a resource write that got no answer holds new sessions back until a later 
     state.resourcesReadable = true;
     await ra._internal.syncTargetGroup();
     assert.equal(ra._internal.settlingForTest(), false);
-    ra.beginStartupSettling();
-    assert.equal(ra._internal.settlingForTest(), true, 'a restart starts in the same state');
     ra._internal.resetSettlingForTest();
+});
+
+test('a resource write answered with a 5xx, or a lost answer after a 429, holds new sessions back too', async () => {
+    for (const answer of [{ status: 503, raw: 'unavailable' }, { status: 429, raw: 'too many requests', answerLost: true }]) {
+        reset();
+        state.putHook = async () => answer;
+        await assert.rejects(db.setResourceEnabled('n1', 'r1', true));
+        assert.equal(ra._internal.settlingForTest(), true, JSON.stringify(answer));
+    }
+    reset();
+    state.putHook = async () => ({ status: 400, raw: 'bad request' });
+    await assert.rejects(db.setResourceEnabled('n1', 'r1', true));
+    assert.equal(ra._internal.settlingForTest(), false, 'a refusal is an answer');
+    state.putHook = null;
+    ra._internal.resetSettlingForTest();
+});
+
+test('a settling follow-up that is still waiting or running is not started again', async () => {
+    reset();
+    const first = ra.followSharedSettling();
+    assert.equal(ra.followSharedSettling(), first);
+    await first;
+    const next = ra.followSharedSettling();
+    assert.notEqual(next, first, 'a new one starts once the previous one finished');
+    await next;
 });
 
 // ─── Grants ───
@@ -503,7 +538,7 @@ test('a snapshot read that started before the targets changed is never used afte
 
 test('a successful sync that started before the deadline leaves one more sync scheduled', async () => {
     reset();
-    ra.beginStartupSettling();
+    await ra.noteUncertainTargetWrite();
     ra._internal.clearSettleTimerForTest(); // as when a retry replaced the deadline timer
     await ra._internal.syncTargetGroup();
     assert.equal(ra._internal.settlingForTest(), true);

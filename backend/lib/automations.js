@@ -11,6 +11,7 @@
 // runtime even though they're assigned after this module is required.
 
 const { pool } = require('./core');
+const { tryLock, LOCK_BUSY } = require('./locks');
 const { httpJson } = require('./http');
 const { netbirdApiConfigured, currentTenantAccount, netbirdReq } = require('./netbird');
 const { getBlocklist, addressBlockedForNetwork, addressesOverlap, addressesEquivalent } = require('./blocklist');
@@ -166,6 +167,7 @@ async function updateAutomation(id, cfg) {
 }
 
 async function deleteAutomation(id) {
+    await pool.query('DELETE FROM automation_pending_creates WHERE automation_id=$1 AND tenant=$2', [id, tnt()]);
     await pool.query('DELETE FROM automation_resources WHERE automation_id=$1 AND tenant=$2', [id, tnt()]);
     await pool.query('DELETE FROM automation_runs WHERE automation_id=$1 AND tenant=$2', [id, tnt()]);
     await pool.query('DELETE FROM automations WHERE id=$1 AND tenant=$2', [id, tnt()]);
@@ -390,7 +392,7 @@ async function dryRunAutomation(id) {
     // Networks that opted into duplicate addresses skip the overlap guard - mirror that.
     const dupAllowed = (await getDupAllowedNetworkIds().catch(() => [])).includes(String(networkId));
     const detail = await getNetworkDetail(networkId).catch(() => null);
-    if (!detail) throw new Error('could not read existing network resources');
+    if (!detail || detail.resourcesListed === false) throw new Error('could not read existing network resources');
     const existing = Array.isArray(detail.resources) ? detail.resources : [];
     const existingByAddr = new Map(existing.map(r => [String(r.address), r]));
     const existingById = new Map(existing.map(r => [r.id, r]));
@@ -487,13 +489,44 @@ async function dryRunAutomation(id) {
     return { ok: true, ...base, belowFloor: false, summary, actions, truncated: totalPlanned > actions.length };
 }
 
-const _runningAutomations = new Set();
+async function runAutomation(id, opts = {}) {
+    const out = await tryLock('automation', [tnt(), String(id)], () => runAutomationLocked(id, opts));
+    return out === LOCK_BUSY ? { skipped: true, reason: 'already running' } : out;
+}
 
-async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
-    if (_runningAutomations.has(id)) return { skipped: true, reason: 'already running' };
+const dropPendingCreate = (id, key) => pool.query('DELETE FROM automation_pending_creates WHERE tenant=$1 AND automation_id=$2 AND external_key=$3', [tnt(), id, key]);
+
+async function settlePendingCreates(id, networkId, existingByAddr) {
+    const pending = (await pool.query('SELECT * FROM automation_pending_creates WHERE tenant=$1 AND automation_id=$2', [tnt(), id])).rows;
+    if (!pending.length) return 0;
+    let adopted = 0;
+    const owned = (await pool.query('SELECT external_key, resource_id FROM automation_resources WHERE automation_id=$1 AND tenant=$2', [id, tnt()])).rows;
+    const ownedIds = new Set(owned.map(r => r.resource_id));
+    const ownedKeys = new Set(owned.map(r => r.external_key));
+    for (const p of pending) {
+        const res = p.network_id === String(networkId) ? existingByAddr.get(p.address) : null;
+        if (res && !ownedIds.has(res.id) && !ownedKeys.has(p.external_key) && String(res.name || '').toLowerCase() === p.name.toLowerCase()) {
+            await pool.query(
+                `INSERT INTO automation_resources (automation_id, external_key, address, resource_id, network_id, status, last_seen_at, tenant)
+                 VALUES ($1,$2,$3,$4,$5,'active',NOW(),$6) ON CONFLICT (automation_id, external_key) DO NOTHING`,
+                [id, p.external_key, p.address, res.id, p.network_id, tnt()]);
+            ownedIds.add(res.id);
+            adopted++;
+        }
+        await dropPendingCreate(id, p.external_key);
+    }
+    return adopted;
+}
+
+async function runAutomationLocked(id, { trigger = 'schedule', actor = null, recheckDue = false } = {}) {
+    if (recheckDue) {
+        const due = await pool.query(
+            `SELECT 1 FROM automations WHERE id = $1 AND tenant = $2 AND enabled = TRUE AND interval_minutes > 0
+               AND (last_run_at IS NULL OR last_run_at < NOW() - make_interval(mins => interval_minutes))`, [id, tnt()]);
+        if (!due.rows.length) return { skipped: true, reason: 'not due' };
+    }
     const row = await getAutomationRow(id);
     if (!row) return { error: 'not found' };
-    _runningAutomations.add(id);
     await pool.query(`UPDATE automations SET last_status='running' WHERE id=$1 AND tenant=$2`, [id, tnt()]);
     const counts = { created: 0, updated: 0, adopted: 0, disabled: 0, skipped: 0, conflicts: 0, blocked: 0, failed: 0, profiled: 0 };
     const itemErrors = [];
@@ -511,7 +544,7 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
         // didn't create (e.g. a manually-added IP, or a name already taken). Fail safe:
         // if we can't read the current state, abort rather than risk duplicates.
         const detail = await getNetworkDetail(networkId).catch(() => null);
-        if (!detail) throw new Error('could not read existing network resources - aborting to avoid duplicates');
+        if (!detail || detail.resourcesListed === false) throw new Error('could not read existing network resources - aborting to avoid duplicates');
         const existing = Array.isArray(detail.resources) ? detail.resources : [];
         const existingByAddr = new Map(existing.map(r => [String(r.address), r]));
         const existingById = new Map(existing.map(r => [r.id, r]));
@@ -523,6 +556,7 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
             catch (e) { console.error('[automation %s] access-profile assign %s "%s" failed:', id, label, resourceId, e.message); }
         };
 
+        counts.adopted += await settlePendingCreates(id, networkId, existingByAddr);
         const ours = await pool.query('SELECT * FROM automation_resources WHERE automation_id=$1 AND tenant=$2', [id, tnt()]);
         const ownByKey = new Map(ours.rows.map(x => [x.external_key, x]));
         const ownResourceIds = new Set(ours.rows.map(x => x.resource_id));
@@ -603,6 +637,10 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
                     // won't allow a duplicate name, and we can't safely adopt. Real conflict.
                     counts.conflicts++;
                 } else {
+                    await pool.query(
+                        `INSERT INTO automation_pending_creates (tenant, automation_id, external_key, network_id, address, name) VALUES ($1,$2,$3,$4,$5,$6)
+                         ON CONFLICT (tenant, automation_id, external_key) DO UPDATE SET network_id=EXCLUDED.network_id, address=EXCLUDED.address, name=EXCLUDED.name`,
+                        [tnt(), id, m.key, networkId, m.address, m.name]);
                     const out = await createClientResource(networkId, { name: m.name, address: m.address, description: m.description, groups, policies: [] });
                     const rid = out && out.resource && out.resource.id;
                     if (!rid) throw new Error('no resource id returned');
@@ -612,6 +650,7 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
                          ON CONFLICT (automation_id, external_key) DO UPDATE SET address=EXCLUDED.address, resource_id=EXCLUDED.resource_id, status='active', last_seen_at=NOW()`,
                         [id, m.key, m.address, rid, networkId, tnt()]
                     );
+                    await dropPendingCreate(id, m.key);
                     // Track within this run so two source items can't collide with each other.
                     existingByAddr.set(m.address, { id: rid, name: m.name, address: m.address, enabled: true });
                     existingByName.add(m.name.toLowerCase());
@@ -655,8 +694,6 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
         }
     } catch (e) {
         runErr = e.message || String(e);
-    } finally {
-        _runningAutomations.delete(id);
     }
     const failNote = itemErrors.length ? `${counts.failed} item(s) failed: ${itemErrors.slice(0, 3).join(' | ')}` : '';
     const status = runErr ? 'error' : (warn || itemErrors.length) ? 'warning' : 'ok';
@@ -677,11 +714,6 @@ async function runAutomation(id, { trigger = 'schedule', actor = null } = {}) {
     return { status, ...counts, error: note };
 }
 
-// Startup: clear any 'running' flags left by a crash so they can run again.
-async function resetStuckAutomations() {
-    await pool.query(`UPDATE automations SET last_status='' WHERE last_status='running' AND tenant=$1`, [tnt()]).catch(() => { });
-}
-
 async function runDueAutomations() {
     if (!netbirdApiConfigured()) return;
     const r = await pool.query(
@@ -692,13 +724,13 @@ async function runDueAutomations() {
         [tnt()]
     ).catch(() => ({ rows: [] }));
     for (const a of r.rows) {
-        await runAutomation(a.id, { trigger: 'schedule' }).catch(e => console.error('[automation tick]', e.message));
+        await runAutomation(a.id, { trigger: 'schedule', recheckDue: true }).catch(e => console.error('[automation tick]', e.message));
     }
 }
 
 module.exports = {
     initAutomations,
     listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation,
-    getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations,
+    getAutomationRuns, runAutomation, testAutomation, runDueAutomations,
     getAutomationManaged, repairAutomation, forgetAutomation, dryRunAutomation,
 };

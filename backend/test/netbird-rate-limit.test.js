@@ -264,9 +264,9 @@ test('a call that is never sent gets a plain 429, never another call\'s answer',
     assert.equal(requests.length, 1);
 });
 
-test('a retry that ends in a network error reports the 429, not a status 0', async () => {
+test('a retry that ends in a network error reports the 429, not a status 0, marked as an answer that was lost', async () => {
     replies = [limited(1), 'drop'];
-    assert.deepEqual(await nb.netbirdReq('DELETE', '/api/groups/g1'), { status: 429, body: TOO_MANY, raw: JSON.stringify(TOO_MANY) });
+    assert.deepEqual(await nb.netbirdReq('DELETE', '/api/groups/g1'), { status: 429, body: TOO_MANY, raw: JSON.stringify(TOO_MANY), answerLost: true });
     clock += 60_000;
     replies = [limited(1), 'drop'];
     assert.deepEqual(await nb.netbirdGet('/api/groups'), TOO_MANY);

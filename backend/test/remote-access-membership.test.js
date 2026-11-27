@@ -278,6 +278,27 @@ test('nothing is written for another account, without stored groups, or for ordi
     assert.equal(writes('PUT', /./).length, 0);
 });
 
+test('only the leader cleans up: a standby beside it during an update writes nothing', async () => {
+    reset();
+    state.users[0].auto_groups = ['g-gw'];
+    state.groups[1].peers = [{ id: 'p-x' }];
+    const peers = [{ id: 'p-x', name: 'x', user_id: 'u1', groups: [{ id: 'g-gwt' }] }];
+    let leader = false;
+    ra.setRemoteAccessDeps({ isLeader: () => leader });
+    try {
+        await enforce({ users: clone(state.users), peers: clone(peers) });
+        assert.equal(writes('PUT', /./).length, 0);
+        assert.deepEqual(state.users[0].auto_groups, ['g-gw']);
+        assert.deepEqual(peerIds('g-gwt'), ['p-x']);
+        leader = true;
+        await enforce({ users: clone(state.users), peers: clone(peers) });
+        assert.deepEqual(state.users[0].auto_groups, []);
+        assert.deepEqual(peerIds('g-gwt'), []);
+    } finally {
+        ra.setRemoteAccessDeps({ isLeader: undefined });
+    }
+});
+
 test('data that arrives during a run is checked right after it', async () => {
     reset();
     let release;
