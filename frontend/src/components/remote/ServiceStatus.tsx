@@ -24,13 +24,11 @@ function gatewaysState(states: (ServiceState | undefined)[]): Shown | undefined 
 // A refresh usually answers at once; the icon keeps turning for a moment so the click shows.
 const MIN_SPIN_MS = 700;
 
-// One compact line on the connect card: is NetBird answering, and is each Browser Gateway up. The
-// page asks only on a user action (loading the page, starting a check, this refresh button), so
-// the line never keeps an idle sign-in alive.
 export function ServiceStatus({ health, loading, onRefresh }: { health: RemoteHealth | null; loading: boolean; onRefresh: () => void }) {
   const items: [string, Shown | undefined][] = [
     ['NetBird', health?.netbird],
-    ['Browser Gateways', health ? gatewaysState([health.gateway, health.namesGateway]) : undefined],
+    ['Gateways', health ? gatewaysState([health.gateway, health.namesGateway]) : undefined],
+    ...(health?.browserGateway ? [['Browser', health.browserGateway] as [string, Shown]] : []),
   ];
   const [spinUntil, setSpinUntil] = useState(0);
   const timer = useRef<number | undefined>(undefined);

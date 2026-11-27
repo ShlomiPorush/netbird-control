@@ -3,7 +3,10 @@
 // /vendor/guacamole-common-js-1.6.0/, matched to the guacd 1.6.0 image) and its on-screen keyboard.
 import { api, ApiError } from '@/lib/api';
 
-export type RemoteProtocol = 'rdp' | 'ssh';
+export type TargetProtocol = 'rdp' | 'ssh';
+export type RemoteProtocol = TargetProtocol | 'web';
+
+export const WEB_SCREEN_LIMIT = { width: 1920, height: 1080 };
 
 export interface RemoteInfo {
   available: boolean;
@@ -14,6 +17,31 @@ export interface RemoteInfo {
   clipboard: boolean;
   idleTimeoutMin: number;
   maxDurationHours: number;
+  browser?: { keepAliveMin: number };
+}
+
+export interface WebSessionInfo {
+  sessionId: string;
+  state: 'starting' | 'active' | 'detached' | 'ending';
+  createdAt: string;
+  detachedAt: string | null;
+  expiresAt: string | null;
+}
+
+export interface BrowserConfig {
+  enabled: boolean;
+  routerGroupId: string;
+  maxSessions: number;
+  maxPerUser: number;
+  keepAliveMin: number;
+  startPage: string;
+}
+
+export interface BrowserStatus {
+  enrolled: boolean;
+  online: boolean;
+  ready: boolean;
+  reason: string;
 }
 
 export interface RemoteStep {
@@ -37,13 +65,13 @@ export interface RemoteAddNetwork { id: string; name: string }
 
 export type ServiceState = 'up' | 'down' | 'unknown';
 /** The service status line; namesGateway only when that gateway is set up. */
-export interface RemoteHealth { netbird: ServiceState; gateway: ServiceState; namesGateway?: ServiceState }
+export interface RemoteHealth { netbird: ServiceState; gateway: ServiceState; namesGateway?: ServiceState; browserGateway?: ServiceState }
 
 export interface RemoteCheck {
   steps: RemoteStep[];
   ok?: boolean;
   target?: {
-    protocol: RemoteProtocol; address: string; port: number;
+    protocol: TargetProtocol; address: string; port: number;
     /** The host name the user typed (normalized), when they typed one. */
     name?: string;
     /** 'names': the name goes through the names gateway; 'ip': the address shown is the IP used. */
@@ -56,8 +84,9 @@ export interface RemoteCheck {
 export interface RemoteSession {
   sessionId: string;
   token: string;
-  resource: { id: string; name: string; address: string };
-  network: { id: string; name: string };
+  attachment?: string;
+  resource?: { id: string; name: string; address: string };
+  network?: { id: string; name: string };
   address?: string;
   name?: string;
   gateway?: 'ip' | 'names';
@@ -102,6 +131,7 @@ export interface RemoteAccessConfig {
   managed?: { gatewayGroupId: string; targetGroupId: string; policyId: string; namesGroupId?: string; namesTargetGroupId?: string; namesPolicyId?: string };
   /** Launch links may add a temporary resource for a missing public server to this network, in the chosen Access Profile's group. */
   createResources?: CreateResourcesConfig;
+  browser?: BrowserConfig;
   lastApply?: { at: string | null; error: string };
   ssoEnabled?: boolean;
   readonly?: boolean;
@@ -167,6 +197,7 @@ export interface RemoteAccessStatus {
   membership?: { at: string | null; error: string; removed: { at: string; kind: 'user' | 'device'; name: string; group: string }[] };
   // Servers that sessions opened to the gateways and that are still held (in use first).
   held?: HeldTarget[];
+  browser?: BrowserStatus;
 }
 
 export interface HeldTarget {
@@ -202,12 +233,15 @@ export const apiText = (err: unknown, fallback: string) =>
 
 export const remoteApi = {
   info: (signal?: AbortSignal) => api.get<RemoteInfo>('/api/remote-access/info', undefined, signal),
-  check: (body: { protocol: RemoteProtocol; address: string; port: number }) => api.post<RemoteCheck>('/api/remote-access/check', body),
+  check: (body: { protocol: TargetProtocol; address: string; port: number } | { protocol: 'web' }) => api.post<RemoteCheck>('/api/remote-access/check', body),
   addNetworks: () => api.get<{ networks: RemoteAddNetwork[] }>('/api/remote-access/add-networks'),
   health: (signal?: AbortSignal) => api.get<RemoteHealth>('/api/remote-access/health', undefined, signal),
   createSession: (body: Record<string, unknown>) => api.post<RemoteSession>('/api/remote-access/sessions', body),
-  lease: (id: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, {}),
-  end: (id: string) => api.del<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
+  lease: (id: string, attachment?: string) => api.post<{ ok: boolean }>(`/api/remote-access/sessions/${encodeURIComponent(id)}/lease`, attachment ? { attachment } : {}),
+  end: (id: string) => api.del<{ ok: boolean; state?: 'ending' }>(`/api/remote-access/sessions/${encodeURIComponent(id)}`),
+  webSessions: () => api.get<{ sessions: WebSessionInfo[] }>('/api/remote-access/web-sessions'),
+  resumeWeb: (id: string, body: { width: number; height: number; dpi: number; timezone: string }) =>
+    api.post<RemoteSession>(`/api/remote-access/sessions/${encodeURIComponent(id)}/resume`, body),
   config: () => api.get<RemoteAccessConfig>('/api/remote-access/config'),
   saveConfig: (cfg: Omit<Partial<RemoteAccessConfig>, 'createResources'> & { createResources?: Partial<Pick<CreateResourcesConfig, 'enabled' | 'profileId' | 'max'>> }) => api.put<{ config: RemoteAccessConfig; sync: { removed: number } | null }>('/api/remote-access/config', cfg),
   status: () => api.get<RemoteAccessStatus>('/api/remote-access/status'),
@@ -215,10 +249,12 @@ export const remoteApi = {
   releaseNetwork: () => api.del<Pick<LaunchNetworkResult, 'config'>>('/api/remote-access/create-resources/network'),
   setUpNetwork: (body: { peers: string[]; peerGroups: string[] } | { networkId: string }) =>
     api.post<LaunchNetworkResult>('/api/remote-access/create-resources/network', body),
-  setupKey: (kind: 'ip' | 'names') => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
+  setupKey: (kind: GatewayKind) => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
   redeemLaunch: (body: { ticket: string; width: number; height: number; dpi: number; rdp?: { width: number; height: number; dpi: number }; timezone: string }) =>
     api.post<LaunchSession>('/api/remote-access/launch/redeem', body),
 };
+
+export type GatewayKind = 'ip' | 'names' | 'web';
 
 /** One routing peer (`peer`) or the peer groups (`peerGroups`) of a network the app created. */
 export interface LaunchRouter { peer?: string; peerGroups?: string[]; reason?: string }
@@ -233,7 +269,7 @@ export interface LaunchNetworkResult {
 }
 
 export interface LaunchSession extends RemoteSession {
-  protocol: RemoteProtocol;
+  protocol: TargetProtocol;
   port: number;
   /** The credentials came from the other system and went to the server directly. */
   serverCredentials: true;

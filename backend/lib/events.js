@@ -121,6 +121,7 @@ function mapApiTrafficEvent(e) {
 // its resource type, a peer id gets PEER. Without this the P2P and Routed filters stay empty.
 // The stored raw_json always keeps the payload exactly as NetBird sent it.
 const ROUTED_TYPES = ['HOST_RESOURCE', 'DOMAIN_RESOURCE', 'SUBNET_RESOURCE'];
+const WEB_CONNECTION_REFERENCE = 'remote-access:web-connection';
 const RESOURCE_TYPE_OF = { host: 'HOST_RESOURCE', subnet: 'SUBNET_RESOURCE', domain: 'DOMAIN_RESOURCE' };
 
 // Per-account index of known endpoint ids: { peers: Set | null, resources: Map<id, type> | null }.
@@ -182,7 +183,7 @@ function deriveTrafficMessage(meta) {
     return null;
 }
 
-async function addEvent(payload) {
+async function addEvent(payload, db = pool) {
     const meta = payload.meta || {};
     const idx = _typeIndex.get(tnt());
     const message = payload.Message === 'TYPE_UNKNOWN' ? (deriveTrafficMessage(meta) || payload.Message) : payload.Message;
@@ -248,7 +249,7 @@ async function addEvent(payload) {
         tnt(), // the active account - main ('') or a tenant (webhook resolved from its token)
     ];
 
-    return pool.query(query, values);
+    return db.query(query, values);
 }
 
 // Split into scalar subqueries on purpose: earliest/latest are then single index probes on
@@ -584,6 +585,7 @@ async function queryTrafficSummary(opts) {
     const SRC = `CASE WHEN source_type = 'BROWSER_GATEWAY' THEN 'bgw:' || COALESCE(user_id, '') ELSE COALESCE(NULLIF(source_id, ''), regexp_replace(source_addr, ':[0-9]+$', '')) END`;
     const DST = `COALESCE(NULLIF(destination_id, ''), NULLIF(destination_name, ''), regexp_replace(destination_addr, ':[0-9]+$', ''))`;
 
+    const where = `${whereClause} AND COALESCE(reference, '') <> '${WEB_CONNECTION_REFERENCE}'`;
     const run = (opts && opts.run) || ((sql) => sql(pool)); // see queryEvents
     const offset = (Math.max(1, page) - 1) * per_page;
     // pair_total counts every pair in the same pass as the page (see queryEvents): a separate
@@ -619,7 +621,7 @@ async function queryTrafficSummary(opts) {
                     FILTER (WHERE destination_addr ~ ':[0-9]+$') AS ports,
                 array_agg(DISTINCT protocol) AS protocols,
                 COUNT(*) OVER () AS pair_total
-             FROM events ${whereClause}
+             FROM events ${where}
              GROUP BY ${SRC}, ${DST}
              ORDER BY ${sumSort} ${sumDir} NULLS LAST, MAX(timestamp) DESC
              LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
@@ -632,7 +634,7 @@ async function queryTrafficSummary(opts) {
             : offset > 0
                 ? await cappedCount(
                     // nosemgrep: javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli -- SRC/DST are const SQL fragments defined above; whereClause comes from buildEventConds (fixed fragments, $n placeholders); user values ride in `params`.
-                    `SELECT 1 FROM events ${whereClause} GROUP BY ${SRC}, ${DST}`,
+                    `SELECT 1 FROM events ${where} GROUP BY ${SRC}, ${DST}`,
                     params, db)
                 : { total: 0, totalCapped: false };
         return { r, total, totalCapped };

@@ -5,6 +5,9 @@
 # Without this file nothing changes for an existing deployment. Setup, with the command that starts
 # the gateways, the REQUIRED host isolation rules and the security model are in
 # docs/remote-access.md.
+#
+# Web sessions (a remote Chromium in the browser, public internet only) run in the browser
+# gateway and its containers, profile "remote-browser".
 
 # Each gateway runs NetBird in the foreground with its settings given on every start (a value
 # changed later in the environment would not reach an already enrolled peer otherwise), after it
@@ -79,11 +82,157 @@ x-guacd: &guacd
   cpus: 2
   pids_limit: 512
 
+# The browser gateway (profile "remote-browser"): the NetBird peer through which the web sessions'
+# Chromium reaches the internet. Its start script locks the network namespace before NetBird
+# starts, in one iptables-restore: root (NetBird, the supervisor, the collector) is not limited;
+# guacd (uid 1000) may only reach the session displays on lo and answer the app; Xvnc (uids
+# 61000-61999) may only answer on lo; every other uid, which is every session's Chromium, may
+# leave only through wt0 to a public address, and each new connection is logged to NFLOG group 7.
+# The kernel sends its own replies, such as the ICMP error of a REJECT, from sockets without an
+# owner, which "! --uid-owner 0" also matches. ICMP to this namespace's own addresses is therefore
+# accepted first, or a refused connection would hang until it times out instead of failing.
+# Only the app instances reach guacd. The health check ("health") compares the rules with what
+# was installed. A background loop writes /run/nbc-status/gateway.json every 10 s (namespace,
+# wt0 address, lock state, NetBird's routes), which the supervisor and the app read.
+x-browser-gateway-start: &browser-gateway-start |
+  set -eu
+  APP_NET=172.31.250.128/25
+  EXPECTED=/run/nbc-web-lock.rules
+  STATUS=/run/nbc-status/gateway.json
+  lock_rules() {
+    cat <<'RULES'
+  *filter
+  :NBC_WEB_GUACD - [0:0]
+  :NBC_WEB_XVNC - [0:0]
+  :NBC_WEB_CHROMIUM - [0:0]
+  -A NBC_WEB_GUACD -o lo -p tcp --dport 5901:6900 -j ACCEPT
+  -A NBC_WEB_GUACD -d 172.31.250.128/25 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  -A NBC_WEB_GUACD -j REJECT
+  -A NBC_WEB_XVNC -o lo -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  -A NBC_WEB_XVNC -j REJECT
+  -A NBC_WEB_CHROMIUM -p udp -m mark --mark 0x1bd00 -j RETURN
+  -A NBC_WEB_CHROMIUM -d 0.0.0.0/8 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 10.0.0.0/8 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 100.64.0.0/10 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 127.0.0.0/8 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 169.254.0.0/16 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 172.16.0.0/12 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 192.0.0.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 192.0.2.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 192.31.196.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 192.52.193.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 192.88.99.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 192.168.0.0/16 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 192.175.48.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 198.18.0.0/15 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 198.51.100.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 203.0.113.0/24 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 224.0.0.0/4 -j REJECT
+  -A NBC_WEB_CHROMIUM -d 240.0.0.0/4 -j REJECT
+  -A NBC_WEB_CHROMIUM -o wt0 -m conntrack --ctstate NEW -j NFLOG --nflog-group 7
+  -A NBC_WEB_CHROMIUM -o wt0 -j ACCEPT
+  -A NBC_WEB_CHROMIUM -j REJECT
+  -I OUTPUT 1 -m owner --uid-owner 0 -j ACCEPT
+  -I OUTPUT 2 -m owner --uid-owner 1000 -j NBC_WEB_GUACD
+  -I OUTPUT 3 -m owner --uid-owner 61000-61999 -j NBC_WEB_XVNC
+  -I OUTPUT 4 -p icmp -m addrtype --dst-type LOCAL -j ACCEPT
+  -I OUTPUT 5 -m owner ! --uid-owner 0 -j NBC_WEB_CHROMIUM
+  -I INPUT 1 -p tcp --dport 4822 ! -s 172.31.250.128/25 -j DROP
+  COMMIT
+  RULES
+  }
+  lock_listing() {
+    for chain in NBC_WEB_GUACD NBC_WEB_XVNC NBC_WEB_CHROMIUM; do iptables -w -S "$$chain"; done
+    iptables -w -S OUTPUT | sed -n '2,6p'
+    iptables -w -C INPUT -p tcp --dport 4822 ! -s "$$APP_NET" -j DROP && echo "INPUT 4822 only from $$APP_NET"
+  }
+  lock_ok() {
+    [ -s "$$EXPECTED" ] && lock_listing 2>/dev/null | cmp -s - "$$EXPECTED"
+  }
+  flags_ok() {
+    found=$$(grep -rhoE "\"$$1\": *(true|false)" /var/lib/netbird/ 2>/dev/null || true)
+    [ -n "$$found" ] && ! printf '%s\n' "$$found" | grep -vqE ": *$$2$$"
+  }
+  write_status() {
+    netns=$$(stat -L -c %i /proc/self/ns/net)
+    wt0=$$(ip -4 -o addr show dev wt0 2>/dev/null | awk '{ sub(/\/.*/, "", $$4); print "\"" $$4 "\""; exit }')
+    lock=false
+    if lock_ok; then lock=true; fi
+    routes=$$(ip route show table 7120 2>/dev/null | awk 'NF { gsub(/^[ \t]+|[ \t]+$$/, ""); gsub(/[\\"]/, "\\\\&"); printf "%s\"%s\"", (n++ ? "," : ""), $$0 }')
+    printf '{"ts":%s,"netns":%s,"wt0":%s,"lock":%s,"table7120":[%s]}\n' \
+      "$$(date +%s)" "$$netns" "$${wt0:-null}" "$$lock" "$$routes" > "$$STATUS.tmp"
+    chmod 0644 "$$STATUS.tmp"
+    mv -f "$$STATUS.tmp" "$$STATUS"
+  }
+  if [ "$${1:-run}" = health ]; then
+    grep -q '^ *wt0:' /proc/net/dev && lock_ok && flags_ok DisableDNS true && flags_ok BlockInbound true
+    exit
+  fi
+  if ! printf '%s' "$${NB_SETUP_KEY:-}" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$$'; then
+    echo "The setup key is missing or is not a NetBird setup key. Create one in NetBird Control (Settings > Remote Access), put it in .env as REMOTE_BROWSER_GATEWAY_SETUP_KEY and keep it there: see docs/remote-access.md." >&2
+    exit 1
+  fi
+  lock_rules | iptables-restore -w --noflush
+  lock_listing > "$$EXPECTED"
+  ( while :; do write_status || true; sleep 10; done ) &
+  exec netbird up --foreground-mode --disable-dns=true --block-inbound=true
+
+# The browser service, its guacd and the collector share the browser gateway's network namespace.
+# A container keeps the namespace it joined, so after the gateway is restarted or recreated it
+# would stay in the old one, where wt0 may linger without NetBird or the lock behind it. Each one
+# therefore runs under this watchdog: it starts the service once wt0 exists, and exits when wt0
+# has been missing for more than 30 s or when the gateway's fresh status names another network
+# namespace. Docker's restart policy then attaches the container to the gateway again.
+x-browser-watchdog: &browser-watchdog |
+  set -u
+  STATUS=/run/nbc-status/gateway.json
+  OWN=$$(stat -L -c %i /proc/self/ns/net)
+  has_wt0() { grep -q '^ *wt0:' /proc/net/dev; }
+  foreign_gateway() {
+    ts=$$(sed -n 's/.*"ts":\([0-9]*\).*/\1/p' "$$STATUS" 2>/dev/null)
+    ns=$$(sed -n 's/.*"netns":\([0-9]*\).*/\1/p' "$$STATUS" 2>/dev/null)
+    [ -n "$$ts" ] && [ -n "$$ns" ] && [ $$(($$(date +%s) - ts)) -le 60 ] && [ "$$ns" != "$$OWN" ]
+  }
+  missing=0
+  until has_wt0; do
+    if [ "$$missing" -ge 30 ]; then
+      echo "No wt0 in this network namespace after 30 s. Exiting, so Docker attaches the container to the gateway again." >&2
+      exit 1
+    fi
+    sleep 1
+    missing=$$((missing + 1))
+  done
+  "$$@" &
+  child=$$!
+  trap 'kill -TERM "$$child" 2>/dev/null; wait "$$child"; exit 0' TERM INT
+  missing=0
+  while kill -0 "$$child" 2>/dev/null; do
+    sleep 5
+    if has_wt0; then missing=0; else missing=$$((missing + 5)); fi
+    if [ "$$missing" -gt 30 ]; then
+      echo "wt0 has been missing for more than 30 s. Exiting, so Docker attaches the container to the gateway again." >&2
+      break
+    fi
+    if foreign_gateway; then
+      echo "The browser gateway runs in another network namespace now. Exiting, so Docker attaches the container to it." >&2
+      break
+    fi
+  done
+  kill -TERM "$$child" 2>/dev/null
+  wait "$$child"
+  exit 1
+
 services:
   app:
     networks:
       # The app reaches guacd only over this internal network.
       remote-access: { }
+    # The remote browser's control socket, connection log and gateway status (profile
+    # "remote-browser"). Empty and unused without that profile.
+    volumes:
+      - remote-browser-control:/run/nbc-control
+      - remote-browser-connections:/run/nbc-connections
+      - remote-browser-status:/run/nbc-status:ro
 
   # The IP gateway: a NetBird peer (this container) with guacd in its network namespace. NetBird
   # DNS is off, so it receives only static routes to the IPv4 host and subnet resources of the
@@ -168,9 +317,141 @@ services:
       start_period: 20s
       retries: 3
 
+  # The browser gateway (profile "remote-browser"), for web sessions. NetBird DNS is off: the
+  # sessions resolve names through 1.1.1.1 (remote-browser/resolv.conf) over the gateway's only
+  # route, NetBird's 0.0.0.0/0 route to the office's routing peers, so sites see the office address.
+  # Enroll it with a setup key from Settings → Remote Access. NB_LAZY_CONN=false: see remote-gateway.
+  remote-browser-gateway:
+    profiles: [ "remote-browser" ]
+    image: netbirdio/netbird:0.82.0
+    container_name: netbird-control-remote-browser-gateway
+    hostname: netbird-control-browser-gateway-web
+    restart: unless-stopped
+    entrypoint: [ "/bin/sh", "-c", *browser-gateway-start, "browser-gateway-start" ]
+    healthcheck:
+      test: [ "CMD", "/bin/sh", "-c", *browser-gateway-start, "browser-gateway-start", "health" ]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    environment:
+      - NB_SETUP_KEY=${REMOTE_BROWSER_GATEWAY_SETUP_KEY}
+      - NB_MANAGEMENT_URL=${REMOTE_GATEWAY_MANAGEMENT_URL}
+      - NB_LAZY_CONN=false
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    volumes:
+      - remote-browser-gateway-state:/var/lib/netbird
+      - remote-browser-status:/run/nbc-status
+    networks:
+      remote-egress: { }
+      remote-access:
+        ipv4_address: 172.31.250.4
+    mem_limit: 256m
+    pids_limit: 256
+
+  # The health check only looks for guacd's listening socket in /proc/net/tcp (172.31.250.4:4822,
+  # hex 04FA1FAC:12D6): connecting to it as uid 1000 would be refused by the gateway's lock. The
+  # app checks that it reaches guacd before it opens a web session.
+  remote-browser-guacd:
+    <<: *guacd
+    image: guacamole/guacd:1.6.0
+    profiles: [ "remote-browser" ]
+    container_name: netbird-control-remote-browser-guacd
+    network_mode: "service:remote-browser-gateway"
+    depends_on:
+      remote-browser-gateway:
+        condition: service_healthy
+    entrypoint: [ "/bin/sh", "-c", *browser-watchdog, "watchdog",
+                  "/opt/guacamole/sbin/guacd", "-f", "-b", "172.31.250.4", "-l", "4822", "-L", "info" ]
+    volumes:
+      - remote-browser-status:/run/nbc-status:ro
+    healthcheck:
+      test: [ "CMD-SHELL", "grep -qE '^ *[0-9]+: (04FA1FAC|00000000):12D6 00000000:0000 0A ' /proc/net/tcp" ]
+      interval: 60s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # The sessions: a supervisor (root) starts, for each session, Xvnc and a window manager as one
+  # uid and Chromium as another (both without capabilities), and stops them on request or when the
+  # app stops renewing the session's lease. Chromium's own sandbox creates user namespaces and
+  # chroots inside them, which Docker's default seccomp profile refuses without CAP_SYS_ADMIN and
+  # CAP_SYS_CHROOT: remote-browser/seccomp.json is that default profile with only clone, unshare
+  # and chroot allowed without those capabilities, which this container does not have. The image
+  # tag follows the app's (TAG), so both always run the same release.
+  remote-browser:
+    profiles: [ "remote-browser" ]
+    image: ghcr.io/shlomiporush/nbcontrol-browser:${TAG}
+    container_name: netbird-control-remote-browser
+    restart: unless-stopped
+    network_mode: "service:remote-browser-gateway"
+    depends_on:
+      remote-browser-gateway:
+        condition: service_healthy
+    init: true
+    entrypoint: [ "/bin/sh", "-c", *browser-watchdog, "watchdog", "node", "/opt/supervisor/main.js" ]
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - KILL
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./remote-browser/seccomp.json
+    tmpfs:
+      - /run/browser:mode=0711
+      - /tmp:mode=1777
+    shm_size: 2g
+    volumes:
+      - remote-browser-control:/run/nbc-control
+      - remote-browser-status:/run/nbc-status:ro
+      - ./remote-browser/resolv.conf:/etc/resolv.conf:ro
+    mem_limit: 8g
+    cpus: 2
+    pids_limit: 4096
+
+  # Turns NFLOG group 7 (each new connection of a session's Chromium) into JSON lines on the app's
+  # socket in the connections volume. It gives that volume to the app's user (uid 1000, mode 0700,
+  # CHOWN) and waits for the app's socket. ulogd connects to it as root, which needs DAC_OVERRIDE
+  # in a directory that only uid 1000 may enter, and it cannot start without the socket. When the
+  # socket goes away, the next connection's record is lost and ulogd connects again.
+  remote-browser-collector:
+    profiles: [ "remote-browser" ]
+    image: ghcr.io/shlomiporush/nbcontrol-browser:${TAG}
+    container_name: netbird-control-remote-browser-collector
+    restart: unless-stopped
+    network_mode: "service:remote-browser-gateway"
+    depends_on:
+      remote-browser-gateway:
+        condition: service_healthy
+    entrypoint: [ "/bin/sh", "-c", *browser-watchdog, "watchdog", "/usr/local/bin/collector" ]
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - CHOWN
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - remote-browser-connections:/run/nbc-connections
+      - remote-browser-status:/run/nbc-status:ro
+    mem_limit: 128m
+    pids_limit: 64
+
 volumes:
   remote-gateway-state:
   remote-names-gateway-state:
+  remote-browser-gateway-state:
+  remote-browser-control:
+  remote-browser-connections:
+  remote-browser-status:
 
 # Both subnets are pinned, so do not change them: guacd binds to the gateways' fixed addresses, the
 # host's isolation rules (remote-access-isolation/netbird-control-gateway-isolation.sh) are keyed to

@@ -1,7 +1,8 @@
 name: CI
 
-# Runs the backend tests, the frontend type check and build, and a build of the production
-# image on every pull request, whatever its base branch, and on every push to main.
+# Runs the backend tests, the frontend type check and build, a build of the production image,
+# and the remote browser's supervisor tests and image build on every pull request, whatever its
+# base branch, and on every push to main.
 # A pull request also runs when it is edited, so a pull request moved to a new base (as when the
 # pull request under it in a stack is merged) is tested against that base.
 # Read-only: no secrets, no publishing.
@@ -78,5 +79,34 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          push: false
+          platforms: linux/amd64
+
+  # The remote browser (Compose profile "remote-browser"): the supervisor's unit tests, then its
+  # image, built like a release but never pushed.
+  remote-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Same major version as the image (remote-browser/Dockerfile: node:24-bookworm-slim)
+          node-version: '24'
+
+      - name: Run the supervisor tests
+        run: node --test "remote-browser/test/*.test.js"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the remote browser image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: remote-browser
           push: false
           platforms: linux/amd64

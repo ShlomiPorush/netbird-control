@@ -1,0 +1,18 @@
+{
+  "DownloadRestrictions": 3,
+  "AllowFileSelectionDialogs": false,
+  "PrintingEnabled": false,
+  "PasswordManagerEnabled": false,
+  "DeveloperToolsAvailability": 2,
+  "ExtensionInstallBlocklist": ["*"],
+  "URLBlocklist": ["file://*"],
+  "DefaultClipboardSetting": 2,
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "PromotionalTabsEnabled": false,
+  "DefaultBrowserSettingEnabled": false,
+  "MetricsReportingEnabled": false,
+  "RestoreOnStartup": 5,
+  "HomepageIsNewTabPage": true,
+  "NewTabPageLocation": "about:blank"
+}

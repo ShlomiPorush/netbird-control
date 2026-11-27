@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { loadGuacamole, remoteApi, type Guac, type GuacStatus } from '@/lib/remoteAccess';
+import { loadGuacamole, remoteApi, WEB_SCREEN_LIMIT, type Guac, type GuacStatus, type RemoteProtocol } from '@/lib/remoteAccess';
 
 export type ViewerEvent =
   | { type: 'channel-open' }
@@ -67,12 +67,16 @@ function hasContent(canvas: HTMLCanvasElement): boolean {
 // The largest screen and scaling the server accepts (MAX_WIDTH / MAX_HEIGHT, and 480 DPI = 500%).
 const MAX_W = 7680, MAX_H = 4320, MAX_DPR = 5;
 
+interface ScreenLimit { width: number; height: number }
+const MAX_SCREEN: ScreenLimit = { width: MAX_W, height: MAX_H };
+const screenLimit = (protocol: RemoteProtocol) => (protocol === 'web' ? WEB_SCREEN_LIMIT : MAX_SCREEN);
+
 /**
  * A box of CSS pixels as the remote screen to ask for: device pixels and the matching DPI, like the
  * official Guacamole client. The scaling is lowered when it would go past the server's limit.
  */
-export function deviceSize(w: number, h: number, scaling = window.devicePixelRatio || 1) {
-  const dpr = Math.min(scaling, MAX_DPR, MAX_W / w, MAX_H / h);
+export function deviceSize(w: number, h: number, scaling = window.devicePixelRatio || 1, limit = MAX_SCREEN) {
+  const dpr = Math.min(scaling, MAX_DPR, limit.width / w, limit.height / h);
   return { width: Math.round(w * dpr), height: Math.round(h * dpr), dpi: Math.round(96 * dpr) };
 }
 
@@ -82,18 +86,19 @@ export const isPhone = () => coarsePointer() && Math.min(window.screen.width, wi
 const PHONE_DESKTOP_SHORT_SIDE = 720;
 const even = (n: number) => Math.round(n / 2) * 2;
 
-export function phoneDesktop(w: number, h: number) {
-  const long = even(Math.min(MAX_W, (PHONE_DESKTOP_SHORT_SIDE * Math.max(w, h)) / Math.min(w, h)));
-  return w >= h
-    ? { width: long, height: PHONE_DESKTOP_SHORT_SIDE, dpi: 96 }
-    : { width: PHONE_DESKTOP_SHORT_SIDE, height: long, dpi: 96 };
+export function phoneDesktop(w: number, h: number, limit = MAX_SCREEN) {
+  const long = (PHONE_DESKTOP_SHORT_SIDE * Math.max(w, h)) / Math.min(w, h);
+  const [width, height] = w >= h ? [long, PHONE_DESKTOP_SHORT_SIDE] : [PHONE_DESKTOP_SHORT_SIDE, long];
+  const fit = Math.min(1, limit.width / width, limit.height / height);
+  return { width: even(width * fit), height: even(height * fit), dpi: 96 };
 }
 
-export function remoteScreen(protocol: 'rdp' | 'ssh', box: { width: number; height: number }, scaling = window.devicePixelRatio || 1) {
-  if (protocol === 'rdp' && coarsePointer()) {
-    return isPhone() ? phoneDesktop(window.innerWidth, window.innerHeight) : deviceSize(window.innerWidth, window.innerHeight, scaling);
+export function remoteScreen(protocol: RemoteProtocol, box: { width: number; height: number }, scaling = window.devicePixelRatio || 1) {
+  const limit = screenLimit(protocol);
+  if (protocol !== 'ssh' && coarsePointer()) {
+    return isPhone() ? phoneDesktop(window.innerWidth, window.innerHeight, limit) : deviceSize(window.innerWidth, window.innerHeight, scaling, limit);
   }
-  return deviceSize(box.width, box.height, scaling);
+  return deviceSize(box.width, box.height, scaling, limit);
 }
 
 // Keys go to the remote side unless one of our own fields or menus has the focus. The device
@@ -126,10 +131,11 @@ function clipboardAutoRead(): Promise<boolean> {
  * (/api/remote-access/tunnel?token=…), drawn into the parent's box. The keyboard and the clipboard
  * sync follow `active` - only the visible session gets keys and clipboard text.
  */
-export function GuacScreen({ sessionId, token, protocol, pointer, active, clipboard, fontSize, onFontSize, onEvent, onRemoteClipboard, onLatchChange, onTouchTap, apiRef }: {
+export function GuacScreen({ sessionId, token, attachment, protocol, pointer, active, clipboard, fontSize, onFontSize, onEvent, onRemoteClipboard, onLatchChange, onTouchTap, apiRef }: {
   sessionId: string;
   token: string;
-  protocol: 'rdp' | 'ssh';
+  attachment?: string;
+  protocol: RemoteProtocol;
   pointer: PointerMode;
   active: boolean;
   clipboard: boolean;
@@ -197,7 +203,7 @@ export function GuacScreen({ sessionId, token, protocol, pointer, active, clipbo
       el.style.flexShrink = '0';
       el.style.overflow = 'hidden';
       host.appendChild(el);
-      const touchRdp = protocol === 'rdp' && coarsePointer();
+      const touchDesktop = protocol !== 'ssh' && coarsePointer();
       const touchSsh = protocol === 'ssh' && coarsePointer();
       let zoom = 1;
 
@@ -220,9 +226,15 @@ export function GuacScreen({ sessionId, token, protocol, pointer, active, clipbo
             else if (Date.now() - started > PAINT_WAIT_MS) { window.clearInterval(paintTimer); emit({ type: 'paint-timeout' }); }
           }, 300);
         }
-        if (st === G.Client.State.DISCONNECTED) emit({ type: 'closed' });
+        if (st === G.Client.State.DISCONNECTED) {
+          window.clearInterval(lease);
+          emit({ type: 'closed' });
+        }
       };
-      c.onerror = (status: GuacStatus) => emit({ type: 'error', status: { code: status.code, message: status.message } });
+      c.onerror = (status: GuacStatus) => {
+        window.clearInterval(lease);
+        emit({ type: 'error', status: { code: status.code, message: status.message } });
+      };
       c.onrequired = (params: string[]) => emit({ type: 'required', params });
 
       // Clipboard, both ways, text only. Remote -> local goes straight to the system clipboard
@@ -330,7 +342,7 @@ export function GuacScreen({ sessionId, token, protocol, pointer, active, clipbo
 
       let syncTouchpad = () => { };
       let usePointer = (_mode: PointerMode) => { };
-      if (touchRdp) {
+      if (touchDesktop) {
         const layer = () => {
           const d = document.createElement('div');
           d.style.cssText = 'position:absolute;inset:0;touch-action:none';
@@ -425,21 +437,22 @@ export function GuacScreen({ sessionId, token, protocol, pointer, active, clipbo
       host.addEventListener('pointerenter', syncLocal);
 
       const scaling = window.devicePixelRatio || 1;
+      const limit = screenLimit(protocol);
       let sentSize = '';
       const fitScale = () => {
         const dw = display.getWidth(), dh = display.getHeight();
         if (!dw || !dh) return 0;
-        if (touchRdp) {
+        if (touchDesktop) {
           const w = window.innerWidth, h = window.innerHeight;
-          const sharpest = isPhone() ? Infinity : w / deviceSize(w, h, scaling).width;
+          const sharpest = isPhone() ? Infinity : w / deviceSize(w, h, scaling, limit).width;
           return Math.min(w / dw, h / dh, sharpest);
         }
         const w = host.clientWidth, h = host.clientHeight;
-        return w && h ? Math.min(w / dw, h / dh, w / deviceSize(w, h, scaling).width) : 0;
+        return w && h ? Math.min(w / dw, h / dh, w / deviceSize(w, h, scaling, limit).width) : 0;
       };
       const zoomLimit = (fitted: number) => Math.max(1, MAX_ZOOM_SCALE / fitted);
       const followCursor = () => {
-        if (!touchRdp) return;
+        if (!touchDesktop) return;
         const s = display.getScale();
         const x = display.cursorX * s, y = display.cursorY * s;
         const w = host.clientWidth, h = host.clientHeight;
@@ -488,7 +501,7 @@ export function GuacScreen({ sessionId, token, protocol, pointer, active, clipbo
       // Lease: an ordinary signed-in request every minute. When the sign-in ends it stops being
       // renewed and the server closes the session.
       lease = window.setInterval(() => {
-        remoteApi.lease(sessionId).catch(() => { /* the server decides; it closes the tunnel */ });
+        remoteApi.lease(sessionId, attachment).catch(() => { /* the server decides; it closes the tunnel */ });
       }, LEASE_MS);
 
       cleanupListeners = () => {
@@ -517,7 +530,7 @@ export function GuacScreen({ sessionId, token, protocol, pointer, active, clipbo
       hooks.current = null;
       if (host) host.replaceChildren();
     };
-  }, [sessionId, token, apiRef]);
+  }, [sessionId, token, attachment, apiRef]);
 
   // Coming to the front: fit the screen and offer the local clipboard. Going to the back: let go
   // of every held key.

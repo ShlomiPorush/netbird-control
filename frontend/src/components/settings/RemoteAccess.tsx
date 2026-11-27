@@ -8,6 +8,7 @@ import { formatTimestamp } from '@/lib/logfmt';
 import { remoteApi, type CreatedResourceState, type CreateResourcesConfig, type LaunchNetworkResult, type RdpDisplay, type RemoteAccessConfig, type SshTerminal } from '@/lib/remoteAccess';
 import { Badge, Button, Card, CopyButton, Field, Input, LoadingState, Select, SelectMenu, Textarea, type SelectOption } from '@/components/ui';
 import { LaunchNetworkRow, StepRow } from './LaunchNetworkPanel';
+import { RemoteBrowserCard } from './RemoteBrowserCard';
 import { Toggle } from './NetbirdFields';
 
 // guacd's keymaps, by name. An id missing here shows as is.
@@ -502,6 +503,9 @@ export function RemoteAccessSettings() {
         {saved && <span className="text-sm text-green-600 dark:text-green-500">{saved}</span>}
         {error && <span className="text-sm text-red-500">{error}</span>}
       </div>
+
+      <RemoteBrowserCard config={cfgQ.data?.browser} status={st?.browser} statusLoading={statusQ.isLoading}
+        readonly={!!form.readonly} managedGroupIds={managedIds} />
 
       <Card className="p-4">
         <div className="text-sm font-bold tracking-tight mb-1 text-nb-gray-800 dark:text-nb-gray-100">Enroll The Gateways</div>

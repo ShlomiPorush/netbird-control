@@ -1,13 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Expand, Hand, Keyboard, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, MousePointer2, Pin, PinOff, Plus, Power, Smartphone, Terminal, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { ApiError } from '@/lib/api';
+import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Expand, Globe, Hand, Keyboard, Loader2, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, MousePointer2, Pin, PinOff, Plus, Power, Smartphone, Terminal, Unplug, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useScrollLock } from '@/lib/useScrollLock';
-import { apiText, remoteApi, GUAC, type RemoteProtocol } from '@/lib/remoteAccess';
+import { apiText, remoteApi, GUAC, PORTAL_MESSAGE_CODES, type GuacStatus, type RemoteProtocol, type WebSessionInfo } from '@/lib/remoteAccess';
 import { Button, Field, Input, PasswordInput, Textarea } from '@/components/ui';
 import { GuacScreen, coarsePointer, deviceSize, isPhone, phoneDesktop, remoteScreen, type PointerMode, type ScreenApi, type ViewerEvent } from './GuacScreen';
-import { ARG_LABELS, FailureBox, StepList, StepSummary, explain, usePacedSteps, withStep, type Failure, type Step } from './steps';
+import { ARG_LABELS, FailureBox, StepList, StepSummary, explain, handoffSteps, usePacedSteps, withStep, type Failure, type Step } from './steps';
 import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from './flow';
 import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN, KEY_ROW_HEIGHT, KeyRow, MenuRow, SPECIAL_KEYS, ScreenKeyboard, hasTouch, saveScreenshot } from './SessionTools';
 
@@ -18,6 +20,7 @@ import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN
 export interface SessionEntry {
   sessionId: string;
   token: string;
+  attachment?: string;
   protocol: RemoteProtocol;
   title: string;
   clipboard: boolean;
@@ -36,12 +39,34 @@ type TabStatus = 'connecting' | 'live' | 'ended';
 
 interface Ctx {
   count: number;
+  ids: string[];
   open: boolean;
   add: (e: SessionEntry) => void;
   show: () => void;
 }
-const SessionsContext = createContext<Ctx>({ count: 0, open: false, add: () => { }, show: () => { } });
+const SessionsContext = createContext<Ctx>({ count: 0, ids: [], open: false, add: () => { }, show: () => { } });
 export const useRemoteSessions = () => useContext(SessionsContext);
+
+export const PROTOCOL_ICON: Record<RemoteProtocol, LucideIcon> = { rdp: MonitorPlay, ssh: Terminal, web: Globe };
+export const WEB_SESSIONS_KEY = ['remote-web-sessions'];
+export const WEB_TITLE = 'Browser';
+const WEB_GONE = 'The browser was closed.';
+const WEB_LOST = 'The connection to your browser was lost.';
+const WEB_REASON_CODES = new Set<number>([...PORTAL_MESSAGE_CODES, GUAC.SESSION_CLOSED]);
+export const WEB_ENDED_TEXT = 'This browser was already closed.';
+export const isWebEnded = (err: unknown) => err instanceof ApiError && (err.code === 'BROWSER_ENDED' || err.status === 404 || err.status === 410);
+const webReason = (status: GuacStatus) => (WEB_REASON_CODES.has(status.code) && status.message && status.message !== 'Aborted. See logs.' ? status.message : '');
+
+export function minutesLeft(expiresAt: string | null, now = Date.now()) {
+  if (!expiresAt) return null;
+  const ms = new Date(expiresAt).getTime() - now;
+  return Number.isFinite(ms) ? Math.max(0, Math.ceil(ms / 60_000)) : null;
+}
+
+const CLOSING_POLL_MS = 3000;
+const OPEN_POLL_MS = 15_000;
+
+export const closesIn = (min: number) => (min <= 1 ? 'Closes in less than a minute' : `Closes in ${min} minutes`);
 
 const PIN_KEY = 'nbc.remote.barPinned';
 // How long the pointer must rest on the handle before the bar opens: passing over it does nothing.
@@ -109,7 +134,19 @@ export function RemoteSessionsProvider({ children }: { children: ReactNode }) {
   }, [sessions, activeId]);
   const show = useCallback(() => { if (sessions.length) setOpen(true); }, [sessions.length]);
 
-  const value = useMemo(() => ({ count: sessions.length, open, add, show }), [sessions.length, open, add, show]);
+  const hasWebTab = sessions.some((s) => s.protocol === 'web');
+  useQuery({
+    queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(), retry: false,
+    enabled: (q) => hasWebTab || !!q.state.data?.sessions.length,
+    refetchInterval: (q) => {
+      const listed = q.state.data?.sessions || [];
+      return listed.some((s) => s.state === 'ending') ? CLOSING_POLL_MS : listed.length || hasWebTab ? OPEN_POLL_MS : false;
+    },
+  });
+
+  const idList = sessions.map((s) => s.sessionId).join(' ');
+  const ids = useMemo(() => (idList ? idList.split(' ') : []), [idList]);
+  const value = useMemo(() => ({ count: sessions.length, ids, open, add, show }), [sessions.length, ids, open, add, show]);
   return (
     <SessionsContext.Provider value={value}>
       {children}
@@ -228,11 +265,70 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
 
   // Tabs are keyed by their first session; after a sign-in retry the tab runs a newer one.
   const current = useRef<Record<string, string>>({});
-  const disconnect = (id: string) => {
-    remoteApi.end(current.current[id] || id).catch(() => { });
+  const qc = useQueryClient();
+  const refreshWebSessions = () => { void qc.invalidateQueries({ queryKey: WEB_SESSIONS_KEY }); };
+  const endSession = (id: string) => {
+    remoteApi.end(current.current[id] || id).catch(() => { }).finally(refreshWebSessions);
     delete current.current[id];
     onRemove(id);
   };
+  const [closing, setClosing] = useState<Record<string, ClosingBrowser>>({});
+  const [closeProblems, setCloseProblems] = useState<Record<string, CloseProblem>>({});
+  const webList = useQuery({ queryKey: WEB_SESSIONS_KEY, queryFn: () => remoteApi.webSessions(), enabled: false });
+  const forgetClosing = (id: string) => setClosing((m) => { const n = { ...m }; delete n[id]; return n; });
+  const forgetProblem = (id: string) => setCloseProblems((m) => { const n = { ...m }; delete n[id]; return n; });
+  const finishClose = (id: string) => {
+    forgetClosing(id);
+    delete current.current[id];
+    onRemove(id);
+    refreshWebSessions();
+  };
+  const settleClose = (id: string) => {
+    setClosing((m) => (m[id] ? { ...m, [id]: { ...m[id], settled: true, since: Date.now() } } : m));
+    refreshWebSessions();
+  };
+  const closeBrowser = (id: string) => {
+    if (closing[id]) return;
+    const sessionId = current.current[id] || id;
+    forgetProblem(id);
+    setClosing((m) => ({ ...m, [id]: { sessionId, settled: false, since: Date.now() } }));
+    remoteApi.end(sessionId).then(
+      (r) => (r?.state === 'ending' ? settleClose(id) : finishClose(id)),
+      (err) => (isWebEnded(err) ? finishClose(id) : settleClose(id)),
+    );
+  };
+  const checkAgain = (id: string) => {
+    const sessionId = current.current[id] || id;
+    forgetProblem(id);
+    setClosing((m) => ({ ...m, [id]: { sessionId, settled: true, since: Date.now() } }));
+    refreshWebSessions();
+  };
+  useEffect(() => {
+    const listed = webList.data?.sessions;
+    for (const [id, c] of Object.entries(closing)) {
+      if (!c.settled) continue;
+      if (listed && webList.dataUpdatedAt > c.since) {
+        const row = listed.find((s) => s.sessionId === c.sessionId);
+        if (!row) finishClose(id);
+        else if (row.state !== 'ending') {
+          forgetClosing(id);
+          setCloseProblems((m) => ({ ...m, [id]: { message: "Your browser couldn't be closed. Try again.", unknown: false } }));
+        }
+      } else if (webList.errorUpdatedAt > c.since) {
+        forgetClosing(id);
+        setCloseProblems((m) => ({ ...m, [id]: { message: "Your browser couldn't be closed, and its state couldn't be checked.", unknown: true } }));
+      }
+    }
+  }, [webList.data, webList.dataUpdatedAt, webList.errorUpdatedAt, closing]);
+  const detach = (id: string) => {
+    delete current.current[id];
+    onRemove(id);
+    window.setTimeout(refreshWebSessions, 1500);
+  };
+  const disconnect = (id: string) => {
+    if (sessions.find((s) => s.sessionId === id)?.protocol === 'web') detach(id); else endSession(id);
+  };
+  const webActive = active?.protocol === 'web';
   const leave = () => {
     setClipOpen(false);
     setOskOpen(false);
@@ -265,7 +361,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
       onContextMenu={(e) => { if (!(e.target as HTMLElement).closest('input, textarea, [contenteditable="true"]')) e.preventDefault(); }}>
       <div className="absolute inset-x-0" style={area ? { top: area.top, height: area.height } : { top: 0, bottom: 0 }}>
       {sessions.map((s) => (
-        <div key={s.sessionId}
+        <div key={`${s.sessionId}:${s.token}`}
           className={cn('absolute inset-x-0 top-0', s.sessionId !== active?.sessionId && 'invisible pointer-events-none')}
           style={s.sessionId !== active?.sessionId
             ? (area ? { height: window.innerHeight } : { bottom: 0 })
@@ -280,6 +376,12 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             onStatus={(st) => setStatus((m) => (m[s.sessionId] === st ? m : { ...m, [s.sessionId]: st }))}
             onRemoteClipboard={(t) => setClips((m) => ({ ...m, [s.sessionId]: t }))}
             onClose={() => disconnect(s.sessionId)}
+            onCloseBrowser={() => closeBrowser(s.sessionId)}
+            closing={!!closing[s.sessionId]}
+            closeProblem={closeProblems[s.sessionId] || null}
+            onDismissCloseProblem={() => forgetProblem(s.sessionId)}
+            onCheckAgain={() => checkAgain(s.sessionId)}
+            onCloseTab={() => finishClose(s.sessionId)}
             onSession={(id) => {
               current.current[s.sessionId] = id;
               // A new session (a sign-in retry) reports its own text size and draws its own picture.
@@ -299,7 +401,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
         <button onClick={reveal} onPointerDown={(e) => e.preventDefault()} onMouseEnter={handleEnter} onMouseLeave={handleLeave} aria-label="Show the session bar"
           className="absolute left-1/2 top-0 z-30 -translate-x-1/2 inline-flex h-7 max-w-[70vw] items-center gap-2 rounded-b-xl border border-t-0 border-nb-gray-800 bg-nb-gray-940/95 px-3 text-[0.75rem] font-medium text-nb-gray-200 shadow-lg backdrop-blur-md">
           <span className={dot(status[active.sessionId])} />
-          {active.protocol === 'rdp' ? <MonitorPlay size={13} className="shrink-0" /> : <Terminal size={13} className="shrink-0" />}
+          <ProtocolIcon protocol={active.protocol} size={13} />
           <span className="truncate">{active.title}</span>
           {sessions.length > 1 && <span className="text-nb-gray-400">+{sessions.length - 1}</span>}
           <ChevronDown size={13} className="shrink-0" />
@@ -310,7 +412,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
       <div
         onPointerEnter={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = true; reveal(); }}
         onPointerLeave={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = false; if (!keepBar) scheduleHide(1500); }}
-        className={cn('absolute left-1/2 top-2 z-30 flex h-[46px] w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-2xl border border-nb-gray-800 bg-nb-gray-940/92 px-1.5 shadow-[0_16px_40px_-14px_rgba(0,0,0,0.7)] backdrop-blur-md transition-transform duration-200 sm:w-auto sm:max-w-[calc(100%-1rem)]',
+        className={cn('absolute left-1/2 top-2 z-30 flex h-[46px] w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-2xl border border-nb-gray-800 bg-nb-gray-940/92 px-1.5 shadow-[0_16px_40px_-14px_rgba(0,0,0,0.7)] backdrop-blur-md transition-transform duration-200 sm:w-max sm:max-w-[calc(100%-1rem)]',
           barVisible ? 'translate-y-0' : '-translate-y-[calc(100%+1rem)]')}>
         {/* The NetBird mark is the way back to the portal. */}
         <button type="button" onClick={backToPortal} title="Back To The Portal (Sessions Keep Running)" aria-label="Back To The Portal (Sessions Keep Running)"
@@ -325,9 +427,9 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                 s.sessionId === active?.sessionId ? 'bg-nb-gray-900 text-white ring-1 ring-inset ring-nb-gray-700' : 'text-nb-gray-400 hover:bg-nb-gray-900/60 hover:text-nb-gray-100')}
               onClick={() => activate(s.sessionId)} title={s.title}>
               <span className={dot(status[s.sessionId])} />
-              {s.protocol === 'rdp' ? <MonitorPlay size={13} className="shrink-0" /> : <Terminal size={13} className="shrink-0" />}
+              <ProtocolIcon protocol={s.protocol} size={13} />
               <span className="truncate">{s.title}</span>
-              <button aria-label={`Disconnect ${s.title}`} title="Disconnect"
+              <button aria-label={`Disconnect ${s.title}`} title={s.protocol === 'web' ? 'Disconnect (The Browser Keeps Running)' : 'Disconnect'}
                 onClick={(e) => { e.stopPropagation(); disconnect(s.sessionId); }}
                 className="rounded-md p-1 text-nb-gray-500 hover:bg-nb-gray-800 hover:text-red-400"><X size={13} /></button>
             </div>
@@ -366,7 +468,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             ) : (
               <BarButton onClick={() => setOskOpen((v) => !v)} title='On-Screen Keyboard' pressed={oskOpen}><Keyboard size={16} /></BarButton>
             )}
-            {active.protocol === 'rdp' && coarse && pointer === 'touchpad' && (
+            {active.protocol !== 'ssh' && coarse && pointer === 'touchpad' && (
               <BarMenu title="Zoom" icon={<ZoomIn size={16} />} container={rootRef} onOpenChange={menuChanged} width={200}>
                 {(close) => (
                   <>
@@ -403,7 +505,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                         className="flex h-7 w-7 items-center justify-center rounded-md ring-1 ring-inset ring-nb-gray-800 hover:bg-nb-gray-900 focus-visible:bg-nb-gray-900 focus-visible:outline-hidden disabled:opacity-40"><Plus size={14} /></button>
                     </div>
                   )}
-                  {active.protocol === 'rdp' && coarse && (
+                  {active.protocol !== 'ssh' && coarse && (
                     <>
                       <div className="my-1 h-px bg-nb-gray-800" />
                       <MenuRow icon={<MousePointer2 size={15} />} label="Touchpad Mode" checked={pointer === 'touchpad'}
@@ -423,6 +525,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                     <MenuRow icon={<Pin size={15} />} label="Keep The Bar Open" checked={pinned}
                       onClick={() => { togglePin(); close(); }} />
                     <MenuRow icon={<Plus size={15} />} label="New Session" onClick={() => { close(); newSession(); }} />
+                    {webActive && <MenuRow icon={<Power size={15} />} label="Close Browser" onClick={() => { close(); closeBrowser(active.sessionId); }} />}
                   </div>
                 </>
               )}
@@ -430,10 +533,18 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           </div>
         )}
         <span className="mx-0.5 h-5 w-px shrink-0 bg-nb-gray-800" />
+        {webActive && (
+          <button type="button" onClick={() => detach(active.sessionId)} title="Disconnect (The Browser Keeps Running)" aria-label="Disconnect (The Browser Keeps Running)"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[0.8rem] font-semibold text-nb-gray-200 ring-1 ring-inset ring-nb-gray-700 transition-colors hover:bg-nb-gray-800 hover:text-white md:px-3">
+            <Unplug size={15} /><span className="hidden md:inline">Disconnect</span>
+          </button>
+        )}
         {active && (
-          <button type="button" onClick={() => disconnect(active.sessionId)} title="Disconnect" aria-label="Disconnect"
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-red-500/15 px-2 text-[0.8rem] font-semibold text-red-300 ring-1 ring-inset ring-red-500/35 transition-colors hover:bg-red-600 hover:text-white md:px-3">
-            <Power size={15} /><span className="hidden md:inline">Disconnect</span>
+          <button type="button" onClick={() => (webActive ? closeBrowser(active.sessionId) : disconnect(active.sessionId))}
+            title={webActive ? 'Close Browser' : 'Disconnect'} aria-label={webActive ? 'Close Browser' : 'Disconnect'}
+            className={cn('h-8 shrink-0 items-center gap-1.5 rounded-lg bg-red-500/15 px-2 text-[0.8rem] font-semibold text-red-300 ring-1 ring-inset ring-red-500/35 transition-colors hover:bg-red-600 hover:text-white md:px-3',
+              webActive ? 'hidden sm:inline-flex' : 'inline-flex')}>
+            <Power size={15} /><span className="hidden md:inline">{webActive ? 'Close Browser' : 'Disconnect'}</span>
           </button>
         )}
       </div>
@@ -452,6 +563,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           key={active.sessionId}
           anchor={clipButton}
           initial={clips[active.sessionId] || ''}
+          note={webActive ? "Pasting Hebrew text into the browser doesn't work yet. Typing Hebrew works." : undefined}
           onSend={(t) => apis.current[active.sessionId]?.current?.sendClipboard(t)}
           onClose={() => { setClipOpen(false); if (!pinned) scheduleHide(1500); }}
         />
@@ -478,8 +590,13 @@ function BarButton({ title, onClick, pressed, className, children, buttonRef, ke
 
 const CLIP_WIDTH = 448;
 
-function ClipboardPanel({ initial, anchor, onSend, onClose }: {
-  initial: string; anchor: RefObject<HTMLButtonElement | null>; onSend: (t: string) => void; onClose: () => void;
+function ProtocolIcon({ protocol, size }: { protocol: RemoteProtocol; size: number }) {
+  const Icon = PROTOCOL_ICON[protocol];
+  return <Icon size={size} className="shrink-0" />;
+}
+
+function ClipboardPanel({ initial, anchor, note, onSend, onClose }: {
+  initial: string; anchor: RefObject<HTMLButtonElement | null>; note?: string; onSend: (t: string) => void; onClose: () => void;
 }) {
   // Right under its button, like the bar's menus, and inside the window.
   const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
@@ -507,6 +624,7 @@ function ClipboardPanel({ initial, anchor, onSend, onClose }: {
       </div>
       <Textarea value={text} onChange={(e) => setText(e.target.value)} aria-label="Clipboard text" rows={12}
         className="h-64 min-h-16! w-full shrink resize-none! rounded-lg! font-mono text-[0.8rem]" />
+      {note && <p className="mt-2 flex items-start gap-1.5 text-[0.78rem] text-nb-gray-400"><AlertCircle size={14} className="mt-px shrink-0" />{note}</p>}
       <div className="mt-3 grid grid-cols-2 gap-2">
         <Button variant="primary" className="rounded-lg!" onClick={() => onSend(text)}>Send To Remote</Button>
         <Button className="rounded-lg!" onClick={() => { navigator.clipboard?.writeText(text).catch(() => { }); }}>Copy Here</Button>
@@ -525,7 +643,12 @@ const SSH_KEY_NOTE = 'To sign in with a private key instead, close this tab and 
 // One session: its screen, and on top of it the remaining steps, the sign-in form the server
 // asks for, or how it ended. A failed sign-in asks again in the same tab: a new session to the
 // same server, which the portal checks again like any other.
-function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onSession, onLeave, fontSize, onFontSize, onPainted }: {
+type WebEnd = { reason: string; live: boolean; found?: WebSessionInfo | null | 'unknown' };
+
+interface ClosingBrowser { sessionId: string; settled: boolean; since: number }
+interface CloseProblem { message: string; unknown: boolean }
+
+function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef, onStatus, onRemoteClipboard, onClose, onCloseBrowser, closing, closeProblem, onDismissCloseProblem, onCheckAgain, onCloseTab, onSession, onLeave, fontSize, onFontSize, onPainted }: {
   entry: SessionEntry; active: boolean; apiRef: { current: ScreenApi | null };
   pointer: PointerMode; onLatchChange: (modifiers: number[]) => void; onTouchTap?: () => void;
   /** SSH: the text size chosen in the session bar, and the terminal's as guacd reports it. */
@@ -535,12 +658,23 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
   onPainted: () => void;
   onStatus: (s: TabStatus) => void; onRemoteClipboard: (t: string) => void;
   onClose: () => void;
+  onCloseBrowser: () => void;
+  closing: boolean;
+  closeProblem: CloseProblem | null;
+  onDismissCloseProblem: () => void;
+  onCheckAgain: () => void;
+  onCloseTab: () => void;
   /** The session this tab runs now (a new one after a sign-in retry). */
   onSession: (sessionId: string) => void;
   onLeave: () => void;
 }) {
   const ssh = entry.protocol === 'ssh';
-  const [conn, setConn] = useState({ sessionId: entry.sessionId, token: entry.token });
+  const web = entry.protocol === 'web';
+  const [conn, setConn] = useState<{ sessionId: string; token: string; attachment?: string }>({ sessionId: entry.sessionId, token: entry.token, attachment: entry.attachment });
+  const connRef = useRef(conn);
+  connRef.current = conn;
+  const [webEnd, setWebEnd] = useState<WebEnd | null>(null);
+  const [resumeError, setResumeError] = useState('');
   const [steps, setSteps] = useState<Step[]>(entry.steps);
   const { shown, caughtUp } = usePacedSteps(steps, entry.dwell);
   const [phase, setPhase] = useState<PanePhase>('connecting');
@@ -586,6 +720,29 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
     setArgValues(Object.fromEntries(fields.map((f) => [f, f === 'password' ? '' : kept.current[f] || ''])));
     setPhase('connecting');
   };
+
+  const webEnded = useCallback((reason: string, gone = false) => {
+    const live = phaseRef.current === 'live';
+    setRequired(null);
+    setPhase('ended');
+    setWebEnd((w) => {
+      const next: WebEnd = w ? { ...w, reason: w.reason || reason } : { reason, live };
+      return gone ? { ...next, found: null } : next;
+    });
+  }, []);
+
+  const checkingWeb = web && phase === 'ended' && !!webEnd && webEnd.found === undefined;
+  useEffect(() => {
+    if (!checkingWeb) return;
+    let stopped = false;
+    const timer = window.setTimeout(() => {
+      remoteApi.webSessions().then(
+        (r) => (r.sessions || []).find((x) => x.sessionId === connRef.current.sessionId && (x.state === 'active' || x.state === 'detached')) || null,
+        () => 'unknown' as const,
+      ).then((found) => { if (!stopped) setWebEnd((w) => (w ? { ...w, found } : w)); });
+    }, 1000);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [checkingWeb]);
 
   const paintedRef = useRef(onPainted);
   paintedRef.current = onPainted;
@@ -634,6 +791,10 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
         break;
       case 'error': {
         pending.current = null;
+        if (web) {
+          webEnded(webReason(ev.status) || (phaseRef.current === 'live' ? '' : explain(ev.status, 'server', 'web').message), ev.status.code === GUAC.SESSION_CLOSED);
+          break;
+        }
         // Wrong credentials: SSH refuses them only at sign-in (also a password typed in the
         // terminal); RDP after the user sent them. Locked or expired accounts are a different code.
         if (ev.status.code === GUAC.CLIENT_UNAUTHORIZED && (ssh || sentCreds.current)) {
@@ -653,11 +814,36 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
       }
       case 'closed':
         pending.current = null;
+        if (web) { webEnded(''); break; }
         setEnded((m) => m || 'The session ended.');
         setPhase('ended');
         break;
     }
-  }, [setStep, ssh, apiRef]);
+  }, [setStep, ssh, web, webEnded, apiRef]);
+
+  const resumeWeb = async () => {
+    if (busy) return;
+    setBusy(true);
+    setResumeError('');
+    try {
+      const s = await remoteApi.resumeWeb(conn.sessionId, { ...sessionScreenSize('web'), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+      if (!mounted.current) return;
+      onSession(s.sessionId);
+      stageRef.current = 'server';
+      setWebEnd(null);
+      setEnded('');
+      setFailure(null);
+      setSteps(handoffSteps({}, 'web'));
+      setPhase('connecting');
+      setConn({ sessionId: s.sessionId, token: s.token, attachment: s.attachment });
+    } catch (err) {
+      if (!mounted.current) return;
+      if (isWebEnded(err)) setWebEnd((w) => (w ? { ...w, found: null } : w));
+      else setResumeError(apiText(err, "Your browser couldn't be resumed. Try again."));
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
 
   const keep = (values: Record<string, string>) => {
     kept.current = { ...kept.current, ...(values.username !== undefined ? { username: values.username } : {}), ...(values.domain !== undefined ? { domain: values.domain } : {}) };
@@ -726,7 +912,40 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
 
   // Each state of the tab is one card: a header (icon, what is happening, the server), then the
   // steps, the sign-in form or how it ended.
-  const proto = ssh ? <Terminal size={19} /> : <MonitorPlay size={19} />;
+  const ProtoIcon = PROTOCOL_ICON[entry.protocol];
+  const proto = <ProtoIcon size={19} />;
+  const webFound = webEnd?.found;
+  const webMinutes = webFound && webFound !== 'unknown' && webFound.state === 'detached' ? minutesLeft(webFound.expiresAt) : null;
+  const webCard = !webEnd ? null
+    : webFound === undefined ? (
+      <FlowCard>
+        <FlowHeader icon={<Unplug size={19} />} tone="neutral" title={webEnd.live ? 'Disconnected' : "Couldn't Connect"} subtitle={entry.title} />
+        <p className="flex items-center gap-2 text-sm text-nb-gray-600 dark:text-nb-gray-300"><Loader2 size={15} className="animate-spin" /> Checking your browser…</p>
+      </FlowCard>
+    ) : webFound === null ? (
+      <FlowCard className="flex flex-col items-center text-center">
+        <FlowTile icon={<Power size={26} />} tone="neutral" large />
+        <h2 className="mt-4 text-xl font-bold tracking-tight text-nb-gray-900 dark:text-white">Browser Closed</h2>
+        <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">{webEnd.reason || WEB_GONE}</p>
+        <Button variant="primary" className={cn(FLOW_BUTTON, 'mt-6')} onClick={onClose}>Close</Button>
+      </FlowCard>
+    ) : (
+      <FlowCard className="flex flex-col items-center text-center">
+        <FlowTile icon={<Unplug size={26} />} tone="neutral" large />
+        <h2 className="mt-4 text-xl font-bold tracking-tight text-nb-gray-900 dark:text-white">{webEnd.live ? 'Disconnected' : "Couldn't Connect"}</h2>
+        <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">{webEnd.reason || WEB_LOST}</p>
+        {webMinutes !== null && <p className="mt-1 text-[0.82rem] text-nb-gray-500 dark:text-nb-gray-400">Your browser keeps running. {closesIn(webMinutes)}.</p>}
+        {resumeError && (
+          <p role="alert" className="mt-4 flex w-full items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/5 px-3 py-2.5 text-left text-[0.82rem] text-nb-gray-700 dark:text-nb-gray-200">
+            <AlertCircle size={16} className="mt-px shrink-0 text-red-500" /><span>{resumeError}</span>
+          </p>
+        )}
+        <div className="mt-6 flex w-full flex-col gap-2">
+          <Button variant="primary" className={FLOW_BUTTON} onClick={() => { void resumeWeb(); }} disabled={busy}>{busy ? 'Resuming…' : 'Resume'}</Button>
+          <Button className={FLOW_BUTTON} onClick={onCloseBrowser} disabled={busy}>Close Browser</Button>
+        </div>
+      </FlowCard>
+    );
   const signInButtons = (label: string) => (
     <div className="mt-1 flex flex-col gap-1">
       <Button type="submit" variant="primary" className={FLOW_BUTTON} disabled={busy}>{label}</Button>
@@ -760,6 +979,30 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
           </form>
         </FlowCard>
       )
+        : web && closeProblem ? (
+          <FlowCard className="flex flex-col items-center text-center">
+            <FlowTile icon={<AlertCircle size={26} />} tone="neutral" large />
+            <h2 className="mt-4 text-xl font-bold tracking-tight text-nb-gray-900 dark:text-white">Couldn't Close The Browser</h2>
+            <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">{closeProblem.message}</p>
+            <div className="mt-6 flex w-full flex-col gap-2">
+              {closeProblem.unknown ? <>
+                <Button variant="primary" className={FLOW_BUTTON} onClick={onCheckAgain}>Check Again</Button>
+                <Button variant="ghost" className={FLOW_QUIET} onClick={onCloseTab}>Close Tab</Button>
+              </> : <>
+                <Button variant="primary" className={FLOW_BUTTON} onClick={onCloseBrowser}>Try Again</Button>
+                <Button variant="ghost" className={FLOW_QUIET} onClick={onDismissCloseProblem}>Keep It Open</Button>
+              </>}
+            </div>
+          </FlowCard>
+        )
+        : web && closing ? (
+          <FlowCard className="flex flex-col items-center text-center">
+            <FlowTile icon={<Loader2 size={26} className="animate-spin" />} tone="neutral" large />
+            <h2 className="mt-4 text-xl font-bold tracking-tight text-nb-gray-900 dark:text-white">Closing…</h2>
+            <p className="mt-1.5 text-sm text-nb-gray-600 dark:text-nb-gray-300">Your browser is being closed. This tab closes when it has stopped.</p>
+          </FlowCard>
+        )
+        : web && phase === 'ended' && webCard ? webCard
         : phase === 'ended' && failure ? (
           <FlowCard>
             <FlowHeader icon={<X size={20} />} tone="danger" title="Couldn't Connect" subtitle={entry.title} />
@@ -783,16 +1026,14 @@ function SessionPane({ entry, active, pointer, onLatchChange, onTouchTap, apiRef
               </FlowCard>
             ) : null;
 
-  // While a sign-in form is up, keys go to the form (and its buttons), not to the remote.
-  const formUp = !!retry || (!!required && caughtUp);
   return (
     <>
-      <GuacScreen sessionId={conn.sessionId} token={conn.token} protocol={entry.protocol} pointer={pointer} active={active && !formUp} clipboard={entry.clipboard}
+      <GuacScreen sessionId={conn.sessionId} token={conn.token} attachment={conn.attachment} protocol={entry.protocol} pointer={pointer} active={active && !overlay} clipboard={entry.clipboard}
         onLatchChange={onLatchChange} onTouchTap={onTouchTap}
         fontSize={fontSize} onFontSize={ssh ? onFontSize : undefined}
         onEvent={onEvent} onRemoteClipboard={onRemoteClipboard} apiRef={apiRef} />
       {overlay && (
-        <div className="absolute inset-0 z-20 overflow-y-auto bg-nb-gray-950/80 backdrop-blur-xs">
+        <div className="nb-follow-theme absolute inset-0 z-20 overflow-y-auto bg-nb-gray-100/85 text-nb-gray-900 backdrop-blur-xs dark:bg-nb-gray-950/80 dark:text-nb-gray-100">
           <div className="flex min-h-full items-center justify-center p-4">{overlay}</div>
         </div>
       )}

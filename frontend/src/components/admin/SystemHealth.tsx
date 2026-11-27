@@ -32,6 +32,7 @@ const SCHED_LABELS: Record<string, string> = {
   resetStuckGrants: 'Startup: Reset Stuck Grants',
   remoteAccessRecheck: 'Remote Access Session Re-Check',
   remoteAccessSync: 'Remote Access Gateway Sync',
+  remoteBrowser: 'Remote Browser Sessions',
 };
 
 // What each job actually DOES - shown under its name so nobody has to guess.
@@ -54,6 +55,7 @@ const SCHED_DESCRIPTIONS: Record<string, string> = {
   mspDigest: "Hourly check: on the configured day and hour, sends the weekly snapshot of every MSP tenant to main's Telegram and/or email. Off by default.",
   remoteAccessRecheck: "Every 60s while browser sessions are open: reads NetBird again and closes any session whose user lost access, was blocked or lost the permission. Sessions also close when access can't be verified for 2.5 minutes.",
   remoteAccessSync: 'Every 10 minutes while Remote Access is on: keeps the Browser Gateway policy in place and adds new resources of the selected networks to the gateway target group.',
+  remoteBrowser: 'Every 60s while browser sessions are on: keeps open and disconnected browsers alive, closes those past their keep-alive or whose user lost access, and records their connections.',
   internalBackup: 'Hourly check: at the configured hour, writes the daily envelope-encrypted full backup to the backup folder. Off until a passphrase and a folder are set.',
   retentionPurge: 'Checked every 10 minutes, acts once per day: deletes traffic + NetBird events older than the Data Retention setting. Disabled retention = nothing is ever deleted.',
   tenantTokenRotation: "Hourly: re-issues each MSP tenant's managed service-user token when it is within 30 days of its 365-day expiry, so tenant access never lapses.",

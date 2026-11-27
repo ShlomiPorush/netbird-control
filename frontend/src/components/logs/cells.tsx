@@ -144,6 +144,13 @@ export function PeerCell({ name, addr, fields, icon, peerId }: { name: string; a
   );
 }
 
+function webConnectionRecord(raw: unknown): { kind?: string; missed?: number } {
+  const remoteAccess = raw && typeof raw === 'object' ? (raw as { remoteAccess?: unknown }).remoteAccess : undefined;
+  if (!remoteAccess || typeof remoteAccess !== 'object') return {};
+  const { kind, missed } = remoteAccess as { kind?: unknown; missed?: unknown };
+  return { kind: typeof kind === 'string' ? kind : undefined, missed: typeof missed === 'number' && missed > 0 ? missed : undefined };
+}
+
 export function EventDescription({ ev }: { ev: LogEvent }) {
   const isStart = ev.message === 'TYPE_START';
   const action = isStart ? 'requested connection to' : 'stopped connection to';
@@ -151,6 +158,19 @@ export function EventDescription({ ev }: { ev: LogEvent }) {
   const dstAddr = ev.destination_addr || '';
   const dstName = ev.destination_name || '';
   const peer = <span className="text-nb-gray-700 dark:text-nb-gray-300 font-medium">{srcName}</span>;
+  const reference = String(ev.reference || '');
+
+  if (reference === 'remote-access:web-connection') {
+    const record = webConnectionRecord(ev.raw_json);
+    if (record.kind === 'gap') {
+      return <>Remote Browser connections not recorded{record.missed ? ` (${record.missed} missed)` : ''}</>;
+    }
+    const site = <span className="text-netbird font-medium">{dstName || dstAddr || 'unknown'}</span>;
+    return <>Remote Browser connected to {site}{dstName && dstAddr && dstName !== dstAddr ? <> ({dstAddr})</> : null}</>;
+  }
+  if (reference === 'remote-access:web') {
+    return isStart ? <>Remote Browser session opened</> : <>Remote Browser session ended</>;
+  }
 
   // A browser RDP/SSH session through the Browser Gateway (recorded by NetBird Control).
   if (ev.source_type === 'BROWSER_GATEWAY') {

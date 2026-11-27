@@ -39,7 +39,8 @@ https://github.com/user-attachments/assets/d48319ad-5146-4b4a-8aad-544edc3f1b78
   schedule, with a dry run before anything is written.
 - **Browser remote access** - RDP and SSH sessions from the browser through NetBird gateway
   peers, by IP address or host name, only to servers the user's own NetBird access already
-  reaches. The Remote Access page opens on its own, without the portal's menu, and several sessions
+  reaches, plus a remote web browser for public websites that go out through the office. The
+  Remote Access page opens on its own, without the portal's menu, and several sessions
   stay open as tabs while you use the rest of the portal, with special keys, an on-screen keyboard,
   touch control and screenshots. Each session
   is checked live and recorded on the Activity page. The gateway's NetBird groups, policies and
@@ -151,7 +152,7 @@ covers the database, SSO and a few locked values:
 | `TRUST_PROXY` | The reverse proxy allowed to report the client address (`X-Forwarded-For`): its address or CIDR (comma-separated for several), or a hop count. Empty (default) uses the connecting address and ignores the header. Behind a proxy, set it to that proxy, and make sure the app port is not also reachable directly |
 | `TELEGRAM_BOT_TOKEN`, `SMTP_*` | Notifications (can also be set in the app) |
 | `EVENT_PURGE_ADMINS` | Emails allowed to delete stored events |
-| `REMOTE_GATEWAY_SETUP_KEY`, `REMOTE_NAMES_GATEWAY_SETUP_KEY`, `REMOTE_GATEWAY_MANAGEMENT_URL` | Browser Remote Access only: the setup keys and management URL of the Browser Gateway containers (`netbird-docker-compose-files/docker-compose-remote-access.yml`). Keep the keys after enrollment. The feature itself is configured in **Settings → Remote Access** ([docs](docs/remote-access.md)) |
+| `REMOTE_GATEWAY_SETUP_KEY`, `REMOTE_NAMES_GATEWAY_SETUP_KEY`, `REMOTE_BROWSER_GATEWAY_SETUP_KEY`, `REMOTE_GATEWAY_MANAGEMENT_URL` | Browser Remote Access only: the setup keys and management URL of the Browser Gateway containers (`netbird-docker-compose-files/docker-compose-remote-access.yml`). Keep the keys after enrollment. The feature itself is configured in **Settings → Remote Access** ([docs](docs/remote-access.md)) |
 
 [`.env.example`](.env.example) documents every variable.
 
