@@ -732,6 +732,11 @@ Each user may have one browser open at a time, and all users together five. Both
 (**Browsers Per User**, 1 to 10, and **Browsers At A Time**, 1 to 50). A disconnected browser that
 still runs counts, so a user at the limit resumes it or closes it first.
 
+Operations → Remote Access shows how many browsers are open, of the **Browsers At A Time** limit,
+and how many of them are disconnected, with the browser gateway's state under **Gateways**. A browser
+gateway that is not ready also turns the status line in Settings → Remote Access to **Needs
+Attention**.
+
 A new browser opens on the **Start Page** set in the same card, or on a blank page when it is empty.
 Only an `http` or `https` address without a user name or password is accepted. A resumed browser
 keeps its own tabs.

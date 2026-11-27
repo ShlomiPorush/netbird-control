@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import { formatTimestamp } from '@/lib/logfmt';
-import { remoteApi, type CreatedResourceState, type RemoteAccessConfig, type RemoteAccessStatus } from '@/lib/remoteAccess';
+import { remoteApi, type BrowserStatus, type CreatedResourceState, type RemoteAccessConfig, type RemoteAccessStatus } from '@/lib/remoteAccess';
 import { Badge, Card, LoadingState } from '@/components/ui';
 import { cn } from '@/lib/cn';
 
@@ -38,7 +38,8 @@ export function StatusLine({ ok, warn, label, detail }: { ok: boolean | null; wa
 
 export function gatewaysSummary(st: RemoteAccessStatus): { ok: boolean | null; warn: boolean; label: string } {
   const problems = !!(st.reachError || st.domainRoutes.length || st.extraReach.length || st.names.reachError || st.names.extraReach.length
-    || st.conflicts.length || st.membership?.removed.length || st.membership?.error || st.error || st.lastApply.error);
+    || st.conflicts.length || st.membership?.removed.length || st.membership?.error || st.error || st.lastApply.error
+    || (st.browser?.enabled && !st.browser.ready));
   if (!st.gateway.enrolled) return { ok: false, warn: true, label: 'Gateway Not Enrolled' };
   const ipOk = st.gateway.online && !!st.guacdReachable;
   const namesOk = !st.names.gateway.enrolled || (st.names.gateway.online && !!st.names.guacdReachable);
@@ -105,8 +106,21 @@ function Gateways({ st, cfg }: { st: RemoteAccessStatus; cfg: RemoteAccessConfig
           detail={`${st.membership.removed.slice(0, 5).map((r) => `${r.kind === 'user' ? 'User' : 'Device'} ${r.name} from ${r.group} (${formatTimestamp(r.at)})`).join('; ')}. Only the gateways belong in these groups. A gateway enrolled by signing in as a user is removed too: enroll it again with a setup key.`} />
       )}
       {st.membership?.error && <StatusLine ok={false} label="Couldn't Remove A Member Added Outside NetBird Control" detail={`${st.membership.error} It is tried again on the next read from NetBird.`} />}
+      {st.browser?.enabled && <BrowserGateway browser={st.browser} />}
       {(st.error || st.lastApply.error) && <StatusLine ok={false} label="Problem" detail={st.error || st.lastApply.error} />}
     </Card>
+  );
+}
+
+function BrowserGateway({ browser }: { browser: BrowserStatus }) {
+  const label = !browser.enrolled ? 'Gateway Not Enrolled' : !browser.online ? 'Gateway Offline' : browser.ready ? 'Gateway Online' : 'Not Ready';
+  const detail = !browser.enrolled ? browser.reason || 'Create a setup key under Remote Browser in Settings → Remote Access and start the remote-browser profile.'
+    : browser.ready ? browser.peer?.name : browser.reason;
+  return (
+    <>
+      <div className={cn(groupLabel, 'mt-3')}>Remote Browser Gateway</div>
+      <StatusLine ok={browser.ready} warn={browser.enrolled && browser.online} label={label} detail={detail} />
+    </>
   );
 }
 
@@ -195,14 +209,17 @@ export function RemoteAccessOps() {
   const st = statusQ.data;
   if (!cfg || !st) return <p className="text-sm text-red-500">The Remote Access status could not be loaded.</p>;
   const summary = gatewaysSummary(st);
+  const browser = st.browser;
   const launchInUse = (createdQ.data?.items || []).filter((i) => IN_USE_STATES.includes(i.state)).length;
   return (
     <div className="flex flex-col gap-5">
-      <p className="text-nb-gray-500 text-sm">The Browser Gateways' health, what they have open right now, and the servers launch links added. Remote Access is set up in Settings → Remote Access.</p>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <p className="text-nb-gray-500 text-sm">The gateways' health, the sessions and remote browsers open right now, and the servers launch links added. Remote Access is set up in Settings → Remote Access.</p>
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
         <Tile label="Remote Access" value={cfg.enabled ? 'On' : 'Off'} />
         <Tile label="Gateways" value={summary.ok ? 'Online' : summary.label} warn={!summary.ok} />
-        <Tile label="Active Sessions" value={String(st.activeSessions)} />
+        <Tile label="Active Sessions" value={String(st.activeSessions)} sub="RDP and SSH" />
+        <Tile label="Remote Browsers" value={browser?.enabled ? String(browser.sessions.total) : 'Off'}
+          sub={browser?.enabled ? `open of ${browser.maxSessions}${browser.sessions.detached ? `, ${browser.sessions.detached} disconnected` : ''}` : undefined} />
         <Tile label="Launch Link Servers" value={String(launchInUse)} sub="in use now" />
       </div>
       <Gateways st={st} cfg={cfg} />
