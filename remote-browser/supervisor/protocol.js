@@ -14,7 +14,6 @@ const GIB = 1024 ** 3;
 const FILES_LIMIT = { min: GIB, max: 10 * GIB, fallback: 2 * GIB };
 const FILE_NAME_MAX_BYTES = 255;
 const LANGUAGES = ['en-US', 'he'];
-const REQUESTS_WAIT_MAX_MS = 30_000;
 
 class RequestError extends Error {
   constructor(code, message) {
@@ -88,14 +87,6 @@ function language(value) {
   return value;
 }
 
-function requestsWait(value) {
-  if (value === undefined) return 0;
-  if (!Number.isInteger(value) || value < 0 || value > REQUESTS_WAIT_MAX_MS) {
-    throw new RequestError('BAD_REQUEST', `wait must be an integer number of milliseconds from 0 to ${REQUESTS_WAIT_MAX_MS}.`);
-  }
-  return value;
-}
-
 function acks(value) {
   if (value === undefined) return {};
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -155,8 +146,6 @@ function parseRequest(line) {
       return { op: 'list', ack: acks(request.ack) };
     case 'ready':
       return { op: 'ready' };
-    case 'requests':
-      return { op: 'requests', wait: requestsWait(request.wait) };
     case 'files':
       return {
         op: 'files',
@@ -165,7 +154,7 @@ function parseRequest(line) {
         rev: nonNegativeInteger(request.rev, 'rev'),
       };
     default:
-      throw new RequestError('BAD_REQUEST', 'op must be start, renew, status, credentials, stop, list, ready, files or requests.');
+      throw new RequestError('BAD_REQUEST', 'op must be start, renew, status, credentials, stop, list, ready or files.');
   }
 }
 

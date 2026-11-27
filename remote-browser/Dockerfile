@@ -8,6 +8,7 @@ RUN apt-get update \
       tigervnc-standalone-server \
       tigervnc-tools \
       matchbox-window-manager \
+      zenity \
       x11-xserver-utils \
       x11-xkb-utils \
       xauth \

@@ -12,5 +12,7 @@ case "$target" in
   "$folder" | "$folder"/*) ;;
   *) exit 0 ;;
 esac
-node -e "require('net').connect(process.argv[1]).end()" "/run/browser/files-request-$slot.sock" 2>/dev/null
+[ -d "$target" ] && target=$target/
+pkill -x -u "$(id -u)" zenity
+setsid zenity --file-selection --title=Downloads --filename="$target" >/dev/null 2>&1 &
 exit 0

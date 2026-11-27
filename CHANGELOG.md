@@ -26,11 +26,12 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   2 GB for its files (a setting, 1 to 10 GB), and its files are deleted when it closes. Files that
   land in the browser and every transfer and delete are recorded. A reverse proxy must allow 1 MiB
   request bodies on the upload route (8 MiB recommended): see docs/remote-access.md.
-- **Show in folder opens the Files panel.** With **Files In The Browser** on, **Show in folder** on
-  a download in the remote browser opens the session bar's **Files** panel, instead of a blocked
-  page. **Open** shows a PDF or another file the browser can display in a tab, from the browser's
-  own folder only, and opens the panel for other files. The browser's file dialogs open in its
-  downloads folder and have a **Downloads** shortcut.
+- **Show in folder shows the downloads.** With **Files In The Browser** on, **Show in folder** on
+  a download in the remote browser opens a **Downloads** window with the browser's files, instead
+  of a blocked page. A file can be dragged from it onto a website. **Open** shows a PDF or another
+  file the browser can display in a tab, from the browser's own folder only, and selects other
+  files in the same window. The browser's file dialogs open in its downloads folder and have a
+  **Downloads** shortcut.
 - **A language for the remote browser.** The new **Browser Language** setting (English or
   Hebrew; default English) sets the language of the browser's menus and the language
   websites are asked for. It applies to browsers opened after the change.

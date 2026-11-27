@@ -25,9 +25,6 @@ const VIEWER_LEASE_S = 150;
 const AUTH_GRACE_MS = 150_000;
 const LOOP_INTERVAL_MS = 60_000;
 const WATCH_INTERVAL_MS = 5_000;
-const FILE_REQUESTS_WAIT_MS = 25_000;
-const FILE_REQUESTS_MIN_GAP_MS = 500;
-const FILE_REQUESTS_IDLE_MS = 1_000;
 const STARTING_STALE_MS = 2 * 60_000;
 const DISPLAY_TIMEOUT_MS = 20_000;
 const HEALTH_TTL_MS = 15_000;
@@ -120,7 +117,7 @@ function withSessionLock(id, task) {
     return result;
 }
 
-function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS, signal = null) {
+function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
         const sock = net.connect(_endpoints.supervisor);
         let buffered = '';
@@ -129,14 +126,10 @@ function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS, signal = 
             if (done) return;
             done = true;
             clearTimeout(timer);
-            signal?.removeEventListener('abort', aborted);
             sock.destroy();
             if (error) reject(error); else resolve(value);
         };
-        const aborted = () => finish(new Error('the request was stopped'));
         const timer = setTimeout(() => finish(new Error('the remote browser did not answer in time')), timeoutMs);
-        if (signal?.aborted) return aborted();
-        signal?.addEventListener('abort', aborted);
         sock.setEncoding('utf8');
         sock.on('connect', () => sock.write(JSON.stringify(request) + '\n'));
         sock.on('data', (chunk) => {
@@ -637,45 +630,8 @@ async function watchAttached() {
     for (const s of [..._attached.values()]) closeLocal(s, MESSAGES.SERVER_RESTARTING, CODE.restarting);
 }
 
-const canAskFileRequests = () => !_shuttingDown && leading() && _attached.size > 0;
-
-async function waitForFileRequests(signal) {
-    const reply = await supervisorRequest({ op: 'requests', wait: FILE_REQUESTS_WAIT_MS }, FILE_REQUESTS_WAIT_MS + SUPERVISOR_TIMEOUT_MS, signal).catch(() => null);
-    if (!reply || reply.ok !== true || !Array.isArray(reply.sessions) || !leading()) return;
-    for (const id of reply.sessions) {
-        const s = _attached.get(id);
-        if (s && !s.closed && s.ws && s.ws.readyState === 1) s.ws.send(ra.encodeInstruction('nbc-files'));
-    }
-}
-
-let _fileRequests = null;
-function startFileRequests() {
-    if (_fileRequests) return;
-    const run = { timer: null, controller: new AbortController() };
-    _fileRequests = run;
-    const step = async () => {
-        if (_fileRequests !== run) return;
-        if (!canAskFileRequests()) {
-            run.timer = setTimeout(step, FILE_REQUESTS_IDLE_MS);
-            return;
-        }
-        const asked = Date.now();
-        await waitForFileRequests(run.controller.signal).catch(e => console.error('[remote-browser] files requests:', e.message));
-        if (_fileRequests === run) run.timer = setTimeout(step, Math.max(0, FILE_REQUESTS_MIN_GAP_MS - (Date.now() - asked)));
-    };
-    step();
-}
-
-function stopFileRequests() {
-    if (!_fileRequests) return;
-    clearTimeout(_fileRequests.timer);
-    _fileRequests.controller.abort();
-    _fileRequests = null;
-}
-
 async function shutdownWebTunnels(message) {
     _shuttingDown = true;
-    stopFileRequests();
     const open = [..._attached.values()];
     for (const s of open) closeLocal(s, message, CODE.restarting);
     await Promise.allSettled(open.map(detach));
@@ -1272,7 +1228,7 @@ async function getBrowserHealth() {
 
 module.exports = {
     setRemoteBrowserDeps, checkWebAccess, createWebSession, resumeWebSession, listWebSessions, renewWebLease, endWebSessionByUser, endWebSession, ownedWebSession,
-    takeToken, attachWebTunnel, watchAttached, startFileRequests, shutdownWebTunnels, onConfigChanged, leaderTick, getBrowserStatus, getBrowserHealth,
+    takeToken, attachWebTunnel, watchAttached, shutdownWebTunnels, onConfigChanged, leaderTick, getBrowserStatus, getBrowserHealth,
     LOOP_INTERVAL_MS, WATCH_INTERVAL_MS, MESSAGES, GATE_REASONS, CODE,
     _internal: {
         setEndpointsForTest: (p) => { _endpoints = { ...DEFAULT_ENDPOINTS, ...(p || {}) }; },
@@ -1289,7 +1245,6 @@ module.exports = {
         drainIdleForTest: () => _drain || Promise.resolve(),
         queuedForTest: () => _queued,
         attachedForTest: (id) => _attached.get(id),
-        stopFileRequestsForTest: stopFileRequests,
         reconcileWithSupervisor: async (now) => {
             const listed = await reconcileWithSupervisor(now);
             if (listed) await recordListedJournals(listed);

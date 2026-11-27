@@ -3,7 +3,6 @@
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const net = require('node:net');
 const path = require('node:path');
 const { SLOT_COUNT, slotIds } = require('./protocol');
 
@@ -128,44 +127,6 @@ const sessionDirs = ({ slot, displayUid, chromiumUid }) => [
 const filesEntry = ({ slot, chromiumUid }) => ({ dir: path.join(FILES_ROOT, `chromium-${slot}`), uid: chromiumUid });
 
 const ownedDirs = (ids) => [filesEntry(ids), ...sessionDirs(ids)];
-
-const filesRequestPath = (slot, dir = SESSIONS_DIR) => path.join(dir, `files-request-${slot}.sock`);
-const FILES_REQUEST_SOCKET = /^files-request-\d+\.sock$/;
-const filesRequestServers = new Map();
-
-function listenForFilesRequests({ slot, chromiumUid }, onRequest, dir = SESSIONS_DIR) {
-  const file = filesRequestPath(slot, dir);
-  fs.rmSync(file, { force: true });
-  const server = net.createServer((socket) => {
-    socket.destroy();
-    onRequest();
-  });
-  filesRequestServers.set(slot, server);
-  return new Promise((resolve, reject) => {
-    server.on('error', reject);
-    server.listen(file, () => {
-      try {
-        fs.chmodSync(file, 0o600);
-        fs.chownSync(file, chromiumUid, chromiumUid);
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    });
-  });
-}
-
-function closeFilesRequests(slot, dir = SESSIONS_DIR) {
-  filesRequestServers.get(slot)?.close();
-  filesRequestServers.delete(slot);
-  fs.rmSync(filesRequestPath(slot, dir), { force: true });
-}
-
-function removeFilesRequestSockets(dir = SESSIONS_DIR) {
-  for (const name of fs.readdirSync(dir)) {
-    if (FILES_REQUEST_SOCKET.test(name)) fs.rmSync(path.join(dir, name), { force: true });
-  }
-}
 
 const xFiles = (display) => [`/tmp/.X${display}-lock`, path.join(X_SOCKET_DIR, `X${display}`)];
 
@@ -317,7 +278,7 @@ function chromiumCommand(filesLimit, args) {
   return ['prlimit', [`--fsize=${filesLimit}`, '--', 'sh', '-c', 'trap "" XFSZ; exec chromium "$@"', 'chromium', ...args]];
 }
 
-async function launch({ ids, width, height, scale, startPage = '', filesLimit, language = 'en-US', onExit, onFilesRequest }) {
+async function launch({ ids, width, height, scale, startPage = '', filesLimit, language = 'en-US', onExit }) {
   const { display, port, displayUid, chromiumUid } = ids;
   const [displayDir, chromiumDir] = sessionDirs(ids);
   xFiles(display).forEach(removeIfPresent);
@@ -329,7 +290,6 @@ async function launch({ ids, width, height, scale, startPage = '', filesLimit, l
   createOwnedDir(displayDir.dir, displayUid, { passwd: vncPassword, xauth: auth });
   createOwnedDir(chromiumDir.dir, chromiumUid, chromiumHomeFiles(ids, auth));
   createOwnedDir(filesEntry(ids).dir, chromiumUid, {});
-  await listenForFilesRequests(ids, onFilesRequest);
 
   const displayEnv = { DISPLAY: `:${display}`, XAUTHORITY: path.join(displayDir.dir, 'xauth'), HOME: displayDir.dir };
   const xvnc = spawnAs(displayUid, 'Xvnc', xvncArgs({ display, port, dir: displayDir.dir, width, height }), displayEnv);
@@ -399,7 +359,6 @@ async function wipe({ dir, uid }, owner = ownerOf) {
 const ignoreFailure = () => {};
 
 async function teardown(ids, afterKill = async () => {}) {
-  closeFilesRequests(ids.slot);
   const uids = [ids.chromiumUid, ids.displayUid];
   const killed = await killAll(uids);
   await afterKill();
@@ -564,7 +523,6 @@ async function wipeLeftoverFiles(root = FILES_ROOT, wipeEntry = wipe) {
 async function prepareHost() {
   writeFilesPolicy(false);
   fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o711 });
-  removeFilesRequestSockets();
   fs.mkdirSync(X_SOCKET_DIR, { recursive: true });
   fs.chmodSync(X_SOCKET_DIR, 0o1777);
   fs.mkdirSync(FILES_ROOT, { recursive: true, mode: 0o711 });
@@ -579,21 +537,18 @@ module.exports = {
   chromiumCommand,
   chromiumEnv,
   chromiumHomeFiles,
-  closeFilesRequests,
   createOwnedDir,
   createUpload,
   deleteFile,
   dropUpload,
   exited,
   launch,
-  listenForFilesRequests,
   parseScan,
   prepareHost,
   publishUpload,
   randomPassword,
   readFile,
   ready,
-  removeFilesRequestSockets,
   scanCommand,
   scanFiles,
   slotIsFree,

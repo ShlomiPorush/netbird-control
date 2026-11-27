@@ -5269,7 +5269,6 @@ async function start() {
         setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);
         setInterval(sweepRemoteSessions, 15000);
         setInterval(() => remoteBrowser.watchAttached().catch(e => console.error('[remote-browser] watch:', e.message)), remoteBrowser.WATCH_INTERVAL_MS);
-        remoteBrowser.startFileRequests();
         const browserTick = leaderOnly(() => tracked('remoteBrowser', remoteBrowser.leaderTick));
         setTimeout(browserTick, 5000);
         setInterval(browserTick, remoteBrowser.LOOP_INTERVAL_MS);

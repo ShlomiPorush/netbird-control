@@ -68,7 +68,6 @@ function hasContent(canvas: HTMLCanvasElement): boolean {
 const MAX_W = 7680, MAX_H = 4320, MAX_DPR = 5;
 
 interface ScreenLimit { width: number; height: number }
-const SHOW_FILES_OPCODE = 'nbc-files';
 const MAX_SCREEN: ScreenLimit = { width: MAX_W, height: MAX_H };
 const screenLimit = (protocol: RemoteProtocol) => (protocol === 'web' ? WEB_SCREEN_LIMIT : MAX_SCREEN);
 
@@ -132,7 +131,7 @@ function clipboardAutoRead(): Promise<boolean> {
  * (/api/remote-access/tunnel?token=…), drawn into the parent's box. The keyboard and the clipboard
  * sync follow `active` - only the visible session gets keys and clipboard text.
  */
-export function GuacScreen({ sessionId, token, attachment, protocol, pointer, active, clipboard, fontSize, onFontSize, onEvent, onRemoteClipboard, onLatchChange, onTouchTap, onShowFiles, apiRef }: {
+export function GuacScreen({ sessionId, token, attachment, protocol, pointer, active, clipboard, fontSize, onFontSize, onEvent, onRemoteClipboard, onLatchChange, onTouchTap, apiRef }: {
   sessionId: string;
   token: string;
   attachment?: string;
@@ -142,7 +141,6 @@ export function GuacScreen({ sessionId, token, attachment, protocol, pointer, ac
   clipboard: boolean;
   onLatchChange: (modifiers: number[]) => void;
   onTouchTap?: () => void;
-  onShowFiles?: () => void;
   /** SSH: the text size chosen in the session bar. Sent when it differs from the terminal's. */
   fontSize?: number;
   /** SSH: the terminal's text size, as guacd reports it. */
@@ -168,8 +166,6 @@ export function GuacScreen({ sessionId, token, attachment, protocol, pointer, ac
   onLatchRef.current = onLatchChange;
   const onTapRef = useRef(onTouchTap);
   onTapRef.current = onTouchTap;
-  const onShowFilesRef = useRef(onShowFiles);
-  onShowFilesRef.current = onShowFiles;
   const pointerRef = useRef(pointer);
   pointerRef.current = pointer;
   // Set while the session runs; called when it becomes inactive or visible again.
@@ -199,11 +195,6 @@ export function GuacScreen({ sessionId, token, attachment, protocol, pointer, ac
       // The tunnel answers pings, so a long wait (typing a password) never looks like a timeout.
       tunnel.receiveTimeout = 30000;
       client = new G.Client(tunnel);
-      const passInstruction = tunnel.oninstruction;
-      tunnel.oninstruction = (opcode: string, args: string[]) => {
-        if (opcode === SHOW_FILES_OPCODE) onShowFilesRef.current?.();
-        else passInstruction(opcode, args);
-      };
       const c = client;
       const display = c.getDisplay();
       const el: HTMLElement = display.getElement();

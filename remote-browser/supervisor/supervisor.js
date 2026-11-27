@@ -37,7 +37,6 @@ class Supervisor {
     this.policyFailed = false;
     this.failedRev = -1;
     this.endings = new Map();
-    this.requestWaiters = new Set();
     const saved = store.load();
     this.nextSlot = Number.isInteger(saved) && saved >= 0 && saved < slotCount ? saved : 0;
   }
@@ -58,8 +57,6 @@ class Supervisor {
         return Promise.resolve(this.list(request.ack));
       case 'files':
         return this.setFilesPolicy(request);
-      case 'requests':
-        return this.requests(request.wait);
       case 'ready':
         return this.runtime.ready().then((state) => ({ ok: true, instance: this.instance, ...state }));
       default:
@@ -141,7 +138,6 @@ class Supervisor {
       published: new Map(),
       streams: new Map(),
       polling: false,
-      filesRequested: false,
     };
     this.sessions.set(session, record);
     try {
@@ -154,7 +150,6 @@ class Supervisor {
         filesLimit,
         language,
         onExit: (reason) => this.ended(session, record, reason),
-        onFilesRequest: () => this.noteFilesRequest(record),
       });
       record.password = password;
     } catch (error) {
@@ -173,36 +168,6 @@ class Supervisor {
     record.state = 'running';
     this.log(`session ${session}: running on display :${ids.display} as uid ${ids.chromiumUid}`);
     return this.grant(record);
-  }
-
-  noteFilesRequest(record) {
-    if (!this.filesPolicy.enabled || this.policyFailed) return;
-    record.filesRequested = true;
-    for (const wake of [...this.requestWaiters]) wake();
-  }
-
-  takeRequests() {
-    const sessions = [];
-    for (const record of this.sessions.values()) {
-      if (!record.filesRequested) continue;
-      record.filesRequested = false;
-      sessions.push(record.session);
-    }
-    return sessions;
-  }
-
-  requests(wait = 0) {
-    const sessions = this.takeRequests();
-    if (sessions.length > 0 || wait === 0) return Promise.resolve({ ok: true, sessions });
-    return new Promise((resolve) => {
-      const wake = () => {
-        clearTimeout(timer);
-        this.requestWaiters.delete(wake);
-        resolve({ ok: true, sessions: this.takeRequests() });
-      };
-      const timer = setTimeout(wake, wait);
-      this.requestWaiters.add(wake);
-    });
   }
 
   grant(record) {

@@ -54,11 +54,7 @@ test('renew, status, credentials, stop, list and ready keep only what they need'
   assert.deepEqual(parseRequest('{"op":"stop","session":"s1"}'), { op: 'stop', session: 's1' });
   assert.deepEqual(parseRequest('{"op":"list","session":"ignored"}'), { op: 'list', ack: {} });
   assert.deepEqual(parseRequest('{"op":"ready"}'), { op: 'ready' });
-  assert.deepEqual(parseRequest('{"op":"requests","session":"ignored"}'), { op: 'requests', wait: 0 });
-  assert.deepEqual(parseRequest('{"op":"requests","wait":25000}'), { op: 'requests', wait: 25000 });
-  rejects('{"op":"requests","wait":30001}');
-  rejects('{"op":"requests","wait":-1}');
-  rejects('{"op":"requests","wait":"25000"}');
+  rejects('{"op":"requests"}');
   rejects('{"op":"renew","until":5000}');
   rejects('{"op":"status"}');
   rejects('{"op":"credentials","session":"a b"}');
@@ -73,7 +69,7 @@ test('start, renew and credentials require until as a positive integer', () => {
 });
 
 test('an unknown op names every op', () => {
-  assert.throws(() => parseRequest('{"op":"explode"}'), { message: 'op must be start, renew, status, credentials, stop, list, ready, files or requests.' });
+  assert.throws(() => parseRequest('{"op":"explode"}'), { message: 'op must be start, renew, status, credentials, stop, list, ready or files.' });
 });
 
 test('malformed requests are refused', () => {
