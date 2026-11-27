@@ -366,7 +366,7 @@ async function wipe({ dir, uid }, owner = ownerOf) {
 const ignoreFailure = () => {};
 
 async function closeFileWindows({ chromiumUid }) {
-  await runAs(chromiumUid, 'sh', ['-c', 'pkill -x zenity; exit 0']);
+  await runAs(chromiumUid, 'sh', ['-c', 'pkill -x zenity; [ $? -le 1 ]']);
 }
 
 async function teardown(ids, afterKill = async () => {}) {

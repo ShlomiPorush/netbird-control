@@ -472,6 +472,30 @@ test('blocking files closes the Downloads window of every open browser, and allo
   assert.deepEqual(runtime.closedWindows.length, 2);
 });
 
+test('files allowed again while blocked windows are still closing stay allowed', async () => {
+  const { supervisor, runtime, startOf } = setup();
+  await filesOp(supervisor, { rev: 0 });
+  await startOf('a');
+  runtime.closeGate = deferred();
+  const blocking = filesOp(supervisor, { rev: 1, enabled: false });
+  await flush();
+  assert.deepEqual(await filesOp(supervisor, { rev: 2 }), { ok: true, rev: 2 });
+  runtime.closeGate.resolve();
+  assert.deepEqual(await blocking, { ok: true, rev: 1 });
+  assert.deepEqual(runtime.policyWrites, [true, false, true]);
+  assert.deepEqual(supervisor.filesPolicy, { enabled: true, transfer: true, rev: 2 });
+});
+
+test('a browser whose Downloads window cannot be closed when files are blocked is ended', async () => {
+  const { supervisor, runtime, startOf } = setup();
+  await filesOp(supervisor, { rev: 0 });
+  await startOf('a');
+  runtime.closeError = new Error('fork failed');
+  assert.deepEqual(await filesOp(supervisor, { rev: 1, enabled: false }), { ok: true, rev: 1 });
+  await settleStops();
+  assert.ok(runtime.calls.includes('teardown 0'));
+});
+
 test('a policy write that fails is refused, keeps the held settings and is retried by the next files op', async () => {
   const { supervisor, runtime, startOf } = setup();
   await startOf('a');

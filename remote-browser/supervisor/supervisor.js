@@ -77,7 +77,8 @@ class Supervisor {
 
   async setFilesPolicy({ enabled, transfer, rev }) {
     if (rev < this.filesPolicy.rev || rev < this.failedRev) return { ok: true, rev: this.filesPolicy.rev };
-    if (this.policyFailed || this.filesPolicy.enabled !== enabled) {
+    const changed = this.policyFailed || this.filesPolicy.enabled !== enabled;
+    if (changed) {
       try {
         this.runtime.writeFilesPolicy(enabled);
       } catch (error) {
@@ -91,15 +92,18 @@ class Supervisor {
       }
       this.policyFailed = false;
       this.log(`files in the browser ${enabled ? 'enabled' : 'blocked'} (rev ${rev})`);
-      if (!enabled) await this.closeFileWindows();
     }
     this.filesPolicy = { enabled, transfer: enabled && transfer, rev };
+    if (changed && !enabled) await this.closeFileWindows();
     return { ok: true, rev };
   }
 
   closeFileWindows() {
     return Promise.all([...this.sessions].map(([session, record]) => this.runtime.closeFileWindows(record.ids)
-      .catch((error) => this.log(`session ${session}: the Downloads window could not be closed: ${error.message}`))));
+      .catch((error) => {
+        this.log(`session ${session}: the Downloads window could not be closed: ${error.message}`);
+        this.endWith(session, record, 'its Downloads window could not be closed', null);
+      })));
   }
 
   endAll(reason) {

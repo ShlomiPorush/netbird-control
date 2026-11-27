@@ -144,7 +144,7 @@ export function useBarPanelPosition(anchor: RefObject<HTMLElement | null>, maxWi
       const viewport = document.documentElement.clientWidth;
       const width = Math.min(maxWidth, viewport - 16);
       if (!r || !r.width) setPos({ left: Math.max(8, (viewport - width) / 2), top: BELOW_BAR, width });
-      else setPos({ left: Math.max(8, Math.min(r.right - width, viewport - width - 8)), top: r.bottom + 10, width });
+      else setPos({ left: Math.max(8, Math.min(r.right - width, viewport - width - 8)), top: BELOW_BAR, width });
     };
     place();
     window.addEventListener('resize', place);

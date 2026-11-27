@@ -60,6 +60,8 @@ function fakeRuntime() {
     },
     async closeFileWindows(ids) {
       runtime.closedWindows.push(ids.slot);
+      if (runtime.closeGate) await runtime.closeGate.promise;
+      if (runtime.closeError) throw runtime.closeError;
     },
     async scanFiles(ids) {
       runtime.scans += 1;
