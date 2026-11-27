@@ -18,6 +18,7 @@ const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] || null;
 core.setSetting = async (k, v) => { settings[k] = v; };
+core.updateSetting = async (k, update) => { settings[k] = String(update(settings[k] ?? null)); return settings[k]; };
 const holds = require('./helpers/hold-table').holdTable();
 core.pool.query = holds.query;
 const nb = require('../lib/netbird');

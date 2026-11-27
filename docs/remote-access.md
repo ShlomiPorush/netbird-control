@@ -1,6 +1,7 @@
-# Browser Remote Access (RDP and SSH)
+# Browser Remote Access (RDP, SSH and Web)
 
-Users open RDP and SSH sessions from the browser, on the **Remote Access** page. The page opens
+Users open RDP and SSH sessions from the browser, on the **Remote Access** page, and a remote web
+browser for public websites (see [Web sessions](#web-sessions-remote-browser)). The page opens
 on its own, without the portal's menu: only **Back To Portal**, the theme switch and the account
 menu stay above the connection form. They need no
 NetBird client on their device, and the servers need no NetBird client either: sessions reach
@@ -289,12 +290,13 @@ check reads the new resource.
 
 ## Service status
 
-The connect card ends with one line: **NetBird** and **Browser Gateways**, each **Online**,
-**Offline** or **Unknown**, with a refresh button that turns while it checks. Browser Gateways is one
-item for both gateways (the names gateway counts only when it is set up): **Online** when every one
-is up, **Offline** when every one is down, **Partly Online** when some are up.
-`GET /api/remote-access/health` answers `{ netbird, gateway, namesGateway? }` (each `up`, `down` or
-`unknown`) and nothing else. It is refused to a user blocked in NetBird.
+The connect card ends with one line: **NetBird**, **Gateways** and, while web sessions are on,
+**Browser**, each **Online**, **Offline** or **Unknown**, with a refresh button that turns while it
+checks. Gateways is one item for the RDP and SSH gateways (the names gateway counts only when it is
+set up): **Online** when every one is up, **Offline** when every one is down, **Partly Online** when
+some are up. Browser is the remote browser's readiness gate.
+`GET /api/remote-access/health` answers `{ netbird, gateway, namesGateway?, browserGateway? }` (each
+`up`, `down` or `unknown`) and nothing else. It is refused to a user blocked in NetBird.
 
 - **NetBird**: is NetBird reachable? One request to the main account's NetBird URL, to an API path
   that needs a sign-in, sent **without** the token. Any answer below 500 (401 included) is up: NetBird
@@ -378,7 +380,8 @@ peers: it uses the copy as it is.
   ends the session instead; SSH servers report every refused sign-in the same way, so SSH always
   asks again. SSH asks for a user name and password only; to use a private key, connect again
   from the Remote Access page. Every password field has a button that shows what was typed.
-- **The session bar.** It hides itself a few seconds after a session comes to the front. A click
+- **The session bar.** It follows the portal's light or dark theme, and so do its menus and the
+  Clipboard and Files panels. It hides itself a few seconds after a session comes to the front. A click
   on its handle at the top of the screen, or the pointer resting there for half a second, brings it
   back. Pinned, it stays on top of the session; the session keeps the whole window. The NetBird
   mark at its start goes back to the portal while the sessions keep running. On a narrow screen,
@@ -484,6 +487,19 @@ peers: it uses the copy as it is.
 
    The one-time token travels in the tunnel URL. It is valid for 30 seconds and a single use, but
    avoid logging query strings for this path in the reverse proxy.
+
+   With **Transfer Files To And From Computers** on, uploads reach
+   `/api/remote-access/sessions/<id>/uploads/<upload>` in parts of up to 8 MiB. The reverse proxy
+   must allow request bodies of at least 1 MiB there; 8 MiB is recommended. When it refuses a part,
+   the browser falls back to 1 MiB parts. nginx allows only 1 MiB by default:
+
+   ```nginx
+   location ~ ^/api/remote-access/sessions/[^/]+/uploads/ {
+       proxy_pass http://netbird-control:3000;
+       client_max_body_size 8m;
+       proxy_request_buffering off;
+   }
+   ```
 
 ## What the gateways enforce on every start
 
@@ -682,6 +698,198 @@ usual.
 When the app restarts during a session, the session is closed on start-up and its end record says
 that the real end time is unknown.
 
+## Web sessions (remote browser)
+
+A **Browser** session opens a Chromium browser that runs next to the app and shows it on the
+Remote Access page, in the same viewer as RDP. Users browse public websites with the normal address
+bar and tabs, and the sites see the office's public address. Typical use: a customer portal that
+accepts only the office's address.
+
+### What a web session can and cannot reach
+
+- **The public internet only.** Every private, shared (CGNAT), loopback, link-local and other
+  special-purpose IPv4 range is refused, and so are the Docker networks, Docker's DNS and the NetBird
+  addresses of other peers. There is no access to internal servers in this version.
+- **Through the office.** The browser's own NetBird peer (the *browser gateway*) sends everything
+  through a route that the app creates: `0.0.0.0/0` through the routing peers you choose in
+  Settings (for example *Office Peers*), distributed only to the browser gateway's group. The route
+  has its own access-control group, so the routing peers forward this traffic only for the browser
+  gateway and for no other peer. The shared Exit Node route is never changed.
+- **One layer protects the LAN, by design.** The routing peers can reach the office LAN. What keeps
+  the browser away from it is the egress lock in the browser gateway's network namespace, installed
+  before NetBird starts and checked every 10 seconds. When the lock is missing or changed, no web
+  session opens and the open ones close.
+- **When the route disappears, nothing leaves.** Without the route, the browser's traffic has no
+  way out (it never falls back to the Docker host's own internet connection).
+
+### Who may open one
+
+Anyone who may use RDP and SSH: sign-in, a live and unblocked NetBird user, and the Remote Access
+permission. The user's own devices and their Exit Node access play no part, because the browser goes
+out through its own gateway. The check runs when the session opens and every minute after.
+
+Each user may have one browser open at a time, and all users together five. Both limits are settings
+(**Browsers Per User**, 1 to 10, and **Browsers At A Time**, 1 to 50). A disconnected browser that
+still runs counts, so a user at the limit resumes it or closes it first.
+
+A new browser opens on the **Start Page** set in the same card, or on a blank page when it is empty.
+Only an `http` or `https` address without a user name or password is accepted. A resumed browser
+keeps its own tabs.
+
+**Browser Language** in the same card (English or Hebrew; default English) is the
+language of a new browser's menus. Websites are asked for that language first and English second,
+so a site that offers it shows it. A changed language applies to browsers opened after the change;
+a resumed browser keeps the language it started with.
+
+A new browser opens in the portal's theme at that moment, light or dark. In dark, its toolbar,
+menus and file windows are dark, and websites are told the user prefers dark. A browser keeps the
+theme it started with: Chromium can't change it while it runs.
+
+### Disconnect, resume and close
+
+- Closing the tab, refreshing the page or losing the network **disconnects** the browser: it keeps
+  running, with its tabs and sign-ins, for the keep-alive time (default 15 minutes). The Remote
+  Access page lists the user's open browsers with **Resume** and **Close Browser**. Only the same
+  user can resume, and the access checks run again first.
+- **Close Browser** ends the browser at once and wipes its profile. When the remote browser does not
+  confirm that it stopped, the browser shows as **Closing...** until the app has stopped it (it tries
+  again every minute). A browser also ends when the user closes its last window, when the keep-alive
+  passes, or when access is lost. When NetBird can't be read to check access, the browser keeps
+  running for up to 2.5 minutes after the last successful check, then ends.
+- Opening the same browser in another window moves it there; the first window shows that it moved.
+- **During an update** the browser view disconnects and the open browsers keep running. Resume them
+  when the update finishes: web sessions are run only by the app instance that leads, so opening,
+  resuming and closing a browser waits for the new instance.
+
+### Inside the browser
+
+- Printing, developer tools, extensions and saved passwords are blocked by Chromium's managed
+  policies. Downloads, saving pages and uploads (file dialogs) are blocked too, unless **Files In
+  The Browser** is on (see [Files](#files)). Websites cannot read the clipboard by themselves.
+- The browser opens on a blank page.
+- Self-signed certificates show Chromium's usual warning, and **Proceed** works.
+- Copy and paste follow the Remote Access clipboard setting, like RDP. **Pasting Hebrew text is not
+  supported yet** (guacd 1.6.0 sends VNC clipboard text as Latin-1; the fix is expected in guacd
+  1.6.1). Typing Hebrew works.
+- Every session runs as its own Linux users (one for the display, one for Chromium), with Chromium's
+  sandbox on and no capabilities. A session cannot see another session's screen or connect to it.
+- The browser container's seccomp profile, `remote-browser/seccomp.json`, is Docker's default
+  profile from moby `docker-v29.8.2`, with `clone` allowed without its namespace-flag filter and
+  `chroot` and `unshare` allowed, which Chromium's sandbox needs.
+
+### Files
+
+Two settings in **Settings → Remote Access → Remote Browser → Files**, both off by default:
+
+- **Files In The Browser.** The browser may download files and upload them to websites through its
+  file dialog. Each browser saves into a folder of its own, which no other browser can read, and the
+  folder is deleted when the browser closes. The browser's file dialogs (a website's upload button,
+  **Save Page As**) open in that folder, and their sidebar has a **Downloads** shortcut to it. In the session
+  bar, **Files** lists the folder's files and their size, shows how much of the storage is used, and
+  can delete a file. A file that is still downloading shows as *Downloading…* and cannot be deleted.
+- **Transfer Files To And From Computers** (only with the first setting). The **Files** panel also
+  copies a file from the browser to the user's computer (**Download**) and from the computer into the
+  browser's folder (**Upload From This Computer**). An upload is sent in parts of 8 MiB, shows its
+  progress, can be cancelled, and continues after a short network break while the browser runs. Only
+  one upload per browser runs at a time; a new one cancels the earlier one. An upload never replaces
+  a file of the same name.
+
+Anyone who may open a web session gets these features when they are on. Turning a setting off takes
+effect in open browsers within about a minute; a download that already started finishes.
+
+**Show in folder and Open.** With **Files In The Browser** on, **Show in folder** on a download
+opens a **Downloads** window over the browser, showing the browser's own folder. **Open** on a file
+the browser can't show itself opens the same window with that file selected. A file can be dragged
+from the window onto a website, for example onto a firmware upload area. The window only shows and
+selects files: **OK** and **Cancel** close it, and the session bar's **Files** panel deletes files
+and moves them to and from the computer. **Open** on a file the browser can show, such as a PDF,
+shows it in a browser tab. This works only for the browser's own folder: other local files stay
+blocked, and another browser's folder can't be read. Other requests to open something outside the
+browser, such as a `mailto:` link, do nothing. When **Files In The Browser** is turned off,
+**Show in folder** and **Open** do nothing and an open **Downloads** window closes.
+
+**Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger
+than the limit fails to download. The total is checked every 3 seconds, and a browser whose files
+pass the limit, or can't be measured completely, is closed: its user sees *This browser's files
+passed its N GB limit, so it was closed.* The limit is an estimate, not a hard bound: a fast
+download can pass it by what arrives between two checks. A changed limit applies to browsers opened
+after the change.
+
+**Disk sizing.** The files are on the `remote-browser-files` Docker volume. The Docker host needs
+about **Browsers At A Time × Storage Per Browser** free space (for example 5 × 2 GB = 10 GB). For a
+hard bound, put the volume on a filesystem of its own with a fixed size (for example a host
+directory on a separate partition, mounted at `/var/lib/browser-files` in the `remote-browser`
+service). The app does not manage that filesystem.
+
+**What is recorded**, in the connection records of the session, with its user:
+
+- Each file that lands in the browser's folder (downloaded by the browser, or uploaded through the
+  portal): its name and size.
+- Each copy to a computer (name and size; a copy the user broke off is recorded as partly copied),
+  each upload from a computer, and each delete from the Files panel, when it happens.
+
+Recording the files that land in the folder is best-effort. The remote browser keeps the list for
+10 minutes after a browser closes; entries are lost when the app or its database is down for longer
+than that, or when the `remote-browser` container restarts.
+
+**Accepted risks**
+
+- Files a website receives through the browser's file dialog are not recorded (the connection
+  records show which sites the browser reached).
+- Files are not scanned for malware.
+- **Save Page As** (Ctrl+S) can still write into the browser's temporary folders in memory. They are
+  limited by the container's memory and wiped when the browser closes.
+- A download that already started continues when the setting is turned off.
+- The storage limit is an estimate (see above).
+
+### Session and connection records
+
+A web session has start and end records like RDP and SSH (destination *Remote Browser*). Each new
+connection the browser opens is also recorded once: the destination address, port and protocol,
+with the session and the user. Connections are not counted in the traffic summaries. When the
+recorder misses connections (for example while the app restarts), a gap record says so.
+
+### Set it up
+
+1. **Settings → Remote Access → Remote Browser:** choose the routing-peer group (the office routing
+   peers) and turn web sessions on. The app creates its groups, route and policies in NetBird.
+2. **Create Setup Key** in the same card and put it in `.env` as
+   `REMOTE_BROWSER_GATEWAY_SETUP_KEY` (one-time key, valid for one day). Keep `.env` readable by its
+   owner only. A new key revokes the earlier unused ones, so only one browser gateway can enroll.
+3. `.env` must also set `TAG` (the release `update.sh` installs), because the browser image follows
+   the app's version.
+4. Start the browser gateway and its containers together, from the folder that holds
+   `docker-compose.yml` (the files `remote-browser/seccomp.json` and `remote-browser/resolv.conf` are
+   read from there):
+
+   ```bash
+   docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-browser up -d
+   ```
+
+   Add `--profile remote-names` if you use the names gateway.
+5. The host isolation rules (below) already cover the browser gateway (`172.31.250.4` and the
+   gateways' egress network).
+6. **Check the sandbox on the host.** Chromium's sandbox needs unprivileged user namespaces. If the
+   host restricts them (for example Ubuntu's AppArmor setting
+   `kernel.apparmor_restrict_unprivileged_userns=1`), browsers do not start and Settings shows the
+   gateway as not ready.
+
+**Settings → Remote Access → Remote Browser** shows whether the gateway is enrolled, online and
+ready, and why not. Before a web session opens, the app also checks that it reaches the browser
+gateway's guacd.
+
+**Enroll the browser gateway again** (for example after its peer was deleted in NetBird): delete the
+old browser gateway peer in NetBird (**Peers**), create a new setup key in the card, put it in `.env`
+and start the four containers again with the command above. The card refuses a new key while the
+browser gateway group still has a peer.
+
+### Known limits
+
+- Pasting Hebrew text does not work (see above).
+- Restarting the `remote-browser` container ends every open browser.
+- Re-create the browser gateway's four containers together (the command above); re-creating only
+  the gateway leaves the others stopped.
+
 ## Settings
 
 | Setting | Default | Notes |
@@ -693,7 +901,7 @@ that the real end time is unknown.
 | Sessions Per User / In Total | 5 / 20 | Sessions that are still opening count too. |
 | Idle Timeout | 30 minutes | No keyboard or mouse input. A session in a background tab gets none. |
 | Maximum Session Length | 8 hours | |
-| Allow Clipboard | On | Text only. File transfer is always off. |
+| Allow Clipboard | On | Text only. RDP and SSH file transfer is always off; web sessions have their own [file settings](#files). |
 | RDP Display: Colors | 32-bit | 8, 16, 24 or 32-bit. guacd's graphics pipeline (GFX) always runs at 32-bit, so a lower depth turns it off. |
 | RDP Display: Keyboard Layout | English (US) | The remote server's layout, from guacd's built-in list. Characters it doesn't have, such as Hebrew, are sent as Unicode text. |
 | RDP Display: Font Smoothing | On | ClearType. |

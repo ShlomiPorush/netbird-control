@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { loadGuacamole, loadKeyboardLayout, type Guac } from '@/lib/remoteAccess';
+import { loadGuacamole, loadKeyboardLayout, type Guac, type RemoteProtocol } from '@/lib/remoteAccess';
 import type { ScreenApi } from './GuacScreen';
 
 // The session bar's tools: its menus, the special keys, the on-screen keyboard, the device
@@ -10,14 +10,14 @@ import type { ScreenApi } from './GuacScreen';
 
 const K = {
   ctrl: 0xffe3, alt: 0xffe9, shift: 0xffe1, win: 0xffeb, del: 0xffff, tab: 0xff09, esc: 0xff1b,
-  f4: 0xffc1, print: 0xff61,
+  f4: 0xffc1, f5: 0xffc2, print: 0xff61, left: 0xff51, right: 0xff53,
 };
 const ch = (c: string) => c.charCodeAt(0);
 
 interface SpecialKey { label: string; combo: string; keys: number[] }
 
 /** Key combinations a browser can't send itself (the local system takes them) or a phone has no key for. */
-export const SPECIAL_KEYS: Record<'rdp' | 'ssh', SpecialKey[]> = {
+export const SPECIAL_KEYS: Record<RemoteProtocol, SpecialKey[]> = {
   rdp: [
     { label: 'Security Options', combo: 'Ctrl+Alt+Del', keys: [K.ctrl, K.alt, K.del] },
     { label: 'Start Menu', combo: 'Win', keys: [K.win] },
@@ -35,6 +35,16 @@ export const SPECIAL_KEYS: Record<'rdp' | 'ssh', SpecialKey[]> = {
     { label: 'Clear Screen', combo: 'Ctrl+L', keys: [K.ctrl, ch('l')] },
     { label: 'Escape', combo: 'Esc', keys: [K.esc] },
     { label: 'Tab', combo: 'Tab', keys: [K.tab] },
+  ],
+  web: [
+    { label: 'Address Bar', combo: 'Ctrl+L', keys: [K.ctrl, ch('l')] },
+    { label: 'New Tab', combo: 'Ctrl+T', keys: [K.ctrl, ch('t')] },
+    { label: 'Close Tab', combo: 'Ctrl+W', keys: [K.ctrl, ch('w')] },
+    { label: 'Next Tab', combo: 'Ctrl+Tab', keys: [K.ctrl, K.tab] },
+    { label: 'Previous Tab', combo: 'Ctrl+Shift+Tab', keys: [K.ctrl, K.shift, K.tab] },
+    { label: 'Reload', combo: 'F5', keys: [K.f5] },
+    { label: 'Back', combo: 'Alt+Left', keys: [K.alt, K.left] },
+    { label: 'Forward', combo: 'Alt+Right', keys: [K.alt, K.right] },
   ],
 };
 
@@ -104,17 +114,16 @@ export function BarMenu({ title, icon, container, width = 248, pressed, onOpenCh
   return (
     <>
       <button ref={btn} type="button" onClick={toggle} title={title} aria-label={title} aria-haspopup="menu" aria-expanded={open}
-        className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-300 transition-colors hover:bg-nb-gray-800 hover:text-white focus-visible:outline-2 focus-visible:outline-netbird-400',
-          (open || pressed) && 'bg-nb-gray-800 text-white')}>
+        className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-600 transition-colors hover:bg-nb-gray-100 hover:text-nb-gray-900 dark:text-nb-gray-300 dark:hover:bg-nb-gray-800 dark:hover:text-white focus-visible:outline-2 focus-visible:outline-netbird-400',
+          (open || pressed) && 'bg-nb-gray-100 text-nb-gray-900 dark:bg-nb-gray-800 dark:text-white')}>
         {icon}
       </button>
       {open && container.current && createPortal(
         <>
           <div className="fixed inset-0 z-40" onClick={() => close()} />
           <div ref={panel} role="menu" aria-label={title} tabIndex={-1} style={{ left: pos.left, top: pos.top, width }}
-            // Focus moving out of the menu (a click elsewhere) closes it.
             onBlur={(e) => { if (!panel.current?.contains(e.relatedTarget as Node | null)) close(); }}
-            className="fixed z-50 max-h-[calc(100dvh-5rem)] overflow-y-auto rounded-xl border border-nb-gray-800 bg-nb-gray-940 p-1.5 shadow-2xl outline-hidden">
+            className="nb-follow-theme fixed z-50 max-h-[calc(100dvh-5rem)] overflow-y-auto rounded-xl border border-nb-gray-200 bg-white text-nb-gray-900 dark:border-nb-gray-800 dark:bg-nb-gray-940 dark:text-nb-gray-100 p-1.5 shadow-2xl outline-hidden">
             {children(close)}
           </div>
         </>,
@@ -124,17 +133,36 @@ export function BarMenu({ title, icon, container, width = 248, pressed, onOpenCh
   );
 }
 
-/** One row of a bar menu: an action, with its keys or a check mark on the right. */
+const BELOW_BAR = 64;
+
+export function useBarPanelPosition(anchor: RefObject<HTMLElement | null>, maxWidth: number, shown = true) {
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!shown) return;
+    const place = () => {
+      const r = anchor.current?.getBoundingClientRect();
+      const viewport = document.documentElement.clientWidth;
+      const width = Math.min(maxWidth, viewport - 16);
+      if (!r || !r.width) setPos({ left: Math.max(8, (viewport - width) / 2), top: BELOW_BAR, width });
+      else setPos({ left: Math.max(8, Math.min(r.right - width, viewport - width - 8)), top: BELOW_BAR, width });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [anchor, maxWidth, shown]);
+  return pos;
+}
+
 export function MenuRow({ icon, label, hint, checked, disabled, onClick, className }: {
   icon?: ReactNode; label: string; hint?: string; checked?: boolean; disabled?: boolean; onClick: () => void; className?: string;
 }) {
   return (
     <button type="button" role={checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={checked} onClick={onClick} disabled={disabled}
-      className={cn('flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-nb-gray-200 hover:bg-nb-gray-900 focus-visible:bg-nb-gray-900 focus-visible:outline-hidden disabled:opacity-40 disabled:hover:bg-transparent', className)}>
-      {icon && <span className="shrink-0 text-nb-gray-400">{icon}</span>}
+      className={cn('flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-nb-gray-800 hover:bg-nb-gray-100 focus-visible:bg-nb-gray-100 focus-visible:outline-hidden disabled:opacity-40 disabled:hover:bg-transparent dark:text-nb-gray-200 dark:hover:bg-nb-gray-900 dark:focus-visible:bg-nb-gray-900', className)}>
+      {icon && <span className="shrink-0 text-nb-gray-500 dark:text-nb-gray-400">{icon}</span>}
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {hint && <kbd className="shrink-0 rounded-md bg-nb-gray-900 px-1.5 py-0.5 font-mono text-[0.7rem] text-nb-gray-400 ring-1 ring-inset ring-nb-gray-800">{hint}</kbd>}
-      {checked && <Check size={15} className="shrink-0 text-netbird-400" />}
+      {hint && <kbd className="shrink-0 rounded-md bg-nb-gray-100 px-1.5 py-0.5 font-mono text-[0.7rem] text-nb-gray-500 ring-1 ring-inset ring-nb-gray-200 dark:bg-nb-gray-900 dark:text-nb-gray-400 dark:ring-nb-gray-800">{hint}</kbd>}
+      {checked && <Check size={15} className="shrink-0 text-netbird-600 dark:text-netbird-400" />}
     </button>
   );
 }
@@ -224,7 +252,7 @@ const ROW_KEYS = [
 ];
 
 export function KeyRow({ protocol, latched, onKey, onLatch }: {
-  protocol: 'rdp' | 'ssh'; latched: number[]; onKey: (keysym: number) => void; onLatch: (modifiers: number[]) => void;
+  protocol: RemoteProtocol; latched: number[]; onKey: (keysym: number) => void; onLatch: (modifiers: number[]) => void;
 }) {
   const keepKeyboardOpen = (e: ReactPointerEvent) => e.preventDefault();
   const key = 'flex h-9 min-w-0 max-w-16 flex-1 items-center justify-center rounded-lg text-[0.78rem] font-semibold text-nb-gray-200 ring-1 ring-inset ring-nb-gray-800 active:bg-nb-gray-800';

@@ -1,6 +1,6 @@
 @import 'tailwindcss';
 
-@custom-variant dark (&:is(.dark *));
+@custom-variant dark (&:is(.dark *):not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)));
 
 /* v4 applies `hover:` only on devices with a real pointer. The Peers filter submenus open on
    `group-hover` alone, so keep v3's behavior where a tap also counts as hover. */
@@ -145,18 +145,18 @@
    layers an earlier layer wins for `!important`, so they live in the base layer: unlayered,
    they would lose to important utilities. */
 @layer base {
-  .dark .text-nb-gray-600, .dark .dark\:text-nb-gray-600 { color: #9ba6ae !important; }
-  .dark .text-nb-gray-500, .dark .dark\:text-nb-gray-500 { color: #b6bfc5 !important; }
-  .dark .text-nb-gray-400, .dark .dark\:text-nb-gray-400 { color: #c9cfd4 !important; }
-  .dark .text-nb-gray-350, .dark .dark\:text-nb-gray-350 { color: #d3d8db !important; }
-  .dark .text-nb-gray-300, .dark .dark\:text-nb-gray-300 { color: #dee2e4 !important; }
-  .dark .text-nb-gray-250, .dark .dark\:text-nb-gray-250 { color: #eceef0 !important; }
-  .dark .text-nb-gray-200, .dark .dark\:text-nb-gray-200 { color: #e6e9eb !important; }
-  .dark .text-nb-gray-100, .dark .dark\:text-nb-gray-100 { color: #edeff1 !important; }
+  .dark .text-nb-gray-600:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-600:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #9ba6ae !important; }
+  .dark .text-nb-gray-500:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-500:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #b6bfc5 !important; }
+  .dark .text-nb-gray-400:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-400:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #c9cfd4 !important; }
+  .dark .text-nb-gray-350:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-350:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #d3d8db !important; }
+  .dark .text-nb-gray-300:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-300:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #dee2e4 !important; }
+  .dark .text-nb-gray-250:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-250:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #eceef0 !important; }
+  .dark .text-nb-gray-200:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-200:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #e6e9eb !important; }
+  .dark .text-nb-gray-100:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)), .dark .dark\:text-nb-gray-100:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *)) { color: #edeff1 !important; }
 
   /* Placeholders (search boxes, inputs, textareas) - brighten them and cancel the reduced
      opacity some use (`/70`), which no `text-*` rule above can reach since it's a separate class. */
-  .dark input::placeholder, .dark textarea::placeholder { color: #aab3ba !important; opacity: 1 !important; }
+  .dark input:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *))::placeholder, .dark textarea:not(:where(html:not(.dark) .nb-follow-theme, html:not(.dark) .nb-follow-theme *))::placeholder { color: #aab3ba !important; opacity: 1 !important; }
 }
 
 /* While the remote session view covers the window, the page's scrollbar would show at the

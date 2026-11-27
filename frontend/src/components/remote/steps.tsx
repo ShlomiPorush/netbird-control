@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { GUAC, PORTAL_MESSAGE_CODES, type GuacStatus } from '@/lib/remoteAccess';
+import { GUAC, PORTAL_MESSAGE_CODES, type GuacStatus, type RemoteProtocol } from '@/lib/remoteAccess';
 import { Button, LinkButton } from '@/components/ui';
 import { FLOW_BUTTON } from './flow';
 
@@ -38,11 +38,19 @@ const STEP_SHORT: Record<StepKey, string> = {
   signin: 'Sign In',
 };
 
-export const freshSteps = (): Step[] => (['ready', 'access', 'path', 'route', 'channel', 'server'] as StepKey[]).map((key) => ({ key, label: STEP_LABELS[key], state: 'pending' }));
+const WEB_STEP_LABELS: Partial<Record<StepKey, string>> = {
+  path: 'Checking Internet Access',
+  route: 'Starting The Browser',
+  server: 'Connecting To The Browser',
+};
+
+const stepLabel = (key: StepKey, protocol?: RemoteProtocol) => (protocol === 'web' && WEB_STEP_LABELS[key]) || STEP_LABELS[key];
+
+export const freshSteps = (protocol?: RemoteProtocol): Step[] => (['ready', 'access', 'path', 'route', 'channel', 'server'] as StepKey[]).map((key) => ({ key, label: stepLabel(key, protocol), state: 'pending' }));
 
 /** The steps a new session tab starts with: the checks and the route are behind it. */
-export const handoffSteps = (c: { access?: string; path?: string } = {}): Step[] =>
-  withStep(withStep(withStep(withStep(withStep(freshSteps(), 'ready', 'pass'), 'access', 'pass', c.access), 'path', 'pass', c.path), 'route', 'pass'), 'channel', 'running');
+export const handoffSteps = (c: { access?: string; path?: string } = {}, protocol?: RemoteProtocol): Step[] =>
+  withStep(withStep(withStep(withStep(withStep(freshSteps(protocol), 'ready', 'pass'), 'access', 'pass', c.access), 'path', 'pass', c.path), 'route', 'pass'), 'channel', 'running');
 
 // Each running step stays on screen for at least this long, so the user can follow the checks.
 // The first connection in a browser tab moves slower; later ones move quicker.
@@ -175,9 +183,12 @@ const GUACD_ABORTED = 'Aborted. See logs.';
 const CONNECTION_FAILED = 'The connection failed. Try connecting again. If it keeps happening, tell an administrator.';
 
 // Translate a Guacamole status into the step it belongs to and a human sentence.
-export function explain(status: GuacStatus, stage: 'server' | 'signin'): { step: StepKey; message: string } {
+export function explain(status: GuacStatus, stage: 'server' | 'signin', protocol?: RemoteProtocol): { step: StepKey; message: string } {
   // guacd's own catch-all text ("Aborted. See logs.") says nothing to the user, whatever its code.
   if (PORTAL_MESSAGE_CODES.has(status.code) && status.message && status.message !== GUACD_ABORTED) return { step: stage, message: status.message };
+  if (protocol === 'web' && status.code !== -1) {
+    return { step: stage, message: "The browser couldn't be reached. Try again. If it keeps happening, tell an administrator." };
+  }
   switch (status.code) {
     case GUAC.CLIENT_UNAUTHORIZED:
       return { step: 'signin', message: 'Sign-in failed. Check the user name and password, then try again.' };

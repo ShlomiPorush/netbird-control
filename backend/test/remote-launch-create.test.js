@@ -11,6 +11,7 @@ const settings = {};
 core.getSetting = async (k) => settings[k] ?? null;
 let failSettings = false;
 core.setSetting = async (k, v) => { if (failSettings) throw new Error('db down'); settings[k] = v; };
+core.updateSetting = async (k, update) => { if (failSettings) throw new Error('db down'); settings[k] = String(update(settings[k] ?? null)); return settings[k]; };
 
 const audits = [];
 let failAuditAction = null;
@@ -1022,8 +1023,9 @@ test('the network is created, attached before any router, then one router per pe
     const after = stored();
     assert.deepEqual(after.networks, ['n-office', net.id]);
     assert.deepEqual(after.createResources, { ...before.createResources, networkId: net.id });
-    const rest = (x) => { const c = { ...x }; delete c.networks; delete c.createResources; return c; };
+    const rest = (x) => { const c = { ...x }; delete c.networks; delete c.createResources; delete c.rev; return c; };
     assert.deepEqual(rest(after), rest(before));
+    assert.equal(after.rev, before.rev + 1);
     assert.deepEqual(out.config, { networks: ['n-office', net.id], createResources: { ...ra._internal.normConfig(before).createResources, networkId: net.id } });
     assert.equal(ra.getRemoteAccessConfig().createResources.networkId, net.id, "this instance's copy follows");
     const attach = audits.find(a => a.action === 'remote_access.network_attach');
@@ -1111,6 +1113,7 @@ test('a setting that cannot be stored leaves the new network and names it', asyn
 
 test('the first network on a clean install is added to an empty list', async () => {
     ra._internal.setConfigForTest({});
+    settings.remote_access_config = JSON.stringify({});
     const out = await setUp({ peers: ['p-r'] });
     assert.deepEqual(stored().networks, [out.network.id]);
     assert.equal(stored().createResources.networkId, out.network.id);

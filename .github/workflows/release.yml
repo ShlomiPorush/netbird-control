@@ -1,10 +1,11 @@
 name: Release
 
 # Publishes a release when a release pull request (opened by scripts/release.sh) is merged:
-# tags the merge commit, builds and pushes the version image, creates the GitHub release from the
-# version's CHANGELOG section, then moves `latest` (the image tag and the GitHub marker) to the
-# highest published release. Each step checks what an earlier, failed run already did, so a failed
-# run is retried with "Re-run jobs" on the same commit. This is the only workflow that publishes.
+# tags the merge commit, builds and pushes the version images (the app and the remote browser),
+# creates the GitHub release from the version's CHANGELOG section, then moves `latest` (both
+# image tags and the GitHub marker) to the highest published release. Each step checks what an
+# earlier, failed run already did, so a failed run is retried with "Re-run jobs" on the same
+# commit. This is the only workflow that publishes.
 on:
   push:
     branches: [ main ]
@@ -29,6 +30,8 @@ jobs:
       CL: .github/scripts/changelog.js
       # The published image is ghcr.io/<owner>/nbcontrol (not the repository name).
       IMAGE_NAME: nbcontrol
+      # The remote browser (remote-browser/), published with the same version as the app.
+      BROWSER_IMAGE_NAME: nbcontrol-browser
 
     steps:
       # Actions are pinned to full commit SHAs (not mutable tags) so a repointed tag
@@ -47,6 +50,7 @@ jobs:
             echo "version=$VERSION"
             echo "tag=v$VERSION"
             echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$IMAGE_NAME"
+            echo "browser=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$BROWSER_IMAGE_NAME"
           } >> "$GITHUB_OUTPUT"
 
       - name: Require a merged release pull request
@@ -189,6 +193,56 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The same check for the remote browser's image, so a re-run builds whichever one is missing.
+      - name: Check the browser image
+        id: browser-image
+        env:
+          STATE: ${{ steps.state.outputs.state }}
+          VERSION: ${{ steps.v.outputs.version }}
+          IMAGE: ${{ steps.v.outputs.browser }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          BUILD=true
+          if [ "$STATE" = "published" ]; then
+            set +e
+            OUT=$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1)
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              BUILD=false
+              echo "Release $TAG is published and $IMAGE:$VERSION exists; not rebuilding it."
+            elif printf '%s\n' "$OUT" | grep -qiE 'manifest unknown|: not found$'; then
+              echo "Release $TAG is published but $IMAGE:$VERSION is missing; building it from $GITHUB_SHA."
+            else
+              printf '%s\n' "$OUT"
+              echo "::error::Could not check whether $IMAGE:$VERSION exists"
+              exit 1
+            fi
+          fi
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata for the browser image
+        if: steps.browser-image.outputs.build == 'true'
+        id: browser-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.v.outputs.browser }}
+          tags: type=raw,value=${{ steps.v.outputs.version }}
+          flavor: latest=false
+
+      # Its own cache scope, so the two images do not evict each other's cache.
+      - name: Build and push the browser image
+        if: steps.browser-image.outputs.build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: remote-browser
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.browser-meta.outputs.tags }}
+          labels: ${{ steps.browser-meta.outputs.labels }}
+          cache-from: type=gha,scope=browser
+          cache-to: type=gha,mode=max,scope=browser
+
       - name: Create the GitHub release
         if: steps.state.outputs.state == 'absent'
         env:
@@ -203,6 +257,7 @@ jobs:
         env:
           VERSION: ${{ steps.v.outputs.version }}
           IMAGE: ${{ steps.v.outputs.image }}
+          BROWSER: ${{ steps.v.outputs.browser }}
           TAG: ${{ steps.v.outputs.tag }}
         run: |
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
@@ -217,4 +272,5 @@ jobs:
           ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f make_latest=true > /dev/null
           docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$VERSION"
-          echo "$TAG is the latest release (GitHub marker and $IMAGE:latest)."
+          docker buildx imagetools create -t "$BROWSER:latest" "$BROWSER:$VERSION"
+          echo "$TAG is the latest release (GitHub marker, $IMAGE:latest and $BROWSER:latest)."

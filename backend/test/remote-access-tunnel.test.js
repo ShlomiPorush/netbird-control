@@ -12,6 +12,7 @@ const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] || null;
 core.setSetting = async (k, v) => { settings[k] = v; };
+core.updateSetting = async (k, update) => { settings[k] = String(update(settings[k] ?? null)); return settings[k]; };
 const queries = [];
 const order = []; // DB writes and event records, in the order they happened
 // The target holds a session start writes live in their own stand-in table.

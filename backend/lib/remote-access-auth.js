@@ -315,8 +315,8 @@ const viewResource = (view, res) => arr(view.resources).find(r => r && r.id === 
 // was added) or followed by " (<installation name>)". Every installation recognizes every other
 // installation's objects on the same NetBird account, whatever characters its name has.
 const MANAGED_NAME_BASES = {
-    group: ['Browser Gateway', 'Browser Gateway Targets', 'Browser Gateway Names', 'Browser Gateway Name Targets'],
-    policy: ['Browser Gateway', 'Browser Gateway Names'],
+    group: ['Browser Gateway', 'Browser Gateway Targets', 'Browser Gateway Names', 'Browser Gateway Name Targets', 'Browser Gateway Web', 'Browser Gateway Web ACL'],
+    policy: ['Browser Gateway', 'Browser Gateway Names', 'Browser Gateway Web', 'Browser Gateway Web Routing'],
 };
 function isManagedGatewayName(name, kind) {
     if (typeof name !== 'string' || !name) return false;
@@ -525,7 +525,88 @@ function pathStatus(snap, cfg, routers) {
     return { ok: false, code: 'NO_ROUTER_ONLINE' };
 }
 
+const EXIT_NETWORK = '0.0.0.0/0';
+const WEB_ROUTE_NETWORK_PREFIX = 'nbc-browser-';
+const WEB_ROUTE_METRIC = 9999;
+const WEB_GATEWAY_ROUTES = ['default dev wt0'];
+const GATEWAY_STATUS_MAX_AGE_S = 60;
+
+const idSet = (list) => new Set(arr(list).map(idOf).filter(Boolean));
+const sameIds = (list, expected) => {
+    const have = idSet(list);
+    return arr(list).length === expected.length && have.size === expected.length && expected.every(id => have.has(id));
+};
+
+function webRouteBody({ description, networkId, routerGroupId, webGroupId, aclGroupId }) {
+    return {
+        description, network_id: networkId, enabled: true, network: EXIT_NETWORK,
+        peer_groups: [routerGroupId], groups: [webGroupId], access_control_groups: [aclGroupId],
+        metric: WEB_ROUTE_METRIC, masquerade: true, keep_route: false, skip_auto_apply: false,
+    };
+}
+
+function webPolicyBody({ name, description, protocol, sourceGroupId, destinationGroupId }) {
+    return {
+        name, description, enabled: true, source_posture_checks: [],
+        rules: [{ name, enabled: true, action: 'accept', bidirectional: false, protocol, ports: [], sources: [sourceGroupId], destinations: [destinationGroupId] }],
+    };
+}
+
+function webRouteMatches(route, want) {
+    if (!route || typeof route !== 'object') return false;
+    return route.enabled === true && route.network === EXIT_NETWORK && route.network_id === want.network_id
+        && !route.peer && !arr(route.domains).length
+        && sameIds(route.peer_groups, want.peer_groups) && sameIds(route.groups, want.groups)
+        && sameIds(route.access_control_groups, want.access_control_groups)
+        && route.masquerade === true && route.metric === want.metric && route.keep_route === false
+        && (route.skip_auto_apply === undefined || route.skip_auto_apply === false);
+}
+
+function webPolicyMatches(policy, want) {
+    if (!policy || typeof policy !== 'object' || policy.enabled !== true || arr(policy.source_posture_checks).length) return false;
+    const rules = arr(policy.rules);
+    if (rules.length !== 1) return false;
+    const [rule] = rules;
+    const [expected] = want.rules;
+    return !!rule && rule.enabled !== false && rule.action === 'accept' && rule.bidirectional === false
+        && String(rule.protocol || '').toLowerCase() === expected.protocol
+        && sameIds(rule.sources, expected.sources) && sameIds(rule.destinations, expected.destinations)
+        && isEmptyValue(rule.sourceResource) && isEmptyValue(rule.destinationResource);
+}
+
+function browserGateProblem(snap, ids, want) {
+    if (!ids.webGroupId || !ids.webAclGroupId || !ids.webRouteId || !ids.webPolicyId || !ids.webRoutingPolicyId) return 'WEB_NOT_SET_UP';
+    const groups = new Map(arr(snap.groups).filter(g => g && g.id).map(g => [g.id, g]));
+    if (!want.routerGroupId || !groups.has(want.routerGroupId)) return 'WEB_ROUTER_GROUP_MISSING';
+    const web = groups.get(ids.webGroupId);
+    if (!web) return 'WEB_NOT_SET_UP';
+    if (!ids.webPeerId) return 'WEB_PEER_NOT_ENROLLED';
+    if (!sameIds(web.peers, [ids.webPeerId])) return 'WEB_GROUP_CHANGED';
+    const acl = groups.get(ids.webAclGroupId);
+    if (!acl || arr(acl.peers).length || arr(acl.resources).length) return 'WEB_ACL_CHANGED';
+    const route = arr(snap.routes).find(r => r && r.id === ids.webRouteId);
+    if (!webRouteMatches(route, want.route)) return 'WEB_ROUTE_CHANGED';
+    const policies = new Map(arr(snap.policies).filter(p => p && p.id).map(p => [p.id, p]));
+    if (!webPolicyMatches(policies.get(ids.webPolicyId), want.icmpPolicy)) return 'WEB_POLICY_CHANGED';
+    if (!webPolicyMatches(policies.get(ids.webRoutingPolicyId), want.routingPolicy)) return 'WEB_POLICY_CHANGED';
+    return null;
+}
+
+function browserLiveProblem(ready, { peerIp, nowSec }) {
+    if (!ready || ready.ok !== true) return 'BROWSER_UNAVAILABLE';
+    const g = ready.gateway;
+    if (!g || typeof g !== 'object') return 'GATEWAY_STATUS_MISSING';
+    if (!Number.isFinite(g.ts) || Math.abs(nowSec - g.ts) > GATEWAY_STATUS_MAX_AGE_S) return 'GATEWAY_STATUS_STALE';
+    if (!Number.isFinite(Number(ready.netns)) || Number(g.netns) !== Number(ready.netns)) return 'GATEWAY_NETNS_CHANGED';
+    if (g.lock !== true) return 'GATEWAY_LOCK_MISSING';
+    if (!peerIp || g.wt0 !== peerIp) return 'GATEWAY_ADDRESS_CHANGED';
+    const routes = arr(ready.table7120).map(line => String(line).trim()).filter(Boolean);
+    if (routes.length !== WEB_GATEWAY_ROUTES.length || routes.some((line, i) => line !== WEB_GATEWAY_ROUTES[i])) return 'GATEWAY_ROUTES_CHANGED';
+    return null;
+}
+
 module.exports = {
+    browserGateProblem, browserLiveProblem, webRouteBody, webPolicyBody, webRouteMatches, webPolicyMatches, WEB_ROUTE_NETWORK_PREFIX,
     evaluateUserAccess, evaluateNameAccess, normalizeTarget, domainPattern, isDomainResource, isExactDomainResource,
     gatewayReach, extraReach, pathStatus, isRefusedTarget, isManagedGatewayName, GATEWAY_INTERNAL_SUBNETS, REFUSED_TARGET_PREFIXES,
     userSourceGroups, ruleOpensTcpPort, grantIsValid, parsePrefix, ipv4ToInt, evaluatePolicies, patternMatches,
