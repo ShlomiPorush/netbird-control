@@ -39,7 +39,7 @@ function reset(saved, cached = saved) {
     ra._internal.setConfigForTest(cached || {});
 }
 
-test('the browser language is English unless it is one of the four offered', () => {
+test('the browser language is English unless it is Hebrew', () => {
     const language = (value) => normConfig({ browser: { language: value } }).browser.language;
     assert.equal(normConfig({}).browser.language, 'en-US');
     for (const value of ['en-US', 'he']) assert.equal(language(value), value);

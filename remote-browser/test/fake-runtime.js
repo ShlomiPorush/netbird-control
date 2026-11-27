@@ -21,6 +21,7 @@ function fakeRuntime() {
     busy: new Set(),
     launches: [],
     policyWrites: [],
+    closedWindows: [],
     folders: new Map(),
     padding: 0,
     scans: 0,
@@ -56,6 +57,9 @@ function fakeRuntime() {
     },
     writeFilesPolicy(enabled) {
       runtime.policyWrites.push(enabled);
+    },
+    async closeFileWindows(ids) {
+      runtime.closedWindows.push(ids.slot);
     },
     async scanFiles(ids) {
       runtime.scans += 1;

@@ -460,6 +460,18 @@ test('the files policy is written only when it changes, and an older rev is igno
   assert.deepEqual(runtime.policyWrites, [true, false]);
 });
 
+test('blocking files closes the Downloads window of every open browser, and allowing them closes none', async () => {
+  const { supervisor, runtime, startOf } = setup();
+  await filesOp(supervisor, { rev: 0 });
+  await startOf('a');
+  await startOf('b');
+  assert.deepEqual(runtime.closedWindows, []);
+  await filesOp(supervisor, { rev: 1, enabled: false });
+  assert.deepEqual(runtime.closedWindows.sort(), [0, 1]);
+  await filesOp(supervisor, { rev: 2 });
+  assert.deepEqual(runtime.closedWindows.length, 2);
+});
+
 test('a policy write that fails is refused, keeps the held settings and is retried by the next files op', async () => {
   const { supervisor, runtime, startOf } = setup();
   await startOf('a');

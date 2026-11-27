@@ -165,15 +165,20 @@ function writeFilesPolicy(enabled, file = POLICY_FILE, temporary = POLICY_TEMPOR
 
 function createOwnedDir(dir, uid, files) {
   fs.mkdirSync(dir, { mode: 0o700 });
-  const created = new Set();
-  for (const [name, content] of Object.entries(files)) {
-    const file = path.join(dir, name);
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(file, content, { mode: 0o600, flag: 'wx' });
-    for (let entry = file; entry !== dir; entry = path.dirname(entry)) created.add(entry);
+  try {
+    const created = new Set();
+    for (const [name, content] of Object.entries(files)) {
+      const file = path.join(dir, name);
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(file, content, { mode: 0o600, flag: 'wx' });
+      for (let entry = file; entry !== dir; entry = path.dirname(entry)) created.add(entry);
+    }
+    for (const entry of [...created].sort((a, b) => b.length - a.length)) fs.chownSync(entry, uid, uid);
+    fs.chownSync(dir, uid, uid);
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
   }
-  for (const entry of [...created].sort((a, b) => b.length - a.length)) fs.chownSync(entry, uid, uid);
-  fs.chownSync(dir, uid, uid);
 }
 
 function chromiumHomeFiles({ slot }, auth) {
@@ -360,6 +365,10 @@ async function wipe({ dir, uid }, owner = ownerOf) {
 
 const ignoreFailure = () => {};
 
+async function closeFileWindows({ chromiumUid }) {
+  await runAs(chromiumUid, 'sh', ['-c', 'pkill -x zenity; exit 0']);
+}
+
 async function teardown(ids, afterKill = async () => {}) {
   const uids = [ids.chromiumUid, ids.displayUid];
   const killed = await killAll(uids);
@@ -539,6 +548,7 @@ module.exports = {
   chromiumCommand,
   chromiumEnv,
   chromiumHomeFiles,
+  closeFileWindows,
   createOwnedDir,
   createUpload,
   deleteFile,

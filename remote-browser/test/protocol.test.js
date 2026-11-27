@@ -113,7 +113,7 @@ test('the theme of a start is light or dark, and light when it is missing', () =
   for (const theme of ['Dark', 'system', '', null, 1, ['dark']]) rejects(start({ theme }));
 });
 
-test('the browser language of a start is one of four, and English when it is missing', () => {
+test('the browser language of a start is English or Hebrew, and English when it is missing', () => {
   for (const language of ['en-US', 'he']) assert.equal(parseRequest(start({ language })).language, language);
   for (const language of ['ar', 'ru']) assert.throws(() => parseRequest(start({ language })), { code: 'BAD_REQUEST' });
   assert.equal(parseRequest(start()).language, 'en-US');

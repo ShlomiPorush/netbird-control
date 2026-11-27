@@ -91,9 +91,15 @@ class Supervisor {
       }
       this.policyFailed = false;
       this.log(`files in the browser ${enabled ? 'enabled' : 'blocked'} (rev ${rev})`);
+      if (!enabled) await this.closeFileWindows();
     }
     this.filesPolicy = { enabled, transfer: enabled && transfer, rev };
     return { ok: true, rev };
+  }
+
+  closeFileWindows() {
+    return Promise.all([...this.sessions].map(([session, record]) => this.runtime.closeFileWindows(record.ids)
+      .catch((error) => this.log(`session ${session}: the Downloads window could not be closed: ${error.message}`))));
   }
 
   endAll(reason) {

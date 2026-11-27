@@ -805,7 +805,8 @@ selects files: **OK** and **Cancel** close it, and the session bar's **Files** p
 and moves them to and from the computer. **Open** on a file the browser can show, such as a PDF,
 shows it in a browser tab. This works only for the browser's own folder: other local files stay
 blocked, and another browser's folder can't be read. Other requests to open something outside the
-browser, such as a `mailto:` link, do nothing.
+browser, such as a `mailto:` link, do nothing. When **Files In The Browser** is turned off,
+**Show in folder** and **Open** do nothing and an open **Downloads** window closes.
 
 **Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger
 than the limit fails to download. The total is checked every 3 seconds, and a browser whose files

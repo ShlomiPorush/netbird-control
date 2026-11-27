@@ -1,6 +1,7 @@
 #!/bin/sh
 slot=$(($(id -u) - 62000))
 folder=/var/lib/browser-files/chromium-$slot
+grep -q '"AllowFileSelectionDialogs":true' /etc/chromium/policies/managed/files.json || exit 0
 case "$1" in
   file://*) target=${1#file://} ;;
   [A-Za-z]*:*) exit 0 ;;

@@ -160,6 +160,14 @@ test('every folder and file of a new browser home belongs to its user, folders 0
   assert.equal(fs.readFileSync(path.join(dir, '.config/gtk-3.0/bookmarks'), 'utf8'), 'file:///var/lib/browser-files/chromium-4 Downloads\n');
 });
 
+test('a browser home that fails halfway is removed, so the slot is not left holding it', onLinux, (t) => {
+  const root = scratch(t);
+  const uid = process.getuid() === 0 ? 62004 : process.getuid();
+  const dir = path.join(root, 'chromium-4');
+  assert.throws(() => createOwnedDir(dir, uid, { xauth: 'cookie', 'profile': 'file', 'profile/Default/Preferences': '{}' }));
+  assert.equal(fs.existsSync(dir), false);
+});
+
 test('Chromium gets the browser language in its environment and asks websites for it before English', () => {
   const dir = '/run/browser/chromium-4';
   const hebrew = chromiumArgs({ dir, scale: 1.5, startPage: 'https://example.com/', language: 'he' });

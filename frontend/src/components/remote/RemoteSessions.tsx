@@ -407,7 +407,6 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
         </div>
       ))}
 
-      {/* The handle brings the bar back: a click, or the pointer resting on it. */}
       {!barVisible && active && (
         <button onClick={reveal} onPointerDown={(e) => e.preventDefault()} onMouseEnter={handleEnter} onMouseLeave={handleLeave} aria-label="Show the session bar"
           className="nb-follow-theme absolute left-1/2 top-0 z-30 -translate-x-1/2 inline-flex h-7 max-w-[70vw] items-center gap-2 rounded-b-xl border border-t-0 border-nb-gray-200 bg-white/95 px-3 text-[0.75rem] font-medium text-nb-gray-700 shadow-lg backdrop-blur-md dark:border-nb-gray-800 dark:bg-nb-gray-940/95 dark:text-nb-gray-200">
@@ -419,18 +418,15 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
         </button>
       )}
 
-      {/* The bar floats above the session, like a dock. */}
       <div
         onPointerEnter={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = true; reveal(); }}
         onPointerLeave={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = false; if (!keepBar) scheduleHide(1500); }}
         className={cn('nb-follow-theme absolute left-1/2 top-2 z-30 flex h-[46px] w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-2xl border border-nb-gray-200 bg-white/92 px-1.5 text-nb-gray-900 shadow-[0_16px_40px_-14px_rgba(0,0,0,0.25)] backdrop-blur-md dark:border-nb-gray-800 dark:bg-nb-gray-940/92 dark:text-nb-gray-100 dark:shadow-[0_16px_40px_-14px_rgba(0,0,0,0.7)] transition-transform duration-200 sm:w-max sm:max-w-[calc(100%-1rem)]',
           barVisible ? 'translate-y-0' : '-translate-y-[calc(100%+1rem)]')}>
-        {/* The NetBird mark is the way back to the portal. */}
         <button type="button" onClick={backToPortal} title="Back To The Portal (Sessions Keep Running)" aria-label="Back To The Portal (Sessions Keep Running)"
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-netbird/12 transition-colors hover:bg-netbird/25 focus-visible:outline-2 focus-visible:outline-netbird-400">
           <img src="/favicon.svg" alt="" className="h-[18px] w-[18px]" />
         </button>
-        {/* Tabs: a list on wide screens, a menu on narrow ones. */}
         <div ref={tabsRef} className="hidden sm:flex min-w-0 shrink items-center gap-1 overflow-x-auto">
           {sessions.map((s) => (
             <div key={s.sessionId} data-tab={s.sessionId}
@@ -532,7 +528,6 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                     <MenuRow icon={<Keyboard size={15} />} label="On-Screen Keyboard" checked={oskOpen}
                       onClick={() => { toggleOsk(); close(); }} />
                   )}
-                  {/* What the bar has no room for on a narrow screen. */}
                   <div className="sm:hidden">
                     <div className="my-1 h-px bg-nb-gray-200 dark:bg-nb-gray-800" />
                     <MenuRow className={coarse ? 'min-[400px]:hidden' : undefined} icon={<Maximize2 size={15} />} label="Full Screen" onClick={() => { close(); fullscreen(); }} />
@@ -627,8 +622,6 @@ function ClipboardPanel({ initial, anchor, note, onSend, onClose }: {
   const [text, setText] = useState(initial);
   useEffect(() => setText(initial), [initial]);
   return (
-    // Never taller than the window below the bar: the text box gives up height first, so the
-    // buttons stay in reach on a low screen.
     <div style={pos ? { left: pos.left, top: pos.top, width: pos.width, maxHeight: `calc(100dvh - ${pos.top + 8}px)` } : { visibility: 'hidden' }}
       className="nb-follow-theme fixed z-40 flex overflow-y-auto flex-col rounded-2xl border border-nb-gray-200 bg-white text-nb-gray-900 dark:border-nb-gray-800 dark:bg-nb-gray-940 dark:text-nb-gray-100 p-4 shadow-2xl">
       <div className="flex items-center justify-between mb-3">

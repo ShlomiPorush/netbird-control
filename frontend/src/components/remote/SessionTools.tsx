@@ -122,7 +122,6 @@ export function BarMenu({ title, icon, container, width = 248, pressed, onOpenCh
         <>
           <div className="fixed inset-0 z-40" onClick={() => close()} />
           <div ref={panel} role="menu" aria-label={title} tabIndex={-1} style={{ left: pos.left, top: pos.top, width }}
-            // Focus moving out of the menu (a click elsewhere) closes it.
             onBlur={(e) => { if (!panel.current?.contains(e.relatedTarget as Node | null)) close(); }}
             className="nb-follow-theme fixed z-50 max-h-[calc(100dvh-5rem)] overflow-y-auto rounded-xl border border-nb-gray-200 bg-white text-nb-gray-900 dark:border-nb-gray-800 dark:bg-nb-gray-940 dark:text-nb-gray-100 p-1.5 shadow-2xl outline-hidden">
             {children(close)}
@@ -145,17 +144,11 @@ export function useBarPanelPosition(anchor: RefObject<HTMLElement | null>, maxWi
       const viewport = document.documentElement.clientWidth;
       const width = Math.min(maxWidth, viewport - 16);
       if (!r || !r.width) setPos({ left: Math.max(8, (viewport - width) / 2), top: BELOW_BAR, width });
-      else if (r.top < 0) setPos(null);
       else setPos({ left: Math.max(8, Math.min(r.right - width, viewport - width - 8)), top: r.bottom + 10, width });
     };
-    const placeAfterSlide = (e: TransitionEvent) => { if (e.propertyName === 'translate' || e.propertyName === 'transform') place(); };
     place();
     window.addEventListener('resize', place);
-    window.addEventListener('transitionend', placeAfterSlide);
-    return () => {
-      window.removeEventListener('resize', place);
-      window.removeEventListener('transitionend', placeAfterSlide);
-    };
+    return () => window.removeEventListener('resize', place);
   }, [anchor, maxWidth, shown]);
   return pos;
 }
