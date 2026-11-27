@@ -14,7 +14,9 @@ const {
   chromiumArgs,
   chromiumCommand,
   chromiumEnv,
+  chromiumHomeFiles,
   closeFilesRequests,
+  createOwnedDir,
   exited,
   listenForFilesRequests,
   parseScan,
@@ -98,6 +100,7 @@ test('the files policy is replaced whole, blocked or enabled, and no temporary f
     DownloadDirectory: '/var/lib/browser-files/${user_name}',
     DefaultFileSystemReadGuardSetting: 2,
     DefaultFileSystemWriteGuardSetting: 2,
+    URLAllowlist: ['file:///var/lib/browser-files/'],
   });
   assert.equal(fs.existsSync(temporary), false);
 });
@@ -116,7 +119,6 @@ test('the image ships the blocked files policy, and the base policy leaves both 
   const managed = readJson(path.join(__dirname, '..', 'policies', 'managed.json'));
   for (const key of Object.keys(ENABLED_POLICY)) assert.equal(key in managed, false, key);
   assert.equal('URLAllowlist' in BLOCKED_POLICY, false);
-  assert.equal('URLAllowlist' in ENABLED_POLICY, false);
   assert.deepEqual(managed.URLBlocklist, ['file://*']);
 });
 
@@ -125,6 +127,41 @@ test('Chromium runs under the files limit with SIGXFSZ ignored', () => {
     'prlimit',
     ['--fsize=2147483648', '--', 'sh', '-c', 'trap "" XFSZ; exec chromium "$@"', 'chromium', '--no-first-run', 'https://example.com/'],
   ]);
+});
+
+test('a new browser home points the file dialogs and a Downloads bookmark at its own files folder', () => {
+  const files = chromiumHomeFiles({ slot: 4 }, 'cookie');
+  assert.deepEqual(Object.keys(files).sort(), ['.config/gtk-3.0/bookmarks', 'profile/Default/Preferences', 'xauth']);
+  assert.equal(files.xauth, 'cookie');
+  assert.equal(files['.config/gtk-3.0/bookmarks'], 'file:///var/lib/browser-files/chromium-4 Downloads\n');
+  assert.deepEqual(JSON.parse(files['profile/Default/Preferences']), {
+    selectfile: { last_directory: '/var/lib/browser-files/chromium-4' },
+    savefile: { default_directory: '/var/lib/browser-files/chromium-4' },
+  });
+});
+
+test('every folder and file of a new browser home belongs to its user, folders 0700 and files 0600', onLinux, (t) => {
+  const root = scratch(t);
+  const previous = process.umask(0o077);
+  t.after(() => process.umask(previous));
+  const uid = process.getuid() === 0 ? 62004 : process.getuid();
+  const dir = path.join(root, 'chromium-4');
+  createOwnedDir(dir, uid, chromiumHomeFiles({ slot: 4 }, 'cookie'));
+  const expected = [
+    ['.', 0o700],
+    ['.config', 0o700],
+    ['.config/gtk-3.0', 0o700],
+    ['.config/gtk-3.0/bookmarks', 0o600],
+    ['profile', 0o700],
+    ['profile/Default', 0o700],
+    ['profile/Default/Preferences', 0o600],
+    ['xauth', 0o600],
+  ];
+  for (const [name, mode] of expected) {
+    const stat = fs.statSync(path.join(dir, name));
+    assert.deepEqual([stat.mode & 0o777, stat.uid, stat.gid], [mode, uid, uid], name);
+  }
+  assert.equal(fs.readFileSync(path.join(dir, '.config/gtk-3.0/bookmarks'), 'utf8'), 'file:///var/lib/browser-files/chromium-4 Downloads\n');
 });
 
 test('Chromium gets the browser language in its environment and asks websites for it before English', () => {

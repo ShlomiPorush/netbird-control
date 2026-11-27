@@ -778,7 +778,8 @@ Two settings in **Settings → Remote Access → Remote Browser → Files**, bot
 
 - **Files In The Browser.** The browser may download files and upload them to websites through its
   file dialog. Each browser saves into a folder of its own, which no other browser can read, and the
-  folder is deleted when the browser closes. In the session
+  folder is deleted when the browser closes. The browser's file dialogs (a website's upload button,
+  **Save Page As**) open in that folder, and their sidebar has a **Downloads** shortcut to it. In the session
   bar, **Files** lists the folder's files and their size, shows how much of the storage is used, and
   can delete a file. A file that is still downloading shows as *Downloading…* and cannot be deleted.
 - **Transfer Files To And From Computers** (only with the first setting). The **Files** panel also
@@ -794,10 +795,10 @@ effect in open browsers within about a minute; a download that already started f
 **Show in folder and Open.** The browser has no file manager of its own. With **Files In The
 Browser** on, **Show in folder** on a download, and **Open** on a file the browser can't show
 itself, open the session bar's **Files** panel instead, within about a second, while the session
-view is open and that browser is the one in front. Local files never open in the browser itself,
-so **Open** on a file it would show in a tab, such as a PDF, still shows a blocked page; the file is
-in the **Files** panel and on a website's upload button. Other
-requests to open something outside the browser, such as a `mailto:` link, do nothing.
+view is open and that browser is the one in front. **Open** on a file the browser can show, such as
+a PDF, shows it in a browser tab. This works only for the browser's own folder: other local files
+stay blocked, and another browser's folder can't be read. Other requests to open something outside
+the browser, such as a `mailto:` link, do nothing.
 
 **Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger
 than the limit fails to download. The total is checked every 3 seconds, and a browser whose files

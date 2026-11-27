@@ -33,6 +33,7 @@ const ENABLED_POLICY = {
   DownloadDirectory: `${FILES_ROOT}/\${user_name}`,
   DefaultFileSystemReadGuardSetting: 2,
   DefaultFileSystemWriteGuardSetting: 2,
+  URLAllowlist: [`file://${FILES_ROOT}/`],
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -203,12 +204,25 @@ function writeFilesPolicy(enabled, file = POLICY_FILE, temporary = POLICY_TEMPOR
 
 function createOwnedDir(dir, uid, files) {
   fs.mkdirSync(dir, { mode: 0o700 });
+  const created = new Set();
   for (const [name, content] of Object.entries(files)) {
     const file = path.join(dir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     fs.writeFileSync(file, content, { mode: 0o600, flag: 'wx' });
-    fs.chownSync(file, uid, uid);
+    for (let entry = file; entry !== dir; entry = path.dirname(entry)) created.add(entry);
   }
+  for (const entry of [...created].sort((a, b) => b.length - a.length)) fs.chownSync(entry, uid, uid);
   fs.chownSync(dir, uid, uid);
+}
+
+function chromiumHomeFiles({ slot }, auth) {
+  const downloads = `${FILES_ROOT}/chromium-${slot}`;
+  const preferences = { selectfile: { last_directory: downloads }, savefile: { default_directory: downloads } };
+  return {
+    xauth: auth,
+    '.config/gtk-3.0/bookmarks': `file://${downloads} Downloads\n`,
+    'profile/Default/Preferences': `${JSON.stringify(preferences)}\n`,
+  };
 }
 
 async function xauthority(display, cookie) {
@@ -313,7 +327,7 @@ async function launch({ ids, width, height, scale, startPage = '', filesLimit, l
   const vncPassword = await run('vncpasswd', ['-f'], { input: `${password}\n` });
   const auth = await xauthority(display, cookie);
   createOwnedDir(displayDir.dir, displayUid, { passwd: vncPassword, xauth: auth });
-  createOwnedDir(chromiumDir.dir, chromiumUid, { xauth: auth });
+  createOwnedDir(chromiumDir.dir, chromiumUid, chromiumHomeFiles(ids, auth));
   createOwnedDir(filesEntry(ids).dir, chromiumUid, {});
   await listenForFilesRequests(ids, onFilesRequest);
 
@@ -564,7 +578,9 @@ module.exports = {
   chromiumArgs,
   chromiumCommand,
   chromiumEnv,
+  chromiumHomeFiles,
   closeFilesRequests,
+  createOwnedDir,
   createUpload,
   deleteFile,
   dropUpload,
