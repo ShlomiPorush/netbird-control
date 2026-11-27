@@ -69,7 +69,9 @@ before(async () => {
             const realPerms = db.resolveFeaturePerms;
             db.resolveFeaturePerms = (a) => ({ ...realPerms(a), ...(String(a.userId || '').startsWith('support') ? { 'tenants.support': true } : {}) });
             db.isActiveDelegate = async () => false;
-            require('../lib/core').pool.query = async () => ({ rows: [], rowCount: 0 });
+            const core = require('../lib/core');
+            core.pool.query = async () => ({ rows: [], rowCount: 0 });
+            core.pool.connect = async () => ({ query: core.pool.query, release() { } });
         },
     });
 });

@@ -33,6 +33,24 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   own window, without the browser's address bar.
 
 ### Changed
+- **Release images say whether they can roll out beside the running release.** Each image carries
+  the labels `netbird-control.compose-sha256` (the hash of the example `docker-compose.yml`) and
+  `netbird-control.rollout-from` (the oldest running release it may run beside), for a
+  zero-downtime rollout with docker rollout. A version tag is never replaced: a re-run of a failed
+  release no longer builds an image that exists, and a deleted image of a published release is
+  restored, not rebuilt. What the host's Compose file needs, and how to update by hand:
+  docs/deployment.md.
+- **Updates roll out without downtime.** The old and the new container can now run together for
+  as long as an update takes: background work, notifications and the Telegram webhook stay on one
+  instance; changes to one user, grant, automation, access request or device bypass are coordinated
+  across instances; a user block, delete or EDR bypass is recorded before NetBird is asked, so a lost
+  answer never loses it; settings changed on one instance apply on the other from its next request;
+  the sign-in idle timeout is the same on both; a stopping container finishes its running jobs; and
+  a tab from the old release reloads into the new one when it needs a file only the old one had.
+  Schema changes are now numbered migrations, so a start with nothing to migrate changes nothing in
+  the database. **This release itself is updated with a short downtime** (its rollout-from is its
+  own version); the releases after it roll out without downtime. Set `stop_grace_period: 30s` on the
+  app service and a rollout timeout of at least 300 seconds: docs/deployment.md.
 - **autoheal can recover guacd after its gateway restarts.** A restarted gateway leaves guacd in the
   old network namespace, unhealthy and unreachable until it restarts too. Both guacd services now
   carry the label `autoheal=true`, so a host that runs
@@ -45,6 +63,20 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   **More**. The keyboard button opens the phone's keyboard in one tap, the session ends where the
   keyboard starts, and a row above it adds Esc, Tab, Ctrl, Alt, Win, the arrows and Del. Over SSH a
   finger scrolls the terminal's history and a tap opens the keyboard.
+
+### Fixed
+- **During an update without downtime, only the leader cleans up the Remote Access groups.** The
+  instance that was not running the background jobs could also remove members added outside the
+  app, and its write could undo a target change the leader had just made. Now only the leader
+  does it.
+- **A block or delete of a user that NetBird did not answer is no longer reported as done.** The
+  app now reports the failure and keeps the user's access closed until NetBird shows the change.
+- **Restoring settings is all or nothing.** A restore that failed part way could leave some
+  settings and tables restored and others not; now it changes nothing when any part fails.
+- **Replacing a tenant's token no longer leaves a moment without a valid one.** The new token is
+  saved before the old one is revoked, and an old token whose revoke failed is revoked again later.
+- **A stop no longer skips a day's digest, backup or retention purge.** These were marked done
+  before they ran; they are now marked done only after they ran.
 
 ---
 

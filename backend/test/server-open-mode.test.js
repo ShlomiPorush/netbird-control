@@ -46,6 +46,23 @@ async function inBatches(n, width, fn) {
     return out;
 }
 
+test('a build file of another release answers 404, not the app page, so the browser reloads into this release', async () => {
+    const r = await call('GET', '/assets/index-0000000000.js', { headers: { accept: '*/*' } });
+    assert.equal(r.status, 404);
+    assert.doesNotMatch(r.text, /<html/i);
+});
+
+test('an API request answers 503 when the current settings cannot be checked, and pages still load', async (t) => {
+    const settingsVersion = require('../lib/settings-version');
+    settingsVersion._setSettingsVersionReaderForTest(async () => { throw new Error('database unavailable'); });
+    t.after(() => settingsVersion._setSettingsVersionReaderForTest(async () => null));
+    const r = await call('POST', '/api/posture-checks/inspect-certificates', { body: { pems: [] } });
+    assert.equal(r.status, 503);
+    assert.equal(JSON.parse(r.text).code, 'SETTINGS_UNAVAILABLE');
+    assert.equal((await call('POST', '/API/posture-checks/inspect-certificates', { body: { pems: [] } })).status, 503);
+    assert.equal((await call('GET', '/version.txt')).status, 200);
+});
+
 test('without SSO the app stays open: no login, pages and the API answer directly', async () => {
     assert.equal((await call('GET', '/version.txt')).status, 200);
     assert.notEqual((await call('GET', '/login')).status, 302);
@@ -93,3 +110,4 @@ test('SPA budget (300) and API budget (600) per IP; the receivers and /api/healt
         assert.equal(r.headers.get('ratelimit'), null, path);
     }
 });
+

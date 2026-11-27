@@ -28,10 +28,13 @@ core.pool.query = async (sql, params = []) => {
     if (/FROM information_schema.columns/.test(sql)) return { rows: ['attempt_id', 'ip', 'state'].map(column_name => ({ column_name, data_type: 'text' })) };
     return { rows: [] };
 };
-// The encrypted backup's restore runs its table sections in a transaction.
 const restored = [];
 core.pool.connect = async () => ({
-    query: async (sql, params = []) => { restored.push([sql.trim(), params]); return { rows: [] }; },
+    query: async (sql, params = []) => {
+        if (/INSERT INTO app_settings/.test(sql)) return core.pool.query(sql, params);
+        restored.push([sql.trim(), params]);
+        return { rows: [] };
+    },
     release: () => { },
 });
 const { restoreInternalBackup, _internal, importAppSettings, getNbApiConfig, getSmtpConfig, getTelegramWebhookSecret } = require('../db');
@@ -169,5 +172,5 @@ test('a backup restore turns it off too, and adds the servers launch links creat
     // The plaintext import never takes the table.
     restored.length = 0;
     await importAppSettings({ settings: { retention_days: '30' }, tables: { ra_created_resources: [row] } });
-    assert.equal(restored.length, 0);
+    assert.ok(!restored.some(([sql]) => /ra_created_resources/.test(sql)));
 });

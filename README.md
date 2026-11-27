@@ -219,7 +219,7 @@ example `SERVICES="app" ./update.sh`:
 |---|---|---|
 | `TAG_VARIABLE` | empty: `TAG` or `VERSION` | The `.env` variable that sets the image tag, when it has another name |
 | `SERVICES` | empty: every NetBird Control service | The services to update, separated by spaces |
-| `ROLLOUT_TIMEOUT` | `180` | Seconds a new container has to become healthy |
+| `ROLLOUT_TIMEOUT` | `300` | Seconds a new container has to become healthy |
 | `SETTLE_SECONDS` | `10` | Seconds between "the new container is healthy" and draining the old one, so the proxy sends requests to the new one first |
 
 An update without downtime needs all of these. When one is missing, the script recreates the app

@@ -10,10 +10,20 @@ const enableCalls = [];        // [resourceId, enabled] per setResourceEnabled c
 let sourceText = '';
 let failQuery = null;          // RegExp: the next matching query throws once
 let removalMode = 'disable';
+const pendingCreates = new Map();
+let loseCreateAnswer = false;
 
 // Applies the automation_resources writes the engine issues; everything else is a no-op.
 function ledgerQuery(sql, params) {
     const s = sql.replace(/\s+/g, ' ').trim();
+    if (s.startsWith('SELECT * FROM automation_pending_creates')) return { rows: [...pendingCreates.values()] };
+    if (s.startsWith('INSERT INTO automation_pending_creates')) {
+        const [, , external_key, network_id, address, name] = params;
+        pendingCreates.set(external_key, { external_key, network_id, address, name });
+        return { rows: [], rowCount: 1 };
+    }
+    if (s.startsWith('DELETE FROM automation_pending_creates')) { pendingCreates.delete(params[2]); return { rows: [], rowCount: 1 }; }
+    if (s.startsWith('SELECT external_key, resource_id FROM automation_resources')) return { rows: [...ledger.values()].map(r => ({ ...r })) };
     if (s.startsWith('SELECT * FROM automation_resources')) return { rows: [...ledger.values()].map(r => ({ ...r })) };
     if (s.startsWith('INSERT INTO automation_resources')) {
         const [, key, address, resource_id, network_id] = params;
@@ -78,6 +88,7 @@ initAutomations({
     createClientResource: async (networkId, { name, address }) => {
         const id = `c${resources.size + 1}`;
         resources.set(id, { id, name, address, enabled: true, groups: [] });
+        if (loseCreateAnswer) { loseCreateAnswer = false; throw new Error('socket hang up'); }
         return { resource: { id } };
     },
     deleteResource: async (networkId, id) => { resources.delete(id); },
@@ -91,6 +102,8 @@ function reset(list) {
     enableCalls.length = 0;
     failQuery = null;
     removalMode = 'disable';
+    pendingCreates.clear();
+    loseCreateAnswer = false;
     for (const r of list) resources.set(r.id, { groups: [], ...r });
 }
 
@@ -194,4 +207,17 @@ test('a removal that stops after disabling the resource is completed on the next
     assert.equal(ledger.get('10.8.8.8').status, 'disabled');
     await sync('10.8.8.8 legacy-db\n10.7.7.8 keep');
     assert.equal(resources.get('u1').enabled, true);
+});
+
+test('a resource whose create answer was lost is managed, and disabled once it leaves the source', async () => {
+    reset([]);
+    loseCreateAnswer = true;
+    sourceText = '10.9.9.9 web';
+    assert.equal((await runAutomation(1)).failed, 1);
+    const [lost] = [...resources.values()];
+    assert.equal(ledger.size, 0);
+    await sync('10.1.1.1 other');
+    assert.equal(ledger.get('10.9.9.9').resource_id, lost.id);
+    assert.equal(resources.get(lost.id).enabled, false);
+    assert.equal(pendingCreates.size, 0);
 });

@@ -82,13 +82,15 @@ test('a second instance stays standby while the first holds the lock, and takes 
     await b.leader.stop();
 });
 
-test('a failed recovery is fatal and the instance never becomes ready', async () => {
+test('a failed recovery is retried while the lock is held, then the instance becomes ready', async () => {
     const db = fakeDb();
-    const { leader, calls } = make(db, { onLeader: async () => { throw new Error('reload failed'); } });
+    let failures = 2;
+    const { leader, calls } = make(db, { onLeader: async () => { if (failures-- > 0) throw new Error('reload failed'); } });
     leader.start();
-    await waitFor(() => calls.fatal.length === 1);
-    assert.match(calls.fatal[0], /recovery failed: reload failed/);
-    assert.equal(leader.isReady(), false);
+    await waitFor(() => leader.isReady());
+    assert.equal(calls.leader, 3);
+    assert.deepEqual(calls.fatal, []);
+    assert.equal(db.clients.length, 1, 'the lock connection was kept through the retries');
     await leader.stop();
 });
 

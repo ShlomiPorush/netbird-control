@@ -920,6 +920,7 @@ const membershipError = () => [...new Set([..._membershipFailed.values()].map(f 
 function enforceManagedMembership(data = {}) {
     if ((typeof currentTenantAccount === 'function' && currentTenantAccount()) || NETBIRD_READONLY || !netbirdApiConfigured()) return Promise.resolve(null);
     if (!managedGroupIds().length) return Promise.resolve(null);
+    if (_deps.isLeader && !_deps.isLeader()) return Promise.resolve(null);
     if (_membershipRun) {
         // One run at a time; what arrives meanwhile is checked right after it.
         const p = _membershipPending || {};

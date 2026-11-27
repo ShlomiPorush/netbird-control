@@ -36,9 +36,10 @@ jobs:
         working-directory: backend
         run: npm ci
 
+      # Includes the tests of two app instances against one PostgreSQL, started for this run.
       - name: Run the backend tests
         working-directory: backend
-        run: npm test
+        run: npm run test:all
 
   frontend-build:
     runs-on: ubuntu-latest
@@ -63,7 +64,8 @@ jobs:
         run: npm run build
 
   # The production image, built on Alpine like a release but never pushed. Uses the same
-  # Buildx and build-push actions (and pins) as release.yml, so an update to them is tested here.
+  # Buildx, metadata and build-push actions (and pins) and the same image labels as release.yml,
+  # so an update to them is tested here, and checks that the labels and the health check are on it.
   docker-build:
     runs-on: ubuntu-latest
     steps:
@@ -71,16 +73,60 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The rollout-from label comes from the release tags.
+          fetch-depth: 0
+
+      - name: Compute the image labels
+        id: labels
+        run: |
+          LABELS=$(.github/scripts/image-labels.sh)
+          printf '%s\n' "$LABELS"
+          {
+            echo 'value<<LABELS_EOF'
+            printf '%s\n' "$LABELS"
+            echo 'LABELS_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: nbcontrol-ci
+          tags: type=raw,value=ci
+          labels: ${{ steps.labels.outputs.value }}
 
       - name: Build the production image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
+          load: true
           platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Check the image labels and health check
+        env:
+          EXPECTED: ${{ steps.labels.outputs.value }}
+        run: |
+          LABELS=$(docker image inspect nbcontrol-ci:ci --format '{{json .Config.Labels}}')
+          while IFS='=' read -r KEY VALUE; do
+            ACTUAL=$(jq -r --arg k "$KEY" '.[$k] // empty' <<< "$LABELS")
+            if [ "$ACTUAL" != "$VALUE" ]; then
+              echo "::error::Label $KEY is '$ACTUAL', expected '$VALUE'"
+              exit 1
+            fi
+            echo "$KEY=$ACTUAL"
+          done <<< "$EXPECTED"
+          HEALTHCHECK=$(docker image inspect nbcontrol-ci:ci --format '{{json .Config.Healthcheck}}')
+          if ! jq -e '.Test | length > 0 and .[0] != "NONE"' <<< "$HEALTHCHECK" > /dev/null; then
+            echo "::error::The image has no active health check: $HEALTHCHECK"
+            exit 1
+          fi
+          echo "Health check: $HEALTHCHECK"
 
   # The remote browser (Compose profile "remote-browser"): the supervisor's unit tests, then its
   # image, built like a release but never pushed.

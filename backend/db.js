@@ -6,6 +6,20 @@ const https = require('https');
 // cappedCount is the shared bounded row count for every paginated LOG list (exact COUNT(*) over a
 // multi-GB table was a per-page-load full scan of the filtered slice).
 const { pool, getSetting, setSetting, cappedCount } = require('./lib/core');
+const { withLock, tryLock, LOCK_BUSY } = require('./lib/locks');
+const { readSettingsVersion } = require('./lib/settings-version');
+const { runSchema } = require('./lib/migrations');
+
+let _isLeader = () => true;
+function setLeaderCheck(fn) { _isLeader = fn; }
+
+const _background = new Set();
+function trackBackground(p) {
+    _background.add(p);
+    p.finally(() => _background.delete(p)).catch(() => { });
+    return p;
+}
+const backgroundWork = () => [..._background];
 // Event store + queries (the pure pool work over events / admin_events / ip_assignments /
 // filter_rules) live in lib/events.js (one-way dependency: db.js -> lib/events.js -> lib/core.js).
 // db.js imports them under their original names and re-exports what server.js needs. events.js
@@ -446,20 +460,21 @@ function getFeaturePermsConfig() {
     for (const k of PERMISSION_KEYS) out[k] = _featurePerms[k] || { users: [], groupIds: [] };
     return out;
 }
-async function setFeaturePermsConfig(cfg) {
-    for (const k of PERMISSION_KEYS) {
-        if (cfg && cfg[k] !== undefined) _featurePerms[k] = normPermEntry(cfg[k]);
-    }
-    await persistInOrder(() => setSetting('feature_permissions', JSON.stringify(getFeaturePermsConfig())));
-    return getFeaturePermsConfig();
-}
-// Permission settings are written one at a time, each from the CURRENT in-memory state, so a save
-// that finishes late can never overwrite a newer one (such as a deleted user's removal).
-let _permSettingsWrites = Promise.resolve();
-function persistInOrder(write) {
-    const p = _permSettingsWrites.then(write, write);
-    _permSettingsWrites = p.catch(() => { });
-    return p;
+const withPermissionSettings = (fn) => withLock('settings', ['permissions'], async () => {
+    await ensureSettingsCurrent();
+    return fn();
+});
+function setFeaturePermsConfig(cfg) {
+    return withPermissionSettings(async () => {
+        const input = typeof cfg === 'function' ? cfg(getFeaturePermsConfig()) : cfg;
+        const next = getFeaturePermsConfig();
+        for (const k of PERMISSION_KEYS) {
+            if (input && input[k] !== undefined) next[k] = normPermEntry(input[k]);
+        }
+        await setSetting('feature_permissions', JSON.stringify(next));
+        for (const k of PERMISSION_KEYS) _featurePerms[k] = next[k];
+        return getFeaturePermsConfig();
+    });
 }
 // The viewer's effective permission map. Matches a user by NetBird user id / oid tail / email,
 // and groups against the viewer's FULL group union (same semantics as network grants).
@@ -549,7 +564,7 @@ async function notifyComplianceBlockedEmail({ to, name, device, reason }) {
         + `</ul>`
         + `<p style="margin:14px 0 0;">Both options are on the Request Access page - your request goes straight to an admin for review:</p>`
         + btn;
-    sendMail({ to, subject: `Device blocked by compliance: ${device}`, html: mailLayout('Device Blocked', body), tag: 'compliance-blocked' }).catch(() => { });
+    return sendMail({ to, subject: `Device blocked by compliance: ${device}`, html: mailLayout('Device Blocked', body), tag: 'compliance-blocked' });
 }
 
 async function notifyBypassEndedEmail({ to, name, device, why }) {
@@ -652,14 +667,8 @@ async function persistApprover(c = _approver) {
 function getApproverConfig() {
     return { groupIds: _approver.groupIds, telegramChatId: _approver.telegramChatId, telegramApprovers: _approver.telegramApprovers, delegates: _approver.delegates };
 }
-// Saves run one at a time and the new config goes live only after it is stored, so a failed
-// write grants or revokes nothing, and a partial save never writes back a field another save
-// just changed. `input` may be a function of the current config, evaluated when the save runs.
-let _approverSaving = Promise.resolve();
 function setApproverConfig(input) {
-    const run = _approverSaving.then(() => saveApproverConfig(typeof input === 'function' ? input(getApproverConfig()) : input));
-    _approverSaving = run.catch(() => { });
-    return run;
+    return withPermissionSettings(() => saveApproverConfig(typeof input === 'function' ? input(getApproverConfig()) : input));
 }
 async function saveApproverConfig({ groupIds, telegramChatId, telegramApprovers, delegates } = {}) {
     const next = { ..._approver };
@@ -781,7 +790,10 @@ function getAutoApprovalConfig() {
 // Changes to the auto-approval config run one at a time (read, change, save, publish), so two
 // concurrent edits or review revokes never save over each other.
 function withAutoApprovalLock(fn) {
-    return withKeyLock('auto-approval', fn);
+    return withLock('autoApproval', [], async () => {
+        await ensureSettingsCurrent();
+        return fn();
+    });
 }
 // Checked here and not in saveAutoApprovalLocked: an Access Review revoke saves without these checks,
 // so another rule's missing profile never blocks it.
@@ -2219,7 +2231,6 @@ async function sendMspDigest({ force = false } = {}) {
         const last = await getSetting('msp_digest_last').catch(() => '');
         if (last === now.dateKey) return { telegram: false, emails: 0 }; // already sent today
     }
-    await setSetting('msp_digest_last', now.dateKey); // stamp up front (Send Now included)
 
     const report = await getFleetReport();
     const tenants = report.tenants;
@@ -2284,12 +2295,12 @@ async function sendMspDigest({ force = false } = {}) {
         }
         if (!tenants.length) body += `<tr><td colspan="10">none</td></tr>`;
         body += `</table>`;
-        for (const to of cfg.emails) {
-            sendMail({ to, subject: 'MSP Weekly Digest', html: mailLayout('MSP Weekly Digest', body), tag: 'msp-digest' }).catch(() => { });
-            emailsSent++;
-        }
+        const sent = await Promise.all(cfg.emails.map(to => sendMail({ to, subject: 'MSP Weekly Digest', html: mailLayout('MSP Weekly Digest', body), tag: 'msp-digest' }).catch(() => null)));
+        emailsSent = sent.filter(r => r && r.ok).length;
     }
+    if (!tgSent && !emailsSent && ((cfg.telegram && getTelegramConfig().enabled) || (cfg.emails.length && getSmtpConfig().enabled))) throw new Error('The MSP digest reached no recipient. Check the Telegram and SMTP settings.');
     console.log('[MspDigest] weekly digest sent');
+    await setSetting('msp_digest_last', now.dateKey);
     return { telegram: !!tgSent, emails: emailsSent };
 }
 
@@ -3055,7 +3066,7 @@ async function provisionTenantServiceUser(tenantId) {
     const prov = getMspProvisioningToken();
     if (!prov) throw new Error('No MSP provisioning token is configured (Settings - NetBird API).');
     const appName = (await getSetting('app_name').catch(() => null)) || 'NetBird Control';
-    return await runWithTenant(id, async () => {
+    return withLock('tenant', [id], () => runWithTenant(id, async () => {
         // Reuse an existing service user with the app's name, else create one.
         const users = await netbirdGet('/api/users?service_user=true');
         let su = (Array.isArray(users) ? users : []).find(u => u && u.is_service_user && (u.name || '') === appName);
@@ -3066,24 +3077,28 @@ async function provisionTenantServiceUser(tenantId) {
             }
             su = r.body;
         }
-        // Fresh token first, then prune the older ones - a failed prune never strands us.
         const tr = await netbirdPost(`/api/users/${encodeURIComponent(su.id)}/tokens`, { name: `${appName} token`, expires_in: 365 });
         const plain = tr && tr.body && (tr.body.plain_token || (tr.body.personal_access_token && tr.body.plain_token));
         const newTokenId = tr && tr.body && ((tr.body.personal_access_token && tr.body.personal_access_token.id) || tr.body.id);
         if (!tr || tr.status >= 300 || !plain) {
             throw new Error('Failed to issue the tenant token: ' + (tr && ((tr.body && (tr.body.message || tr.body.error)) || tr.raw || tr.error || tr.status)));
         }
-        const olds = await netbirdGet(`/api/users/${encodeURIComponent(su.id)}/tokens`);
-        for (const t of (Array.isArray(olds) ? olds : [])) {
-            if (t && t.id && t.id !== newTokenId) {
-                await netbirdReq('DELETE', `/api/users/${encodeURIComponent(su.id)}/tokens/${encodeURIComponent(t.id)}`).catch(() => { });
-            }
+        const listed = await netbirdGet(`/api/users/${encodeURIComponent(su.id)}/tokens`);
+        const meta = { userId: su.id, name: appName, rotatedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 365 * 86400_000).toISOString() };
+        if (!Array.isArray(listed)) {
+            await setMspTenantToken(id, plain, { ...meta, pendingRevoke: [], tokensUnlisted: true });
+            throw new Error('The new tenant token is saved, but NetBird did not list the old tokens to revoke; the next rotation revokes them.');
         }
-        const expiresAt = new Date(Date.now() + 365 * 86400_000).toISOString();
-        await setMspTenantToken(id, plain);
-        await setSetting(`msp_tenant_su:${id}`, JSON.stringify({ userId: su.id, name: appName, rotatedAt: new Date().toISOString(), expiresAt }));
-        return { serviceUser: appName, userId: su.id, expiresAt };
-    }, { authToken: prov });
+        const olds = listed.map(t => t && t.id).filter(tid => tid && tid !== newTokenId);
+        await setMspTenantToken(id, plain, { ...meta, pendingRevoke: olds });
+        const left = [];
+        for (const tid of olds) {
+            const resp = await netbirdReq('DELETE', `/api/users/${encodeURIComponent(su.id)}/tokens/${encodeURIComponent(tid)}`).catch(() => null);
+            if (!nbWriteOk(resp, true)) left.push(tid);
+        }
+        await setSetting(`msp_tenant_su:${id}`, JSON.stringify({ ...meta, pendingRevoke: left }));
+        return { serviceUser: appName, userId: su.id, expiresAt: meta.expiresAt };
+    }, { authToken: prov }));
 }
 
 // Scheduler: rotate tenant tokens that are within 30 days of their 365-day expiry.
@@ -3095,7 +3110,9 @@ async function rotateTenantTokens() {
     for (const row of r.rows) {
         try {
             const meta = JSON.parse(row.value);
-            if (meta && meta.expiresAt && new Date(meta.expiresAt).getTime() < Date.now() + 30 * 86400_000) {
+            const expiring = meta && meta.expiresAt && new Date(meta.expiresAt).getTime() < Date.now() + 30 * 86400_000;
+            const revokeLeft = meta && ((Array.isArray(meta.pendingRevoke) && meta.pendingRevoke.length > 0) || meta.tokensUnlisted);
+            if (expiring || revokeLeft) {
                 due.push(row.key.slice('msp_tenant_su:'.length));
             }
         } catch { /* unreadable metadata - re-provisioning will rewrite it */ }
@@ -3114,17 +3131,22 @@ async function rotateTenantTokens() {
 // tenant account. Registered in memory under the tenant record id AND its switcher/account
 // ids, so whichever id form the switch context carries resolves to the token. Write-only:
 // the token is never returned to the browser (only hasApiToken).
-async function setMspTenantToken(tenantId, token) {
+async function setMspTenantToken(tenantId, token, serviceUserMeta) {
     const id = String(tenantId || '').trim();
     if (!id) throw new Error('a tenant id is required');
     const tok = String(token || '').trim();
     const sw = await listMspSwitcher().catch(() => []);
     const match = sw.find(s => s.id === id || s.accountId === id);
     const ids = [id, match && match.id, match && match.accountId].filter(Boolean);
-    if (tok) await setSetting(`msp_tenant_token:${id}`, tok);
-    else await pool.query(`DELETE FROM app_settings WHERE key = $1`, [`msp_tenant_token:${id}`]).catch(() => { });
-    setTenantTokenInMemory(ids, tok || null);
-    return { hasApiToken: !!tok };
+    return withLock('tenant', [id], async () => {
+        await inOneTransaction(async (client) => {
+            if (tok) await putSetting(client, `msp_tenant_token:${id}`, tok);
+            else await client.query(`DELETE FROM app_settings WHERE key = $1`, [`msp_tenant_token:${id}`]);
+            if (serviceUserMeta) await putSetting(client, `msp_tenant_su:${id}`, JSON.stringify(serviceUserMeta));
+        });
+        setTenantTokenInMemory(ids, tok || null);
+        return { hasApiToken: !!tok };
+    });
 }
 
 // A tenant's incoming-webhook tokens are now set via the normal Settings → Webhook page while
@@ -3688,7 +3710,23 @@ async function getAdminEventTypes() {
 
 // telegramTest and telegramCreateTopics now live in lib/telegram.js (imported at the top).
 
-async function initializeDatabase() {
+async function initializeDatabase({ budgetMs } = {}) {
+    await runSchema({ baseline: createBaselineSchema, budgetMs });
+    const version = await readSettingsVersion();
+    await loadStartupConfig();
+    _settingsVersionLoaded = version;
+}
+
+async function loadStartupConfig() {
+    await reloadConfigCaches();
+    if (_nbApi.url && _nbApi.token) {
+        console.log(`NetBird API configured: ${_nbApi.url} (resolves users + routers)`);
+    } else {
+        console.log('NetBird API not configured - set it in Settings → NetBird API (or NETBIRD_API_URL/NETBIRD_API_TOKEN env)');
+    }
+}
+
+async function createBaselineSchema() {
     const client = await pool.connect();
     try {
         // Schema statements wait at most 5 s for a table lock. During a zero-downtime update the old
@@ -4129,39 +4167,6 @@ async function initializeDatabase() {
         // Older rows keep the defaults and are IP sessions.
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS target_name TEXT DEFAULT ''`);
         await client.query(`ALTER TABLE remote_sessions ADD COLUMN IF NOT EXISTS gateway TEXT DEFAULT 'ip'`);
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS browser_sessions (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            user_email TEXT DEFAULT '',
-            user_name TEXT DEFAULT '',
-            oid TEXT DEFAULT '',
-            client_ip TEXT DEFAULT '',
-            state TEXT NOT NULL,
-            uid INTEGER,
-            port INTEGER,
-            width INTEGER NOT NULL,
-            height INTEGER NOT NULL,
-            dpi INTEGER NOT NULL DEFAULT 96,
-            attachment TEXT DEFAULT '',
-            owner_instance TEXT DEFAULT '',
-            recorded BOOLEAN NOT NULL DEFAULT false,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            last_auth_ok_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            lease_expires_at TIMESTAMPTZ,
-            detached_at TIMESTAMPTZ,
-            ended_at TIMESTAMPTZ,
-            end_reason TEXT DEFAULT '',
-            end_code INTEGER
-          );
-        `);
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_browser_sessions_open ON browser_sessions (state) WHERE state <> 'ended'`);
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_browser_sessions_user ON browser_sessions (user_id) WHERE state <> 'ended'`);
-        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS supervisor_instance TEXT DEFAULT ''`);
-        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS token_hash TEXT`);
-        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS token_expires TIMESTAMPTZ`);
-        await client.query(`ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS conn_count INTEGER NOT NULL DEFAULT 0`);
-        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_token ON browser_sessions (token_hash) WHERE token_hash IS NOT NULL`);
         // Browser Gateway targets that sessions opened: one hold per resource, for the network and
         // the address the resource had when the session started. The resource stays in its target
         // group until expires_at; added_at is when this app last added it to the group; updated_at is
@@ -4535,32 +4540,19 @@ async function initializeDatabase() {
 
         // One-time merge: legacy resource templates → Access Profiles of type Direct
         // (protocol/ports presets, no group/policy). Templates and profiles are unified.
-        const merged = await client.query(`SELECT 1 FROM app_settings WHERE key = 'templates_merged_v1'`);
-        if (!merged.rows.length) {
-            const m = await client.query(`
-                INSERT INTO access_profiles (name, group_id, policy_id, sources, protocol, ports, shared)
-                SELECT name, '', '', '[]'::jsonb, protocol, ports, false FROM templates`);
-            await client.query(`INSERT INTO app_settings (key, value) VALUES ('templates_merged_v1', 'true') ON CONFLICT (key) DO NOTHING`);
-            if (m.rowCount) console.log(`Merged ${m.rowCount} resource templates into Access Profiles (Direct)`);
-        }
-
-        // Load the NetBird API connection + webhook auth token from app_settings (env wins).
-        await loadNbApi();
-        await loadTenantTokens();
-        await loadWebhook();
-        await loadTelegram();
-        await loadApproverConfig();
-        await loadAutoApproval();
-        await loadSmtp();
-        await loadFeaturePerms();
-        await loadSecurityConfig();
-        await loadRemoteAccessConfig();
-
-        // Log NetBird Management API configuration status (resolves users + router names)
-        if (_nbApi.url && _nbApi.token) {
-            console.log(`NetBird API configured: ${_nbApi.url} (resolves users + routers)`);
-        } else {
-            console.log('NetBird API not configured - set it in Settings → NetBird API (or NETBIRD_API_URL/NETBIRD_API_TOKEN env)');
+        await client.query('BEGIN');
+        try {
+            const marked = await client.query(`INSERT INTO app_settings (key, value) VALUES ('templates_merged_v1', 'true') ON CONFLICT (key) DO NOTHING RETURNING key`);
+            if (marked.rows.length) {
+                const m = await client.query(`
+                    INSERT INTO access_profiles (name, group_id, policy_id, sources, protocol, ports, shared)
+                    SELECT name, '', '', '[]'::jsonb, protocol, ports, false FROM templates`);
+                if (m.rowCount) console.log(`Merged ${m.rowCount} resource templates into Access Profiles (Direct)`);
+            }
+            await client.query('COMMIT');
+        } catch (e) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw e;
         }
     } finally {
         // The connection goes back to the pool: without the setting, or closed when that fails.
@@ -4906,7 +4898,7 @@ async function getAllUsers() {
             status: raw.status || '',
             last_login: raw.last_login || '',
             is_service_user: !!raw.is_service_user,
-            is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
+            is_blocked: !!raw.is_blocked,
             pending_approval: !!raw.pending_approval,
             // Auto-assigned groups (assigned to peers this user enrolls), resolved to {id,name}.
             groups: autoGroups.map(gid => ({ id: gid, name: getGroupsMap()[gid] || gid })),
@@ -5574,7 +5566,7 @@ async function getUserDetail(id) {
         role: raw.role || '',
         status: raw.status || '',
         last_login: raw.last_login || '',
-        is_blocked: !!raw.is_blocked || blockUnrecorded(r.user_id, tnt()),
+        is_blocked: !!raw.is_blocked,
         is_service_user: !!raw.is_service_user,
         // Whether NetBird serves the cloud MFA reset endpoint on this API base (cached probe). The
         // Reset MFA button disables itself with a tooltip when false - like the Tenant Defaults MFA
@@ -5628,19 +5620,21 @@ async function deleteUser(id) {
         e.status = 400; throw e;
     }
 
-    const resp = await netbirdReq('DELETE', '/api/users/' + encodeURIComponent(id));
-    // 404 = already gone, which is the desired end state - same as deleteGroup treats it.
-    if (!resp || (resp.status >= 300 && resp.status !== 404)) {
+    const resp = await withNbUserLock(id, () => withUsersMirror(acct, async () => {
+        await inOneTransaction(async (client) => {
+            await recordUserIntent(client, acct, id, 'delete', row.email || '');
+            await client.query('DELETE FROM users WHERE tenant = $2 AND user_id = $1', [id, acct]);
+        });
+        const answer = await netbirdReq('DELETE', '/api/users/' + encodeURIComponent(id));
+        const gone = nbWriteOk(answer, true);
+        if (gone || definitelyRefused(answer)) await dropUserIntent(pool, acct, id);
+        return answer;
+    }));
+    _usersLastRefresh.set(acct, 0);
+    if (!nbWriteOk(resp, true)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to delete the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
-    // A user-list refresh already in flight may have read the list before this delete - let it
-    // land first, so it cannot write the deleted user back into the mirror.
-    await settleUserRefreshes(acct);
-    // Drop the mirror row so the user disappears at once, then force a re-pull of BOTH
-    // mirrors for THIS account - the user's peers died with them.
-    await pool.query('DELETE FROM users WHERE tenant = $2 AND user_id = $1', [id, acct]).catch(() => { });
-    _usersLastRefresh.set(acct, 0);
     _peersLastRefresh.set(acct, 0);
     bustNbCaches('gref', 'usage');
     const out = { ok: true, name: row.display_name || '', email: row.email || '', label };
@@ -5668,10 +5662,11 @@ async function removeUserFromAppSettings(id, email) {
     const isUser = (entryId, entryEmail) => entryId
         ? entryId === id
         : !!em && String(entryEmail || '').trim().toLowerCase() === em;
-    const perms = getFeaturePermsConfig();
-    for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
     const results = await Promise.allSettled([
-        setFeaturePermsConfig(perms),
+        setFeaturePermsConfig((perms) => {
+            for (const k of Object.keys(perms)) perms[k] = { ...perms[k], users: perms[k].users.filter(u => !isUser(u.id, u.email)) };
+            return perms;
+        }),
         setApproverConfig(c => ({
             delegates: c.delegates.filter(d => !isUser(d.user.id, d.user.email)),
             telegramApprovers: c.telegramApprovers.filter(a => !isUser(a.userId, a.email)),
@@ -5736,34 +5731,33 @@ async function applyUserBlocked(id, blocked) {
     const acct = tnt();
     const row = await resolveUserRow(id, acct);
     const label = row.email || row.display_name || row.user_id;
-    // role + auto_groups come from a fresh read under the user's lock, never the mirror: a stale
-    // auto_groups would put back a group removed since the last sync (or drop one added).
-    const resp = await withNbUserLock(id, async () => {
+    const resp = await withNbUserLock(id, () => withUsersMirror(acct, async () => {
         const live = (await liveUsersById([id])).get(String(id));
         if (!live) throw new Error(STALE_USER_ERR);
         if (blocked) await guardProtectedUser(id, live, acct, 'blocked');
+        await inOneTransaction(async (client) => {
+            await recordUserIntent(client, acct, id, blocked ? 'block' : 'unblock', row.email || '');
+            if (blocked) await markUserBlocked(client, acct, id, true);
+        });
         const body = {
             role: live.role || 'user',
             auto_groups: Array.isArray(live.auto_groups) ? live.auto_groups.map(g => (g && g.id) || g) : [],
             is_blocked: !!blocked,
         };
-        return asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(id), body));
-    });
-    if (!resp || resp.status >= 300) {
+        const answer = await asRealUser(() => netbirdPut('/api/users/' + encodeURIComponent(id), body));
+        const ok = nbWriteOk(answer);
+        if (ok || definitelyRefused(answer)) {
+            await inOneTransaction(async (client) => {
+                await dropUserIntent(client, acct, id);
+                await markUserBlocked(client, acct, id, ok ? !!blocked : !!live.is_blocked);
+            });
+        }
+        return answer;
+    }));
+    if (!nbWriteOk(resp)) {
         const msg = (resp && resp.body && (resp.body.message || resp.body.error)) || (resp && resp.raw) || (resp && resp.error) || 'Failed to update the user';
         throw new Error(typeof msg === 'string' ? msg : String(msg));
     }
-    // Refresh the mirror now (bypassing the TTL) so is_blocked flips immediately on the Users page.
-    // A refresh already in flight may have read the list before this change - let it land first.
-    await settleUserRefreshes(acct);
-    // Record the new state in the mirror row itself, so it holds even if the refresh below fails.
-    // A block that cannot be recorded is held in memory until a user-list refresh records it.
-    const recorded = await pool.query(
-        `UPDATE users SET raw_json = jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{is_blocked}', to_jsonb($3::boolean)) WHERE tenant = $2 AND user_id = $1`,
-        [id, acct, !!blocked]
-    ).then(() => true, err => { console.error('[UserResolve] block state update error:', err.message); return false; });
-    if (blocked && !recorded) _unrecordedBlocks.add(`${acct}|${id}`);
-    else _unrecordedBlocks.delete(`${acct}|${id}`);
     _usersLastRefresh.set(acct, 0);
     await refreshUsersCache().catch(err => console.error('[UserResolve] post-block refresh error:', err.message));
     return { ok: true, name: row.display_name || '', email: row.email || '', label, blocked: !!blocked };
@@ -6182,6 +6176,7 @@ async function getNetworkDetail(id) {
         name: net ? (net.name || '') : '',
         description: net ? (net.description || '') : '',
         resources: resourceList,
+        resourcesListed: Array.isArray(resources),
         routers: routerList,
         policies: policyList,
         allowDuplicates: (await getDupAllowedNetworkIds()).includes(String(id)),
@@ -8983,6 +8978,7 @@ function fetchUsersFromApi() {
             if (u && u.id && !seen.has(u.id)) { seen.add(u.id); out.push(u); }
         }
         out.usersListed = Array.isArray(a); // the regular list, which holds every human user, answered
+        out.serviceListed = Array.isArray(b);
         return out;
     });
     // Runs in the active account's context (service token for a tenant) - that already lists users
@@ -8990,65 +8986,82 @@ function fetchUsersFromApi() {
     return pull();
 }
 
-async function upsertUsers(users) {
-    const t = tnt(); // one account for the whole batch (ALS context is stable across the loop)
-    const client = await pool.connect();
-    try {
-        for (const u of users) {
-            if (!u || !u.id) continue;
-            // Mirror rows are stamped with the active account - main ('') or a tenant, identically.
-            await client.query(`
-                INSERT INTO users (tenant, user_id, display_name, email, raw_json, updated_at)
-                VALUES ($5, $1, $2, $3, $4, NOW())
-                ON CONFLICT (tenant, user_id) DO UPDATE SET
-                    display_name = $2, email = $3, raw_json = $4, updated_at = NOW()
-            `, [u.id, u.name || '', u.email || '', JSON.stringify(u), t]);
-        }
-    } finally {
-        client.release();
+const withUsersMirror = (acct, fn) => withLock('mirror', [acct, 'users'], fn);
+
+async function upsertUsers(client, users, t) {
+    for (const u of users) {
+        if (!u || !u.id) continue;
+        await client.query(`
+            INSERT INTO users (tenant, user_id, display_name, email, raw_json, updated_at)
+            VALUES ($5, $1, $2, $3, $4, NOW())
+            ON CONFLICT (tenant, user_id) DO UPDATE SET
+                display_name = $2, email = $3, raw_json = $4, updated_at = NOW()
+        `, [u.id, u.name || '', u.email || '', JSON.stringify(u), t]);
     }
 }
 
-// Every running refresh per account, whoever started it. A delete or block waits for them, so a
-// list read before the change is never written back after it.
-const _usersPulls = new Map(); // account id → Set of refresh promises
-function refreshUsersCache() {
-    const t = tnt();
-    const p = pullUsersCache();
-    if (!_usersPulls.has(t)) _usersPulls.set(t, new Set());
-    _usersPulls.get(t).add(p);
-    p.catch(() => { }).finally(() => _usersPulls.get(t).delete(p));
-    return p;
-}
-async function settleUserRefreshes(acct) {
-    await Promise.allSettled([...(_usersPulls.get(acct) || [])]);
+const markUserBlocked = (client, acct, id, blocked) => client.query(
+    `UPDATE users SET raw_json = jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{is_blocked}', to_jsonb($3::boolean)) WHERE tenant = $2 AND user_id = $1`,
+    [id, acct, !!blocked]);
+const recordUserIntent = (client, acct, id, kind, email = '') => client.query(
+    `INSERT INTO user_intents (tenant, user_id, kind, email, created_at) VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (tenant, user_id) DO UPDATE SET kind = EXCLUDED.kind, email = EXCLUDED.email, created_at = NOW()`,
+    [acct, id, kind, email]);
+const dropUserIntent = (db, acct, id) => db.query('DELETE FROM user_intents WHERE tenant = $1 AND user_id = $2', [acct, id]);
+
+async function retryUserIntents() {
+    const acct = tnt();
+    const open = (await pool.query(`SELECT user_id, kind, email FROM user_intents WHERE tenant = $1 AND created_at < NOW() - interval '1 minute'`, [acct])).rows;
+    for (const it of open) {
+        const deleted = await withNbUserLock(it.user_id, () => withUsersMirror(acct, async () => {
+            const cur = (await pool.query('SELECT kind, email FROM user_intents WHERE tenant = $1 AND user_id = $2', [acct, it.user_id])).rows[0];
+            if (!cur) return false;
+            if (cur.kind !== 'delete') {
+                await applyUserBlocked(it.user_id, cur.kind === 'block').catch(e => console.error('[UserResolve] retry of a %s failed: %s', cur.kind, e.message));
+                return false;
+            }
+            const r = await netbirdReq('DELETE', '/api/users/' + encodeURIComponent(it.user_id));
+            if (nbWriteOk(r, true) || definitelyRefused(r)) await dropUserIntent(pool, acct, it.user_id);
+            return nbWriteOk(r, true) ? cur.email : false;
+        }));
+        if (deleted !== false && !acct) await removeUserFromAppSettings(it.user_id, deleted);
+        _usersLastRefresh.set(acct, 0);
+    }
 }
 
-// Users blocked from this app whose mirror row could not be updated (`${account}|${user id}`).
-// They count as blocked until a user-list refresh has written NetBird's state to the mirror.
-const _unrecordedBlocks = new Set();
-function blockUnrecorded(userId, acct = '') { return _unrecordedBlocks.has(`${acct}|${userId}`); }
+function refreshUsersCache() {
+    return pullUsersCache();
+}
 
 async function pullUsersCache() {
     const t = tnt();
-    const users = await fetchUsersFromApi();
-    if (users) {
-        await upsertUsers(users);
-        // Only a user the list returned now has NetBird's state in the mirror.
-        for (const u of users) if (u && u.id) _unrecordedBlocks.delete(`${t}|${u.id}`);
-        // Members added to the Browser Remote Access groups outside the app are removed.
-        if (!t) enforceManagedMembership({ users }).catch(() => { });
-        // Prune users deleted in NetBird. Only when the regular user list answered and at least one
-        // user came back (an account always has its owner, so an empty result means a transient
-        // error - don't wipe; without the regular list every human user would be dropped).
-        const ids = users.map(u => u && u.id).filter(Boolean);
-        if (ids.length && users.usersListed) {
-            // Prune only THIS account's rows - other accounts' rows must survive.
-            await pool.query(`DELETE FROM users WHERE tenant = $2 AND user_id <> ALL($1)`, [ids, t])
-                .catch(e => console.error('[UserResolve] prune error:', e.message));
-        }
-        console.log(`[UserResolve] Cached ${users.length} users from NetBird API`);
-    }
+    const users = await withUsersMirror(t, async () => {
+        const list = await fetchUsersFromApi();
+        if (!list) return null;
+        await inOneTransaction(async (client) => {
+            await upsertUsers(client, list, t);
+            const ids = list.map(u => u && u.id).filter(Boolean);
+            if (ids.length && list.usersListed) {
+                await client.query(list.serviceListed
+                    ? `DELETE FROM users WHERE tenant = $2 AND user_id <> ALL($1)`
+                    : `DELETE FROM users WHERE tenant = $2 AND user_id <> ALL($1) AND COALESCE((raw_json->>'is_service_user')::boolean, false) = false`, [ids, t]);
+            }
+            const byId = new Map(list.filter(u => u && u.id).map(u => [String(u.id), u]));
+            const intents = (await client.query('SELECT user_id, kind FROM user_intents WHERE tenant = $1', [t])).rows;
+            for (const it of intents) {
+                const live = byId.get(String(it.user_id));
+                const done = it.kind === 'block' ? !!(live && live.is_blocked)
+                    : it.kind === 'unblock' ? !!(live && !live.is_blocked)
+                        : (!live && list.usersListed && list.serviceListed);
+                if (done) { await dropUserIntent(client, t, it.user_id); continue; }
+                if (it.kind === 'delete') await client.query('DELETE FROM users WHERE tenant = $1 AND user_id = $2', [t, it.user_id]);
+                else await markUserBlocked(client, t, it.user_id, true);
+            }
+        });
+        console.log(`[UserResolve] Cached ${list.length} users from NetBird API`);
+        return list;
+    });
+    if (users && !t) trackBackground(enforceManagedMembership({ users }).catch(() => { }));
     _usersLastRefresh.set(t, Date.now());
 }
 
@@ -9202,36 +9215,31 @@ async function resolveUser(userId) {
 // A user blocked in NetBird resolves with `blocked: true`, no role and no groups - and an id match
 // is final, so a blocked user is never re-resolved by email.
 async function resolveViewer(oid, email) {
-    const mapRow = row => {
-        const blocked = !!row.is_blocked || blockUnrecorded(row.user_id);
-        return {
-            user_id: row.user_id,
-            email: row.email,
-            name: row.display_name,
-            role: blocked ? '' : (row.role || ''),
-            auto_groups: !blocked && Array.isArray(row.auto_groups) ? row.auto_groups : [],
-            blocked,
-        };
+    const r = await pool.query(
+        `SELECT * FROM (
+            SELECT 0 AS rank, user_id, email, '' AS display_name, NULL AS role, NULL::jsonb AS auto_groups, TRUE AS is_blocked
+              FROM user_intents
+             WHERE tenant = '' AND (($1 <> '' AND (user_id = $1 OR user_id LIKE '%|' || $1)) OR ($2 <> '' AND LOWER(email) = LOWER($2)))
+            UNION ALL
+            SELECT 1, user_id, email, display_name, raw_json->>'role', raw_json->'auto_groups', COALESCE((raw_json->>'is_blocked') = 'true', FALSE)
+              FROM users WHERE tenant = '' AND $1 <> '' AND (user_id = $1 OR user_id LIKE '%|' || $1)
+            UNION ALL
+            SELECT 2, user_id, email, display_name, raw_json->>'role', raw_json->'auto_groups', COALESCE((raw_json->>'is_blocked') = 'true', FALSE)
+              FROM users WHERE tenant = '' AND $2 <> '' AND LOWER(email) = LOWER($2)
+        ) found ORDER BY rank LIMIT 1`,
+        [oid || '', email || '']
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    const blocked = !!row.is_blocked;
+    return {
+        user_id: row.user_id,
+        email: row.email,
+        name: row.display_name,
+        role: blocked ? '' : (row.role || ''),
+        auto_groups: !blocked && Array.isArray(row.auto_groups) ? row.auto_groups : [],
+        blocked,
     };
-    if (oid) {
-        const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
-                    (raw_json->>'is_blocked') = 'true' AS is_blocked
-             FROM users WHERE tenant = '' AND (user_id = $1 OR user_id LIKE '%|' || $1) LIMIT 1`,
-            [oid]
-        );
-        if (r.rows.length) return mapRow(r.rows[0]);
-    }
-    if (email) {
-        const r = await pool.query(
-            `SELECT user_id, email, display_name, raw_json->>'role' AS role, raw_json->'auto_groups' AS auto_groups,
-                    (raw_json->>'is_blocked') = 'true' AS is_blocked
-             FROM users WHERE tenant = '' AND LOWER(email) = LOWER($1) LIMIT 1`,
-            [email]
-        );
-        if (r.rows.length) return mapRow(r.rows[0]);
-    }
-    return null;
 }
 
 // NetBird group ids the user belongs to via their PEERS (peer.groups). A user's own
@@ -9391,10 +9399,14 @@ async function deletePeer(id) {
 
 // Bypass compliance for a non-compliant peer (NetBird's EDR bypass - the same call the official
 // dashboard's "Bypass" action makes). The peer then connects despite failing posture/EDR checks.
+const definitelyRefused = (resp) => !!resp && resp.status >= 400 && resp.status < 500 && !resp.answerLost;
+
 async function bypassPeer(peerId) {
     const resp = await netbirdPost(`/api/peers/${encodeURIComponent(peerId)}/edr/bypass`, {});
-    if (!resp || resp.status >= 300) {
-        throw new Error('Failed to bypass the device: ' + (resp && (resp.raw || resp.error || resp.status)));
+    if (!nbWriteOk(resp)) {
+        const e = new Error('Failed to bypass the device: ' + (resp && (resp.raw || resp.error || resp.status)));
+        e.definite = definitelyRefused(resp);
+        throw e;
     }
     _peersLastRefresh.set(tnt(), 0); // reflect force_approved on the next peers refresh
     return { ok: true };
@@ -9404,8 +9416,10 @@ async function bypassPeer(peerId) {
 // The peer goes back to being blocked until it passes the compliance checks again.
 async function revokePeerBypass(peerId) {
     const resp = await netbirdReq('DELETE', `/api/peers/${encodeURIComponent(peerId)}/edr/bypass`);
-    if (!nbWriteOk(resp)) {
-        throw new Error('Failed to remove the bypass: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
+    if (!nbWriteOk(resp, true)) {
+        const e = new Error('Failed to remove the bypass: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
+        e.definite = definitelyRefused(resp);
+        throw e;
     }
     // A manual revoke also cancels any scheduled expiry (scoped to the current context).
     await pool.query('DELETE FROM bypass_expirations WHERE tenant=$2 AND peer_id=$1', [peerId, tnt()]).catch(() => { });
@@ -9419,7 +9433,12 @@ async function revokeExpiredBypasses() {
     if (NETBIRD_READONLY) return;
     // Per-account: runs inside forEachTenant, so tnt() scopes to the account being serviced.
     const r = await pool.query(`SELECT * FROM bypass_expirations WHERE tenant = $1 AND expires_at <= NOW()`, [tnt()]).catch(() => ({ rows: [] }));
-    for (const row of r.rows) {
+    for (const due of r.rows) await withEdrDevice(due.peer_id, () => expireBypass(due.peer_id));
+}
+
+async function expireBypass(peerId) {
+    const cur = await pool.query(`SELECT * FROM bypass_expirations WHERE tenant = $1 AND peer_id = $2 AND expires_at <= NOW()`, [tnt(), peerId]);
+    for (const row of cur.rows) {
         try {
             if (row.delete_peer) {
                 // Temporary device: expiry DELETES the peer from NetBird (which drops the
@@ -9538,33 +9557,64 @@ async function edrIdSet(key) {
         return new Set(Array.isArray(a) ? a.map(String).filter(Boolean) : []);
     } catch { return new Set(); }
 }
-async function saveEdrIdSet(key, set, cap) {
-    const arr = [...set]; // Sets keep insertion order - trimming the head drops the OLDEST ids
-    await setSetting(key, JSON.stringify(arr.length > cap ? arr.slice(arr.length - cap) : arr));
+const withEdrDevice = (peerId, fn) => withLock('edr', [tnt(), String(peerId)], fn);
+
+const edrRevokePendingKey = () => tnt() ? `edr_auto_bypass_revoke_pending:${tnt()}` : 'edr_auto_bypass_revoke_pending';
+
+async function editEdrSets(change) {
+    const keys = [edrAppliedKey(), edrRevokedKey(), edrRevokePendingKey()];
+    return inOneTransaction(async (client) => {
+        for (const k of keys) await client.query(`INSERT INTO app_settings (key, value) VALUES ($1, '[]') ON CONFLICT (key) DO NOTHING`, [k]);
+        const r = await client.query('SELECT key, value FROM app_settings WHERE key = ANY($1) ORDER BY key FOR UPDATE', [keys]);
+        const parse = (k) => {
+            try {
+                const a = JSON.parse((r.rows.find(x => x.key === k) || {}).value || '[]');
+                return new Set(Array.isArray(a) ? a.map(String).filter(Boolean) : []);
+            } catch { return new Set(); }
+        };
+        const applied = parse(keys[0]), revoked = parse(keys[1]), pending = parse(keys[2]);
+        const out = change(applied, revoked, pending);
+        const newest = (set, cap) => { const arr = [...set]; return JSON.stringify(arr.length > cap ? arr.slice(arr.length - cap) : arr); };
+        await putSetting(client, keys[0], newest(applied, EDR_APPLIED_CAP));
+        await putSetting(client, keys[1], newest(revoked, EDR_REVOKED_CAP));
+        await putSetting(client, keys[2], newest(pending, EDR_REVOKED_CAP));
+        return out;
+    });
 }
 
-// Called from the EXPLICIT admin revoke paths only (the revoke-bypass route and an Access Review
-// "Revoke" decision) - never from the scheduler's natural expiry. A peer whose TIMED auto-bypass
-// simply expired is blocked again and gets re-applied on the next sync (rolling renewal while the
-// rule stays on); only a human revoke puts it in the revoke memory, permanently.
-// Returns true when the revoked bypass was one WE applied.
-async function noteEdrAutoBypassRevoked(peerId) {
+async function revokeBypassByHuman(peerId) {
     const id = String(peerId || '');
-    if (!id) return false;
-    try {
-        const applied = await edrIdSet(edrAppliedKey());
-        if (!applied.has(id)) return false;
-        applied.delete(id);
-        await saveEdrIdSet(edrAppliedKey(), applied, EDR_APPLIED_CAP);
-        const revoked = await edrIdSet(edrRevokedKey());
-        if (!revoked.has(id)) {
-            revoked.add(id);
-            await saveEdrIdSet(edrRevokedKey(), revoked, EDR_REVOKED_CAP);
+    return withEdrDevice(id, async () => {
+        const wasAuto = await editEdrSets((applied, revoked, pending) => {
+            const had = applied.delete(id);
+            if (had) revoked.add(id);
+            pending.add(id);
+            return had;
+        });
+        try {
+            await revokePeerBypass(id);
+        } catch (e) {
+            if (e.definite) await editEdrSets((applied, revoked, pending) => { pending.delete(id); if (wasAuto) { revoked.delete(id); applied.add(id); } });
+            throw e;
         }
-        return true;
-    } catch (e) {
-        console.error('[EDR auto-bypass] revoke memory error:', e.message);
-        return false;
+        await editEdrSets((applied, revoked, pending) => { pending.delete(id); });
+        return wasAuto;
+    });
+}
+
+async function retryPendingRevokes() {
+    if (NETBIRD_READONLY || !_isLeader()) return;
+    for (const id of await edrIdSet(edrRevokePendingKey())) {
+        await withEdrDevice(id, async () => {
+            if (!(await edrIdSet(edrRevokePendingKey())).has(id)) return;
+            try {
+                await revokePeerBypass(id);
+                await editEdrSets((applied, revoked, pending) => { pending.delete(id); });
+            } catch (e) {
+                if (e.definite) await editEdrSets((applied, revoked, pending) => { pending.delete(id); });
+                console.error('[EDR] revoke retry for %s: %s', id, e.message);
+            }
+        });
     }
 }
 
@@ -9589,7 +9639,7 @@ async function applyAutoEdrBypasses(peers) {
     // The apply step is a NetBird WRITE - blocked in read-only mode (netbirdPost would answer 503
     // and bypassPeer would throw); bail early so a read-only instance stays silent. Configuring
     // the rules is still allowed.
-    if (NETBIRD_READONLY) return { applied: 0 };
+    if (NETBIRD_READONLY || !_isLeader()) return { applied: 0 };
     const cfg = await getEdrAutoBypassConfig();
     if (!cfg.enabled || !cfg.rules.length) return { applied: 0 };
     const byOs = new Map(cfg.rules.map(r => [r.os, r]));
@@ -9615,33 +9665,44 @@ async function applyAutoEdrBypasses(peers) {
         capped = true;
     }
 
-    const applied = await edrIdSet(edrAppliedKey());
     let n = 0;
     for (const m of todo) {
         const name = m.peer.name || m.peer.dns_label || m.peer.id;
         const days = m.rule.durationDays;
-        try {
-            await bypassPeer(m.peer.id); // the exact call the manual approve makes
-        } catch (e) {
-            console.error('[EDR auto-bypass] failed for %s: %s', name, e.message);
-            continue;
-        }
-        // Identical bookkeeping to a manual timed approval - the 60s revokeExpiredBypasses
-        // scheduler owns the expiry, and getAllPeers surfaces bypass_expires_at as usual.
-        if (days) {
-            await pool.query(`
-                INSERT INTO bypass_expirations (tenant, peer_id, peer_name, requester_email, requester_name, request_id, expires_at, delete_peer)
-                VALUES ($1, $2, $3, '', 'Automatic EDR Bypass', NULL, NOW() + ($4 || ' days')::interval, false)
-                ON CONFLICT (tenant, peer_id) DO UPDATE SET
-                    expires_at = EXCLUDED.expires_at, peer_name = EXCLUDED.peer_name,
-                    requester_name = EXCLUDED.requester_name, request_id = NULL, delete_peer = false
-            `, [tnt(), m.peer.id, name, String(days)]).catch(e => console.error('[EDR auto-bypass] expiry save error:', e.message));
-        } else {
-            // Unlimited: no row (exactly like an unlimited manual bypass) → it becomes a
-            // recertification item every round.
-            await pool.query(`DELETE FROM bypass_expirations WHERE tenant=$1 AND peer_id=$2`, [tnt(), m.peer.id]).catch(() => { });
-        }
-        applied.add(String(m.peer.id));
+        const id = String(m.peer.id);
+        const done = await withEdrDevice(id, async () => {
+            await refreshBypassedPeers();
+            if (peerIsBypassed(id)) return false;
+            const recorded = await editEdrSets((applied, revoked, pending) => {
+                if (revoked.has(id) || pending.has(id)) return false;
+                applied.add(id);
+                return true;
+            });
+            if (!recorded) return false;
+            if (days) {
+                await pool.query(`
+                    INSERT INTO bypass_expirations (tenant, peer_id, peer_name, requester_email, requester_name, request_id, expires_at, delete_peer)
+                    VALUES ($1, $2, $3, '', 'Automatic EDR Bypass', NULL, NOW() + ($4 || ' days')::interval, false)
+                    ON CONFLICT (tenant, peer_id) DO UPDATE SET
+                        expires_at = EXCLUDED.expires_at, peer_name = EXCLUDED.peer_name,
+                        requester_name = EXCLUDED.requester_name, request_id = NULL, delete_peer = false
+                `, [tnt(), id, name, String(days)]);
+            } else {
+                await pool.query(`DELETE FROM bypass_expirations WHERE tenant=$1 AND peer_id=$2`, [tnt(), id]);
+            }
+            try {
+                await bypassPeer(id);
+            } catch (e) {
+                console.error('[EDR auto-bypass] failed for %s: %s', name, e.message);
+                if (e.definite) {
+                    await editEdrSets((applied) => { applied.delete(id); });
+                    await pool.query(`DELETE FROM bypass_expirations WHERE tenant=$1 AND peer_id=$2`, [tnt(), id]);
+                }
+                return false;
+            }
+            return true;
+        }).catch((e) => { console.error('[EDR auto-bypass] %s: %s', name, e.message); return false; });
+        if (!done) continue;
         n++;
         recordAudit({
             actorId: '', actorEmail: '', actorName: 'Automatic EDR Bypass',
@@ -9654,7 +9715,6 @@ async function applyAutoEdrBypasses(peers) {
         notifyAutoEdrBypass(name, EDR_OS_LABELS[m.os] || m.os, days).catch(() => { });
     }
     if (n) {
-        await saveEdrIdSet(edrAppliedKey(), applied, EDR_APPLIED_CAP);
         // Re-read NetBird's bypassed list so peerIsBypassed is immediately truthful: the Peers
         // page shows the badge on this refresh, and the NEXT sync will not re-apply these.
         await refreshBypassedPeers().catch(() => { });
@@ -9703,12 +9763,15 @@ function fmtBytes(n) {
 }
 
 // Hourly: flag devices that moved far more traffic in the last hour than their own baseline.
-let _trafficAnomalyHour = '';
+const readCoordination = async (key) => ((await pool.query('SELECT value FROM coordination WHERE key = $1', [key])).rows[0] || {}).value || '';
+const writeCoordination = (key, value) => pool.query(
+    'INSERT INTO coordination (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [key, String(value)]);
+
 async function checkTrafficAnomalies() {
     if (!_security.anomalyEnabled || !getTelegramConfig().enabled) return;
     const hourKey = new Date().toISOString().slice(0, 13);
-    if (_trafficAnomalyHour === hourKey) return; // once per hour
-    _trafficAnomalyHour = hourKey;
+    const markerKey = `traffic_anomaly_hour:${tnt()}`;
+    if ((await readCoordination(markerKey)) === hourKey) return; // once per hour
     const floor = _security.trafficFloorMb * 1024 * 1024;
     const r = await pool.query(`
         WITH last_hour AS (
@@ -9728,63 +9791,50 @@ async function checkTrafficAnomalies() {
         FROM last_hour l LEFT JOIN baseline bs ON bs.src = l.src
         WHERE l.b > $1 AND l.b > COALESCE(bs.avg_b, 0) * $2
         ORDER BY l.b DESC LIMIT 5
-    `, [floor, _security.trafficMult, tnt()]).catch(() => ({ rows: [] }));
+    `, [floor, _security.trafficMult, tnt()]);
     for (const row of r.rows) {
         const avg = Number(row.avg_b);
         await sendAnomalyAlert(`📈 <b>Traffic Spike</b>\n🖥 ${tgEsc(row.src)}\n📊 <b>${fmtBytes(Number(row.b))}</b> in the last hour${avg > 0 ? ` (hourly average: ${fmtBytes(avg)})` : ' (no prior baseline)'}`);
     }
+    await writeCoordination(markerKey, hourKey);
 }
 
-async function upsertPeers(peers) {
-    const t = tnt(); // one account for the whole batch (ALS context is stable across the loop)
+const withPeersMirror = (acct, fn) => withLock('mirror', [acct, 'peers'], fn);
+
+async function upsertPeers(client, peers, t) {
+    const notes = [];
+    const anomalies = _security.anomalyEnabled && getTelegramConfig().enabled;
     // Snapshot the previous geo/owner per peer, to detect country changes and
     // new devices enrolling from a country the user was never seen in.
-    let prev = new Map();
-    if (_security.anomalyEnabled && getTelegramConfig().enabled) {
-        try {
-            const r = await pool.query(`SELECT peer_id, raw_json->>'country_code' AS cc, raw_json->>'user_id' AS uid FROM peers WHERE tenant = $1`, [t]);
-            prev = new Map(r.rows.map(x => [x.peer_id, x]));
-        } catch { /* alerts are best-effort */ }
-    }
+    const before = await client.query(`SELECT peer_id, raw_json->>'country_code' AS cc, raw_json->>'user_id' AS uid, raw_json->>'last_login' AS ll FROM peers WHERE tenant = $1`, [t]);
+    const prev = new Map(before.rows.map(x => [x.peer_id, x]));
     // Previous login state per peer - the compliance-blocked owner email fires ONLY on a
     // transition observed between two syncs (a login happening right now), never on state.
-    let loginPrev = null;
-    try {
-        const r0 = await pool.query(`SELECT peer_id, raw_json->>'last_login' AS ll FROM peers WHERE tenant = $1`, [t]);
-        loginPrev = new Map(r0.rows.map(x => [x.peer_id, x.ll || '']));
-    } catch { /* email is best-effort */ }
-    const alerts = [];
-    const client = await pool.connect();
-    try {
-        for (const p of peers) {
-            if (!p || !p.id) continue;
-            // Mirror rows are stamped with the active account - main ('') or a tenant, identically.
-            await client.query(`
-                INSERT INTO peers (tenant, peer_id, name, dns_label, ip, raw_json, updated_at)
-                VALUES ($6, $1, $2, $3, $4, $5, NOW())
-                ON CONFLICT (tenant, peer_id) DO UPDATE SET
-                    name = $2, dns_label = $3, ip = $4, raw_json = $5, updated_at = NOW()
-            `, [p.id, p.name || '', p.dns_label || '', p.ip || '', JSON.stringify(p), t]);
+    const loginPrev = new Map(before.rows.map(x => [x.peer_id, x.ll || '']));
+    for (const p of peers) {
+        if (!p || !p.id) continue;
+        await client.query(`
+            INSERT INTO peers (tenant, peer_id, name, dns_label, ip, raw_json, updated_at)
+            VALUES ($6, $1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (tenant, peer_id) DO UPDATE SET
+                name = $2, dns_label = $3, ip = $4, raw_json = $5, updated_at = NOW()
+        `, [p.id, p.name || '', p.dns_label || '', p.ip || '', JSON.stringify(p), t]);
 
-            if (_security.anomalyEnabled && getTelegramConfig().enabled && p.country_code && prev.size) {
-                const old = prev.get(p.id);
-                const flag = countryFlag(p.country_code) || '';
-                if (old && old.cc && old.cc !== p.country_code) {
-                    alerts.push(`🌍 <b>Device Changed Country</b>\n🖥 ${tgEsc(p.name || p.id)}\n📍 <b>${tgEsc(countryName(old.cc) || old.cc)} → ${flag} ${tgEsc(countryName(p.country_code) || p.country_code)}</b>${p.connection_ip ? `\n🌐 ${tgEsc(p.connection_ip)}` : ''}`);
-                } else if (!old && p.user_id) {
-                    const known = new Set([...prev.values()].filter(x => x.uid === p.user_id && x.cc).map(x => x.cc));
-                    if (known.size && !known.has(p.country_code)) {
-                        alerts.push(`🆕 <b>New Device From a New Country</b>\n🖥 ${tgEsc(p.name || p.id)}\n📍 ${flag} <b>${tgEsc(countryName(p.country_code) || p.country_code)}</b> (user's other devices: ${[...known].join(', ')})`);
-                    }
+        if (anomalies && p.country_code && prev.size) {
+            const old = prev.get(p.id);
+            const flag = countryFlag(p.country_code) || '';
+            if (old && old.cc && old.cc !== p.country_code) {
+                notes.push({ channel: 'anomaly-alert', payload: { html: `🌍 <b>Device Changed Country</b>\n🖥 ${tgEsc(p.name || p.id)}\n📍 <b>${tgEsc(countryName(old.cc) || old.cc)} → ${flag} ${tgEsc(countryName(p.country_code) || p.country_code)}</b>${p.connection_ip ? `\n🌐 ${tgEsc(p.connection_ip)}` : ''}` } });
+            } else if (!old && p.user_id) {
+                const known = new Set([...prev.values()].filter(x => x.uid === p.user_id && x.cc).map(x => x.cc));
+                if (known.size && !known.has(p.country_code)) {
+                    notes.push({ channel: 'anomaly-alert', payload: { html: `🆕 <b>New Device From a New Country</b>\n🖥 ${tgEsc(p.name || p.id)}\n📍 ${flag} <b>${tgEsc(countryName(p.country_code) || p.country_code)}</b> (user's other devices: ${[...known].join(', ')})` } });
                 }
             }
         }
-    } finally {
-        client.release();
     }
-    for (const a of alerts.slice(0, 5)) await sendAnomalyAlert(a);
-    // Owner email for compliance-blocked devices - fires only on a login observed RIGHT NOW.
-    notifyComplianceBlockedOwners(peers, loginPrev).catch(e => console.error('[Compliance email] error:', e.message));
+    const alerts = notes.slice(0, 5);
+    return [...alerts, ...(await complianceBlockedNotes(peers, loginPrev))];
 }
 
 // A user-owned peer with approval_required (and no bypass) failed to get network access.
@@ -9794,11 +9844,12 @@ async function upsertPeers(peers) {
 // Pure state ("this peer is blocked") never emails - so a deploy, a restart or an initial
 // cache fill (empty baseline) can never mass-mail the backlog.
 // Kill switch: Settings → Email → compliance_blocked_email ('false' disables).
-async function notifyComplianceBlockedOwners(peers, loginPrev) {
-    if (tnt()) return; // customer-facing emails for tenants need their own policy - main only for now
-    if (!getSmtpConfig().enabled) return;
-    if (!loginPrev || !loginPrev.size) return; // no baseline (initial fill / snapshot failed) - nothing is "now"
-    if ((await getSetting('compliance_blocked_email')) === 'false') return;
+async function complianceBlockedNotes(peers, loginPrev) {
+    const notes = [];
+    if (tnt()) return notes; // customer-facing emails for tenants need their own policy - main only for now
+    if (!getSmtpConfig().enabled) return notes;
+    if (!loginPrev || !loginPrev.size) return notes; // no baseline (initial fill) - nothing is "now"
+    if ((await getSetting('compliance_blocked_email')) === 'false') return notes;
     for (const p of (Array.isArray(peers) ? peers : [])) {
         if (!p || !p.id || !p.user_id) continue;
         if (!p.approval_required || peerIsBypassed(p.id, p)) continue;
@@ -9808,13 +9859,14 @@ async function notifyComplianceBlockedOwners(peers, loginPrev) {
         if (!isNewPeer && !loggedInNow) continue;
         const u = await resolveUser(p.user_id).catch(() => null);
         if (u && u.email) {
-            notifyComplianceBlockedEmail({
+            notes.push({ channel: 'compliance-email', payload: {
                 to: u.email, name: u.display_name || '',
                 device: p.name || p.dns_label || p.id,
                 reason: p.disapproval_reason || '',
-            });
+            } });
         }
     }
+    return notes;
 }
 
 // The EDR-bypassed peer set (_bypassedPeerIds + refreshBypassedPeers / peerIsBypassed) now lives in
@@ -9823,27 +9875,59 @@ async function notifyComplianceBlockedOwners(peers, loginPrev) {
 
 async function refreshPeersCache() {
     const t = tnt();
-    await refreshBypassedPeers();
-    const peers = await fetchPeersFromApi();
+    const peers = await withPeersMirror(t, async () => {
+        await refreshBypassedPeers();
+        const list = await fetchPeersFromApi();
+        if (!list) return null;
+        await inOneTransaction(async (client) => {
+            const notes = await upsertPeers(client, list, t);
+            const ids = list.map(p => p && p.id).filter(Boolean);
+            if (ids.length) await client.query(`DELETE FROM peers WHERE tenant = $2 AND peer_id <> ALL($1)`, [ids, t]);
+            for (const n of notes) await queueOutbox(client, n.channel, n.payload, t);
+        });
+        console.log(`[PeerResolve] Cached ${list.length} peers from NetBird API`);
+        return list;
+    });
     if (peers) {
-        await upsertPeers(peers);
-        if (!t) enforceManagedMembership({ peers }).catch(() => { });
-        // Prune peers that were deleted in NetBird so they stop appearing in the app - the cache
-        // mirrors NetBird. Only when the API returned at least one peer (don't wipe on a transient
-        // empty/error response).
-        const ids = peers.map(p => p && p.id).filter(Boolean);
-        if (ids.length) {
-            // Prune only THIS account's rows - other accounts' rows must survive.
-            await pool.query(`DELETE FROM peers WHERE tenant = $2 AND peer_id <> ALL($1)`, [ids, t])
-                .catch(e => console.error('[PeerResolve] prune error:', e.message));
-        }
-        console.log(`[PeerResolve] Cached ${peers.length} peers from NetBird API`);
+        if (!t) trackBackground(enforceManagedMembership({ peers }).catch(() => { }));
         // Automatic EDR bypass by OS - evaluated on EVERY peers sync, for EVERY account (main and
         // each tenant run this same path inside their own context, so tnt()-keyed rules apply to
         // that account's own peers). Best-effort: never let it break the mirror refresh.
+        await retryPendingRevokes().catch(e => console.error('[EDR] revoke retry error:', e.message));
         await applyAutoEdrBypasses(peers).catch(e => console.error('[EDR auto-bypass] error:', e.message));
     }
     _peersLastRefresh.set(t, Date.now());
+}
+
+const queueOutbox = (client, channel, payload, t) => client.query(
+    'INSERT INTO outbox (tenant, channel, payload, created_at, next_at) VALUES ($1, $2, $3, NOW(), NOW())', [t, channel, JSON.stringify(payload)]);
+
+const OUTBOX_MAX_ATTEMPTS = 5;
+async function deliverOutboxRow(row) {
+    const p = row.payload || {};
+    if (row.channel === 'anomaly-alert') {
+        const tg = getTelegramConfig();
+        const cat = tg.categories && tg.categories.alerts;
+        if (!tg.enabled || !tg.hasToken || !tg.chatId || (cat && cat.enabled === false)) return { ok: true };
+        const sent = await sendTelegram('alerts', `🚨 ${p.html}`);
+        return sent ? { ok: true } : { ok: false, error: 'Telegram did not accept the alert' };
+    }
+    if (row.channel === 'compliance-email') return notifyComplianceBlockedEmail(p);
+    return { ok: false, permanent: true, error: `unknown channel ${row.channel}` };
+}
+async function deliverOutbox() {
+    const due = (await pool.query(`SELECT * FROM outbox WHERE status = 'pending' AND next_at <= NOW() ORDER BY id LIMIT 50`)).rows;
+    for (const row of due) {
+        let out;
+        try {
+            out = await (row.tenant ? runWithTenant(row.tenant, () => deliverOutboxRow(row)) : deliverOutboxRow(row));
+        } catch (e) { out = { ok: false, error: e.message }; }
+        if (!out || out.ok !== false) { await pool.query('DELETE FROM outbox WHERE id = $1', [row.id]); continue; }
+        const attempts = row.attempts + 1;
+        const failed = (out && out.permanent) || attempts >= OUTBOX_MAX_ATTEMPTS;
+        await pool.query(`UPDATE outbox SET attempts = $2, last_error = $3, status = $4, next_at = NOW() + ($5 || ' seconds')::interval WHERE id = $1`,
+            [row.id, attempts, String((out && out.error) || 'not sent'), failed ? 'failed' : 'pending', String(30 * 2 ** attempts)]);
+    }
 }
 
 // Refresh the peers cache if stale; coalesces concurrent callers into one request PER account.
@@ -10058,7 +10142,7 @@ async function enforceBlockedResources(ids) {
 const {
     initAutomations,
     listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation,
-    getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations,
+    getAutomationRuns, runAutomation, testAutomation, runDueAutomations,
     getAutomationManaged, repairAutomation, forgetAutomation, dryRunAutomation,
 } = require('./lib/automations');
 initAutomations({ listAccessProfiles, getNetworkDetail, addResourceGroups, setResourceEnabled, renameResource, createClientResource, deleteResource, recordAudit, getDupAllowedNetworkIds, assertProfilesExist, resourceGoneConfirmed, isLinkNetwork });
@@ -10066,23 +10150,10 @@ initAutomations({ listAccessProfiles, getNetworkDetail, addResourceGroups, setRe
 
 // ─── Temporary access grants: time-boxed user→resource access, auto-revoked on expiry ───
 
-const _runningGrants = new Set();
 
-// One in-process queue per key (this app is single-instance). NetBird's user PUT replaces the
-// whole user (role + auto_groups + is_blocked), so every read-modify-write of one user runs
-// through withNbUserLock: two writers can never interleave and undo each other's change. The
-// lock is NOT reentrant - code already holding it calls the unlocked inner helpers.
-const _keyLocks = new Map();
-function withKeyLock(key, fn) {
-    const run = (_keyLocks.get(key) || Promise.resolve()).then(() => fn());
-    const tail = run.catch(() => { });
-    _keyLocks.set(key, tail);
-    tail.then(() => { if (_keyLocks.get(key) === tail) _keyLocks.delete(key); });
-    return run;
-}
 // Keyed on the account + the IdP-subject tail, since a user may be addressed by either id form.
 function withNbUserLock(userId, fn) {
-    return withKeyLock(`user\u0000${tnt()}\u0000${String(userId || '').split('|').pop()}`, fn);
+    return withLock('user', [tnt(), String(userId || '').split('|').pop()], fn);
 }
 
 // A NetBird write succeeded only on a 2xx answer (or a 404 when the target being gone is fine,
@@ -10223,14 +10294,7 @@ async function formatConfiguredDate(date) {
 // ALL_COMBO, comboKey and combosForResource (least-privilege combo logic) now live in
 // lib/pure.js (imported at the top).
 
-// Grant ids whose creation is running in this process: the cleanup job and a manual delete leave
-// their 'creating' row alone, however long the creation takes.
-const _creatingGrants = new Set();
-async function createTemporaryAccessGrant(cfg, actor) {
-    const run = {};
-    try { return await createGrantTracked(cfg, actor, run); } finally { if (run.id) _creatingGrants.delete(run.id); }
-}
-async function createGrantTracked(cfg, actor, run) {
+async function createTemporaryAccessGrant(cfg, actor, { grantId: reservedId } = {}) {
     const userId = String((cfg && cfg.userId) || '').trim();
     if (!userId) throw new Error('a user is required');
     const targets = Array.isArray(cfg.targets) ? cfg.targets.filter(t => t && t.id && t.type) : [];
@@ -10249,232 +10313,182 @@ async function createGrantTracked(cfg, actor, run) {
     let recipientEmail = String(cfg.userEmail || (peers.find(p => p.owner_email) || {}).owner_email || '').trim();
     if (!recipientEmail) { const nbu = await getNbUser(userId).catch(() => null); recipientEmail = (nbu && nbu.email) || ''; }
     const until = await formatConfiguredDate(expiresAt);
-    // Reserve the grant id up front so the NetBird group/policy names can be short and stable
-    // (`#<id> (until <date>)`) - these objects are app-managed, so a long user label just clutters.
-    const grantId = (await pool.query(`SELECT nextval(pg_get_serial_sequence('temporary_access_grants','id')) AS id`)).rows[0].id;
-    run.id = String(grantId); _creatingGrants.add(run.id);
-    // Crash-safety: write a 'creating' placeholder BEFORE touching NetBird. If the process
-    // dies mid-creation, this row (plus the "#<id>" embedded in every NetBird object name)
-    // lets cleanupStuckCreatingGrants find and delete the orphaned groups/policies - without
-    // it they would be untracked forever. Success flips the row to 'active'; a thrown error
-    // deletes it (after the in-line compensation removed the NetBird objects).
-    await pool.query(
-        `INSERT INTO temporary_access_grants (id, user_id, user_label, user_email, targets, note, expires_at, created_by, status, tenant)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'creating',$9)`,
-        [grantId, userId, label, recipientEmail, JSON.stringify(targets), String(cfg.note || '').trim(), expiresAt.toISOString(), (actor && (actor.email || actor.name)) || '', tnt()]
-    );
+    const grantId = reservedId || await reserveGrantId();
+    return withLock('grant', [tnt(), String(grantId)], async () => {
+        await pool.query(
+            `INSERT INTO temporary_access_grants (id, user_id, user_label, user_email, targets, note, expires_at, created_by, status, tenant)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'creating',$9)`,
+            [grantId, userId, label, recipientEmail, JSON.stringify(targets), String(cfg.note || '').trim(), expiresAt.toISOString(), (actor && (actor.email || actor.name)) || '', tnt()]
+        );
 
-    // Split targets:
-    //  - GROUP    → the user JOINS that exact group directly (their explicit choice; they get
-    //               everything that group grants, and appear in its Users tab).
-    //  - PROFILE  → the policy points at the profile's *destination* group, so the user gets
-    //               EXACTLY the profile's resources - never whatever the profile's shared source
-    //               groups grant elsewhere.
-    //  - RESOURCE → collected and dropped into one shared destination group (below).
-    //  - NETWORK  → expands into all of its resources, collected the same way.
-    // Everything that isn't a direct group-join is served by a SINGLE policy: the user goes into
-    // one source group (Gs), all the loose resources into one destination group (Gd), and the
-    // policy is Gs -> [Gd, ...profile destination groups]. One group pair, one policy, however
-    // many resources - the Access Profile pattern (NetBird keeps only one destinationResource per
-    // policy, so per-resource policies don't scale; groups do).
-    const joinGroups = new Set();
-    const destGroupIds = new Set();   // profile destination groups (policy destinations)
-    const destGroupAccess = new Map(); // profile dest group → access spec (null = profile default)
-    const resourceRefs = [];          // { networkId, resourceId, access } to drop into Gd
-    let profileGroups = null;         // lazy profile id → destination group id map
-    // Auto-approval rules may pin the EXACT protocols/ports the grant opens (t.access,
-    // one temp policy per protocol). null = mirror existing exposure, as always. Group
-    // targets are direct memberships - a spec can't apply there and is ignored.
-    for (const t of targets) {
-        const acc = normAccessSpec(t.access);
-        if (t.type === 'group') { joinGroups.add(t.id); continue; }
-        if (t.type === 'profile') {
-            let gid = t.groupId;
-            if (!gid) {
-                if (!profileGroups) profileGroups = new Map((await listAccessProfiles()).map(p => [String(p.id), p.groupId]));
-                gid = profileGroups.get(String(t.id));
-            }
-            if (gid) {
-                destGroupIds.add(gid);
-                // Unrestricted (null) wins if the same profile group arrives twice.
-                if (!destGroupAccess.has(gid) || acc === null) destGroupAccess.set(gid, acc);
-            }
-            continue;
-        }
-        if (t.type === 'resource') {
-            if (t.networkId) resourceRefs.push({ networkId: t.networkId, resourceId: t.id, access: acc });
-            continue;
-        }
-        if (t.type === 'network') {
-            const rs = await netbirdGet('/api/networks/' + encodeURIComponent(t.id) + '/resources');
-            for (const r of (Array.isArray(rs) ? rs : [])) {
-                if (r && r.id) resourceRefs.push({ networkId: t.id, resourceId: r.id, access: acc });
-            }
-            continue;
-        }
-    }
-
-    const assignedGroups = [];   // groups we actually added the user to (so revoke only undoes ours)
-    let sourceGroupId = '';      // Gs - the temp source group the user joins
-    const allDestGroupIds = [];  // every temp destination group we created (one per combo bucket)
-    const destResources = [];    // { networkId, resourceId, groupId } we attached (for clean detach)
-    let policyIds = [];
-    try {
-        // 1) direct group memberships (target groups). Only track the ones we actually add, so
-        //    revoke never strips a membership the user already had.
-        for (const gid of joinGroups) {
-            if (await setUserGroupMembership(userId, gid, true)) assignedGroups.push(gid);
-        }
-        // 2) resources / profiles → one source group (Gs, user assigned) + one policy PER
-        //    protocol/ports combo, MIRRORING each destination's EXISTING exposure: a resource
-        //    whose only policy is TCP 39001 stays TCP 39001 for the temp user too - temporary
-        //    access never opens more than the resource already allows. Resources with no policy
-        //    at all have nothing to mirror and get 'all' (otherwise the grant would be inert);
-        //    profiles mirror their own protocol/ports definition.
-        if (resourceRefs.length || destGroupIds.size) {
-            const gs = await netbirdPost('/api/groups', { name: `Temp access #${grantId} (until ${until})` });
-            if (!gs || gs.status >= 300 || !gs.body || !gs.body.id) throw new Error('Failed to create group: ' + (gs && (gs.raw || gs.error || gs.status)));
-            sourceGroupId = gs.body.id;
-            await setUserGroupMembership(userId, sourceGroupId, true);
-            assignedGroups.push(sourceGroupId);
-
-            // ── Existing exposure per resource → combo buckets (pure logic: combosForResource) ──
-            // Resource → groups lookup (one fetch per network; network targets were fetched above
-            // but refetching here keeps this self-contained and cheap).
-            // An unreadable list stops the grant: treating it as empty would mirror no policy
-            // and no posture checks.
-            const netResources = new Map();
-            for (const rr of resourceRefs) {
-                if (netResources.has(rr.networkId)) continue;
-                const rs = await netbirdGet('/api/networks/' + encodeURIComponent(rr.networkId) + '/resources');
-                if (!Array.isArray(rs)) throw new Error('could not read the resources of network ' + rr.networkId);
-                netResources.set(rr.networkId, rs);
-            }
-            // All enabled, non-temporary policies (other grants' temp policies must not leak
-            // their 'all' back into new grants).
-            const rawPolicies = await netbirdGet('/api/policies');
-            if (resourceRefs.length && !Array.isArray(rawPolicies)) throw new Error('could not read the existing policies');
-            const polArr = (Array.isArray(rawPolicies) ? rawPolicies : [])
-                .filter(p => p && p.enabled !== false && !/^Temporary access #\d+/.test(p.name || '')
-                    // The Browser Gateway's standing policy is infrastructure, not exposure: mirroring
-                    // its all-ports, posture-free rule would widen every grant to a gateway target.
-                    && !isRemoteAccessManagedPolicy(p));
-            const combosFor = (rr) => {
-                const res = (netResources.get(rr.networkId) || []).find(x => x && x.id === rr.resourceId);
-                if (!res) throw new Error('resource ' + rr.resourceId + ' was not found in network ' + rr.networkId);
-                const rgroups = (Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
-                const existing = combosForResource(polArr, rr.resourceId, rgroups);
-                if (!rr.access) return existing;
-                // Rule-pinned protocols/ports keep the posture checks of the exposure they overlap.
-                return accessSpecCombos(rr.access).map(c => {
-                    const pc = postureChecksFor(c, existing);
-                    return pc.length ? { ...c, postureChecks: pc } : c;
-                });
-            };
-
-            // bucket key → { combo, resources: [rr], profileGroups: [gid] }
-            const buckets = new Map();
-            const bucketFor = (c) => {
-                const k = comboKey(c);
-                if (!buckets.has(k)) buckets.set(k, { combo: c, resources: [], profileGroups: [] });
-                return buckets.get(k);
-            };
-            for (const rr of resourceRefs) {
-                for (const c of combosFor(rr)) bucketFor(c).resources.push(rr);
-            }
-            if (destGroupIds.size) {
-                const profByGid = new Map((await listAccessProfiles()).map(p => [p.groupId, p]));
-                for (const gid of destGroupIds) {
-                    const prof = profByGid.get(gid);
-                    if (!prof) throw new Error('access profile not found for group ' + gid);
-                    // The profile's posture checks gate the temp policy too.
-                    const pc = postureIds(prof.postureChecks);
-                    const gated = (c) => (pc.length ? { ...c, postureChecks: pc } : c);
-                    const acc = destGroupAccess.get(gid);
-                    if (acc) { // rule-pinned protocols/ports override the profile's definition
-                        for (const c of accessSpecCombos(acc)) bucketFor(gated(c)).profileGroups.push(gid);
-                        continue;
-                    }
-                    const ports = prof && (Array.isArray(prof.ports) ? prof.ports : String(prof.ports || '').split(',').map(s => s.trim()).filter(Boolean));
-                    const c = prof && prof.protocol && prof.protocol !== 'all'
-                        ? { protocol: prof.protocol, ...splitPortTokens(ports || []) }
-                        : ALL_COMBO;
-                    bucketFor(gated(c)).profileGroups.push(gid);
+        const joinGroups = new Set();
+        const destGroupIds = new Set();
+        const destGroupAccess = new Map();
+        const resourceRefs = [];          // { networkId, resourceId, access } to drop into Gd
+        let profileGroups = null;         // lazy profile id → destination group id map
+        for (const t of targets) {
+            const acc = normAccessSpec(t.access);
+            if (t.type === 'group') { joinGroups.add(t.id); continue; }
+            if (t.type === 'profile') {
+                let gid = t.groupId;
+                if (!gid) {
+                    if (!profileGroups) profileGroups = new Map((await listAccessProfiles()).map(p => [String(p.id), p.groupId]));
+                    gid = profileGroups.get(String(t.id));
                 }
-            }
-
-            // ── One destination group (when loose resources exist) + one policy per bucket ──
-            let bi = 0;
-            for (const b of buckets.values()) {
-                bi++;
-                const suffix = buckets.size > 1 ? ` (${bi})` : '';
-                const destinations = [...b.profileGroups];
-                if (b.resources.length) {
-                    const gd = await netbirdPost('/api/groups', { name: `Temp resources #${grantId}${suffix} (until ${until})` });
-                    if (!gd || gd.status >= 300 || !gd.body || !gd.body.id) throw new Error('Failed to create destination group: ' + (gd && (gd.raw || gd.error || gd.status)));
-                    allDestGroupIds.push(gd.body.id);
-                    for (const rr of b.resources) {
-                        await addResourceGroups(rr.networkId, rr.resourceId, [gd.body.id]);
-                        destResources.push({ ...rr, groupId: gd.body.id });
-                    }
-                    destinations.push(gd.body.id);
+                if (gid) {
+                    destGroupIds.add(gid);
+                    if (!destGroupAccess.has(gid) || acc === null) destGroupAccess.set(gid, acc);
                 }
-                if (!destinations.length) continue;
-                const rule = {
-                    name: 'Temporary access', enabled: true, action: 'accept', bidirectional: false,
-                    protocol: b.combo.protocol, ports: b.combo.ports || [], sources: [sourceGroupId], destinations,
+                continue;
+            }
+            if (t.type === 'resource') {
+                if (t.networkId) resourceRefs.push({ networkId: t.networkId, resourceId: t.id, access: acc });
+                continue;
+            }
+            if (t.type === 'network') {
+                const rs = await netbirdGet('/api/networks/' + encodeURIComponent(t.id) + '/resources');
+                for (const r of (Array.isArray(rs) ? rs : [])) {
+                    if (r && r.id) resourceRefs.push({ networkId: t.id, resourceId: r.id, access: acc });
+                }
+                continue;
+            }
+        }
+
+        const assignedGroups = [];   // groups we actually added the user to (so revoke only undoes ours)
+        let sourceGroupId = '';      // Gs - the temp source group the user joins
+        const allDestGroupIds = [];  // every temp destination group we created (one per combo bucket)
+        const destResources = [];    // { networkId, resourceId, groupId } we attached (for clean detach)
+        let policyIds = [];
+        try {
+            for (const gid of joinGroups) {
+                if (await setUserGroupMembership(userId, gid, true)) assignedGroups.push(gid);
+            }
+            if (resourceRefs.length || destGroupIds.size) {
+                const gs = await netbirdPost('/api/groups', { name: `Temp access #${grantId} (until ${until})` });
+                if (!gs || gs.status >= 300 || !gs.body || !gs.body.id) throw new Error('Failed to create group: ' + (gs && (gs.raw || gs.error || gs.status)));
+                sourceGroupId = gs.body.id;
+                await setUserGroupMembership(userId, sourceGroupId, true);
+                assignedGroups.push(sourceGroupId);
+
+                const netResources = new Map();
+                for (const rr of resourceRefs) {
+                    if (netResources.has(rr.networkId)) continue;
+                    const rs = await netbirdGet('/api/networks/' + encodeURIComponent(rr.networkId) + '/resources');
+                    if (!Array.isArray(rs)) throw new Error('could not read the resources of network ' + rr.networkId);
+                    netResources.set(rr.networkId, rs);
+                }
+                const rawPolicies = await netbirdGet('/api/policies');
+                if (resourceRefs.length && !Array.isArray(rawPolicies)) throw new Error('could not read the existing policies');
+                const polArr = (Array.isArray(rawPolicies) ? rawPolicies : [])
+                    .filter(p => p && p.enabled !== false && !/^Temporary access #\d+/.test(p.name || '')
+                        && !isRemoteAccessManagedPolicy(p));
+                const combosFor = (rr) => {
+                    const res = (netResources.get(rr.networkId) || []).find(x => x && x.id === rr.resourceId);
+                    if (!res) throw new Error('resource ' + rr.resourceId + ' was not found in network ' + rr.networkId);
+                    const rgroups = (Array.isArray(res.groups) ? res.groups : []).map(g => (g && g.id) || g);
+                    const existing = combosForResource(polArr, rr.resourceId, rgroups);
+                    if (!rr.access) return existing;
+                    return accessSpecCombos(rr.access).map(c => {
+                        const pc = postureChecksFor(c, existing);
+                        return pc.length ? { ...c, postureChecks: pc } : c;
+                    });
                 };
-                if (b.combo.portRanges && b.combo.portRanges.length) rule.port_ranges = b.combo.portRanges;
-                const p = await netbirdPost('/api/policies', {
-                    name: `Temporary access #${grantId}${suffix}`, description: `Auto-managed temporary access for ${label}`, enabled: true,
-                    source_posture_checks: b.combo.postureChecks || [],
-                    rules: [rule],
-                });
-                if (p && p.status < 300 && p.body && p.body.id) policyIds.push(p.body.id);
-                else throw new Error('Failed to create policy: ' + (p && (p.raw || p.error || p.status)));
-            }
-            if (!policyIds.length) throw new Error(`no reachable destinations for the chosen targets - a whole-network target needs at least one resource in that network`);
-        }
-        if (!assignedGroups.length) throw new Error('nothing to grant - the user may already be a member of the chosen group(s)');
-    } catch (e) {
-        // An add NetBird did not answer may still land later: undo it now, and keep the
-        // placeholder either way so the delayed cleanup removes it again.
-        let clean = !(e && e.uncertainGroup);
-        if (e && e.uncertainGroup && !assignedGroups.includes(e.uncertainGroup)) assignedGroups.push(e.uncertainGroup);
-        const undo = async (fn) => { try { if (await fn() === false) clean = false; } catch { clean = false; } };
-        const del = (path) => undo(async () => nbWriteOk(await netbirdReq('DELETE', path), true));
-        for (const pid of policyIds) await del('/api/policies/' + encodeURIComponent(pid));
-        for (const rr of destResources) await undo(() => removeResourceGroups(rr.networkId, rr.resourceId, [rr.groupId]).then(() => true));
-        for (const gid of assignedGroups) await undo(() => setUserGroupMembership(userId, gid, false).then(() => true));
-        for (const gid of allDestGroupIds) await del('/api/groups/' + encodeURIComponent(gid));
-        if (sourceGroupId) await del('/api/groups/' + encodeURIComponent(sourceGroupId));
-        if (clean) {
-            // Compensation removed the NetBird objects - drop the placeholder too.
-            await pool.query(`DELETE FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [grantId, tnt()]).catch(() => { });
-        } else {
-            // Keep the placeholder for cleanupStuckCreatingGrants, with the groups this attempt
-            // assigned so the cleanup removes exactly those memberships.
-            await pool.query(`UPDATE temporary_access_grants SET assigned_groups=$2, policy_ids=$3, last_error=$4 WHERE id=$1 AND status='creating' AND tenant=$5`,
-                [grantId, JSON.stringify(assignedGroups), JSON.stringify(policyIds), (e && e.message) || 'creation failed', tnt()]).catch(() => { });
-        }
-        throw e;
-    }
 
-    const row = await pool.query(
-        `UPDATE temporary_access_grants
-         SET group_id=$2, dest_group_id=$3, dest_group_ids=$4, dest_resources=$5, assigned_groups=$6, policy_ids=$7, status='active'
-         WHERE id=$1 AND tenant=$8 RETURNING id`,
-        [grantId, sourceGroupId, allDestGroupIds[0] || '', JSON.stringify(allDestGroupIds), JSON.stringify(destResources), JSON.stringify(assignedGroups), JSON.stringify(policyIds), tnt()]
-    );
-    bustNbCaches('policies', 'gref', 'usage');
-    recordAudit({
-        actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
-        action: 'access.grant', target: label,
-        meta: { targets: targets.map(t => t.name || t.id).join(', '), until: expiresAt.toISOString(), devices: peers.length || 'none yet' },
-    }).catch(() => { });
-    // Tell the recipient they now have access (covers both direct grants and approved requests).
-    notifyGrantEmail({ to: recipientEmail, name: label, targets: targets.map(t => t.name || t.id).join(', '), expiresAt, note: String(cfg.note || '').trim() }).catch(() => { });
-    return { id: row.rows[0].id, devices: peers.length };
+                const buckets = new Map();
+                const bucketFor = (c) => {
+                    const k = comboKey(c);
+                    if (!buckets.has(k)) buckets.set(k, { combo: c, resources: [], profileGroups: [] });
+                    return buckets.get(k);
+                };
+                for (const rr of resourceRefs) {
+                    for (const c of combosFor(rr)) bucketFor(c).resources.push(rr);
+                }
+                if (destGroupIds.size) {
+                    const profByGid = new Map((await listAccessProfiles()).map(p => [p.groupId, p]));
+                    for (const gid of destGroupIds) {
+                        const prof = profByGid.get(gid);
+                        if (!prof) throw new Error('access profile not found for group ' + gid);
+                        const pc = postureIds(prof.postureChecks);
+                        const gated = (c) => (pc.length ? { ...c, postureChecks: pc } : c);
+                        const acc = destGroupAccess.get(gid);
+                        if (acc) { // rule-pinned protocols/ports override the profile's definition
+                            for (const c of accessSpecCombos(acc)) bucketFor(gated(c)).profileGroups.push(gid);
+                            continue;
+                        }
+                        const ports = prof && (Array.isArray(prof.ports) ? prof.ports : String(prof.ports || '').split(',').map(s => s.trim()).filter(Boolean));
+                        const c = prof && prof.protocol && prof.protocol !== 'all'
+                            ? { protocol: prof.protocol, ...splitPortTokens(ports || []) }
+                            : ALL_COMBO;
+                        bucketFor(gated(c)).profileGroups.push(gid);
+                    }
+                }
+
+                let bi = 0;
+                for (const b of buckets.values()) {
+                    bi++;
+                    const suffix = buckets.size > 1 ? ` (${bi})` : '';
+                    const destinations = [...b.profileGroups];
+                    if (b.resources.length) {
+                        const gd = await netbirdPost('/api/groups', { name: `Temp resources #${grantId}${suffix} (until ${until})` });
+                        if (!gd || gd.status >= 300 || !gd.body || !gd.body.id) throw new Error('Failed to create destination group: ' + (gd && (gd.raw || gd.error || gd.status)));
+                        allDestGroupIds.push(gd.body.id);
+                        for (const rr of b.resources) {
+                            await addResourceGroups(rr.networkId, rr.resourceId, [gd.body.id]);
+                            destResources.push({ ...rr, groupId: gd.body.id });
+                        }
+                        destinations.push(gd.body.id);
+                    }
+                    if (!destinations.length) continue;
+                    const rule = {
+                        name: 'Temporary access', enabled: true, action: 'accept', bidirectional: false,
+                        protocol: b.combo.protocol, ports: b.combo.ports || [], sources: [sourceGroupId], destinations,
+                    };
+                    if (b.combo.portRanges && b.combo.portRanges.length) rule.port_ranges = b.combo.portRanges;
+                    const p = await netbirdPost('/api/policies', {
+                        name: `Temporary access #${grantId}${suffix}`, description: `Auto-managed temporary access for ${label}`, enabled: true,
+                        source_posture_checks: b.combo.postureChecks || [],
+                        rules: [rule],
+                    });
+                    if (p && p.status < 300 && p.body && p.body.id) policyIds.push(p.body.id);
+                    else throw new Error('Failed to create policy: ' + (p && (p.raw || p.error || p.status)));
+                }
+                if (!policyIds.length) throw new Error(`no reachable destinations for the chosen targets - a whole-network target needs at least one resource in that network`);
+            }
+            if (!assignedGroups.length) throw new Error('nothing to grant - the user may already be a member of the chosen group(s)');
+        } catch (e) {
+            let clean = !(e && e.uncertainGroup);
+            if (e && e.uncertainGroup && !assignedGroups.includes(e.uncertainGroup)) assignedGroups.push(e.uncertainGroup);
+            const undo = async (fn) => { try { if (await fn() === false) clean = false; } catch { clean = false; } };
+            const del = (path) => undo(async () => nbWriteOk(await netbirdReq('DELETE', path), true));
+            for (const pid of policyIds) await del('/api/policies/' + encodeURIComponent(pid));
+            for (const rr of destResources) await undo(() => removeResourceGroups(rr.networkId, rr.resourceId, [rr.groupId]).then(() => true));
+            for (const gid of assignedGroups) await undo(() => setUserGroupMembership(userId, gid, false).then(() => true));
+            for (const gid of allDestGroupIds) await del('/api/groups/' + encodeURIComponent(gid));
+            if (sourceGroupId) await del('/api/groups/' + encodeURIComponent(sourceGroupId));
+            if (clean) {
+                await pool.query(`DELETE FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [grantId, tnt()]).catch(() => { });
+            } else {
+                await pool.query(`UPDATE temporary_access_grants SET assigned_groups=$2, policy_ids=$3, last_error=$4 WHERE id=$1 AND status='creating' AND tenant=$5`,
+                    [grantId, JSON.stringify(assignedGroups), JSON.stringify(policyIds), (e && e.message) || 'creation failed', tnt()]).catch(() => { });
+            }
+            throw e;
+        }
+
+        const row = await pool.query(
+            `UPDATE temporary_access_grants
+             SET group_id=$2, dest_group_id=$3, dest_group_ids=$4, dest_resources=$5, assigned_groups=$6, policy_ids=$7, status='active'
+             WHERE id=$1 AND tenant=$8 RETURNING id`,
+            [grantId, sourceGroupId, allDestGroupIds[0] || '', JSON.stringify(allDestGroupIds), JSON.stringify(destResources), JSON.stringify(assignedGroups), JSON.stringify(policyIds), tnt()]
+        );
+        bustNbCaches('policies', 'gref', 'usage');
+        recordAudit({
+            actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
+            action: 'access.grant', target: label,
+            meta: { targets: targets.map(t => t.name || t.id).join(', '), until: expiresAt.toISOString(), devices: peers.length || 'none yet' },
+        }).catch(() => { });
+        notifyGrantEmail({ to: recipientEmail, name: label, targets: targets.map(t => t.name || t.id).join(', '), expiresAt, note: String(cfg.note || '').trim() }).catch(() => { });
+        return { id: row.rows[0].id, devices: peers.length };
+    });
 }
 
 // The whole revoke - NetBird teardown AND the final status write - runs under the grantee's user
@@ -10483,16 +10497,15 @@ async function createGrantTracked(cfg, actor, run) {
 async function revokeTemporaryAccessGrant(id, opts = {}) {
     const r = await pool.query('SELECT user_id FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [id, tnt()]);
     if (!r.rows.length) return { error: 'not found' };
-    return withNbUserLock(r.rows[0].user_id, () => revokeGrantLocked(id, opts));
+    return withLock('grant', [tnt(), String(id)], () => withNbUserLock(r.rows[0].user_id, () => revokeGrantLocked(id, opts)));
 }
 async function revokeGrantLocked(id, { trigger = 'manual', actor = null } = {}) {
-    if (_runningGrants.has(id)) return { skipped: true };
     const r = await pool.query('SELECT * FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [id, tnt()]);
     if (!r.rows.length) return { error: 'not found' };
     const g = r.rows[0];
     if (g.status !== 'active') return { skipped: true, reason: 'not active' };
+    if (trigger === 'expiry' && new Date(g.expires_at).getTime() > Date.now()) return { skipped: true, reason: 'extended' };
 
-    _runningGrants.add(id);
     let err = '';
     try {
         // revoke_requested_at is written before any NetBird call and never cleared: once a revoke
@@ -10522,8 +10535,6 @@ async function revokeGrantLocked(id, { trigger = 'manual', actor = null } = {}) 
         }
     } catch (e) {
         err = e.message || String(e);
-    } finally {
-        _runningGrants.delete(id);
     }
 
     if (err) {
@@ -10548,11 +10559,15 @@ async function revokeGrantLocked(id, { trigger = 'manual', actor = null } = {}) 
     return { status };
 }
 
-async function extendTemporaryAccessGrant(id, cfg, actor) {
+function extendTemporaryAccessGrant(id, cfg, actor) {
+    return withLock('grant', [tnt(), String(id)], () => extendGrantLocked(id, cfg, actor));
+}
+async function extendGrantLocked(id, cfg, actor) {
     const r = await pool.query('SELECT * FROM temporary_access_grants WHERE id=$1 AND tenant=$2', [id, tnt()]);
     if (!r.rows.length) throw new Error('grant not found');
     const g = r.rows[0];
     if (g.status !== 'active') throw new Error('only an active grant can be extended');
+    if (g.revoke_requested_at) throw new Error('this grant is being revoked, so it can no longer be extended');
     await refuseManagedGroupTargets(g.targets);
     const newExp = grantExpiryFrom(cfg);
     await pool.query('UPDATE temporary_access_grants SET expires_at=$2 WHERE id=$1 AND tenant=$3', [id, newExp.toISOString(), tnt()]);
@@ -10594,19 +10609,16 @@ async function deleteTemporaryAccessGrant(id, actor) {
     return { deleted: true };
 }
 
-// Leader start-up recovery (lib/leader.js): clear the 'running' flags of automations and grants
-// that a crashed or stopped leader left, for every account at once. Not per account through
-// forEachTenant: a failed tenant lookup there falls back to main only and would hide the miss.
-// Errors propagate, so the leader is not ready until this succeeded. Only the instance that just
-// took the leader lock runs it, and the previous leader is gone by then (it held the lock until
-// it exited), so no job is really running.
 async function resetAllStuckRuns() {
-    await pool.query(`UPDATE automations SET last_status='' WHERE last_status='running'`);
-    await pool.query(`UPDATE temporary_access_grants SET last_status='' WHERE last_status='running'`);
+    for (const [table, kind] of [['automations', 'automation'], ['temporary_access_grants', 'grant']]) {
+        const stuck = (await pool.query(`SELECT id, tenant FROM ${table} WHERE last_status='running'`)).rows;
+        for (const row of stuck) {
+            await tryLock(kind, [row.tenant || '', String(row.id)], () => pool.query(
+                `UPDATE ${table} SET last_status='' WHERE id=$1 AND tenant=$2 AND last_status='running'`, [row.id, row.tenant]));
+        }
+    }
 }
 
-// Leader start-up: read every in-memory config again. Settings saved on the previous leader while
-// this instance was starting would otherwise stay stale here. Strict: a database error throws.
 async function reloadConfigCaches() {
     const strict = { strict: true };
     await loadNbApi(strict); await loadTenantTokens(strict); await loadWebhook(strict); await loadTelegram(strict);
@@ -10614,9 +10626,22 @@ async function reloadConfigCaches() {
     await loadSecurityConfig(strict); await loadRemoteAccessConfig(strict);
 }
 
-// Startup: clear any 'running' flags left by a crash so a revoke can be retried.
-async function resetStuckGrants() {
-    await pool.query(`UPDATE temporary_access_grants SET last_status='' WHERE last_status='running' AND tenant=$1`, [tnt()]).catch(() => { });
+let _settingsVersionLoaded = null;
+let _settingsReload = null;
+async function ensureSettingsCurrent() {
+    while (_settingsReload) await _settingsReload;
+    const version = await readSettingsVersion();
+    if (version === _settingsVersionLoaded) return;
+    if (_settingsReload) return ensureSettingsCurrent();
+    _settingsReload = (async () => {
+        try {
+            await reloadConfigCaches();
+            _settingsVersionLoaded = version;
+        } finally {
+            _settingsReload = null;
+        }
+    })();
+    await _settingsReload;
 }
 
 // Crash-recovery: a grant stuck in 'creating' means the process died between reserving the
@@ -10641,9 +10666,8 @@ async function cleanupStuckCreatingGrants() {
 // (the cleanup job and a manual delete can meet), and the row is re-read inside the lock.
 // Returns 'running' when its creation is still running here, null when the row is already gone,
 // false when a leftover could not be removed (the row is kept), true when the row was dropped.
-function removeCreatingGrant(id, actor) {
-    return withKeyLock(`creating\u0000${tnt()}\u0000${id}`, async () => {
-        if (_creatingGrants.has(String(id))) return 'running';
+async function removeCreatingGrant(id, actor) {
+    const out = await tryLock('grant', [tnt(), String(id)], async () => {
         const r = await pool.query(`SELECT * FROM temporary_access_grants WHERE id=$1 AND status='creating' AND tenant=$2`, [id, tnt()]);
         if (!r.rows.length) return null;
         const g = r.rows[0];
@@ -10658,6 +10682,7 @@ function removeCreatingGrant(id, actor) {
         }).catch(() => { });
         return true;
     });
+    return out === LOCK_BUSY ? 'running' : out;
 }
 
 async function removeCreatingLeftovers(g) {
@@ -10783,7 +10808,7 @@ async function createRecurringAccess(cfg, actor) {
 // One queue per rule: a window activation (runRecurringAccess) and a disable / delete / review
 // revoke of the same rule never overlap, so a disable always sees the window it has to end.
 function withRuleLock(id, fn) {
-    return withKeyLock(`rule\u0000${tnt()}\u0000${id}`, fn);
+    return withLock('rule', [tnt(), String(id)], fn);
 }
 // End the rule's live window, if any. The link is cleared only once the grant is really gone;
 // otherwise this throws and the link stays for a retry.
@@ -11302,11 +11327,46 @@ async function backfillApprovedDurations() {
     }
 }
 
-async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, targets } = {}) {
+const reserveGrantId = async () => (await pool.query(`SELECT nextval(pg_get_serial_sequence('temporary_access_grants','id')) AS id`)).rows[0].id;
+const withRequestLock = (id, fn) => withLock('request', [String(id)], fn);
+const requestHandledError = (status) => new Error(status === 'approving' ? 'this request is being approved right now' : 'this request has already been handled');
+
+async function claimApproving(id, grantId, decidedBy) {
+    const r = await pool.query(`UPDATE access_requests SET status='approving', grant_id=$2, decided_by=$3 WHERE id=$1 AND status='pending' RETURNING id`, [id, grantId, decidedBy]);
+    if (!r.rows.length) throw new Error('this request has already been handled');
+}
+const releaseApproving = (id) => pool.query(`UPDATE access_requests SET status='pending', grant_id=NULL, decided_by=NULL WHERE id=$1 AND status='approving'`, [id]);
+
+async function reconcileApprovingRequests() {
+    const rows = (await pool.query(`SELECT id FROM access_requests WHERE status='approving'`)).rows;
+    for (const { id } of rows) {
+        await tryLock('request', [String(id)], async () => {
+            const cur = (await pool.query(`SELECT * FROM access_requests WHERE id=$1 AND status='approving'`, [id])).rows[0];
+            if (!cur) return;
+            let done;
+            if (cur.kind === 'bypass') {
+                const t = (Array.isArray(cur.targets) && cur.targets[0]) || {};
+                await refreshBypassedPeers();
+                done = peerIsBypassed(t.id);
+            } else {
+                const g = cur.grant_id ? (await pool.query('SELECT status FROM temporary_access_grants WHERE id=$1', [cur.grant_id])).rows[0] : null;
+                if (g && g.status === 'creating') return;
+                done = !!g && g.status === 'active';
+            }
+            if (done) await pool.query(`UPDATE access_requests SET status='approved', decided_at=COALESCE(decided_at, NOW()) WHERE id=$1 AND status='approving'`, [id]);
+            else await releaseApproving(id);
+        });
+    }
+}
+
+function approveAccessRequest(id, opts) {
+    return withRequestLock(id, () => approveRequestLocked(id, opts));
+}
+async function approveRequestLocked(id, { durationMinutes, expiresAt, actor, targets } = {}) {
     const r = await pool.query('SELECT * FROM access_requests WHERE id=$1', [id]);
     if (!r.rows.length) throw new Error('request not found');
     const req = r.rows[0];
-    if (req.status !== 'pending') throw new Error('this request has already been handled');
+    if (req.status !== 'pending') throw requestHandledError(req.status);
 
     // Device-bypass request: approve the peer in NetBird (EDR bypass) - no grant. The approver
     // may give the bypass a DURATION (durationMinutes > 0 → auto-revoked by the scheduler);
@@ -11318,30 +11378,30 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
         // A temporary device is deleted ON EXPIRY - an unlimited bypass never expires,
         // so it would silently drop the requested deletion. Force a real duration.
         if (tempDev && min <= 0) throw new Error('a temporary device needs a duration - pick how long the bypass lasts');
-        // Extension: the peer is already bypassed and the real work is moving the expiry,
-        // so a re-POST of the bypass being rejected must not fail the approval.
-        try { await bypassPeer(t.id); }
-        catch (e) { if (!req.extend_bypass) throw e; }
-        if (min > 0) {
-            try {
-                await pool.query(`
-                    INSERT INTO bypass_expirations (tenant, peer_id, peer_name, requester_email, requester_name, request_id, expires_at, delete_peer)
-                    VALUES ('', $1, $2, $3, $4, $5, NOW() + ($6 || ' minutes')::interval, $7)
-                    ON CONFLICT (tenant, peer_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, request_id = EXCLUDED.request_id, delete_peer = EXCLUDED.delete_peer
-                `, [t.id, t.name || t.id, req.requester_email || '', req.requester_name || '', id, String(min), tempDev]);
-            } catch (e) {
-                // A timed bypass never stays on without its expiry: take the bypass back and leave the
-                // request pending. Only the NetBird bypass is removed - an expiry already scheduled for
-                // this device (and a temporary device's deletion) stays in place.
-                console.error('[Bypass] expiry save error:', e.message);
-                const back = await netbirdReq('DELETE', `/api/peers/${encodeURIComponent(t.id)}/edr/bypass`);
-                _peersLastRefresh.set(tnt(), 0);
-                if (!nbWriteOk(back, true)) throw new Error("Couldn't save when the bypass ends, and removing it failed - the device is still bypassed with no end time. Revoke the bypass on the Peers page.");
-                throw new Error("Couldn't save when the bypass ends, so the bypass was removed. The request is still pending - try approving it again.");
+        await claimApproving(id, null, (actor && (actor.name || actor.email)) || 'admin');
+        await withEdrDevice(t.id, async () => {
+            if (min > 0) {
+                try {
+                    await pool.query(`
+                        INSERT INTO bypass_expirations (tenant, peer_id, peer_name, requester_email, requester_name, request_id, expires_at, delete_peer)
+                        VALUES ('', $1, $2, $3, $4, $5, NOW() + ($6 || ' minutes')::interval, $7)
+                        ON CONFLICT (tenant, peer_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, request_id = EXCLUDED.request_id, delete_peer = EXCLUDED.delete_peer
+                    `, [t.id, t.name || t.id, req.requester_email || '', req.requester_name || '', id, String(min), tempDev]);
+                } catch (e) {
+                    console.error('[Bypass] expiry save error:', e.message);
+                    throw new Error("Couldn't save when the bypass ends, so the device was not bypassed. The request is still pending - try approving it again.");
+                }
             }
-        } else {
-            await pool.query(`DELETE FROM bypass_expirations WHERE tenant = '' AND peer_id=$1`, [t.id]).catch(() => { });
-        }
+            try { await bypassPeer(t.id); }
+            catch (e) {
+                if (!req.extend_bypass) {
+                    if (min > 0 && e.definite) await pool.query(`DELETE FROM bypass_expirations WHERE tenant = '' AND peer_id=$1 AND request_id=$2`, [t.id, id]);
+                    throw e;
+                }
+            }
+            await editEdrSets((applied, revoked, pending) => { pending.delete(String(t.id)); });
+            if (!(min > 0)) await pool.query(`DELETE FROM bypass_expirations WHERE tenant = '' AND peer_id=$1`, [t.id]).catch(() => { });
+        }).catch(async (e) => { await releaseApproving(id).catch(() => { }); throw e; });
         const decidedBy = (actor && (actor.name || actor.email)) || 'admin';
         await pool.query(`UPDATE access_requests SET status='approved', decided_by=$2, decided_at=NOW(), approved_minutes=$3, decided_via=$4 WHERE id=$1`, [id, decidedBy, min, decisionVia(actor)]);
         recordAudit({
@@ -11378,11 +11438,13 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     const approvedMin = expiresAt
         ? Math.max(1, Math.round((new Date(expiresAt).getTime() - Date.now()) / 60000))
         : (durationMinutes || req.requested_minutes || 60);
+    const grantId = await reserveGrantId();
+    await claimApproving(id, grantId, (actor && (actor.name || actor.email)) || 'admin');
     const grant = await createTemporaryAccessGrant({
         userId: req.requester_id, userLabel: req.requester_name || req.requester_email, userEmail: req.requester_email,
         targets: effective,
         note: `Approved access request #${id}`, ...durCfg,
-    }, actor);
+    }, actor, { grantId }).catch(async (e) => { await releaseApproving(id).catch(() => { }); throw e; });
     // The "access granted" email is sent by createTemporaryAccessGrant - it covers the approval.
     const decidedBy = (actor && (actor.name || actor.email)) || 'admin';
     await pool.query(
@@ -11404,13 +11466,17 @@ async function approveAccessRequest(id, { durationMinutes, expiresAt, actor, tar
     return { id, grantId: grant.id, targets: effective };
 }
 
-async function denyAccessRequest(id, { reason, actor } = {}) {
+function denyAccessRequest(id, opts) {
+    return withRequestLock(id, () => denyRequestLocked(id, opts));
+}
+async function denyRequestLocked(id, { reason, actor } = {}) {
     const r = await pool.query('SELECT * FROM access_requests WHERE id=$1', [id]);
     if (!r.rows.length) throw new Error('request not found');
     const req = r.rows[0];
-    if (req.status !== 'pending') throw new Error('this request has already been handled');
+    if (req.status !== 'pending') throw requestHandledError(req.status);
     const decidedBy = (actor && (actor.name || actor.email)) || 'admin';
-    await pool.query(`UPDATE access_requests SET status='denied', decided_by=$2, decided_at=NOW(), decision_note=$3, decided_via=$4 WHERE id=$1`, [id, decidedBy, String(reason || '').trim(), decisionVia(actor)]);
+    const denied = await pool.query(`UPDATE access_requests SET status='denied', decided_by=$2, decided_at=NOW(), decision_note=$3, decided_via=$4 WHERE id=$1 AND status='pending' RETURNING id`, [id, decidedBy, String(reason || '').trim(), decisionVia(actor)]);
+    if (!denied.rows.length) throw requestHandledError();
     recordAudit({
         actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
         action: 'request.deny', target: req.requester_name || req.requester_id,
@@ -11422,15 +11488,19 @@ async function denyAccessRequest(id, { reason, actor } = {}) {
     return { id };
 }
 
-async function cancelAccessRequest(id, requester) {
+function cancelAccessRequest(id, requester) {
+    return withRequestLock(id, () => cancelRequestLocked(id, requester));
+}
+async function cancelRequestLocked(id, requester) {
     const r = await pool.query('SELECT * FROM access_requests WHERE id=$1', [id]);
     if (!r.rows.length) throw new Error('request not found');
     const req = r.rows[0];
     const rid = String((requester && (requester.user_id || requester.oid)) || '');
     if (req.requester_id !== rid && !(requester && requester.isAdmin)) throw new Error('not allowed');
-    if (req.status !== 'pending') throw new Error('this request has already been handled');
+    if (req.status !== 'pending') throw requestHandledError(req.status);
     const by = (requester && (requester.name || requester.email)) || 'requester';
-    await pool.query(`UPDATE access_requests SET status='cancelled', decided_by=$2, decided_at=NOW() WHERE id=$1`, [id, by]);
+    const cancelled = await pool.query(`UPDATE access_requests SET status='cancelled', decided_by=$2, decided_at=NOW() WHERE id=$1 AND status='pending' RETURNING id`, [id, by]);
+    if (!cancelled.rows.length) throw requestHandledError();
     recordAudit({
         actorId: rid, actorEmail: (requester && requester.email) || '', actorName: (requester && requester.name) || '',
         action: 'request.cancel', target: req.requester_name || req.requester_id, meta: { targets: (req.targets || []).map(t => t.name || t.id).join(', ') },
@@ -11709,7 +11779,6 @@ async function purgeOldEvents() {
     const gateKey = tntKey('retention_purge_last');
     const last = await getSetting(gateKey).catch(() => '');
     if (last === now.dateKey) return; // already ran today
-    await setSetting(gateKey, now.dateKey);
 
     // Scope every DELETE to THIS account. The tenant filter is on the OUTER delete too: with the
     // per-tenant PK, an id (numeric admin-event id especially) can repeat across accounts, so an
@@ -11735,6 +11804,7 @@ async function purgeOldEvents() {
         const outbound = await deleteOld('outbound_log', 'timestamp');
         const nbNotifs = await deleteOld('nb_notifications', 'received_at');
         _retentionLast[acct] = { at: new Date().toISOString(), events, adminEvents, proxyLogs, outbound, nbNotifs };
+        await setSetting(gateKey, now.dateKey);
         if (events || adminEvents || proxyLogs || outbound || nbNotifs) {
             recordAudit({
                 actorId: '', actorEmail: '', actorName: 'Scheduler',
@@ -11840,7 +11910,24 @@ async function tableColumnTypes(table) {
 // REPLACE each section PRESENT in the file, one transaction per section: DELETE the whole table then
 // re-INSERT the file's rows WITH their original ids; a section ABSENT from the file leaves its live
 // table untouched. results/skipped are filled in place (per-section kept vs dropped counts).
-async function importConfigTables(tables, results, skipped, full = false) {
+async function inOneTransaction(fn) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const out = await fn(client);
+        await client.query('COMMIT');
+        return out;
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => { });
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+const putSetting = (client, key, value) => client.query(
+    'INSERT INTO app_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [key, String(value)]);
+
+async function importConfigTables(client, tables, results, skipped, full = false) {
     for (const t of EXPORT_TABLES) {
         if (t.fullOnly && !full) continue;
         const rows = tables[t.name];
@@ -11859,9 +11946,7 @@ async function importConfigTables(tables, results, skipped, full = false) {
             if (t.required.some(c => o[c] === undefined || o[c] === null || o[c] === '')) { bad++; continue; } // malformed
             clean.push(o);
         }
-        const client = await pool.connect();
         try {
-            await client.query('BEGIN');
             if (!t.merge) await client.query(`DELETE FROM ${t.name}`); // REPLACE: the file's rows become the whole table (all tenants)
             for (const o of clean) {
                 const keys = Object.keys(o);
@@ -11875,19 +11960,15 @@ async function importConfigTables(tables, results, skipped, full = false) {
                 const ph = keys.map((_, i) => `$${i + 1}`).join(', ');
                 await client.query(`INSERT INTO ${t.name} (${keys.join(', ')}) VALUES (${ph})${t.merge ? ' ON CONFLICT DO NOTHING' : ''}`, vals);
             }
-            // Serial tables only: advance the sequence past the largest restored id so new inserts don't collide.
             if (t.idCol) {
                 await client.query(
-                    `SELECT setval(pg_get_serial_sequence($1, $2), COALESCE((SELECT MAX(${t.idCol}) FROM ${t.name}), 1))`,
+                    `SELECT setval(s, GREATEST(COALESCE((SELECT MAX(${t.idCol}) FROM ${t.name}), 1), COALESCE(pg_sequence_last_value(s::regclass), 1)))
+                     FROM (SELECT pg_get_serial_sequence($1, $2) AS s) seq`,
                     [t.name, t.idCol]);
             }
-            await client.query('COMMIT');
         } catch (e) {
-            await client.query('ROLLBACK').catch(() => { });
-            client.release();
             throw new Error(`restoring "${t.name}": ${e.message}`);
         }
-        client.release();
         results[t.name] = clean.length;
         if (bad) skipped[t.name] = bad;
     }
@@ -11924,7 +12005,7 @@ async function importAppSettings(payload, actor) {
     // Telegram config that is not a JSON object is skipped.
     const parseObject = (s) => { try { const j = JSON.parse(s); return j && typeof j === 'object' && !Array.isArray(j) ? j : null; } catch { return null; } };
     const smtpServer = (c) => JSON.stringify([c.host || '', parseInt(c.port, 10) || 587, !!c.secure, c.user || '']); // as loadSmtp reads it
-    const importedKeys = [], skippedSettings = [];
+    const importedKeys = [], skippedSettings = [], writes = [];
     for (const [k, v] of entries) {
         let val = v;
         if (k === 'netbird_api_url') {
@@ -11941,7 +12022,7 @@ async function importAppSettings(payload, actor) {
         if (k === 'remote_access_config') {
             const imported = importedRemoteAccessConfig(v);
             if (!imported) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
-            await setSetting(k, imported);
+            writes.push([k, imported]);
             importedKeys.push(k);
             continue;
         }
@@ -11955,19 +12036,17 @@ async function importAppSettings(payload, actor) {
             if (secret) imp.webhookSecret = secret;
             val = JSON.stringify(imp);
         }
-        await setSetting(k, val);
+        writes.push([k, val]);
         importedKeys.push(k);
     }
-    // Reload every config module state so the import applies without a restart.
-    await loadNbApi(); await loadWebhook(); await loadTelegram(); await loadApproverConfig();
-    await loadAutoApproval(); await loadSmtp(); await loadFeaturePerms(); await loadSecurityConfig(); await loadRemoteAccessConfig();
-    // Config TABLES: only touched when the file carries them (older backups skip this untouched).
     const tableResults = {}, tableSkipped = {};
-    if (payload.tables && typeof payload.tables === 'object' && !Array.isArray(payload.tables)) {
-        await importConfigTables(payload.tables, tableResults, tableSkipped);
-        invalidateFilterCache(); // filter_rules changed - drop every account's cached filter config (the
-        // only per-table cache; blocklist/automations/profiles/grants/templates read the DB directly)
-    }
+    const hasTables = payload.tables && typeof payload.tables === 'object' && !Array.isArray(payload.tables);
+    await inOneTransaction(async (client) => {
+        for (const [k, v] of writes) await putSetting(client, k, v);
+        if (hasTables) await importConfigTables(client, payload.tables, tableResults, tableSkipped);
+    });
+    await reloadConfigCaches();
+    if (hasTables) invalidateFilterCache();
     recordAudit({
         actorId: (actor && (actor.user_id || actor.oid)) || '', actorEmail: (actor && actor.email) || '', actorName: (actor && actor.name) || '',
         action: 'settings.import', target: 'app settings',
@@ -12182,34 +12261,34 @@ const BACKUP_KEY_SETTINGS = new Set(['backup_public_key', 'backup_private_key_en
 async function importInternalBackupPayload(payload) {
     const settings = payload && payload.settings;
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('invalid backup - missing the "settings" object');
-    let settingsCount = 0;
+    const writes = [];
     for (const [k, v] of Object.entries(settings)) {
         if (typeof k !== 'string' || k.length > 100 || typeof v !== 'string') continue;
         if (BACKUP_KEY_SETTINGS.has(k)) continue; // keep this server's own backup keypair (see BACKUP_KEY_SETTINGS)
         const value = k === 'remote_access_config' ? importedRemoteAccessConfig(v) : v;
         if (value === null) continue;
-        await setSetting(k, value);
-        settingsCount++;
+        writes.push([k, value]);
     }
-    // Reload every config module so the restore applies without a restart.
-    await loadNbApi(); await loadTenantTokens(); await loadWebhook(); await loadTelegram(); await loadApproverConfig();
-    await loadAutoApproval(); await loadSmtp(); await loadFeaturePerms(); await loadSecurityConfig(); await loadRemoteAccessConfig();
+    const settingsCount = writes.length;
     const tableResults = {}, tableSkipped = {};
-    if (payload.tables && typeof payload.tables === 'object' && !Array.isArray(payload.tables)) {
-        await importConfigTables(payload.tables, tableResults, tableSkipped, true); // full: secrets + runtime restored
-        invalidateFilterCache();
-    }
+    const hasTables = payload.tables && typeof payload.tables === 'object' && !Array.isArray(payload.tables);
+    await inOneTransaction(async (client) => {
+        for (const [k, v] of writes) await putSetting(client, k, v);
+        if (hasTables) await importConfigTables(client, payload.tables, tableResults, tableSkipped, true);
+    });
+    await reloadConfigCaches();
+    if (hasTables) invalidateFilterCache();
     return { settings: settingsCount, tables: tableResults, skipped: tableSkipped };
 }
 
 // Run a backup NOW (schedule-independent). No passphrase needed - the public key encrypts.
-async function runInternalBackup() {
+async function runInternalBackup({ name: fixedName } = {}) {
     const pub = await getSetting('backup_public_key');
     const enc = await getSetting('backup_private_key_enc');
     if (!pub || !enc) { const e = new Error('No backup encryption key configured - set a passphrase first'); e.status = 400; throw e; }
     if (!(await backupDirWritable())) { const e = new Error(`Backup directory ${BACKUP_DIR} is not writable`); e.status = 400; throw e; }
     const bytes = encryptBackup(await buildInternalBackupPayload(), pub, Buffer.from(enc, 'base64'));
-    const name = `netbird-control-${backupStamp()}.nbbackup`;
+    const name = fixedName || `netbird-control-${backupStamp()}.nbbackup`;
     const finalPath = backupPath.join(BACKUP_DIR, name);
     const tmpPath = finalPath + '.tmp';
     await backupFs.promises.writeFile(tmpPath, bytes);
@@ -12253,8 +12332,11 @@ async function internalBackupTick() {
     if (now.hour < cfg.hour) return;
     const last = await getSetting('internal_backup_last').catch(() => '');
     if (last === now.dateKey) return;              // already ran today
-    await setSetting('internal_backup_last', now.dateKey); // stamp up front so a slow run never double-fires
-    const out = await runInternalBackup();
+    const name = `netbird-control-${now.dateKey.replace(/-/g, '')}-000000.nbbackup`;
+    const exists = await backupFs.promises.access(backupPath.join(BACKUP_DIR, name)).then(() => true, () => false);
+    const out = exists ? null : await runInternalBackup({ name });
+    await setSetting('internal_backup_last', now.dateKey);
+    if (!out) return;
     recordAudit({
         actorId: '', actorEmail: '', actorName: 'Scheduler', action: 'backup.run', target: out.file,
         meta: { file: out.file, size: out.size, scheduled: true },
@@ -12516,22 +12598,18 @@ async function runRecertification() {
 async function applyRecertRevoke(it, actor) {
     const d = it.detail || {};
     if (it.kind === 'bypass') {
-        await revokePeerBypass(d.peerId);
-        // An explicit human "Revoke" - if we applied this bypass automatically, remember it so
-        // the OS rule never re-applies it (same semantics as the Peers page revoke).
-        await noteEdrAutoBypassRevoked(d.peerId).catch(() => { });
+        await revokeBypassByHuman(d.peerId);
         return;
     }
     if (it.kind === 'perm_user' || it.kind === 'perm_group') {
-        const cfg = getFeaturePermsConfig();
-        const e = cfg[d.key];
-        if (!e) return;
-        if (it.kind === 'perm_user') {
-            e.users = (e.users || []).filter(u => !((d.user && d.user.id && u.id === d.user.id) || (d.user && d.user.email && u.email === d.user.email)));
-        } else {
-            e.groupIds = (e.groupIds || []).filter(g => g !== d.groupId);
-        }
-        await setFeaturePermsConfig({ [d.key]: e });
+        await setFeaturePermsConfig((cfg) => {
+            const e = cfg[d.key];
+            if (!e) return {};
+            if (it.kind === 'perm_user') {
+                return { [d.key]: { ...e, users: (e.users || []).filter(u => !((d.user && d.user.id && u.id === d.user.id) || (d.user && d.user.email && u.email === d.user.email))) } };
+            }
+            return { [d.key]: { ...e, groupIds: (e.groupIds || []).filter(g => g !== d.groupId) } };
+        });
         return;
     }
     if (it.kind === 'auto_trusted' || it.kind === 'auto_rule') {
@@ -12700,8 +12778,6 @@ async function sendAccessReviewDigest({ force = false } = {}) {
         const last = await getSetting('access_review_last').catch(() => '');
         if (last === now.dateKey) return; // already sent today
     }
-    await setSetting('access_review_last', now.dateKey);
-
     const [grants, pending] = await Promise.all([
         listTemporaryAccessGrants().catch(() => []),
         countPendingRequests().catch(() => 0),
@@ -12822,13 +12898,13 @@ async function sendAccessReviewDigest({ force = false } = {}) {
                 : '')
             + `<li><b>Open address conflicts:</b> ${conflictCount}</li>`
             + `</ul><p>Details live under Operations &rsaquo; Cleanup in the app.</p>`;
-        for (const to of REVIEW_EMAILS) {
-            sendMail({ to, subject: 'Weekly Access Review', html: mailLayout('Weekly Access Review', mail), tag: 'access-review' }).catch(() => { });
-            emailsSent++;
-        }
+        const sent = await Promise.all(REVIEW_EMAILS.map(to => sendMail({ to, subject: 'Weekly Access Review', html: mailLayout('Weekly Access Review', mail), tag: 'access-review' }).catch(() => null)));
+        emailsSent = sent.filter(r => r && r.ok).length;
     }
+    if (!tgSent && !emailsSent && (getTelegramConfig().enabled || (REVIEW_EMAILS.length && getSmtpConfig().enabled))) throw new Error('The weekly access review reached no recipient. Check the Telegram and SMTP settings.');
     console.log('[AccessReview] weekly digest sent');
     // Summary for the manual "Send Now" button's feedback toast.
+    await setSetting('access_review_last', now.dateKey);
     return { telegram: !!tgSent, emails: emailsSent };
 }
 
@@ -12843,7 +12919,7 @@ async function telegramApproverActive(approver) {
         `SELECT user_id, (raw_json->>'is_blocked') = 'true' AS is_blocked FROM users WHERE tenant = '' AND ${id ? 'user_id = $1' : 'LOWER(email) = LOWER($1)'}`,
         [id || email]
     ).catch(() => ({ rows: [] }));
-    return r.rows.length > 0 && r.rows.every(x => !x.is_blocked && !blockUnrecorded(x.user_id));
+    return r.rows.length > 0 && r.rows.every(x => !x.is_blocked);
 }
 
 // Handle a Telegram update: either a button press (callback_query) or a reply carrying a denial
@@ -12951,7 +13027,7 @@ async function handleTelegramReplyMessage(msg) {
 
 module.exports = {
     addResourceGroups, removeResourceGroups, fetchUserGroupsFresh, // used by browser remote access (server.js)
-    pool, initializeDatabase, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
+    pool, initializeDatabase, createBaselineSchema, ensureLogIndexes, reclassifyEventTypes, addEvent, addAdminEvent, queryEvents, queryTrafficSummary, queryAdminEvents, getAdminStats,
     syncIpAssignments, queryIpHistory, getIpHistoryUsers, getHourlyEventCounts, getReverseProxyStatus, bustReverseProxyCache, getProxyAccessLogs, syncProxyAccessLogs, getProxyLogUsers, getProxyLogsSummary, getProxyServiceStats, getProxyDomains, createProxyService, exposeDockerService, getProxyServiceRaw, sanitizeProxyService, updateProxyService, deleteProxyService, getProxyTargetOptions,
     getDistinctUsers, getDistinctSources, getStats, getAllUsers, getAllPeers, getPeerDetail, deletePeer, revokePeerBypass, getGroups, getGroupDetail, createGroup, renameGroup, deleteGroup, setGroupPeers, setUserGroups, refuseManagedGroupEdit, removeUserManagedGroups, addUsersToGroup, removeUsersFromGroup, getUserDetail, deleteUser, setUserBlocked, resetUserMfa, getNetworks, getNetworkDetail, getUsageData, getAllPolicies, createPolicy, updatePolicy, checkResourcePolicySync, deletePolicy, policyRenamePlan, applyPolicyRenames, createNetwork, updateNetwork, deleteNetwork, setNetworkAllowDuplicates, createNetworkRouter, deleteNetworkRouter, setUpLaunchNetwork, releaseLaunchNetwork, checkLaunchNetwork,
     loadAccessCheckSnapshot, loadAccessCheckRouters,
@@ -12991,12 +13067,12 @@ module.exports = {
     getNetworkDefaultProfiles, getAllNetworkDefaultProfiles, setNetworkDefaultProfiles,
     listPostureChecks, createPostureCheck, updatePostureCheck, deletePostureCheck, getCountries, getCities,
     listAutomations, getAutomationRow, createAutomation, updateAutomation, deleteAutomation,
-    getAutomationRuns, runAutomation, testAutomation, runDueAutomations, resetStuckAutomations,
+    getAutomationRuns, runAutomation, testAutomation, runDueAutomations,
     getAutomationManaged, repairAutomation, forgetAutomation,
     getBlocklist, addBlocklistEntry, addBlocklistEntries, updateBlocklistEntry, deleteBlocklistEntry, addressBlockedForNetwork,
     scanBlockedResources, enforceBlockedResources,
     listTemporaryAccessGrants, createTemporaryAccessGrant, revokeTemporaryAccessGrant, extendTemporaryAccessGrant, deleteTemporaryAccessGrant,
-    revokeExpiredGrants, reconcileActiveGrants, resetStuckGrants, resetAllStuckRuns, reloadConfigCaches, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies,
+    revokeExpiredGrants, reconcileActiveGrants, resetAllStuckRuns, reloadConfigCaches, ensureSettingsCurrent, cleanupStuckCreatingGrants, revokeExpiredBypasses, escalatePendingRequests, sendAccessReviewDigest, checkTrafficAnomalies,
     purgeOldEvents, getRetentionStatus, getRetentionDays, setRetentionDays, getSystemStats,
     exportAppSettings, importAppSettings,
     // Internal envelope-encrypted backup (tier 2)
@@ -13012,7 +13088,7 @@ module.exports = {
     refreshAutoApprovalInventory,
     listRecurringAccess, createRecurringAccess, updateRecurringAccess, deleteRecurringAccess, runRecurringAccess,
     getSecurityConfig, setSecurityConfig,
-    getEdrAutoBypassConfig, setEdrAutoBypassConfig, noteEdrAutoBypassRevoked, EDR_OS_LABELS,
+    getEdrAutoBypassConfig, setEdrAutoBypassConfig, revokeBypassByHuman, setLeaderCheck, retryUserIntents, deliverOutbox, reconcileApprovingRequests, trackBackground, backgroundWork, EDR_OS_LABELS,
     resolveUser, resolveUsersForEvents, resolveUsersForAdminEvents, getOwnNetbirdUserId, resolveViewer, getUserPeerGroupIds,
     ensurePeersFresh, ensureUsersFresh, resetNbCaches, netbirdApiConfigured,
     inviteUser, resendUserInvite, USER_ROLES, createSetupKey,
