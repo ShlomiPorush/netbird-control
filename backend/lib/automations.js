@@ -498,7 +498,8 @@ const dropPendingCreate = (id, key) => pool.query('DELETE FROM automation_pendin
 
 async function settlePendingCreates(id, networkId, existingByAddr) {
     const pending = (await pool.query('SELECT * FROM automation_pending_creates WHERE tenant=$1 AND automation_id=$2', [tnt(), id])).rows;
-    if (!pending.length) return;
+    if (!pending.length) return 0;
+    let adopted = 0;
     const owned = (await pool.query('SELECT external_key, resource_id FROM automation_resources WHERE automation_id=$1 AND tenant=$2', [id, tnt()])).rows;
     const ownedIds = new Set(owned.map(r => r.resource_id));
     const ownedKeys = new Set(owned.map(r => r.external_key));
@@ -510,9 +511,11 @@ async function settlePendingCreates(id, networkId, existingByAddr) {
                  VALUES ($1,$2,$3,$4,$5,'active',NOW(),$6) ON CONFLICT (automation_id, external_key) DO NOTHING`,
                 [id, p.external_key, p.address, res.id, p.network_id, tnt()]);
             ownedIds.add(res.id);
+            adopted++;
         }
         await dropPendingCreate(id, p.external_key);
     }
+    return adopted;
 }
 
 async function runAutomationLocked(id, { trigger = 'schedule', actor = null, recheckDue = false } = {}) {
@@ -553,7 +556,7 @@ async function runAutomationLocked(id, { trigger = 'schedule', actor = null, rec
             catch (e) { console.error('[automation %s] access-profile assign %s "%s" failed:', id, label, resourceId, e.message); }
         };
 
-        await settlePendingCreates(id, networkId, existingByAddr);
+        counts.adopted += await settlePendingCreates(id, networkId, existingByAddr);
         const ours = await pool.query('SELECT * FROM automation_resources WHERE automation_id=$1 AND tenant=$2', [id, tnt()]);
         const ownByKey = new Map(ours.rows.map(x => [x.external_key, x]));
         const ownResourceIds = new Set(ours.rows.map(x => x.resource_id));

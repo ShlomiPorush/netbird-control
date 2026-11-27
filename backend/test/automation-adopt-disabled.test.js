@@ -216,7 +216,7 @@ test('a resource whose create answer was lost is managed, and disabled once it l
     assert.equal((await runAutomation(1)).failed, 1);
     const [lost] = [...resources.values()];
     assert.equal(ledger.size, 0);
-    await sync('10.1.1.1 other');
+    assert.equal((await sync('10.1.1.1 other')).adopted, 1);
     assert.equal(ledger.get('10.9.9.9').resource_id, lost.id);
     assert.equal(resources.get(lost.id).enabled, false);
     assert.equal(pendingCreates.size, 0);
