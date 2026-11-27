@@ -63,7 +63,7 @@ const socketPath = (name) => (process.platform === 'win32'
     ? `\\\\.\\pipe\\nbc-test-${name}-${crypto.randomBytes(6).toString('hex')}`
     : path.join(os.tmpdir(), `nbc-test-${name}-${crypto.randomBytes(6).toString('hex')}.sock`));
 
-const sup = { fileRequests: new Set(), journal: new Map(), codes: new Map(), limits: new Map(), endedIds: new Set(), rev: -1, sessions: new Map(), tombstones: new Set(), requests: [], nextUid: 62000, failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, unlisted: new Set(), started: new Map(), delays: new Map(), clock: () => Date.now() };
+const sup = { fileRequests: new Set(), journal: new Map(), codes: new Map(), limits: new Map(), endedIds: new Set(), rev: -1, sessions: new Map(), tombstones: new Set(), requests: [], nextUid: 62000, failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, unlisted: new Set(), started: new Map(), delays: new Map(), waiting: 0, ignoreWait: false, clock: () => Date.now() };
 const expired = (req) => req.until <= sup.clock();
 const gone = (id) => ({ ok: false, error: sup.tombstones.has(id) ? 'ENDED' : 'UNKNOWN', ...(sup.codes.has(id) ? { code: sup.codes.get(id), limit: sup.limits.get(id) } : {}) });
 const journalOf = (id) => sup.journal.get(id) || [];
@@ -91,7 +91,15 @@ const supervisor = net.createServer((sock) => {
             }
             const delay = sup.delays.get(req.op + ':' + req.session) ?? sup.delays.get(req.op + ':*');
             const reply = () => sock.write(JSON.stringify(answer(req)) + '\n');
-            if (delay) setTimeout(reply, delay); else reply();
+            if (req.op === 'requests' && req.wait > 0 && !sup.ignoreWait && sup.fileRequests.size === 0) {
+                sup.waiting += 1;
+                const held = setInterval(() => {
+                    if (!sock.destroyed && sup.fileRequests.size === 0 && Date.now() - req.receivedAt < req.wait) return;
+                    clearInterval(held);
+                    sup.waiting -= 1;
+                    if (!sock.destroyed) reply();
+                }, 10);
+            } else if (delay) setTimeout(reply, delay); else reply();
         }
     });
 });
@@ -229,7 +237,7 @@ async function reset({ maxSessions = 5, maxPerUser = 5, keepAliveMin = 15, start
     guacdNoDisplay = false;
     onSelect = null;
     holdSync = null;
-    Object.assign(sup, { requests: [], failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, clock: () => Date.now() });
+    Object.assign(sup, { ignoreWait: false, requests: [], failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, clock: () => Date.now() });
     sup.delays.clear();
     sup.dropNextStart = false;
     sup.onCredentials = null;
@@ -357,54 +365,85 @@ test('a new browser starts in the language the administrator chose', async () =>
     assert.equal(sup.requests.find(r => r.op === 'start').language, 'he');
 });
 
-test('a browser that asks to show its files gets one nbc-files on its own tunnel, and nothing is asked with no tunnel attached', async () => {
+test('a browser that asks to show its files gets one nbc-files on its own tunnel at once, through one waiting ask', async () => {
     await reset();
     const shown = await rb.createWebSession(USER, {}, '');
     const other = await rb.createWebSession(USER, {}, '');
     const c = connect(shown.token);
     await c.opened;
     await until(() => table.rows.get(shown.sessionId).state === 'active' && c.got.some(i => i.opcode === 'sync'));
-    sup.fileRequests.add(shown.sessionId);
-    sup.fileRequests.add(other.sessionId);
-    await rb._internal.pollFileRequests();
-    await until(() => c.got.some(i => i.opcode === 'nbc-files'));
-    await rb._internal.pollFileRequests();
-    await sleep(50);
-    assert.deepEqual(c.got.filter(i => i.opcode === 'nbc-files').map(i => i.args), [[]]);
-    assert.equal(sup.requests.filter(r => r.op === 'requests').length, 2);
-    rb.setRemoteBrowserDeps({ isLeader: () => false });
+    const asked = () => sup.requests.filter(r => r.op === 'requests');
+    rb.startFileRequests();
     try {
-        await rb._internal.pollFileRequests();
+        await until(() => sup.waiting === 1);
+        assert.equal(asked().length, 1);
+        assert.equal(asked()[0].wait, 25000);
+        await sleep(300);
+        assert.equal(asked().length, 1, 'nothing is asked again while the ask waits');
+        const clicked = Date.now();
+        sup.fileRequests.add(shown.sessionId);
+        sup.fileRequests.add(other.sessionId);
+        await until(() => c.got.some(i => i.opcode === 'nbc-files'));
+        assert.ok(Date.now() - clicked < 300, `the panel was asked for ${Date.now() - clicked} ms after the click`);
+        await until(() => sup.waiting === 1);
+        assert.equal(asked().length, 2);
+        assert.deepEqual(c.got.filter(i => i.opcode === 'nbc-files').map(i => i.args), [[]]);
     } finally {
-        rb.setRemoteBrowserDeps({ isLeader: undefined });
+        rb._internal.stopFileRequestsForTest();
     }
-    assert.equal(sup.requests.filter(r => r.op === 'requests').length, 2, 'only the leader asks');
+    await until(() => sup.waiting === 0);
+    await sleep(1200);
+    assert.equal(asked().length, 2, 'a stopped loop asks nothing more');
     c.ws.send(encodeInstruction('disconnect'));
     await c.closed;
-    await until(() => table.rows.get(shown.sessionId).state === 'detached' && !rb._internal.attachedForTest(shown.sessionId));
-    sup.requests = [];
-    await rb._internal.pollFileRequests();
-    assert.equal(sup.requests.filter(r => r.op === 'requests').length, 0);
 });
 
-test('the files requests poll waits for a slow answer before it asks again, and stops when told to', async () => {
+test('the files requests loop asks nothing without an attached tunnel or when another instance leads', async () => {
     await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    const asked = () => sup.requests.filter(r => r.op === 'requests');
+    rb.startFileRequests();
+    try {
+        await sleep(1200);
+        assert.equal(asked().length, 0);
+    } finally {
+        rb._internal.stopFileRequestsForTest();
+    }
+    const c = connect(out.token);
+    await c.opened;
+    await until(() => table.rows.get(out.sessionId).state === 'active');
+    rb.setRemoteBrowserDeps({ isLeader: () => false });
+    rb.startFileRequests();
+    try {
+        await sleep(1200);
+        assert.equal(asked().length, 0, 'only the leader asks');
+        rb.setRemoteBrowserDeps({ isLeader: undefined });
+        await until(() => sup.waiting === 1, 3000);
+    } finally {
+        rb.setRemoteBrowserDeps({ isLeader: undefined });
+        rb._internal.stopFileRequestsForTest();
+    }
+    c.ws.send(encodeInstruction('disconnect'));
+    await c.closed;
+});
+
+test('a supervisor that answers a waiting ask at once is asked at most twice a second', async () => {
+    await reset();
+    sup.ignoreWait = true;
     const out = await rb.createWebSession(USER, {}, '');
     const c = connect(out.token);
     await c.opened;
     await until(() => table.rows.get(out.sessionId).state === 'active');
-    sup.delays.set('requests:*', 500);
     const asked = () => sup.requests.filter(r => r.op === 'requests');
     rb.startFileRequests();
     try {
-        await until(() => asked().length === 2, 8000);
+        await until(() => asked().length >= 1);
+        await sleep(1100);
     } finally {
         rb._internal.stopFileRequestsForTest();
     }
-    const [first, second] = asked();
-    assert.ok(second.at - first.at >= 900, `the second ask came ${second.at - first.at} ms after the first`);
-    await sleep(1200);
-    assert.equal(asked().length, 2);
+    const count = asked().length;
+    assert.ok(count >= 2 && count <= 4, `asked ${count} times in about a second`);
     c.ws.send(encodeInstruction('disconnect'));
     await c.closed;
 });

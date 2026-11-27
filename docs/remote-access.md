@@ -794,7 +794,7 @@ effect in open browsers within about a minute; a download that already started f
 
 **Show in folder and Open.** The browser has no file manager of its own. With **Files In The
 Browser** on, **Show in folder** on a download, and **Open** on a file the browser can't show
-itself, open the session bar's **Files** panel instead, within about a second, while the session
+itself, open the session bar's **Files** panel instead, at once, while the session
 view is open and that browser is the one in front. **Open** on a file the browser can show, such as
 a PDF, shows it in a browser tab. This works only for the browser's own folder: other local files
 stay blocked, and another browser's folder can't be read. Other requests to open something outside

@@ -76,6 +76,38 @@ test('a stopped browser is no longer reported by requests', async () => {
   assert.deepEqual(await requests(supervisor), { ok: true, sessions: [] });
 });
 
+test('a waiting requests answers as soon as a browser asks to show its files', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await filesOn(supervisor);
+  await startOf('a');
+  const asked = Date.now();
+  const waiting = supervisor.handle({ op: 'requests', wait: 5_000 });
+  setTimeout(() => runtime.launches[0].onFilesRequest(), 50);
+  assert.deepEqual(await waiting, { ok: true, sessions: ['a'] });
+  assert.ok(Date.now() - asked < 1_000);
+  assert.equal(supervisor.requestWaiters.size, 0);
+});
+
+test('a waiting requests answers at once when a request is already pending, and with nothing when its wait ends', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await filesOn(supervisor);
+  await startOf('a');
+  runtime.launches[0].onFilesRequest();
+  assert.deepEqual(await supervisor.handle({ op: 'requests', wait: 5_000 }), { ok: true, sessions: ['a'] });
+  const asked = Date.now();
+  assert.deepEqual(await supervisor.handle({ op: 'requests', wait: 100 }), { ok: true, sessions: [] });
+  assert.ok(Date.now() - asked >= 90);
+  assert.equal(supervisor.requestWaiters.size, 0);
+});
+
+test('a files request while files are off does not wake a waiting requests', async () => {
+  const { startOf, supervisor, runtime } = setup();
+  await startOf('a');
+  const waiting = supervisor.handle({ op: 'requests', wait: 150 });
+  runtime.launches[0].onFilesRequest();
+  assert.deepEqual(await waiting, { ok: true, sessions: [] });
+});
+
 test('start returns the port, password and Chromium uid of the first free slot', async () => {
   const { startOf } = setup();
   assert.deepEqual(await startOf('a'), { ok: true, port: 5901, password: 'pw0', uid: 62000, instance: INSTANCE, startedAt: 1_000 });

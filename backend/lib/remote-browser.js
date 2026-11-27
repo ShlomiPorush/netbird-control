@@ -25,7 +25,9 @@ const VIEWER_LEASE_S = 150;
 const AUTH_GRACE_MS = 150_000;
 const LOOP_INTERVAL_MS = 60_000;
 const WATCH_INTERVAL_MS = 5_000;
-const FILE_REQUESTS_INTERVAL_MS = 500;
+const FILE_REQUESTS_WAIT_MS = 25_000;
+const FILE_REQUESTS_MIN_GAP_MS = 500;
+const FILE_REQUESTS_IDLE_MS = 1_000;
 const STARTING_STALE_MS = 2 * 60_000;
 const DISPLAY_TIMEOUT_MS = 20_000;
 const HEALTH_TTL_MS = 15_000;
@@ -118,7 +120,7 @@ function withSessionLock(id, task) {
     return result;
 }
 
-function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS) {
+function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS, signal = null) {
     return new Promise((resolve, reject) => {
         const sock = net.connect(_endpoints.supervisor);
         let buffered = '';
@@ -127,10 +129,14 @@ function supervisorRequest(request, timeoutMs = SUPERVISOR_TIMEOUT_MS) {
             if (done) return;
             done = true;
             clearTimeout(timer);
+            signal?.removeEventListener('abort', aborted);
             sock.destroy();
             if (error) reject(error); else resolve(value);
         };
+        const aborted = () => finish(new Error('the request was stopped'));
         const timer = setTimeout(() => finish(new Error('the remote browser did not answer in time')), timeoutMs);
+        if (signal?.aborted) return aborted();
+        signal?.addEventListener('abort', aborted);
         sock.setEncoding('utf8');
         sock.on('connect', () => sock.write(JSON.stringify(request) + '\n'));
         sock.on('data', (chunk) => {
@@ -631,10 +637,11 @@ async function watchAttached() {
     for (const s of [..._attached.values()]) closeLocal(s, MESSAGES.SERVER_RESTARTING, CODE.restarting);
 }
 
-async function pollFileRequests() {
-    if (_shuttingDown || !leading() || _attached.size === 0) return;
-    const reply = await supervisorRequest({ op: 'requests' }).catch(() => null);
-    if (!reply || reply.ok !== true || !Array.isArray(reply.sessions)) return;
+const canAskFileRequests = () => !_shuttingDown && leading() && _attached.size > 0;
+
+async function waitForFileRequests(signal) {
+    const reply = await supervisorRequest({ op: 'requests', wait: FILE_REQUESTS_WAIT_MS }, FILE_REQUESTS_WAIT_MS + SUPERVISOR_TIMEOUT_MS, signal).catch(() => null);
+    if (!reply || reply.ok !== true || !Array.isArray(reply.sessions) || !leading()) return;
     for (const id of reply.sessions) {
         const s = _attached.get(id);
         if (s && !s.closed && s.ws && s.ws.readyState === 1) s.ws.send(ra.encodeInstruction('nbc-files'));
@@ -644,16 +651,25 @@ async function pollFileRequests() {
 let _fileRequests = null;
 function startFileRequests() {
     if (_fileRequests) return;
-    const next = () => {
-        _fileRequests = setTimeout(() => pollFileRequests()
-            .catch(e => console.error('[remote-browser] files requests:', e.message))
-            .finally(() => { if (_fileRequests) next(); }), FILE_REQUESTS_INTERVAL_MS);
+    const run = { timer: null, controller: new AbortController() };
+    _fileRequests = run;
+    const step = async () => {
+        if (_fileRequests !== run) return;
+        if (!canAskFileRequests()) {
+            run.timer = setTimeout(step, FILE_REQUESTS_IDLE_MS);
+            return;
+        }
+        const asked = Date.now();
+        await waitForFileRequests(run.controller.signal).catch(e => console.error('[remote-browser] files requests:', e.message));
+        if (_fileRequests === run) run.timer = setTimeout(step, Math.max(0, FILE_REQUESTS_MIN_GAP_MS - (Date.now() - asked)));
     };
-    next();
+    step();
 }
 
 function stopFileRequests() {
-    clearTimeout(_fileRequests);
+    if (!_fileRequests) return;
+    clearTimeout(_fileRequests.timer);
+    _fileRequests.controller.abort();
     _fileRequests = null;
 }
 
@@ -1273,7 +1289,6 @@ module.exports = {
         drainIdleForTest: () => _drain || Promise.resolve(),
         queuedForTest: () => _queued,
         attachedForTest: (id) => _attached.get(id),
-        pollFileRequests,
         stopFileRequestsForTest: stopFileRequests,
         reconcileWithSupervisor: async (now) => {
             const listed = await reconcileWithSupervisor(now);
