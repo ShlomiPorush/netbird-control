@@ -17,7 +17,7 @@ export interface RemoteInfo {
   clipboard: boolean;
   idleTimeoutMin: number;
   maxDurationHours: number;
-  browser?: { keepAliveMin: number };
+  browser?: { keepAliveMin: number; files?: boolean; transfer?: boolean };
 }
 
 export interface WebSessionInfo {
@@ -35,6 +35,23 @@ export interface BrowserConfig {
   maxPerUser: number;
   keepAliveMin: number;
   startPage: string;
+  files: boolean;
+  transfer: boolean;
+  filesLimitGb: number;
+  language: string;
+}
+
+export interface BrowserFile {
+  name: string;
+  size: number;
+  partial: boolean;
+}
+
+export interface BrowserFiles {
+  files: BrowserFile[];
+  total: number;
+  used: number;
+  limit: number;
 }
 
 export interface BrowserStatus {
@@ -252,7 +269,26 @@ export const remoteApi = {
   setupKey: (kind: GatewayKind) => api.post<{ key: string; expires: string; name: string }>('/api/remote-access/setup-key', { kind }),
   redeemLaunch: (body: { ticket: string; width: number; height: number; dpi: number; rdp?: { width: number; height: number; dpi: number }; timezone: string }) =>
     api.post<LaunchSession>('/api/remote-access/launch/redeem', body),
+  browserFiles: (id: string) => api.get<BrowserFiles>(`${webFilesBase(id)}/files`),
+  deleteBrowserFile: (id: string, name: string) => api.del<{ ok: boolean; size: number }>(browserFileUrl(id, name)),
+  startUpload: (id: string, body: { name: string; size: number }) => api.post<{ id: string; received: number }>(`${webFilesBase(id)}/uploads`, body),
+  cancelUpload: (id: string, uploadId: string) => api.del<{ ok: boolean }>(`${webFilesBase(id)}/uploads/${encodeURIComponent(uploadId)}`),
 };
+
+const webFilesBase = (id: string) => `/api/remote-access/sessions/${encodeURIComponent(id)}`;
+export const browserFileUrl = (id: string, name: string) => `${webFilesBase(id)}/files/${encodeURIComponent(name)}`;
+
+export interface ChunkAnswer { status: number; json: { received?: number; done?: boolean; code?: string; error?: string } | null; retryAfter: number }
+
+export async function sendUploadChunk(id: string, uploadId: string, offset: number, chunk: Blob, signal: AbortSignal): Promise<ChunkAnswer> {
+  const res = await fetch(`${webFilesBase(id)}/uploads/${encodeURIComponent(uploadId)}?offset=${offset}`, {
+    method: 'PUT', body: chunk, signal, headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
+  });
+  const text = await res.text();
+  let json: ChunkAnswer['json'] = null;
+  try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+  return { status: res.status, json, retryAfter: Number(res.headers.get('Retry-After')) || 0 };
+}
 
 export type GatewayKind = 'ip' | 'names' | 'web';
 

@@ -6,6 +6,7 @@ const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] ?? null;
 core.setSetting = async (k, v) => { settings[k] = String(v); };
+core.updateSetting = async (k, update) => { settings[k] = String(update(settings[k] ?? null)); return settings[k]; };
 core.pool.query = async (sql, params) => {
     if (/INSERT INTO app_settings/.test(sql)) { if (!(params[0] in settings)) settings[params[0]] = params[1]; return { rows: [], rowCount: 1 }; }
     if (/DELETE FROM app_settings/.test(sql)) { if (settings[params[0]] === params[1]) delete settings[params[0]]; return { rows: [], rowCount: 1 }; }
@@ -229,16 +230,19 @@ test('the web group keeps exactly the first enrolled peer; other members and eve
 
 test('the browser settings are normalized, clamped and merged', async () => {
     const norm = ra._internal.normConfig;
-    assert.deepEqual(norm({}).browser, { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '' });
+    const filesOff = { files: false, transfer: false, filesLimitGb: 2, language: 'en-US' };
+    assert.deepEqual(norm({}).browser, { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', ...filesOff });
     assert.equal(norm({ browser: { startPage: ' https://Portal.example.com/a ' } }).browser.startPage, 'https://portal.example.com/a');
     for (const bad of ['file:///etc/passwd', '--flag', 'https://u:p@example.com/', 'portal.example.com']) assert.equal(norm({ browser: { startPage: bad } }).browser.startPage, '');
-    assert.deepEqual(norm({ browser: { enabled: 1, routerGroupId: 'bad id!', maxSessions: 99, maxPerUser: 0, keepAliveMin: 0 } }).browser, { enabled: true, routerGroupId: '', maxSessions: 50, maxPerUser: 1, keepAliveMin: 1, startPage: '' });
+    assert.deepEqual(norm({ browser: { enabled: 1, routerGroupId: 'bad id!', maxSessions: 99, maxPerUser: 0, keepAliveMin: 0 } }).browser, { enabled: true, routerGroupId: '', maxSessions: 50, maxPerUser: 1, keepAliveMin: 1, startPage: '', ...filesOff });
     assert.equal('browserGuacdHost' in norm({ browserGuacdHost: '10.0.0.1' }), false);
     assert.equal('browserGuacdPort' in norm({ browserGuacdPort: 1 }), false);
     reset({ browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } });
-    ra._internal.setConfigForTest({ enabled: false, browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } });
+    const saved = { enabled: false, browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } };
+    ra._internal.setConfigForTest(saved);
+    settings.remote_access_config = JSON.stringify(saved);
     const out = await ra.setRemoteAccessConfig({ browser: { keepAliveMin: 20 } });
-    assert.deepEqual(out.config.browser, { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 20, startPage: '' });
+    assert.deepEqual(out.config.browser, { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 20, startPage: '', ...filesOff });
 });
 
 test('a new web setup key needs an empty web group, and revokes every still-valid key for that group first', async () => {

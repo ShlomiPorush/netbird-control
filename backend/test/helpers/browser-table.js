@@ -111,12 +111,15 @@ function browserTable() {
             Object.assign(r, { state: 'detached', detached_at: r.lease_expires_at, owner_instance: '' });
             return one(r);
         }
-        if (/^SELECT 1 FROM browser_sessions WHERE state <> 'ended' LIMIT 1$/.test(s)) return many([...rows.values()].filter(open).slice(0, 1));
+        if (/^SELECT 1 FROM browser_sessions WHERE state <> 'ended' OR ended_at > NOW\(\) - interval '10 minutes' LIMIT 1$/.test(s)) {
+            return many([...rows.values()].filter(r => open(r) || r.ended_at > new Date(Date.now() - 10 * 60_000)).slice(0, 1));
+        }
         if (/^DELETE FROM browser_sessions WHERE state = 'ended'/.test(s)) return { rows: [], rowCount: 0 };
         if (/^SELECT id, uid, user_id, user_email, user_name FROM browser_sessions WHERE state <> 'ended'$/.test(s)) return many([...rows.values()].filter(open));
         if (/^SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY\(\$1\) AND state = ANY\(\$2\)$/.test(s)) {
             return many(p[0].map(id => rows.get(id)).filter(r => r && p[1].includes(r.state)));
         }
+        if (/^SELECT id, user_id, user_email, user_name FROM browser_sessions WHERE id = ANY\(\$1\)$/.test(s)) return many(p[0].map(id => rows.get(id)).filter(Boolean));
         if (/^SELECT conn_count FROM browser_sessions WHERE id = \$1 FOR UPDATE$/.test(s)) return one(rows.get(p[0]));
         if (/^UPDATE browser_sessions SET conn_count = conn_count \+ 1 WHERE id = \$1$/.test(s)) {
             const r = rows.get(p[0]);

@@ -28,6 +28,7 @@ core.pool.query = async (sql, params = []) => {
     if (/FROM information_schema.columns/.test(sql)) return { rows: ['attempt_id', 'ip', 'state'].map(column_name => ({ column_name, data_type: 'text' })) };
     return { rows: [] };
 };
+core.updateSetting = async (k, update) => { const v = String(update(store.has(k) ? store.get(k) : null)); store.set(k, v); return v; };
 // The encrypted backup's restore runs its table sections in a transaction.
 const restored = [];
 core.pool.connect = async () => ({

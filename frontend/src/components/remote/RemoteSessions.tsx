@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '@/lib/api';
-import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Expand, Globe, Hand, Keyboard, Loader2, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, MousePointer2, Pin, PinOff, Plus, Power, Smartphone, Terminal, Unplug, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
+import { AlertCircle, Camera, ChevronDown, ClipboardPaste, Command, Expand, FolderOpen, Globe, Hand, Keyboard, Loader2, Lock, Maximize2, Minus, MonitorPlay, MoreHorizontal, MousePointer2, Pin, PinOff, Plus, Power, Smartphone, Terminal, Unplug, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useScrollLock } from '@/lib/useScrollLock';
 import { apiText, remoteApi, GUAC, PORTAL_MESSAGE_CODES, type GuacStatus, type RemoteProtocol, type WebSessionInfo } from '@/lib/remoteAccess';
@@ -11,7 +11,8 @@ import { Button, Field, Input, PasswordInput, Textarea } from '@/components/ui';
 import { GuacScreen, coarsePointer, deviceSize, isPhone, phoneDesktop, remoteScreen, type PointerMode, type ScreenApi, type ViewerEvent } from './GuacScreen';
 import { ARG_LABELS, FailureBox, StepList, StepSummary, explain, handoffSteps, usePacedSteps, withStep, type Failure, type Step } from './steps';
 import { FLOW_BUTTON, FLOW_INPUT, FLOW_QUIET, FlowCard, FlowHeader, FlowTile } from './flow';
-import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN, KEY_ROW_HEIGHT, KeyRow, MenuRow, SPECIAL_KEYS, ScreenKeyboard, hasTouch, saveScreenshot } from './SessionTools';
+import { BarMenu, DeviceKeyboard, type DeviceKeyboardControl, FONT_MAX, FONT_MIN, KEY_ROW_HEIGHT, KeyRow, MenuRow, SPECIAL_KEYS, ScreenKeyboard, hasTouch, saveScreenshot, useBarPanelPosition } from './SessionTools';
+import { FilesPanel } from './FilesPanel';
 
 // Open browser sessions live here, above the routes: moving to another page of the portal keeps
 // them running, and they show as tabs in one full-screen session view. Closing the browser tab
@@ -183,6 +184,8 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const [clips, setClips] = useState<Record<string, string>>({});
   const [clipOpen, setClipOpen] = useState(false);
   const clipButton = useRef<HTMLButtonElement>(null);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const filesButton = useRef<HTMLButtonElement>(null);
   const active = sessions.find((s) => s.sessionId === activeId) || sessions[sessions.length - 1];
   const activeApi = () => (active ? apis.current[active.sessionId]?.current ?? null : null);
   // The bar's tools: an open menu keeps the bar in sight; the on-screen keyboard and the device
@@ -246,7 +249,7 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
   const handleLeave = () => window.clearTimeout(dwellTimer.current);
   useEffect(() => { if (open) reveal(); }, [open, activeId, scheduleHide]);
   useEffect(() => () => { window.clearTimeout(hideTimer.current); window.clearTimeout(dwellTimer.current); }, []);
-  const keepBar = pinned || clipOpen || menuOpen;
+  const keepBar = pinned || clipOpen || filesOpen || menuOpen;
   const barVisible = barShown || keepBar;
   // The tab of the session in front stays in sight when the tab list scrolls: when it comes to the
   // front, and when the list gets narrower (a smaller window).
@@ -329,8 +332,16 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
     if (sessions.find((s) => s.sessionId === id)?.protocol === 'web') detach(id); else endSession(id);
   };
   const webActive = active?.protocol === 'web';
+  const info = useQuery({ queryKey: ['remote-access-info'], queryFn: ({ signal }) => remoteApi.info(signal), enabled: open && webActive, staleTime: 60_000 });
+  const filesAllowed = !!info.data?.browser?.files;
+  const transferAllowed = filesAllowed && !!info.data?.browser?.transfer;
+  const filesOn = webActive && filesAllowed;
+  useEffect(() => setFilesOpen(false), [activeId]);
+  const toggleFiles = () => { setClipOpen(false); setFilesOpen((v) => !v); };
+  const toggleClipboard = () => { setFilesOpen(false); setClipOpen((v) => !v); };
   const leave = () => {
     setClipOpen(false);
+    setFilesOpen(false);
     setOskOpen(false);
     deviceKeys.current?.close();
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => { });
@@ -396,54 +407,50 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
         </div>
       ))}
 
-      {/* The handle brings the bar back: a click, or the pointer resting on it. */}
       {!barVisible && active && (
         <button onClick={reveal} onPointerDown={(e) => e.preventDefault()} onMouseEnter={handleEnter} onMouseLeave={handleLeave} aria-label="Show the session bar"
-          className="absolute left-1/2 top-0 z-30 -translate-x-1/2 inline-flex h-7 max-w-[70vw] items-center gap-2 rounded-b-xl border border-t-0 border-nb-gray-800 bg-nb-gray-940/95 px-3 text-[0.75rem] font-medium text-nb-gray-200 shadow-lg backdrop-blur-md">
+          className="nb-follow-theme absolute left-1/2 top-0 z-30 -translate-x-1/2 inline-flex h-7 max-w-[70vw] items-center gap-2 rounded-b-xl border border-t-0 border-nb-gray-200 bg-white/95 px-3 text-[0.75rem] font-medium text-nb-gray-700 shadow-lg backdrop-blur-md dark:border-nb-gray-800 dark:bg-nb-gray-940/95 dark:text-nb-gray-200">
           <span className={dot(status[active.sessionId])} />
           <ProtocolIcon protocol={active.protocol} size={13} />
           <span className="truncate">{active.title}</span>
-          {sessions.length > 1 && <span className="text-nb-gray-400">+{sessions.length - 1}</span>}
+          {sessions.length > 1 && <span className="text-nb-gray-500 dark:text-nb-gray-400">+{sessions.length - 1}</span>}
           <ChevronDown size={13} className="shrink-0" />
         </button>
       )}
 
-      {/* The bar floats above the session, like a dock. */}
       <div
         onPointerEnter={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = true; reveal(); }}
         onPointerLeave={(e) => { if (e.pointerType !== 'mouse') return; hovering.current = false; if (!keepBar) scheduleHide(1500); }}
-        className={cn('absolute left-1/2 top-2 z-30 flex h-[46px] w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-2xl border border-nb-gray-800 bg-nb-gray-940/92 px-1.5 shadow-[0_16px_40px_-14px_rgba(0,0,0,0.7)] backdrop-blur-md transition-transform duration-200 sm:w-max sm:max-w-[calc(100%-1rem)]',
+        className={cn('nb-follow-theme absolute left-1/2 top-2 z-30 flex h-[46px] w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-1.5 rounded-2xl border border-nb-gray-200 bg-white/92 px-1.5 text-nb-gray-900 shadow-[0_16px_40px_-14px_rgba(0,0,0,0.25)] backdrop-blur-md dark:border-nb-gray-800 dark:bg-nb-gray-940/92 dark:text-nb-gray-100 dark:shadow-[0_16px_40px_-14px_rgba(0,0,0,0.7)] transition-transform duration-200 sm:w-max sm:max-w-[calc(100%-1rem)]',
           barVisible ? 'translate-y-0' : '-translate-y-[calc(100%+1rem)]')}>
-        {/* The NetBird mark is the way back to the portal. */}
         <button type="button" onClick={backToPortal} title="Back To The Portal (Sessions Keep Running)" aria-label="Back To The Portal (Sessions Keep Running)"
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-netbird/12 transition-colors hover:bg-netbird/25 focus-visible:outline-2 focus-visible:outline-netbird-400">
           <img src="/favicon.svg" alt="" className="h-[18px] w-[18px]" />
         </button>
-        {/* Tabs: a list on wide screens, a menu on narrow ones. */}
         <div ref={tabsRef} className="hidden sm:flex min-w-0 shrink items-center gap-1 overflow-x-auto">
           {sessions.map((s) => (
             <div key={s.sessionId} data-tab={s.sessionId}
               className={cn('group flex h-8 min-w-0 max-w-64 shrink-0 items-center gap-1.5 rounded-lg pl-2.5 pr-1 text-[0.8rem] cursor-pointer transition-colors',
-                s.sessionId === active?.sessionId ? 'bg-nb-gray-900 text-white ring-1 ring-inset ring-nb-gray-700' : 'text-nb-gray-400 hover:bg-nb-gray-900/60 hover:text-nb-gray-100')}
+                s.sessionId === active?.sessionId ? 'bg-nb-gray-100 text-nb-gray-900 ring-1 ring-inset ring-nb-gray-200 dark:bg-nb-gray-900 dark:text-white dark:ring-nb-gray-700' : 'text-nb-gray-500 hover:bg-nb-gray-100 hover:text-nb-gray-900 dark:text-nb-gray-400 dark:hover:bg-nb-gray-900/60 dark:hover:text-nb-gray-100')}
               onClick={() => activate(s.sessionId)} title={s.title}>
               <span className={dot(status[s.sessionId])} />
               <ProtocolIcon protocol={s.protocol} size={13} />
               <span className="truncate">{s.title}</span>
               <button aria-label={`Disconnect ${s.title}`} title={s.protocol === 'web' ? 'Disconnect (The Browser Keeps Running)' : 'Disconnect'}
                 onClick={(e) => { e.stopPropagation(); disconnect(s.sessionId); }}
-                className="rounded-md p-1 text-nb-gray-500 hover:bg-nb-gray-800 hover:text-red-400"><X size={13} /></button>
+                className="rounded-md p-1 text-nb-gray-400 hover:bg-nb-gray-200 hover:text-red-600 dark:text-nb-gray-500 dark:hover:bg-nb-gray-800 dark:hover:text-red-400"><X size={13} /></button>
             </div>
           ))}
         </div>
         <div className="sm:hidden flex min-w-0 flex-1 items-center">
           <select value={active?.sessionId} onChange={(e) => activate(e.target.value)} aria-label="Session"
-            className="h-8 min-w-16 flex-1 rounded-lg border border-nb-gray-700 bg-nb-gray-900 px-2 text-sm text-white">
+            className="h-8 min-w-16 flex-1 rounded-lg border border-nb-gray-200 bg-white px-2 text-sm text-nb-gray-900 dark:border-nb-gray-700 dark:bg-nb-gray-900 dark:text-white">
             {sessions.map((s) => <option key={s.sessionId} value={s.sessionId}>{s.title}</option>)}
           </select>
         </div>
-        <BarButton onClick={newSession} title="New Session" className="hidden sm:flex border border-dashed border-nb-gray-700"><Plus size={15} /></BarButton>
+        <BarButton onClick={newSession} title="New Session" className="hidden sm:flex border border-dashed border-nb-gray-300 dark:border-nb-gray-700"><Plus size={15} /></BarButton>
 
-        <span className="mx-0.5 h-5 w-px shrink-0 bg-nb-gray-800" />
+        <span className="mx-0.5 h-5 w-px shrink-0 bg-nb-gray-200 dark:bg-nb-gray-800" />
         {active && (
           <div className="flex shrink-0 items-center gap-0.5">
             <BarMenu key={active.protocol} title="Special Keys" icon={<Command size={16} />} container={rootRef} onOpenChange={menuChanged}>
@@ -480,7 +487,10 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
               </BarMenu>
             )}
             {active.clipboard && (
-              <BarButton buttonRef={clipButton} onClick={() => setClipOpen((v) => !v)} title="Clipboard" pressed={clipOpen}><ClipboardPaste size={16} /></BarButton>
+              <BarButton buttonRef={clipButton} onClick={toggleClipboard} title="Clipboard" pressed={clipOpen}><ClipboardPaste size={16} /></BarButton>
+            )}
+            {filesOn && (
+              <BarButton buttonRef={filesButton} className="hidden sm:flex" onClick={toggleFiles} title="Files" pressed={filesOpen}><FolderOpen size={16} /></BarButton>
             )}
             <BarButton className={coarse ? 'hidden min-[400px]:flex' : 'hidden sm:flex'} onClick={fullscreen} title="Full Screen"><Maximize2 size={16} /></BarButton>
             <BarButton className="hidden sm:flex" onClick={togglePin} title={pinned ? 'Let The Bar Hide' : 'Keep The Bar Open'} pressed={pinned}>{pinned ? <PinOff size={16} /> : <Pin size={16} />}</BarButton>
@@ -492,22 +502,22 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                     onClick={() => {
                       void saveScreenshot(activeApi(), active.title).then((ok) => { if (ok) close(); else setShotFailed(true); });
                     }} />
-                  {shotFailed && <p role="alert" className="px-2.5 pb-1.5 text-xs text-red-300">The screenshot could not be saved. Try again in a moment.</p>}
+                  {shotFailed && <p role="alert" className="px-2.5 pb-1.5 text-xs text-red-600 dark:text-red-300">The screenshot could not be saved. Try again in a moment.</p>}
                   {active.protocol === 'ssh' && (
-                    <div className="flex items-center gap-2 px-2.5 py-1.5 text-sm text-nb-gray-200">
+                    <div className="flex items-center gap-2 px-2.5 py-1.5 text-sm text-nb-gray-800 dark:text-nb-gray-200">
                       <span className="flex-1">Text Size</span>
                       <button type="button" role="menuitem" aria-label="Smaller Text" title="Smaller Text" disabled={termFonts[active.sessionId] === undefined || fontOf(active)! <= FONT_MIN}
                         onClick={() => setFont(active, fontOf(active)! - 1)}
-                        className="flex h-7 w-7 items-center justify-center rounded-md ring-1 ring-inset ring-nb-gray-800 hover:bg-nb-gray-900 focus-visible:bg-nb-gray-900 focus-visible:outline-hidden disabled:opacity-40"><Minus size={14} /></button>
+                        className="flex h-7 w-7 items-center justify-center rounded-md ring-1 ring-inset ring-nb-gray-200 hover:bg-nb-gray-100 focus-visible:bg-nb-gray-100 focus-visible:outline-hidden disabled:opacity-40 dark:ring-nb-gray-800 dark:hover:bg-nb-gray-900 dark:focus-visible:bg-nb-gray-900"><Minus size={14} /></button>
                       <span className="w-6 text-center tabular-nums" aria-live="polite">{termFonts[active.sessionId] === undefined ? '-' : fontOf(active)}</span>
                       <button type="button" role="menuitem" aria-label="Larger Text" title="Larger Text" disabled={termFonts[active.sessionId] === undefined || fontOf(active)! >= FONT_MAX}
                         onClick={() => setFont(active, fontOf(active)! + 1)}
-                        className="flex h-7 w-7 items-center justify-center rounded-md ring-1 ring-inset ring-nb-gray-800 hover:bg-nb-gray-900 focus-visible:bg-nb-gray-900 focus-visible:outline-hidden disabled:opacity-40"><Plus size={14} /></button>
+                        className="flex h-7 w-7 items-center justify-center rounded-md ring-1 ring-inset ring-nb-gray-200 hover:bg-nb-gray-100 focus-visible:bg-nb-gray-100 focus-visible:outline-hidden disabled:opacity-40 dark:ring-nb-gray-800 dark:hover:bg-nb-gray-900 dark:focus-visible:bg-nb-gray-900"><Plus size={14} /></button>
                     </div>
                   )}
                   {active.protocol !== 'ssh' && coarse && (
                     <>
-                      <div className="my-1 h-px bg-nb-gray-800" />
+                      <div className="my-1 h-px bg-nb-gray-200 dark:bg-nb-gray-800" />
                       <MenuRow icon={<MousePointer2 size={15} />} label="Touchpad Mode" checked={pointer === 'touchpad'}
                         onClick={() => { choosePointer('touchpad'); close(); }} />
                       <MenuRow icon={<Hand size={15} />} label="Direct Touch Mode" checked={pointer === 'touchscreen'}
@@ -518,12 +528,12 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
                     <MenuRow icon={<Keyboard size={15} />} label="On-Screen Keyboard" checked={oskOpen}
                       onClick={() => { toggleOsk(); close(); }} />
                   )}
-                  {/* What the bar has no room for on a narrow screen. */}
                   <div className="sm:hidden">
-                    <div className="my-1 h-px bg-nb-gray-800" />
+                    <div className="my-1 h-px bg-nb-gray-200 dark:bg-nb-gray-800" />
                     <MenuRow className={coarse ? 'min-[400px]:hidden' : undefined} icon={<Maximize2 size={15} />} label="Full Screen" onClick={() => { close(); fullscreen(); }} />
                     <MenuRow icon={<Pin size={15} />} label="Keep The Bar Open" checked={pinned}
                       onClick={() => { togglePin(); close(); }} />
+                    {filesOn && <MenuRow icon={<FolderOpen size={15} />} label="Files" checked={filesOpen} onClick={() => { close(); toggleFiles(); }} />}
                     <MenuRow icon={<Plus size={15} />} label="New Session" onClick={() => { close(); newSession(); }} />
                     {webActive && <MenuRow icon={<Power size={15} />} label="Close Browser" onClick={() => { close(); closeBrowser(active.sessionId); }} />}
                   </div>
@@ -532,17 +542,17 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
             </BarMenu>
           </div>
         )}
-        <span className="mx-0.5 h-5 w-px shrink-0 bg-nb-gray-800" />
+        <span className="mx-0.5 h-5 w-px shrink-0 bg-nb-gray-200 dark:bg-nb-gray-800" />
         {webActive && (
           <button type="button" onClick={() => detach(active.sessionId)} title="Disconnect (The Browser Keeps Running)" aria-label="Disconnect (The Browser Keeps Running)"
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[0.8rem] font-semibold text-nb-gray-200 ring-1 ring-inset ring-nb-gray-700 transition-colors hover:bg-nb-gray-800 hover:text-white md:px-3">
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[0.8rem] font-semibold text-nb-gray-700 ring-1 ring-inset ring-nb-gray-300 transition-colors hover:bg-nb-gray-100 hover:text-nb-gray-900 md:px-3 dark:text-nb-gray-200 dark:ring-nb-gray-700 dark:hover:bg-nb-gray-800 dark:hover:text-white">
             <Unplug size={15} /><span className="hidden md:inline">Disconnect</span>
           </button>
         )}
         {active && (
           <button type="button" onClick={() => (webActive ? closeBrowser(active.sessionId) : disconnect(active.sessionId))}
             title={webActive ? 'Close Browser' : 'Disconnect'} aria-label={webActive ? 'Close Browser' : 'Disconnect'}
-            className={cn('h-8 shrink-0 items-center gap-1.5 rounded-lg bg-red-500/15 px-2 text-[0.8rem] font-semibold text-red-300 ring-1 ring-inset ring-red-500/35 transition-colors hover:bg-red-600 hover:text-white md:px-3',
+            className={cn('h-8 shrink-0 items-center gap-1.5 rounded-lg bg-red-500/10 px-2 text-[0.8rem] font-semibold text-red-600 ring-1 ring-inset ring-red-500/30 transition-colors hover:bg-red-600 hover:text-white md:px-3 dark:bg-red-500/15 dark:text-red-300 dark:ring-red-500/35',
               webActive ? 'hidden sm:inline-flex' : 'inline-flex')}>
             <Power size={15} /><span className="hidden md:inline">{webActive ? 'Close Browser' : 'Disconnect'}</span>
           </button>
@@ -568,6 +578,16 @@ function Workspace({ sessions, activeId, open, onActivate, onRemove, onHide }: {
           onClose={() => { setClipOpen(false); if (!pinned) scheduleHide(1500); }}
         />
       )}
+      {filesAllowed && sessions.filter((s) => s.protocol === 'web').map((s) => (
+        <FilesPanel
+          key={s.sessionId}
+          sessionId={current.current[s.sessionId] || s.sessionId}
+          transfer={transferAllowed}
+          anchor={filesButton}
+          open={filesOpen && s.sessionId === active?.sessionId}
+          onClose={() => { setFilesOpen(false); if (!pinned) scheduleHide(1500); }}
+        />
+      ))}
       </div>
     </div>,
     document.body,
@@ -581,8 +601,8 @@ function BarButton({ title, onClick, pressed, className, children, buttonRef, ke
   return (
     <button ref={buttonRef} type="button" onClick={onClick} title={title} aria-label={title} aria-pressed={pressed}
       onPointerDown={keepFocus ? (e) => e.preventDefault() : undefined}
-      className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-300 transition-colors hover:bg-nb-gray-800 hover:text-white focus-visible:outline-2 focus-visible:outline-netbird-400',
-        pressed && 'bg-nb-gray-800 text-white', className)}>
+      className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nb-gray-600 transition-colors hover:bg-nb-gray-100 hover:text-nb-gray-900 dark:text-nb-gray-300 dark:hover:bg-nb-gray-800 dark:hover:text-white focus-visible:outline-2 focus-visible:outline-netbird-400',
+        pressed && 'bg-nb-gray-100 text-nb-gray-900 dark:bg-nb-gray-800 dark:text-white', className)}>
       {children}
     </button>
   );
@@ -598,33 +618,19 @@ function ProtocolIcon({ protocol, size }: { protocol: RemoteProtocol; size: numb
 function ClipboardPanel({ initial, anchor, note, onSend, onClose }: {
   initial: string; anchor: RefObject<HTMLButtonElement | null>; note?: string; onSend: (t: string) => void; onClose: () => void;
 }) {
-  // Right under its button, like the bar's menus, and inside the window.
-  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
-  useLayoutEffect(() => {
-    const place = () => {
-      const r = anchor.current?.getBoundingClientRect();
-      if (!r) return;
-      const width = Math.min(CLIP_WIDTH, window.innerWidth - 16);
-      setPos({ left: Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8)), top: r.bottom + 10, width });
-    };
-    place();
-    window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
-  }, [anchor]);
+  const pos = useBarPanelPosition(anchor, CLIP_WIDTH);
   const [text, setText] = useState(initial);
   useEffect(() => setText(initial), [initial]);
   return (
-    // Never taller than the window below the bar: the text box gives up height first, so the
-    // buttons stay in reach on a low screen.
     <div style={pos ? { left: pos.left, top: pos.top, width: pos.width, maxHeight: `calc(100dvh - ${pos.top + 8}px)` } : { visibility: 'hidden' }}
-      className="fixed z-40 flex overflow-y-auto flex-col rounded-2xl border border-nb-gray-800 bg-nb-gray-940 p-4 shadow-2xl">
+      className="nb-follow-theme fixed z-40 flex overflow-y-auto flex-col rounded-2xl border border-nb-gray-200 bg-white text-nb-gray-900 dark:border-nb-gray-800 dark:bg-nb-gray-940 dark:text-nb-gray-100 p-4 shadow-2xl">
       <div className="flex items-center justify-between mb-3">
         <span className="text-sm font-semibold">Clipboard</span>
-        <button onClick={onClose} aria-label="Close The Clipboard" className="rounded-md p-1 text-nb-gray-400 hover:bg-nb-gray-800 hover:text-white"><X size={16} /></button>
+        <button onClick={onClose} aria-label="Close The Clipboard" className="rounded-md p-1 text-nb-gray-500 hover:bg-nb-gray-100 hover:text-nb-gray-900 dark:text-nb-gray-400 dark:hover:bg-nb-gray-800 dark:hover:text-white"><X size={16} /></button>
       </div>
       <Textarea value={text} onChange={(e) => setText(e.target.value)} aria-label="Clipboard text" rows={12}
         className="h-64 min-h-16! w-full shrink resize-none! rounded-lg! font-mono text-[0.8rem]" />
-      {note && <p className="mt-2 flex items-start gap-1.5 text-[0.78rem] text-nb-gray-400"><AlertCircle size={14} className="mt-px shrink-0" />{note}</p>}
+      {note && <p className="mt-2 flex items-start gap-1.5 text-[0.78rem] text-nb-gray-500 dark:text-nb-gray-400"><AlertCircle size={14} className="mt-px shrink-0" />{note}</p>}
       <div className="mt-3 grid grid-cols-2 gap-2">
         <Button variant="primary" className="rounded-lg!" onClick={() => onSend(text)}>Send To Remote</Button>
         <Button className="rounded-lg!" onClick={() => { navigator.clipboard?.writeText(text).catch(() => { }); }}>Copy Here</Button>

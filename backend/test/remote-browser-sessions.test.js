@@ -10,6 +10,7 @@ const core = require('../lib/core');
 const settings = {};
 core.getSetting = async (k) => settings[k] ?? null;
 core.setSetting = async (k, v) => { settings[k] = String(v); };
+core.updateSetting = async (k, update) => { settings[k] = String(update(settings[k] ?? null)); return settings[k]; };
 const table = require('./helpers/browser-table').browserTable();
 let queryHook = null;
 core.pool.query = async (sql, params) => {
@@ -39,10 +40,14 @@ const events = require('../lib/events');
 const recorded = [];
 const insertedIds = new Set();
 const attemptedIds = [];
+const failingIds = new Set();
 let failingWrites = 0;
+let fileWriteGate = null;
 events.addEvent = async (e) => {
+    if (fileWriteGate && e.remoteAccess && e.remoteAccess.kind === 'file') await fileWriteGate;
     attemptedIds.push(e.ID);
     if (failingWrites > 0) { failingWrites--; throw new Error('the database is not answering'); }
+    if (failingIds.has(e.ID)) throw new Error('the database is not answering');
     if (insertedIds.has(e.ID)) return { rowCount: 0 };
     insertedIds.add(e.ID);
     recorded.push(JSON.parse(JSON.stringify(e)));
@@ -58,9 +63,13 @@ const socketPath = (name) => (process.platform === 'win32'
     ? `\\\\.\\pipe\\nbc-test-${name}-${crypto.randomBytes(6).toString('hex')}`
     : path.join(os.tmpdir(), `nbc-test-${name}-${crypto.randomBytes(6).toString('hex')}.sock`));
 
-const sup = { sessions: new Map(), tombstones: new Set(), requests: [], nextUid: 62000, failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, unlisted: new Set(), started: new Map(), delays: new Map(), clock: () => Date.now() };
+const sup = { journal: new Map(), codes: new Map(), limits: new Map(), endedIds: new Set(), rev: -1, sessions: new Map(), tombstones: new Set(), requests: [], nextUid: 62000, failStop: false, renewAnswer: null, table7120: ['default dev wt0'], down: false, instance: 'instance-1', onList: null, unlisted: new Set(), started: new Map(), delays: new Map(), clock: () => Date.now() };
 const expired = (req) => req.until <= sup.clock();
-const gone = (id) => ({ ok: false, error: sup.tombstones.has(id) ? 'ENDED' : 'UNKNOWN' });
+const gone = (id) => ({ ok: false, error: sup.tombstones.has(id) ? 'ENDED' : 'UNKNOWN', ...(sup.codes.has(id) ? { code: sup.codes.get(id), limit: sup.limits.get(id) } : {}) });
+const journalOf = (id) => sup.journal.get(id) || [];
+function acknowledge(ack) {
+    for (const [id, seq] of Object.entries(ack || {})) sup.journal.set(id, journalOf(id).filter(f => f.seq > seq));
+}
 const supervisor = net.createServer((sock) => {
     let buf = '';
     sock.setEncoding('utf8');
@@ -94,6 +103,7 @@ function answer(req) {
             if (expired(req)) return { ok: false, error: 'EXPIRED' };
             if (sup.tombstones.has(req.session)) return { ok: false, error: 'ENDED' };
             if (!sup.sessions.has(req.session)) {
+                sup.limits.set(req.session, req.filesLimit);
                 const uid = sup.nextUid++;
                 sup.sessions.set(req.session, { uid, port: 5901 + uid - 62000, password: crypto.randomBytes(4).toString('hex'), startedAt: req.receivedAt || Date.now() });
             }
@@ -120,10 +130,19 @@ function answer(req) {
             if (sup.failStop) return { ok: false, error: 'STOP_FAILED' };
             sup.tombstones.add(req.session);
             sup.sessions.delete(req.session);
-            return { ok: true, state: 'stopped' };
+            sup.endedIds.add(req.session);
+            return { ok: true, state: 'stopped', code: sup.codes.get(req.session) ?? null };
         case 'list':
             if (sup.onList) sup.onList();
-            return { ok: true, instance: sup.instance, sessions: [...sup.sessions].filter(([session]) => !sup.unlisted.has(session)).map(([session, s]) => ({ session, state: 'running', uid: s.uid, port: s.port, startedAt: s.startedAt })) };
+            acknowledge(req.ack);
+            return {
+                ok: true, instance: sup.instance,
+                sessions: [...sup.sessions].filter(([session]) => !sup.unlisted.has(session)).map(([session, s]) => ({ session, state: 'running', uid: s.uid, port: s.port, startedAt: s.startedAt, files: journalOf(session).slice(0, 20) })),
+                ended: [...sup.endedIds].map(session => ({ session, code: sup.codes.get(session) ?? null, limit: sup.limits.get(session), files: journalOf(session).slice(0, 20) })),
+            };
+        case 'files':
+            if (req.rev >= sup.rev) sup.rev = req.rev;
+            return { ok: true, rev: sup.rev };
         case 'ready':
             return { ok: true, instance: sup.instance, netns: 4026532001, gateway: { ts: Math.floor(Date.now() / 1000), netns: 4026532001, wt0: '100.92.0.7', lock: true, table7120: ['default dev wt0'] }, table7120: sup.table7120 };
         default:
@@ -218,6 +237,12 @@ async function reset({ maxSessions = 5, maxPerUser = 5, keepAliveMin = 15, start
     rb._internal.setEndpointsForTest({ ...paths, guacd: { host: '127.0.0.1', port: guacd.address().port } });
     sup.sessions.clear();
     sup.tombstones.clear();
+    sup.journal.clear();
+    sup.codes.clear();
+    sup.limits.clear();
+    sup.endedIds.clear();
+    sup.rev = -1;
+    failingIds.clear();
     for (const k of Object.keys(settings)) delete settings[k];
     settings.remote_access_nb = JSON.stringify(WEB_IDS);
     settings.remote_access_web_peer = JSON.stringify({ id: 'web-gw', ip: '100.92.0.7' });
@@ -274,7 +299,7 @@ test('a web session opens without any target: checks, a slot, the supervisor, a 
     assert.match(out.token, /^[A-Za-z0-9_-]{43}$/);
     const start = sup.requests.find(r => r.op === 'start');
     const { until, at, ...rest } = start;
-    assert.deepEqual(rest, { op: 'start', session: out.sessionId, width: 1920, height: 1080, dpi: 144, terminal: false });
+    assert.deepEqual(rest, { op: 'start', session: out.sessionId, width: 1920, height: 1080, dpi: 144, terminal: false, filesLimit: 2 * 1024 ** 3, language: 'en-US', theme: 'light' });
     assert.ok(until >= before + 150_000 && until <= Date.now() + 150_000, 'the first lease ends 150 s after the authorization');
     const row = table.rows.get(out.sessionId);
     assert.equal(out.attachment, row.attachment);
@@ -317,6 +342,21 @@ test('a new browser opens on the start page the administrator chose', async () =
     await reset({ startPage: 'https://portal.example.com/login' });
     await rb.createWebSession(USER, {}, '');
     assert.equal(sup.requests.find(r => r.op === 'start').startPage, 'https://portal.example.com/login');
+});
+
+test('a new browser starts in the language the administrator chose', async () => {
+    await reset();
+    ra._internal.setConfigForTest({ enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions: 5, maxPerUser: 5, keepAliveMin: 15, language: 'he' } });
+    await rb.createWebSession(USER, {}, '');
+    assert.equal(sup.requests.find(r => r.op === 'start').language, 'he');
+});
+
+test('a new browser opens in the theme the portal showed, and light for anything else', async () => {
+    await reset({ maxSessions: 5, maxPerUser: 5 });
+    await rb.createWebSession(USER, { theme: 'dark' }, '');
+    await rb.createWebSession(USER, { theme: 'purple' }, '');
+    await rb.createWebSession(USER, {}, '');
+    assert.deepEqual(sup.requests.filter(r => r.op === 'start').map(r => r.theme), ['dark', 'light', 'light']);
 });
 
 test('a user at the per-user limit opens no new browser, while others still can', async () => {
@@ -1199,7 +1239,7 @@ test('the connection check asks the page to wait while this instance is not the 
     }
 });
 
-test('a settings change on another instance stops nothing; the leader reads the saved settings on its tick and stops the browsers', async () => {
+test('a settings change on another instance only sends the files setting; the leader reads the saved settings on its tick and stops the browsers', async () => {
     await reset();
     const out = await rb.createWebSession(USER, {}, '');
     rb.setRemoteBrowserDeps({ isLeader: () => false });
@@ -1207,7 +1247,7 @@ test('a settings change on another instance stops nothing; the leader reads the 
     try {
         ra._internal.setConfigForTest({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office' } });
         await rb.onConfigChanged();
-        assert.deepEqual(sup.requests, []);
+        assert.deepEqual(sup.requests.map(({ at, ...r }) => r), [{ op: 'files', enabled: false, transfer: false, rev: 0 }]);
         assert.equal(table.rows.get(out.sessionId).state, 'detached');
     } finally {
         rb.setRemoteBrowserDeps({ isLeader: undefined });
@@ -1260,4 +1300,324 @@ test('a uid map rebuild keeps mappings added while it runs, and a failed rebuild
     await rb._internal.eventsIdleForTest();
     assert.deepEqual(recorded.filter(e => e.remoteAccess.kind === 'connection').map(e => e.remoteAccess.sessionId), [added.sessionId]);
     await rb._internal.closeConnectionsForTest();
+});
+
+const FILES_FULL_TEXT = "This browser's files passed its 2 GB limit, so it was closed.";
+const filesOps = () => sup.requests.filter(r => r.op === 'files').map(({ at, ...r }) => r);
+const listRequests = () => sup.requests.filter(r => r.op === 'list');
+const fileRecords = () => recorded.filter(e => e.remoteAccess.kind === 'file');
+const filesOn = (extra = {}) => ({ enabled: true, browser: { enabled: true, routerGroupId: 'g-office', maxSessions: 5, maxPerUser: 5, files: true, transfer: true, ...extra } });
+
+test('a settings save sends the effective files setting with its revision, also when web sessions turn off, before any session is stopped', async () => {
+    await reset();
+    sup.requests.length = 0;
+    ra._internal.setConfigForTest({ ...filesOn(), rev: 4 });
+    await rb.onConfigChanged();
+    assert.deepEqual(filesOps(), [{ op: 'files', enabled: true, transfer: true, rev: 4 }]);
+    const status = await rb.getBrowserStatus();
+    assert.deepEqual([status.files, status.transfer, status.filesLimitGb], [true, true, 2]);
+    sup.requests.length = 0;
+    ra._internal.setConfigForTest({ ...filesOn({ files: false }), rev: 5 });
+    await rb.onConfigChanged();
+    assert.deepEqual(filesOps(), [{ op: 'files', enabled: false, transfer: false, rev: 5 }], 'transfer is never sent on without files');
+    ra._internal.setConfigForTest({ ...filesOn(), rev: 6 });
+    const out = await rb.createWebSession(USER, {}, '');
+    sup.requests.length = 0;
+    ra._internal.setConfigForTest({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office', files: true, transfer: true }, rev: 7 });
+    await rb.onConfigChanged();
+    await rb._internal.stopsIdleForTest();
+    assert.deepEqual(filesOps(), [{ op: 'files', enabled: false, transfer: false, rev: 7 }]);
+    const ops = sup.requests.map(r => `${r.op}:${r.session || ''}`);
+    assert.ok(ops.indexOf('files:') < ops.indexOf(`stop:${out.sessionId}`), ops.join(' '));
+});
+
+test('a supervisor that is not deployed is not logged as an error when the files setting is sent', async () => {
+    await reset();
+    const logged = [];
+    const error = console.error;
+    console.error = (...args) => logged.push(args.join(' '));
+    try {
+        rb._internal.setEndpointsForTest({ ...paths, supervisor: socketPath('missing') });
+        ra._internal.setConfigForTest({ ...filesOn(), rev: 1 });
+        await rb.onConfigChanged();
+    } finally {
+        console.error = error;
+    }
+    assert.deepEqual(logged.filter(line => /files setting/.test(line)), []);
+});
+
+test('the leader tick takes the web sessions flag from the same fresh read as the files setting and its revision', async () => {
+    await reset();
+    settings.remote_access_config = JSON.stringify({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office', files: true, transfer: true }, rev: 12 });
+    const stored = settings.remote_access_config;
+    Object.defineProperty(settings, 'remote_access_config', {
+        configurable: true, enumerable: true,
+        get() {
+            ra._internal.setConfigForTest({ ...filesOn(), rev: 11 });
+            return stored;
+        },
+    });
+    sup.requests.length = 0;
+    try {
+        await rb.leaderTick();
+    } finally {
+        delete settings.remote_access_config;
+        await rb._internal.closeConnectionsForTest();
+    }
+    assert.deepEqual(filesOps(), [{ op: 'files', enabled: false, transfer: false, rev: 12 }]);
+});
+
+test('the leader tick drains a long journal in bounded lists, acknowledging each part before it asks for the next', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    await rb.endWebSessionByUser(USER, out.sessionId);
+    sup.journal.set(out.sessionId, Array.from({ length: 250 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
+    await rb._internal.closeConnectionsForTest();
+    assert.equal(fileRecords().length, 250);
+    assert.deepEqual(sup.journal.get(out.sessionId).length, 0);
+    assert.deepEqual(listRequests().filter(r => r.ack).map(r => r.ack[out.sessionId]), Array.from({ length: 13 }, (_, i) => Math.min(250, (i + 1) * 20)));
+});
+
+test('the drain stops after 20 lists in one tick and goes on in the next', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    await rb.endWebSessionByUser(USER, out.sessionId);
+    sup.journal.set(out.sessionId, Array.from({ length: 500 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
+    assert.equal(listRequests().filter(r => r.ack).length, 19, 'the list of the tick and 19 more');
+    assert.equal(fileRecords().length, 400);
+    await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
+    await rb._internal.closeConnectionsForTest();
+    assert.equal(fileRecords().length, 500);
+});
+
+test('the drain stops when a round records nothing new', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    await rb.endWebSessionByUser(USER, out.sessionId);
+    sup.journal.set(out.sessionId, Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, name: `f${i + 1}`, size: 1 })));
+    failingIds.add(`web-file:${out.sessionId}:21`);
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    await rb._internal.drainIdleForTest();
+    await rb._internal.closeConnectionsForTest();
+    assert.equal(fileRecords().length, 20);
+    assert.equal(listRequests().filter(r => r.ack).length, 1);
+});
+
+test('the leader tick sends the files setting from a fresh read of the saved settings, and nothing when the read fails', async () => {
+    await reset();
+    settings.remote_access_config = JSON.stringify({ ...filesOn({ transfer: false }), rev: 9 });
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    assert.deepEqual(filesOps(), [{ op: 'files', enabled: true, transfer: false, rev: 9 }], 'the saved value, not this instance copy');
+    sup.requests.length = 0;
+    Object.defineProperty(settings, 'remote_access_config', { configurable: true, enumerable: true, get() { throw new Error('the database is not answering'); } });
+    try {
+        await rb.leaderTick();
+    } finally {
+        delete settings.remote_access_config;
+    }
+    assert.deepEqual(filesOps(), []);
+    assert.ok(listRequests().length > 0, 'the rest of the tick still ran');
+    settings.remote_access_config = JSON.stringify({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office', files: true, transfer: true }, rev: 10 });
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    assert.deepEqual(filesOps(), [{ op: 'files', enabled: false, transfer: false, rev: 10 }], 'sent off while web sessions are off');
+    await rb._internal.closeConnectionsForTest();
+});
+
+test('the leader tick renews the sessions without waiting for the files they saved to be written', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    sup.journal.set(out.sessionId, [{ seq: 1, name: 'a.bin', size: 1 }]);
+    let release;
+    fileWriteGate = new Promise(r => { release = r; });
+    sup.requests.length = 0;
+    try {
+        await rb.leaderTick();
+        assert.ok(sup.requests.some(r => r.op === 'renew' && r.session === out.sessionId));
+        assert.deepEqual(fileRecords(), [], 'the tick ended while the file write waits');
+        sup.requests.length = 0;
+        await rb.leaderTick();
+        assert.ok(sup.requests.some(r => r.op === 'renew' && r.session === out.sessionId), 'the next tick renews while the earlier file write still waits');
+        release();
+        await rb._internal.drainIdleForTest();
+    } finally {
+        release();
+        fileWriteGate = null;
+        await rb._internal.closeConnectionsForTest();
+    }
+    assert.deepEqual(fileRecords().map(e => e.remoteAccess.name), ['a.bin']);
+});
+
+test('the leader tick still reads the files of a browser closed in the last minutes when web sessions are off', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    sup.journal.set(out.sessionId, [{ seq: 1, name: 'last.bin', size: 2 }]);
+    assert.equal(await rb.endWebSessionByUser(USER, out.sessionId), 'stopped');
+    assert.deepEqual(fileRecords(), [], 'the stop answer carries no files');
+    settings.remote_access_config = JSON.stringify({ enabled: true, browser: { enabled: false, routerGroupId: 'g-office' }, rev: 3 });
+    sup.requests.length = 0;
+    await rb.leaderTick();
+    await rb._internal.closeConnectionsForTest();
+    assert.ok(listRequests().length > 0);
+    assert.deepEqual(fileRecords().map(e => [e.remoteAccess.name, e.remoteAccess.user]), [['last.bin', 'u1@example.com']]);
+});
+
+test('a new browser gets the storage limit of the setting in bytes', async () => {
+    await reset();
+    ra._internal.setConfigForTest(filesOn({ filesLimitGb: 3 }));
+    await rb.createWebSession(USER, {}, '');
+    assert.equal(sup.requests.find(r => r.op === 'start').filesLimit, 3 * 1024 ** 3);
+});
+
+test('files the browser saved are recorded once with the user of the session, and acknowledged on the next list after the write', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    sup.journal.set(out.sessionId, [{ seq: 2, name: 'b.bin', size: 20 }, { seq: 1, name: 'a.bin', size: 10 }, { seq: 3, name: 'c.bin', size: 30 }]);
+    failingIds.add(`web-file:${out.sessionId}:2`);
+    recorded.length = 0;
+    await rb._internal.reconcileWithSupervisor();
+    assert.deepEqual(fileRecords().map(e => [e.ID, e.reference, e.remoteAccess.action, e.remoteAccess.name, e.remoteAccess.size, e.remoteAccess.user, e.meta.user_id]),
+        [[`web-file:${out.sessionId}:1`, 'remote-access:web-connection', 'saved', 'a.bin', 10, 'u1@example.com', 'u1']]);
+    assert.ok(!attemptedIds.includes(`web-file:${out.sessionId}:3`), 'nothing after a failed write, so the ack never skips it');
+    assert.equal(listRequests()[0].ack, undefined);
+    failingIds.clear();
+    await rb._internal.reconcileWithSupervisor();
+    assert.deepEqual(listRequests()[1].ack, { [out.sessionId]: 1 });
+    assert.deepEqual(fileRecords().map(e => e.remoteAccess.name), ['a.bin', 'b.bin', 'c.bin']);
+    await rb._internal.reconcileWithSupervisor();
+    assert.deepEqual(listRequests()[2].ack, { [out.sessionId]: 3 });
+    assert.deepEqual(sup.journal.get(out.sessionId), []);
+    await rb._internal.reconcileWithSupervisor();
+    assert.equal(listRequests()[3].ack, undefined);
+    assert.equal(fileRecords().length, 3);
+});
+
+test('an entry recorded before is acknowledged again without a second record', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    sup.journal.set(out.sessionId, [{ seq: 1, name: 'a.bin', size: 10 }]);
+    insertedIds.add(`web-file:${out.sessionId}:1`);
+    recorded.length = 0;
+    await rb._internal.reconcileWithSupervisor();
+    await rb._internal.reconcileWithSupervisor();
+    assert.equal(fileRecords().length, 0);
+    assert.deepEqual(listRequests()[1].ack, { [out.sessionId]: 1 });
+});
+
+test('files of a closed browser come from the ended list, with the user of the ended row', async () => {
+    await reset();
+    const stopped = await rb.createWebSession(USER, {}, '');
+    sup.journal.set(stopped.sessionId, [{ seq: 1, name: 'firmware.out', size: 4096 }]);
+    recorded.length = 0;
+    assert.equal(await rb.endWebSessionByUser(USER, stopped.sessionId), 'stopped');
+    assert.deepEqual(fileRecords(), []);
+    const later = await rb.createWebSession(OTHER, {}, '');
+    await rb.endWebSessionByUser(OTHER, later.sessionId);
+    sup.journal.set(later.sessionId, [{ seq: 1, name: 'late.bin', size: 1 }]);
+    await rb._internal.reconcileWithSupervisor();
+    assert.deepEqual(fileRecords().map(e => [e.ID, e.remoteAccess.name, e.remoteAccess.user, e.meta.user_id]), [
+        [`web-file:${stopped.sessionId}:1`, 'firmware.out', 'u1@example.com', 'u1'],
+        [`web-file:${later.sessionId}:1`, 'late.bin', 'u2@example.com', 'u2'],
+    ]);
+    await rb._internal.reconcileWithSupervisor();
+    assert.deepEqual(listRequests().filter(r => r.ack).map(r => r.ack), [{ [stopped.sessionId]: 1, [later.sessionId]: 1 }]);
+});
+
+test('acks wait for a list request that succeeds, and a long backlog goes out in parts', async () => {
+    await reset();
+    const ids = [];
+    for (let i = 0; i < 45; i++) {
+        const id = crypto.randomUUID();
+        ids.push(id);
+        table.rows.set(id, { id, user_id: 'u1', user_email: 'u1@example.com', user_name: '', state: 'ended' });
+        sup.endedIds.add(id);
+        sup.journal.set(id, [{ seq: 1, name: `f${i}`, size: 1 }]);
+    }
+    await rb._internal.reconcileWithSupervisor();
+    sup.down = true;
+    assert.equal(await rb._internal.reconcileWithSupervisor(), false);
+    sup.down = false;
+    await rb._internal.reconcileWithSupervisor();
+    const sent = listRequests().filter(r => r.ack);
+    assert.equal(Object.keys(sent[0].ack).length, 40);
+    assert.ok(JSON.stringify(sent[0]).length < 4096);
+    await rb._internal.reconcileWithSupervisor();
+    const acked = new Set(listRequests().filter(r => r.ack && r.op === 'list').flatMap(r => Object.keys(r.ack)));
+    assert.deepEqual([...acked].sort(), [...ids].sort());
+});
+
+test('a browser closed for its file limit says so, on every path that records a close by the supervisor', async () => {
+    await reset();
+    const viaTunnel = await rb.createWebSession(USER, {}, '');
+    const c = connect(viaTunnel.token);
+    await c.opened;
+    await until(() => guacdSeen.some(i => i.opcode === 'connect'));
+    sup.codes.set(viaTunnel.sessionId, 'FILES_FULL');
+    sup.sessions.delete(viaTunnel.sessionId);
+    sup.tombstones.add(viaTunnel.sessionId);
+    guacdSockets[guacdSockets.length - 1].destroy();
+    await c.closed;
+    const err = errorOf(c.got);
+    assert.deepEqual([err.args[0], Number(err.args[1])], [FILES_FULL_TEXT, 0x020B]);
+    assert.equal(table.rows.get(viaTunnel.sessionId).end_reason, FILES_FULL_TEXT);
+
+    const viaRenew = await rb.createWebSession(USER, {}, '');
+    table.rows.get(viaRenew.sessionId).last_auth_ok_at = new Date(Date.now() - 151_000);
+    const viaReconcile = await rb.createWebSession(USER, {}, '');
+    const viaResume = await rb.createWebSession(USER, {}, '');
+    for (const id of [viaRenew.sessionId, viaReconcile.sessionId, viaResume.sessionId]) {
+        sup.codes.set(id, 'FILES_FULL');
+        sup.sessions.delete(id);
+        sup.tombstones.add(id);
+    }
+    await rejects(rb.resumeWebSession(USER, viaResume.sessionId, {}), 410, 'BROWSER_ENDED');
+    assert.equal(await rb._internal.reconcileWithSupervisor(), true);
+    await rb._internal.superviseWebSessions();
+    for (const id of [viaRenew.sessionId, viaReconcile.sessionId, viaResume.sessionId]) {
+        const row = table.rows.get(id);
+        assert.deepEqual([row.state, row.end_reason, row.end_code], ['ended', FILES_FULL_TEXT, rb.CODE.ended], id);
+    }
+});
+
+test('a browser closed for its file limit names the limit it ran with, not the current setting', async () => {
+    await reset();
+    ra._internal.setConfigForTest(filesOn({ filesLimitGb: 3 }));
+    const out = await rb.createWebSession(USER, {}, '');
+    ra._internal.setConfigForTest(filesOn({ filesLimitGb: 5 }));
+    sup.codes.set(out.sessionId, 'FILES_FULL');
+    sup.sessions.delete(out.sessionId);
+    sup.tombstones.add(out.sessionId);
+    await rb._internal.superviseWebSessions();
+    assert.equal(table.rows.get(out.sessionId).end_reason, "This browser's files passed its 3 GB limit, so it was closed.");
+});
+
+test('the leader renew path asks for the status to learn why a browser closed', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    sup.codes.set(out.sessionId, 'FILES_FULL');
+    sup.sessions.delete(out.sessionId);
+    sup.tombstones.add(out.sessionId);
+    sup.requests.length = 0;
+    await rb._internal.superviseWebSessions();
+    assert.deepEqual(sup.requests.filter(r => r.session === out.sessionId).map(r => r.op).slice(0, 2), ['renew', 'status']);
+    assert.equal(table.rows.get(out.sessionId).end_reason, FILES_FULL_TEXT);
+});
+
+test('only the owner reaches the files of an open browser', async () => {
+    await reset();
+    const out = await rb.createWebSession(USER, {}, '');
+    assert.deepEqual(await rb.ownedWebSession(USER, out.sessionId), { id: out.sessionId, userId: 'u1', user: 'u1@example.com' });
+    await rejects(rb.ownedWebSession(OTHER, out.sessionId), 404, 'SESSION_NOT_FOUND');
+    await rejects(rb.ownedWebSession(USER, 'no-such-session'), 404, 'SESSION_NOT_FOUND');
+    await rb.endWebSessionByUser(USER, out.sessionId);
+    await rejects(rb.ownedWebSession(USER, out.sessionId), 410, 'BROWSER_ENDED');
 });

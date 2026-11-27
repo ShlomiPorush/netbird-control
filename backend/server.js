@@ -132,6 +132,7 @@ app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 // 1mb is plenty for every route EXCEPT the settings restore, which also carries the app-config
 // TABLES (automations / blocklist could push past 1mb) and gets its own 10mb parser on the route.
 const jsonBody1mb = express.json({ limit: '1mb' });
+const browserFiles = require('./lib/remote-browser-files');
 // /api/settings-import carries the config TABLES (10mb parser on the route). /api/internal-backup/upload
 // is RAW encrypted binary (express.raw on the route) - both bypass the global 1mb json wrapper.
 const BODY_PARSER_EXEMPT = new Set(['/api/settings-import', '/api/internal-backup/upload']);
@@ -141,7 +142,7 @@ const BODY_PARSER_EXEMPT = new Set(['/api/settings-import', '/api/internal-backu
 // The public API (/api/v1, any letter case, with or without a trailing slash, as Express routes it)
 // reads its body with its own smaller parser, after the API key was checked.
 const API_V1_PATH = /^\/api\/v1(\/|$)/i;
-app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) || API_V1_PATH.test(req.path) ? next() : jsonBody1mb(req, res, (err) => {
+app.use((req, res, next) => (BODY_PARSER_EXEMPT.has(req.path) || API_V1_PATH.test(req.path) || browserFiles.UPLOAD_CHUNK_PATH.test(req.path) ? next() : jsonBody1mb(req, res, (err) => {
     if (!err && req.body === undefined) req.body = {};
     next(err);
 })));
@@ -3425,6 +3426,11 @@ const remoteUserGate = ({ refresh = true } = {}) => async (req, res, next) => {
     }
 };
 const requireRemoteUser = remoteUserGate();
+const refuseBlockedViewer = (req, res) => {
+    if (!req.remoteViewer.blocked) return false;
+    res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
+    return true;
+};
 function sendRemoteError(res, e) {
     const status = e.status || 500;
     if (status >= 500 && !e.code) console.error('[remote-access]', e.message);
@@ -3446,7 +3452,7 @@ app.get('/api/remote-access/info', async (req, res) => {
             settling: remoteAccessViewerOk(v) && remoteAccessAvailable() ? remoteAccessLib.isSettling() : false,
             clipboard: cfg.clipboard, idleTimeoutMin: cfg.idleTimeoutMin, maxDurationHours: cfg.maxDurationHours,
             ...(AUTH_ENABLED && !currentTenantAccount() && remoteAccessViewerOk(v) && remoteAccessAvailable() && remoteAccessLib.browserWanted()
-                ? { browser: { keepAliveMin: cfg.browser.keepAliveMin } } : {}),
+                ? { browser: { keepAliveMin: cfg.browser.keepAliveMin, files: cfg.browser.files, transfer: cfg.browser.transfer } } : {}),
         });
     } catch (err) {
         res.status(500).json({ error: 'Internal server error' });
@@ -3479,7 +3485,7 @@ app.get('/api/remote-access/add-networks', requireRemoteUser, async (req, res) =
 // 'down' or 'unknown', and nothing else. Asked only on a user action (the page polls nothing).
 app.get('/api/remote-access/health', remoteUserGate({ refresh: false }), async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    if (req.remoteViewer.blocked) return res.status(403).json({ error: 'Your NetBird account is blocked. Ask an administrator to unblock it.', code: 'USER_BLOCKED' });
+    if (refuseBlockedViewer(req, res)) return;
     try {
         const [health, browserGateway] = await Promise.all([remoteAccessLib.getServiceHealth(), remoteBrowser.getBrowserHealth()]);
         res.json(browserGateway ? { ...health, browserGateway } : health);
@@ -3518,6 +3524,18 @@ app.post('/api/remote-access/sessions/:id/resume', requireRemoteUser, async (req
     try { res.json(await remoteBrowser.resumeWebSession(req.remoteViewer, String(req.params.id), req.body || {})); }
     catch (e) { sendRemoteError(res, e); }
 });
+const webFiles = (handler) => async (req, res) => {
+    if (refuseBlockedViewer(req, res)) return;
+    try { await handler(req, res, await remoteBrowser.ownedWebSession(req.remoteViewer, String(req.params.id))); } catch (e) {
+        if (res.headersSent) res.destroy(); else sendRemoteError(res, e);
+    }
+};
+app.get('/api/remote-access/sessions/:id/files', requireRemoteUser, webFiles(browserFiles.listFiles));
+app.get('/api/remote-access/sessions/:id/files/:name', requireRemoteUser, webFiles(browserFiles.downloadFile));
+app.delete('/api/remote-access/sessions/:id/files/:name', requireRemoteUser, webFiles(browserFiles.deleteFile));
+app.post('/api/remote-access/sessions/:id/uploads', requireRemoteUser, webFiles(browserFiles.startUpload));
+app.put('/api/remote-access/sessions/:id/uploads/:uploadId', requireRemoteUser, webFiles(browserFiles.uploadChunk));
+app.delete('/api/remote-access/sessions/:id/uploads/:uploadId', requireRemoteUser, webFiles(browserFiles.cancelUpload));
 // A launch link from another system (POST /api/v1/remote-access/launch), opened in the browser.
 // Only the ticket and the screen size come from the browser; the target and credentials don't.
 app.post('/api/remote-access/launch/redeem', requireRemoteUser, async (req, res) => {

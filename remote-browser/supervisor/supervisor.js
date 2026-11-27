@@ -1,15 +1,20 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { SLOT_COUNT, failure, slotIds } = require('./protocol');
+const { FILES_LIMIT, SLOT_COUNT, failure, slotIds } = require('./protocol');
 const { memoryStore } = require('./state');
 
 const LEASE_MS = 150_000;
 const MAX_SESSIONS = 50;
 const MAX_TOMBSTONES = 10_000;
 const SLOT_COOLDOWN_MS = 10 * 60_000;
+const ENDED_RECORD_MS = 10 * 60_000;
+const JOURNAL_PER_LIST = 20;
+const SESSIONS_WITH_FILES_PER_LIST = 20;
 
 const expiredFailure = () => failure('EXPIRED', "The user's authorization has expired.");
+
+const newJournal = () => ({ entries: [], nextSeq: 1, seen: new Set() });
 
 class Supervisor {
   constructor({ runtime, store = memoryStore(), instance = crypto.randomUUID(), now = Date.now, log = () => {}, leaseMs = LEASE_MS, maxSessions = MAX_SESSIONS, slotCount = SLOT_COUNT, maxTombstones = MAX_TOMBSTONES, slotCooldownMs = SLOT_COOLDOWN_MS }) {
@@ -28,6 +33,10 @@ class Supervisor {
     this.heldSlots = new Set();
     this.freedAt = new Map();
     this.slotCooldownMs = slotCooldownMs;
+    this.filesPolicy = { enabled: false, transfer: false, rev: -1 };
+    this.policyFailed = false;
+    this.failedRev = -1;
+    this.endings = new Map();
     const saved = store.load();
     this.nextSlot = Number.isInteger(saved) && saved >= 0 && saved < slotCount ? saved : 0;
   }
@@ -45,7 +54,9 @@ class Supervisor {
       case 'stop':
         return this.serialize(request.session, () => this.stop(request.session, 'requested'));
       case 'list':
-        return Promise.resolve(this.list());
+        return Promise.resolve(this.list(request.ack));
+      case 'files':
+        return this.setFilesPolicy(request);
       case 'ready':
         return this.runtime.ready().then((state) => ({ ok: true, instance: this.instance, ...state }));
       default:
@@ -64,8 +75,44 @@ class Supervisor {
     return result;
   }
 
-  async start({ session, width, height, scale, terminal, until, startPage = '' }) {
+  async setFilesPolicy({ enabled, transfer, rev }) {
+    if (rev < this.filesPolicy.rev || rev < this.failedRev) return { ok: true, rev: this.filesPolicy.rev };
+    const changed = this.policyFailed || this.filesPolicy.enabled !== enabled;
+    if (changed) {
+      try {
+        this.runtime.writeFilesPolicy(enabled);
+      } catch (error) {
+        this.log(`files policy (rev ${rev}) could not be written: ${error.message}`);
+        if (!enabled) {
+          this.policyFailed = true;
+          this.failedRev = rev;
+          this.endAll('the files policy could not be blocked');
+        }
+        return failure('POLICY_FAILED', 'The files policy could not be written.');
+      }
+      this.policyFailed = false;
+      this.log(`files in the browser ${enabled ? 'enabled' : 'blocked'} (rev ${rev})`);
+    }
+    this.filesPolicy = { enabled, transfer: enabled && transfer, rev };
+    if (changed && !enabled) await this.closeFileWindows();
+    return { ok: true, rev };
+  }
+
+  closeFileWindows() {
+    return Promise.all([...this.sessions].map(([session, record]) => this.runtime.closeFileWindows(record.ids)
+      .catch((error) => {
+        this.log(`session ${session}: the Downloads window could not be closed: ${error.message}`);
+        this.endWith(session, record, 'its Downloads window could not be closed', null);
+      })));
+  }
+
+  endAll(reason) {
+    for (const [session, record] of this.sessions) this.endWith(session, record, reason, null);
+  }
+
+  async start({ session, width, height, scale, terminal, until, startPage = '', filesLimit = FILES_LIMIT.fallback, language = 'en-US', theme = 'light' }) {
     if (terminal) return failure('TERMINAL', 'The session has ended and cannot start again.');
+    if (this.policyFailed) return failure('POLICY_FAILED', 'The files policy could not be blocked, so no browser starts.');
     if (this.expired(until)) return expiredFailure();
     if (this.tombstones.has(session)) return failure('ENDED', 'The session has ended and cannot start again.');
     const existing = this.sessions.get(session);
@@ -95,6 +142,12 @@ class Supervisor {
       leaseExpiresAt: this.leaseUntil(until),
       password: null,
       ending: false,
+      filesLimit,
+      journal: newJournal(),
+      upload: null,
+      published: new Map(),
+      streams: new Map(),
+      polling: false,
     };
     this.sessions.set(session, record);
     try {
@@ -104,6 +157,9 @@ class Supervisor {
         height,
         scale,
         startPage,
+        filesLimit,
+        language,
+        theme,
         onExit: (reason) => this.ended(session, record, reason),
       });
       record.password = password;
@@ -155,6 +211,10 @@ class Supervisor {
     return { record };
   }
 
+  running(record) {
+    return record.state === 'running' && !record.ending;
+  }
+
   renew(session, until) {
     const { record, refusal } = this.live(session);
     if (refusal) return refusal;
@@ -165,7 +225,10 @@ class Supervisor {
 
   status(session) {
     const { record, refusal } = this.live(session);
-    if (refusal) return refusal;
+    if (refusal) {
+      const ending = this.endings.get(session);
+      return ending?.code ? { ...refusal, code: ending.code, limit: ending.limit } : refusal;
+    }
     return { ok: true, state: record.state };
   }
 
@@ -178,14 +241,28 @@ class Supervisor {
     return this.grant(record);
   }
 
+  recordEnding(session, record, code) {
+    const ending = this.endings.get(session);
+    if (ending) {
+      ending.code = ending.code ?? code;
+      return;
+    }
+    this.endings.set(session, { code, limit: record.filesLimit, journal: record.journal, endedAt: this.now() });
+  }
+
+  stopped(session) {
+    return { ok: true, state: 'stopped', code: this.endings.get(session)?.code ?? null };
+  }
+
   async stop(session, reason) {
     this.bury(session);
     const record = this.sessions.get(session);
-    if (!record) return { ok: true, state: 'stopped' };
+    if (!record) return this.stopped(session);
     record.state = 'stopping';
+    this.recordEnding(session, record, null);
     let clean = false;
     try {
-      clean = await this.runtime.teardown(record.ids);
+      clean = await this.runtime.teardown(record.ids, () => this.finalScan(session, record));
     } catch (error) {
       this.log(`session ${session}: teardown error: ${error.message}`);
     }
@@ -197,15 +274,20 @@ class Supervisor {
     this.heldSlots.delete(record.ids.slot);
     this.freedAt.set(record.ids.slot, this.now());
     this.log(`session ${session}: stopped (${reason})`);
-    return { ok: true, state: 'stopped' };
+    return this.stopped(session);
   }
 
-  ended(session, record, reason) {
+  endWith(session, record, reason, code) {
     if (record.ending || record.state === 'stopping' || this.sessions.get(session) !== record) return;
     record.ending = true;
+    if (code) this.recordEnding(session, record, code);
     if (record.state === 'starting') return;
     this.log(`session ${session}: ${reason}`);
     this.serialize(session, () => this.stop(session, reason));
+  }
+
+  ended(session, record, reason) {
+    this.endWith(session, record, reason, null);
   }
 
   expireLeases() {
@@ -214,9 +296,100 @@ class Supervisor {
       if (record.ending || record.state === 'stopping' || record.leaseExpiresAt > now) continue;
       this.ended(session, record, 'lease expired');
     }
+    this.pruneEndings();
   }
 
-  list() {
+  noteFiles(journal, files) {
+    const complete = new Set();
+    for (const { name, size, partial } of files) {
+      if (partial) continue;
+      complete.add(name);
+      if (journal.seen.has(name)) continue;
+      journal.seen.add(name);
+      journal.entries.push({ seq: journal.nextSeq, name, size });
+      journal.nextSeq += 1;
+    }
+    for (const name of journal.seen) {
+      if (!complete.has(name)) journal.seen.delete(name);
+    }
+  }
+
+  reservedBy(record) {
+    return record.upload ? record.upload.size - record.upload.received : 0;
+  }
+
+  pollFiles() {
+    for (const [session, record] of this.sessions) {
+      if (!this.running(record) || record.polling) continue;
+      record.polling = true;
+      this.serialize(session, () => this.pollSession(session, record))
+        .catch((error) => this.log(`session ${session}: files poll failed: ${error.message}`))
+        .finally(() => {
+          record.polling = false;
+        });
+    }
+  }
+
+  async pollSession(session, record) {
+    if (this.sessions.get(session) !== record || !this.running(record)) return;
+    let scan;
+    try {
+      scan = await this.runtime.scanFiles(record.ids);
+    } catch (error) {
+      this.endWith(session, record, `files could not be measured: ${error.message}`, 'FILES_FULL');
+      return;
+    }
+    if (!scan) return;
+    this.noteFiles(record.journal, scan.files);
+    const charged = scan.used + this.reservedBy(record);
+    if (charged > record.filesLimit) {
+      this.endWith(session, record, `files take ${charged} of ${record.filesLimit} bytes`, 'FILES_FULL');
+    }
+  }
+
+  async finalScan(session, record) {
+    try {
+      const scan = await this.runtime.scanFiles(record.ids);
+      if (scan) this.noteFiles(record.journal, scan.files);
+    } catch (error) {
+      this.log(`session ${session}: final files scan failed: ${error.message}`);
+    }
+  }
+
+  filesAccess(session, needsTransfer) {
+    const record = this.sessions.get(session);
+    if (!record || !this.running(record) || record.leaseExpiresAt <= this.now()) return { refusal: 'NO_SESSION' };
+    if (!this.filesPolicy.enabled || this.policyFailed) return { refusal: 'FILES_OFF' };
+    if (needsTransfer && !this.filesPolicy.transfer) return { refusal: 'TRANSFER_OFF' };
+    return { record };
+  }
+
+  acknowledge(acks) {
+    for (const [session, seq] of Object.entries(acks)) {
+      const journal = this.sessions.get(session)?.journal ?? this.endings.get(session)?.journal;
+      if (journal) journal.entries = journal.entries.filter((entry) => entry.seq > seq);
+    }
+  }
+
+  pruneEndings() {
+    const now = this.now();
+    for (const [session, ending] of this.endings) {
+      if (this.sessions.has(session)) continue;
+      const settled = ending.code === null && ending.journal.entries.length === 0;
+      if (settled || now - ending.endedAt >= ENDED_RECORD_MS) this.endings.delete(session);
+    }
+  }
+
+  list(acks = {}) {
+    this.acknowledge(acks);
+    this.pruneEndings();
+    let sessionsLeft = SESSIONS_WITH_FILES_PER_LIST;
+    const pending = ({ entries }) => {
+      if (entries.length === 0 || sessionsLeft === 0) return [];
+      sessionsLeft -= 1;
+      return entries.slice(0, JOURNAL_PER_LIST);
+    };
+    const ended = [...this.endings].map(([session, ending]) => ({ session, code: ending.code, limit: ending.limit, files: pending(ending.journal) }));
     return {
       ok: true,
       instance: this.instance,
@@ -226,7 +399,9 @@ class Supervisor {
         uid: record.ids.chromiumUid,
         port: record.ids.port,
         startedAt: record.startedAt,
+        files: this.endings.has(record.session) ? [] : pending(record.journal),
       })),
+      ended,
     };
   }
 
@@ -267,4 +442,4 @@ class Supervisor {
   }
 }
 
-module.exports = { Supervisor, LEASE_MS, MAX_SESSIONS };
+module.exports = { Supervisor, LEASE_MS, MAX_SESSIONS, ENDED_RECORD_MS, JOURNAL_PER_LIST, SESSIONS_WITH_FILES_PER_LIST };

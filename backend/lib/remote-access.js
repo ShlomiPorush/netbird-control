@@ -26,7 +26,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const dns = require('dns');
 const net = require('net');
 const { StringDecoder } = require('string_decoder');
-const { pool, getSetting, setSetting } = require('./core');
+const { pool, getSetting, setSetting, updateSetting } = require('./core');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, nbDirectGet, getUsageData, _nbApi } = require('./netbird');
 const { addEvent } = require('./events');
 const apiKeys = require('./api-keys');
@@ -64,6 +64,7 @@ const WS_BUFFER_HIGH = 4 * 1024 * 1024;  // pause guacd while the browser is thi
 const WS_BUFFER_LOW = 1 * 1024 * 1024;
 const STALL_LIMIT_MS = 30_000;           // a consumer stuck above the cap this long is disconnected
 const MAX_WIDTH = 7680, MAX_HEIGHT = 4320;
+const BROWSER_LANGUAGES = ['en-US', 'he'];
 
 const DEFAULTS = {
     enabled: false,
@@ -97,7 +98,8 @@ const DEFAULTS = {
     ssh: { fontSize: 12, colorScheme: 'gray-black' },
     // networkId is set by the Choose Network actions only, groupId by resolving the chosen profile.
     createResources: { enabled: false, networkId: '', profileId: 0, groupId: '', max: 50 },
-    browser: { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '' },
+    browser: { enabled: false, routerGroupId: '', maxSessions: 5, maxPerUser: 1, keepAliveMin: 15, startPage: '', files: false, transfer: false, filesLimitGb: 2, language: 'en-US' },
+    rev: 0,
 };
 
 // What guacd 1.6 accepts (its built-in keymaps and terminal color schemes).
@@ -149,6 +151,7 @@ function normConfig(c) {
         ssh: normSsh(x.ssh),
         createResources: normCreate(x.createResources),
         browser: normBrowser(x.browser),
+        rev: Number.isSafeInteger(x.rev) && x.rev >= 0 ? x.rev : 0,
     };
 }
 
@@ -173,6 +176,10 @@ function normBrowser(v) {
         maxPerUser: clampInt(x.maxPerUser, 1, 10, d.maxPerUser),
         keepAliveMin: clampInt(x.keepAliveMin, 1, 120, d.keepAliveMin),
         startPage: webStartPage(x.startPage),
+        files: !!x.files,
+        transfer: !!x.files && !!x.transfer,
+        filesLimitGb: clampInt(x.filesLimitGb, 1, 10, d.filesLimitGb),
+        language: BROWSER_LANGUAGES.includes(x.language) ? x.language : d.language,
     };
 }
 
@@ -225,6 +232,26 @@ async function reloadSavedConfig() {
     const before = _cfg;
     const saved = normConfig(JSON.parse(await getSetting('remote_access_config') || 'null'));
     if (_cfg === before) _cfg = saved;
+    return saved;
+}
+
+function storedConfig(value) {
+    try { return normConfig(JSON.parse(value || 'null')); } catch (e) {
+        if (e instanceof SyntaxError) return normConfig(null);
+        throw e;
+    }
+}
+
+async function updateStoredConfig(change, { asGiven = false } = {}) {
+    let next;
+    await updateSetting('remote_access_config', (value) => {
+        const fresh = storedConfig(value);
+        const changed = { ...change(fresh), rev: fresh.rev + 1 };
+        next = normConfig(changed);
+        return JSON.stringify(asGiven ? changed : next);
+    });
+    _cfg = next;
+    return next;
 }
 
 function getRemoteAccessConfig() {
@@ -799,14 +826,15 @@ async function setRemoteAccessConfig(input) {
     const { createResources: sent, ...rest } = input || {};
     const wasEnabled = _cfg.enabled;
     try {
-        // A read-only instance never adds or removes servers, so it doesn't decide this section.
-        const createResources = sent && typeof sent === 'object' && !NETBIRD_READONLY ? await checkedCreateSection(sent) : _cfg.createResources;
-        const browser = { ..._cfg.browser, ...(rest.browser && typeof rest.browser === 'object' ? rest.browser : {}) };
-        const next = normConfig({ ..._cfg, ...rest, browser, createResources });
-        // The network launch links use stays open to the gateway.
-        if (createResources.networkId) next.networks = [...new Set([...next.networks, createResources.networkId])];
-        await setSetting('remote_access_config', JSON.stringify(next));
-        _cfg = next;
+        const checked = sent && typeof sent === 'object' && !NETBIRD_READONLY ? await checkedCreateSection(sent) : null;
+        await updateStoredConfig((fresh) => {
+            const createResources = checked
+                ? { ...fresh.createResources, enabled: checked.enabled, profileId: checked.profileId, groupId: checked.groupId, max: checked.max }
+                : fresh.createResources;
+            const browser = { ...fresh.browser, ...(rest.browser && typeof rest.browser === 'object' ? rest.browser : {}) };
+            const networks = rest.networks === undefined ? fresh.networks : rest.networks;
+            return { ...fresh, ...rest, browser, createResources, networks: createResources.networkId ? [...(Array.isArray(networks) ? networks : []), createResources.networkId] : networks };
+        });
     } catch (e) {
         if (e.status) throw e;
         console.error('[remote-access] saving the settings:', e.message);
@@ -2739,12 +2767,12 @@ async function checkedCreateSection(sent) {
     return next;
 }
 const createdInUseMessage = (n, what = 'The network') => `${n} server${n === 1 ? '' : 's'} added by launch links ${n === 1 ? 'is' : 'are'} still in use. ${what} can be changed once ${n === 1 ? 'it is' : 'they are'} removed; kept ones can be deleted in Networks.`;
-// A chosen network is open to the gateway.
 async function storeCreateSection(patch) {
-    const networks = patch.networkId ? [...new Set([..._cfg.networks, patch.networkId])] : _cfg.networks;
-    const next = normConfig({ ..._cfg, networks, createResources: { ..._cfg.createResources, ...patch } });
-    await setSetting('remote_access_config', JSON.stringify(next));
-    _cfg = next;
+    const next = await updateStoredConfig((fresh) => ({
+        ...fresh,
+        networks: patch.networkId ? [...new Set([...fresh.networks, patch.networkId])] : fresh.networks,
+        createResources: { ...fresh.createResources, ...patch },
+    }));
     noteTargetsChanged();
     return { networks: [...next.networks], createResources: { ...next.createResources } };
 }
@@ -2759,6 +2787,12 @@ function importedRemoteAccessConfig(value) {
     try { x = JSON.parse(value); } catch { return null; }
     if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
     return JSON.stringify({ ...x, createResources: { ...x.createResources, enabled: false } });
+}
+async function importRemoteAccessConfig(value) {
+    const imported = importedRemoteAccessConfig(value);
+    if (!imported) return false;
+    await updateStoredConfig(() => JSON.parse(imported), { asGiven: true });
+    return true;
 }
 
 // ─── Adding a server ───
@@ -3010,7 +3044,7 @@ async function listCreatedResources() {
 module.exports = {
     issueLaunch, redeemLaunch,
     CREATE_SCOPE, API_NETWORK_MESSAGE, linkGuardNetworkIds, countCreatedInUse, createdInUseMessage, createdResourceIds, sessionResourceIds,
-    noteCreatedResourceDeleted, noteCreatedNetworkDeleted, storeCreateSection, launchNetworkName, importedRemoteAccessConfig,
+    noteCreatedResourceDeleted, noteCreatedNetworkDeleted, storeCreateSection, launchNetworkName, importedRemoteAccessConfig, importRemoteAccessConfig,
     listCreatedResources, maintainCreatedResources,
     loadRemoteAccessConfig, getRemoteAccessConfig, setRemoteAccessConfig, setRemoteAccessDeps,
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets,

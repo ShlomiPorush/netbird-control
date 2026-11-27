@@ -380,7 +380,8 @@ peers: it uses the copy as it is.
   ends the session instead; SSH servers report every refused sign-in the same way, so SSH always
   asks again. SSH asks for a user name and password only; to use a private key, connect again
   from the Remote Access page. Every password field has a button that shows what was typed.
-- **The session bar.** It hides itself a few seconds after a session comes to the front. A click
+- **The session bar.** It follows the portal's light or dark theme, and so do its menus and the
+  Clipboard and Files panels. It hides itself a few seconds after a session comes to the front. A click
   on its handle at the top of the screen, or the pointer resting there for half a second, brings it
   back. Pinned, it stays on top of the session; the session keeps the whole window. The NetBird
   mark at its start goes back to the portal while the sessions keep running. On a narrow screen,
@@ -486,6 +487,19 @@ peers: it uses the copy as it is.
 
    The one-time token travels in the tunnel URL. It is valid for 30 seconds and a single use, but
    avoid logging query strings for this path in the reverse proxy.
+
+   With **Transfer Files To And From Computers** on, uploads reach
+   `/api/remote-access/sessions/<id>/uploads/<upload>` in parts of up to 8 MiB. The reverse proxy
+   must allow request bodies of at least 1 MiB there; 8 MiB is recommended. When it refuses a part,
+   the browser falls back to 1 MiB parts. nginx allows only 1 MiB by default:
+
+   ```nginx
+   location ~ ^/api/remote-access/sessions/[^/]+/uploads/ {
+       proxy_pass http://netbird-control:3000;
+       client_max_body_size 8m;
+       proxy_request_buffering off;
+   }
+   ```
 
 ## What the gateways enforce on every start
 
@@ -722,6 +736,15 @@ A new browser opens on the **Start Page** set in the same card, or on a blank pa
 Only an `http` or `https` address without a user name or password is accepted. A resumed browser
 keeps its own tabs.
 
+**Browser Language** in the same card (English or Hebrew; default English) is the
+language of a new browser's menus. Websites are asked for that language first and English second,
+so a site that offers it shows it. A changed language applies to browsers opened after the change;
+a resumed browser keeps the language it started with.
+
+A new browser opens in the portal's theme at that moment, light or dark. In dark, its toolbar,
+menus and file windows are dark, and websites are told the user prefers dark. A browser keeps the
+theme it started with: Chromium can't change it while it runs.
+
 ### Disconnect, resume and close
 
 - Closing the tab, refreshing the page or losing the network **disconnects** the browser: it keeps
@@ -740,9 +763,9 @@ keeps its own tabs.
 
 ### Inside the browser
 
-- Downloads, saving pages, uploads (file dialogs), printing, developer tools, extensions and saved
-  passwords are blocked by Chromium's managed policies. Websites cannot read the clipboard by
-  themselves.
+- Printing, developer tools, extensions and saved passwords are blocked by Chromium's managed
+  policies. Downloads, saving pages and uploads (file dialogs) are blocked too, unless **Files In
+  The Browser** is on (see [Files](#files)). Websites cannot read the clipboard by themselves.
 - The browser opens on a blank page.
 - Self-signed certificates show Chromium's usual warning, and **Proceed** works.
 - Copy and paste follow the Remote Access clipboard setting, like RDP. **Pasting Hebrew text is not
@@ -753,6 +776,71 @@ keeps its own tabs.
 - The browser container's seccomp profile, `remote-browser/seccomp.json`, is Docker's default
   profile from moby `docker-v29.8.2`, with `clone` allowed without its namespace-flag filter and
   `chroot` and `unshare` allowed, which Chromium's sandbox needs.
+
+### Files
+
+Two settings in **Settings → Remote Access → Remote Browser → Files**, both off by default:
+
+- **Files In The Browser.** The browser may download files and upload them to websites through its
+  file dialog. Each browser saves into a folder of its own, which no other browser can read, and the
+  folder is deleted when the browser closes. The browser's file dialogs (a website's upload button,
+  **Save Page As**) open in that folder, and their sidebar has a **Downloads** shortcut to it. In the session
+  bar, **Files** lists the folder's files and their size, shows how much of the storage is used, and
+  can delete a file. A file that is still downloading shows as *Downloading…* and cannot be deleted.
+- **Transfer Files To And From Computers** (only with the first setting). The **Files** panel also
+  copies a file from the browser to the user's computer (**Download**) and from the computer into the
+  browser's folder (**Upload From This Computer**). An upload is sent in parts of 8 MiB, shows its
+  progress, can be cancelled, and continues after a short network break while the browser runs. Only
+  one upload per browser runs at a time; a new one cancels the earlier one. An upload never replaces
+  a file of the same name.
+
+Anyone who may open a web session gets these features when they are on. Turning a setting off takes
+effect in open browsers within about a minute; a download that already started finishes.
+
+**Show in folder and Open.** With **Files In The Browser** on, **Show in folder** on a download
+opens a **Downloads** window over the browser, showing the browser's own folder. **Open** on a file
+the browser can't show itself opens the same window with that file selected. A file can be dragged
+from the window onto a website, for example onto a firmware upload area. The window only shows and
+selects files: **OK** and **Cancel** close it, and the session bar's **Files** panel deletes files
+and moves them to and from the computer. **Open** on a file the browser can show, such as a PDF,
+shows it in a browser tab. This works only for the browser's own folder: other local files stay
+blocked, and another browser's folder can't be read. Other requests to open something outside the
+browser, such as a `mailto:` link, do nothing. When **Files In The Browser** is turned off,
+**Show in folder** and **Open** do nothing and an open **Downloads** window closes.
+
+**Storage Per Browser** (1 to 10 GB, default 2 GB) limits each browser's files. A single file larger
+than the limit fails to download. The total is checked every 3 seconds, and a browser whose files
+pass the limit, or can't be measured completely, is closed: its user sees *This browser's files
+passed its N GB limit, so it was closed.* The limit is an estimate, not a hard bound: a fast
+download can pass it by what arrives between two checks. A changed limit applies to browsers opened
+after the change.
+
+**Disk sizing.** The files are on the `remote-browser-files` Docker volume. The Docker host needs
+about **Browsers At A Time × Storage Per Browser** free space (for example 5 × 2 GB = 10 GB). For a
+hard bound, put the volume on a filesystem of its own with a fixed size (for example a host
+directory on a separate partition, mounted at `/var/lib/browser-files` in the `remote-browser`
+service). The app does not manage that filesystem.
+
+**What is recorded**, in the connection records of the session, with its user:
+
+- Each file that lands in the browser's folder (downloaded by the browser, or uploaded through the
+  portal): its name and size.
+- Each copy to a computer (name and size; a copy the user broke off is recorded as partly copied),
+  each upload from a computer, and each delete from the Files panel, when it happens.
+
+Recording the files that land in the folder is best-effort. The remote browser keeps the list for
+10 minutes after a browser closes; entries are lost when the app or its database is down for longer
+than that, or when the `remote-browser` container restarts.
+
+**Accepted risks**
+
+- Files a website receives through the browser's file dialog are not recorded (the connection
+  records show which sites the browser reached).
+- Files are not scanned for malware.
+- **Save Page As** (Ctrl+S) can still write into the browser's temporary folders in memory. They are
+  limited by the container's memory and wiped when the browser closes.
+- A download that already started continues when the setting is turned off.
+- The storage limit is an estimate (see above).
 
 ### Session and connection records
 
@@ -813,7 +901,7 @@ browser gateway group still has a peer.
 | Sessions Per User / In Total | 5 / 20 | Sessions that are still opening count too. |
 | Idle Timeout | 30 minutes | No keyboard or mouse input. A session in a background tab gets none. |
 | Maximum Session Length | 8 hours | |
-| Allow Clipboard | On | Text only. File transfer is always off. |
+| Allow Clipboard | On | Text only. RDP and SSH file transfer is always off; web sessions have their own [file settings](#files). |
 | RDP Display: Colors | 32-bit | 8, 16, 24 or 32-bit. guacd's graphics pipeline (GFX) always runs at 32-bit, so a lower depth turns it off. |
 | RDP Display: Keyboard Layout | English (US) | The remote server's layout, from guacd's built-in list. Characters it doesn't have, such as Hebrew, are sent as Unicode text. |
 | RDP Display: Font Smoothing | On | ClearType. |

@@ -30,7 +30,7 @@ const {
     isRemoteAccessManagedPolicy, isRemoteAccessManagedGroup, withManagedTargets, withTargetLock, noteUncertainTargetWrite, noteTargetsChanged,
     loadRemoteAccessConfig, enforceManagedMembership, invalidateSnapshot: invalidateRemoteSnapshot, getRemoteAccessConfig,
     API_NETWORK_MESSAGE, linkGuardNetworkIds, countCreatedInUse, createdInUseMessage, createdResourceIds, sessionResourceIds,
-    noteCreatedResourceDeleted, noteCreatedNetworkDeleted, storeCreateSection, launchNetworkName, importedRemoteAccessConfig,
+    noteCreatedResourceDeleted, noteCreatedNetworkDeleted, storeCreateSection, launchNetworkName, importRemoteAccessConfig,
 } = require('./lib/remote-access');
 // "Is this address part of NetBird at all?" (Troubleshoot's Add As Resource), shared with Remote Access.
 const { ipUncovered: coverageIpUncovered, nameUncovered: coverageNameUncovered, nameCovered: coverageNameCovered } = require('./lib/coverage');
@@ -11939,9 +11939,7 @@ async function importAppSettings(payload, actor) {
             }
         }
         if (k === 'remote_access_config') {
-            const imported = importedRemoteAccessConfig(v);
-            if (!imported) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
-            await setSetting(k, imported);
+            if (!(await importRemoteAccessConfig(v))) { skippedSettings.push({ key: k, reason: 'not a valid settings object' }); continue; }
             importedKeys.push(k);
             continue;
         }
@@ -12186,9 +12184,11 @@ async function importInternalBackupPayload(payload) {
     for (const [k, v] of Object.entries(settings)) {
         if (typeof k !== 'string' || k.length > 100 || typeof v !== 'string') continue;
         if (BACKUP_KEY_SETTINGS.has(k)) continue; // keep this server's own backup keypair (see BACKUP_KEY_SETTINGS)
-        const value = k === 'remote_access_config' ? importedRemoteAccessConfig(v) : v;
-        if (value === null) continue;
-        await setSetting(k, value);
+        if (k === 'remote_access_config') {
+            if (await importRemoteAccessConfig(v)) settingsCount++;
+            continue;
+        }
+        await setSetting(k, v);
         settingsCount++;
     }
     // Reload every config module so the restore applies without a restart.
