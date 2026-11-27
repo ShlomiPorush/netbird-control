@@ -35,6 +35,8 @@ COPY --chmod=0755 hebrew-keymap.sh /usr/local/bin/hebrew-keymap
 COPY --chmod=0755 collector.sh /usr/local/bin/collector
 COPY --chmod=0755 xdg-open.sh /usr/local/bin/xdg-open
 COPY supervisor/ /opt/supervisor/
+COPY --chmod=0644 seccomp.json resolv.conf /usr/share/netbird-control/host/remote-browser/
 ENV LANG=C.UTF-8
 LABEL netbird-control.zero-downtime-update="1"
+LABEL netbird-control.host-files="1"
 CMD ["node", "/opt/supervisor/main.js"]
