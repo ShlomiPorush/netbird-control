@@ -48,7 +48,13 @@ async function setup(t, { cfg = {}, warm = true } = {}) {
     await a.call('db', { fn: 'setSetting', args: ['remote_access_config', JSON.stringify({ enabled: true, networks: ['n1'], ...cfg })] });
     await a.call('db', { fn: 'setSetting', args: ['remote_access_nb', JSON.stringify(NB)] });
     for (const x of [a, b]) await x.call('db', { fn: 'ensureSettingsCurrent' });
-    return { nb, a, b };
+    const another = async () => {
+        const c = await startInstance({ ...database.env, ...nb.envFor('a') }, APP, { name: 'C' });
+        cleanup(() => c.stop());
+        await c.call('init');
+        return c;
+    };
+    return { nb, a, b, another };
 }
 
 const groupReadsBy = (nb, who) => nb.log.filter((e) => e.who === who && e.method === 'GET' && /^\/api\/groups\/g-/.test(e.path));
@@ -118,6 +124,60 @@ test('an instance killed while its target write is on the way leaves the other r
     assert.equal((await b.call('raSession', { viewer: U2, body: RDP })).ok, true);
 });
 
+test("the leader turns a stopped writer's row into a deadline even when another instance holds the targets lock at its tick", { skip: seamSkipReason() }, async (t) => {
+    const { nb, a, b, another } = await setup(t, { warm: false });
+    const c = await another();
+    await b.call('raLeader', { leader: true });
+    const held = nb.hold('PUT', RESOURCE, { who: 'a', when: 'before' });
+    a.call('raSession', { viewer: U1, body: RDP }).catch(() => { });
+    await held.reached;
+    await a.kill();
+    const pending = () => b.call('sql', { text: `SELECT key FROM coordination WHERE key LIKE 'ra_pending:%'` });
+    await c.call('holdLock', { kind: 'targets', parts: ['remote-access'], name: 'c-targets' });
+    await c.waitFor('held:c-targets');
+    let done = false;
+    const following = b.call('ra', { fn: 'followSharedSettling' }).then(() => { done = true; });
+    await sleep(1000);
+    assert.equal(done, false, 'the follow-up waits for the lock');
+    assert.equal((await pending()).length, 1);
+    c.release('c-targets');
+    await following;
+    assert.equal((await pending()).length, 0, 'converted once the lock was free');
+    assert.equal(await b.call('ra', { fn: 'isSettling' }), true);
+});
+
+test('two Remote Access saves that overlap keep both changes: one turns it off, the other changes only a browser field', { skip: seamSkipReason() }, async (t) => {
+    const { a, b } = await setup(t);
+    await a.call('holdLock', { kind: 'targets', parts: ['remote-access'], name: 'a-targets' });
+    await a.waitFor('held:a-targets');
+    const off = a.call('ra', { fn: 'setRemoteAccessConfig', args: [{ enabled: false }] }).catch((e) => e);
+    await sleep(500);
+    const browser = b.call('ra', { fn: 'setRemoteAccessConfig', args: [{ browser: { keepAliveMin: 25 } }] }).catch((e) => e);
+    await sleep(500);
+    a.release('a-targets');
+    await off;
+    await browser;
+    const saved = JSON.parse((await b.call('sql', { text: `SELECT value FROM app_settings WHERE key = 'remote_access_config'` }))[0].value);
+    assert.equal(saved.enabled, false, 'still off');
+    assert.equal(saved.browser.keepAliveMin, 25, 'with the browser change');
+});
+
+test('a launch network release that overlaps a Remote Access settings save keeps both changes', { skip: seamSkipReason() }, async (t) => {
+    const { a, b } = await setup(t, { cfg: { createResources: { enabled: false, networkId: 'n9' } } });
+    await a.call('holdLock', { kind: 'targets', parts: ['remote-access'], name: 'a-targets' });
+    await a.waitFor('held:a-targets');
+    const saving = a.call('ra', { fn: 'setRemoteAccessConfig', args: [{ idleTimeoutMin: 45 }] }).catch((e) => e);
+    await sleep(500);
+    const releasing = b.call('db', { fn: 'releaseLaunchNetwork', args: [U2] }).catch((e) => e);
+    await sleep(500);
+    a.release('a-targets');
+    await saving;
+    await releasing;
+    const saved = JSON.parse((await b.call('sql', { text: `SELECT value FROM app_settings WHERE key = 'remote_access_config'` }))[0].value);
+    assert.equal(saved.idleTimeoutMin, 45, 'with the settings change');
+    assert.equal(saved.createResources.networkId, '', 'and without the released network');
+});
+
 test('a Remote Access settings save raises the targets generation and writes the setting only while it holds the targets lock', { skip: seamSkipReason() }, async (t) => {
     const { a, b } = await setup(t);
     const gen = async () => ((await b.call('sql', { text: `SELECT value FROM coordination WHERE key = 'ra_targets_gen'` }))[0] || {}).value || '';
@@ -145,7 +205,8 @@ test('a target write on its way on one instance does not refuse the other instan
     assert.deepEqual(check.steps.map((s) => [s.key, s.status]), [['access', 'pass'], ['path', 'pass']]);
     await b.call('raLeader', { leader: true });
     await b.call('sql', { text: `UPDATE coordination SET value = $1 WHERE key LIKE 'ra_pending:%'`, params: [String(Date.now() - 120_000)] });
-    await b.call('ra', { fn: 'followSharedSettling' });
+    const following = b.call('ra', { fn: 'followSharedSettling' });
+    await sleep(500);
     assert.equal((await b.call('sql', { text: `SELECT key FROM coordination WHERE key LIKE 'ra_pending:%'` })).length, 1, 'the leader leaves the row of a writer that still holds the lock, however old');
     assert.equal(await b.call('ra', { fn: 'isSettling' }), false);
     let answered = false;
@@ -154,7 +215,9 @@ test('a target write on its way on one instance does not refuse the other instan
     assert.equal(answered, false, 'the session start waits for the write');
     held.release();
     assert.equal((await first).ok, true);
+    await following;
     assert.equal((await second).ok, true, JSON.stringify(await second));
+    assert.equal(await b.call('ra', { fn: 'isSettling' }), false, 'an answered write leaves no deadline');
 });
 
 test('a targets change on one instance while a session start on the other waits to issue its token makes it refuse', { skip: seamSkipReason() }, async (t) => {

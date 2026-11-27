@@ -1112,6 +1112,7 @@ test('a setting that cannot be stored leaves the new network and names it', asyn
 
 test('the first network on a clean install is added to an empty list', async () => {
     ra._internal.setConfigForTest({});
+    settings.remote_access_config = JSON.stringify(ra._internal.normConfig({}));
     const out = await setUp({ peers: ['p-r'] });
     assert.deepEqual(stored().networks, [out.network.id]);
     assert.equal(stored().createResources.networkId, out.network.id);

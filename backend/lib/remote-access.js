@@ -26,7 +26,7 @@ const dns = require('dns');
 const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { pool, getSetting, setSetting } = require('./core');
-const { withLock, tryLock, outsideLocks } = require('./locks');
+const { withLock, outsideLocks } = require('./locks');
 const { readSettingsVersion } = require('./settings-version');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, nbDirectGet, getUsageData, _nbApi } = require('./netbird');
 const { addEvent } = require('./events');
@@ -222,6 +222,11 @@ async function loadRemoteAccessConfig({ strict = false } = {}) {
     await loadTargetHolds({ strict });
 }
 
+async function readStoredConfig() {
+    const raw = await getSetting('remote_access_config');
+    try { return normConfig(JSON.parse(raw || 'null')); } catch { return { ...DEFAULTS }; }
+}
+
 async function reloadSavedConfig() {
     const before = _cfg;
     const saved = normConfig(JSON.parse(await getSetting('remote_access_config') || 'null'));
@@ -411,10 +416,15 @@ async function settleStoppedWrites() {
     await raiseTime(SETTLE_UNTIL_KEY, Date.now() + SETTLE_MS);
     for (const p of pending) await pool.query('DELETE FROM coordination WHERE key = $1 AND value = $2', [p.key, p.value]);
 }
-async function followSharedSettling() {
-    await tryLock('targets', ['remote-access'], settleStoppedWrites);
+async function followSharedSettlingOnce() {
+    await withLock('targets', ['remote-access'], settleStoppedWrites);
     await readTargetsState();
     if (_lastSyncStartOk < _settleUntil && !_settleTimer) scheduleSettleSync();
+}
+let _followRun = null;
+function followSharedSettling() {
+    if (!_followRun) _followRun = followSharedSettlingOnce().finally(() => { _followRun = null; });
+    return _followRun;
 }
 const settlingNow = () => readTargetsState().then(() => targetsSettling(), () => true);
 const targetsSettling = () => Date.now() < _settleUntil || (!NETBIRD_READONLY && _lastSyncStartOk < _settleUntil);
@@ -823,13 +833,15 @@ async function applyGatewayObjectsLocked() {
 
 async function setRemoteAccessConfig(input) {
     const { createResources: sent, ...rest } = input || {};
-    const wasEnabled = _cfg.enabled;
+    let wasEnabled = _cfg.enabled;
     try {
-        const createResources = sent && typeof sent === 'object' && !NETBIRD_READONLY ? await checkedCreateSection(sent) : _cfg.createResources;
-        const browser = { ..._cfg.browser, ...(rest.browser && typeof rest.browser === 'object' ? rest.browser : {}) };
-        const next = normConfig({ ..._cfg, ...rest, browser, createResources });
-        if (createResources.networkId) next.networks = [...new Set([...next.networks, createResources.networkId])];
         await withTargetLock(async () => {
+            const cur = await readStoredConfig();
+            wasEnabled = cur.enabled;
+            const createResources = sent && typeof sent === 'object' && !NETBIRD_READONLY ? await checkedCreateSection(sent, cur) : cur.createResources;
+            const browser = { ...cur.browser, ...(rest.browser && typeof rest.browser === 'object' ? rest.browser : {}) };
+            const next = normConfig({ ...cur, ...rest, browser, createResources });
+            if (createResources.networkId) next.networks = [...new Set([...next.networks, createResources.networkId])];
             await noteTargetsChanged();
             await setSetting('remote_access_config', JSON.stringify(next));
             _cfg = next;
@@ -2752,12 +2764,11 @@ async function resolveCreateProfile(profileId) {
 }
 // The network and the group are never a client's to set: the Choose Network actions and the profile
 // decide them.
-async function checkedCreateSection(sent) {
-    const cur = _cfg.createResources;
+async function checkedCreateSection(sent, config) {
+    const cur = config.createResources;
     const pick = (k) => (sent[k] === undefined ? cur[k] : sent[k]);
     const next = normCreate({ ...cur, enabled: pick('enabled'), profileId: pick('profileId'), max: pick('max') });
     const turnsOn = next.enabled && !cur.enabled;
-    // Turning it off is always possible.
     if (next.enabled) {
         const refuse = (message) => { throw httpError(400, 'INVALID_SETTINGS', message); };
         if (!next.networkId) refuse('Choose the network first.');
@@ -2773,13 +2784,16 @@ async function checkedCreateSection(sent) {
     return next;
 }
 const createdInUseMessage = (n, what = 'The network') => `${n} server${n === 1 ? '' : 's'} added by launch links ${n === 1 ? 'is' : 'are'} still in use. ${what} can be changed once ${n === 1 ? 'it is' : 'they are'} removed; kept ones can be deleted in Networks.`;
-// A chosen network is open to the gateway.
 async function storeCreateSection(patch) {
-    const networks = patch.networkId ? [...new Set([..._cfg.networks, patch.networkId])] : _cfg.networks;
-    const next = normConfig({ ..._cfg, networks, createResources: { ..._cfg.createResources, ...patch } });
-    await setSetting('remote_access_config', JSON.stringify(next));
-    _cfg = next;
-    await noteTargetsChanged();
+    const next = await withTargetLock(async () => {
+        const cur = await readStoredConfig();
+        const networks = patch.networkId ? [...new Set([...cur.networks, patch.networkId])] : cur.networks;
+        const merged = normConfig({ ...cur, networks, createResources: { ...cur.createResources, ...patch } });
+        await noteTargetsChanged();
+        await setSetting('remote_access_config', JSON.stringify(merged));
+        _cfg = merged;
+        return merged;
+    });
     return { networks: [...next.networks], createResources: { ...next.createResources } };
 }
 async function launchNetworkName() {

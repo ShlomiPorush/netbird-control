@@ -333,6 +333,16 @@ test('a resource write answered with a 5xx, or a lost answer after a 429, holds 
     ra._internal.resetSettlingForTest();
 });
 
+test('a settling follow-up that is still waiting or running is not started again', async () => {
+    reset();
+    const first = ra.followSharedSettling();
+    assert.equal(ra.followSharedSettling(), first);
+    await first;
+    const next = ra.followSharedSettling();
+    assert.notEqual(next, first, 'a new one starts once the previous one finished');
+    await next;
+});
+
 // ─── Grants ───
 test('no grant puts anyone into a managed group, and nothing is recorded or written for one', async () => {
     for (const id of ['g-gw', 'g-gwt', 'g-ngw', 'g-ngwt']) {

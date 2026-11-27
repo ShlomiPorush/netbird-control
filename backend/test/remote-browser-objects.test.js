@@ -236,7 +236,8 @@ test('the browser settings are normalized, clamped and merged', async () => {
     assert.equal('browserGuacdHost' in norm({ browserGuacdHost: '10.0.0.1' }), false);
     assert.equal('browserGuacdPort' in norm({ browserGuacdPort: 1 }), false);
     reset({ browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } });
-    ra._internal.setConfigForTest({ enabled: false, browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } });
+    settings.remote_access_config = JSON.stringify({ enabled: false, browser: { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 30 } });
+    ra._internal.setConfigForTest(JSON.parse(settings.remote_access_config));
     const out = await ra.setRemoteAccessConfig({ browser: { keepAliveMin: 20 } });
     assert.deepEqual(out.config.browser, { enabled: false, routerGroupId: 'g-office', maxSessions: 7, maxPerUser: 3, keepAliveMin: 20, startPage: '' });
 });

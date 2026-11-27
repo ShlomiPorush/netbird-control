@@ -149,7 +149,8 @@ test('a read-only instance never adds or deletes a server for a launch link', as
 
 test('a save on a read-only instance never changes the settings for created resources', async () => {
     await reset();
-    ra._internal.setConfigForTest({ enabled: true, networks: ['n1'], createResources: CREATE });
+    settings.remote_access_config = JSON.stringify({ enabled: true, networks: ['n1'], createResources: CREATE });
+    ra._internal.setConfigForTest(JSON.parse(settings.remote_access_config));
     await ra.setRemoteAccessConfig({ idleTimeoutMin: 45, createResources: { enabled: false, profileId: 9, max: 1 } }).catch(() => { });
     const saved = JSON.parse(settings.remote_access_config);
     assert.deepEqual(saved.createResources, CREATE);
