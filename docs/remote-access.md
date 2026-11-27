@@ -861,20 +861,34 @@ recorder misses connections (for example while the app restarts), a gap record s
 2. **Create Setup Key** in the same card and put it in `.env` as
    `REMOTE_BROWSER_GATEWAY_SETUP_KEY` (one-time key, valid for one day). Keep `.env` readable by its
    owner only. A new key revokes the earlier unused ones, so only one browser gateway can enroll.
-3. `.env` must also set `TAG` (the release `update.sh` installs), because the browser image follows
-   the app's version.
-4. Start the browser gateway and its containers together, from the folder that holds
-   `docker-compose.yml` (the files `remote-browser/seccomp.json` and `remote-browser/resolv.conf` are
-   read from there):
+3. The browser image's tag comes from the same `.env` line as the app's: `TAG` in this repository's
+   Compose files, or `VERSION` if your Compose file uses that. The browser image follows the app's
+   version.
+4. **Put the browser's two host files in place.** Docker reads `remote-browser/seccomp.json` (the
+   browser container's seccomp profile) and `remote-browser/resolv.conf` (its DNS server) from the
+   folder that holds `docker-compose.yml`, so they can't stay inside the image. The browser image
+   carries both. Copy them out once, with the release you run instead of `1.9.2`:
+
+   ```bash
+   mkdir -p remote-browser
+   docker run --rm --network none --entrypoint cat ghcr.io/shlomiporush/nbcontrol-browser:1.9.2 /usr/share/netbird-control/host/remote-browser/seccomp.json > remote-browser/seccomp.json
+   docker run --rm --network none --entrypoint cat ghcr.io/shlomiporush/nbcontrol-browser:1.9.2 /usr/share/netbird-control/host/remote-browser/resolv.conf > remote-browser/resolv.conf
+   ```
+
+   After that, `update.sh` copies both from each new browser image before it updates the browser
+   containers, and replaces a copy that differs (it says so). Without `update.sh`, run these
+   commands again with the new release before `docker compose up -d`.
+5. Start the browser gateway and its containers together, from the folder that holds
+   `docker-compose.yml`:
 
    ```bash
    docker compose -f docker-compose.yml -f netbird-docker-compose-files/docker-compose-remote-access.yml --profile remote-browser up -d
    ```
 
    Add `--profile remote-names` if you use the names gateway.
-5. The host isolation rules (below) already cover the browser gateway (`172.31.250.4` and the
+6. The host isolation rules (below) already cover the browser gateway (`172.31.250.4` and the
    gateways' egress network).
-6. **Check the sandbox on the host.** Chromium's sandbox needs unprivileged user namespaces. If the
+7. **Check the sandbox on the host.** Chromium's sandbox needs unprivileged user namespaces. If the
    host restricts them (for example Ubuntu's AppArmor setting
    `kernel.apparmor_restrict_unprivileged_userns=1`), browsers do not start and Settings shows the
    gateway as not ready.

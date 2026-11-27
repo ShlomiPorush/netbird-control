@@ -51,6 +51,10 @@ and the GitHub release for `vX.Y.Z` uses it as its notes.
   own window, without the browser's address bar.
 
 ### Changed
+- **update.sh puts the remote browser's host files in place.** The browser image now carries
+  `remote-browser/seccomp.json` and `remote-browser/resolv.conf`, which Docker reads from the
+  deployment folder. `update.sh` copies them from each new browser image before it updates the
+  browser containers, and says when it replaces a copy that differs.
 - **Remote Access status moved to Operations.** A new **Remote Access** tab in Operations shows the
   gateways' health and warnings, the remote browser gateway, the servers open right now, the active
   sessions, the open remote browsers and the servers launch links added. Settings → Remote Access
