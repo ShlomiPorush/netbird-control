@@ -475,8 +475,9 @@ plan_service() {
 }
 
 copy_host_files() {
-  local image="$1" name="$2" path i
-  [[ $(docker image inspect -f "{{index .Config.Labels \"$HOST_FILES_LABEL\"}}" "$image") == "1" ]] || return 0
+  local image="$1" name="$2" path i label
+  label="$(docker image inspect -f "{{index .Config.Labels \"$HOST_FILES_LABEL\"}}" "$image")" || return 1
+  [[ $label == "1" ]] || return 0
   for path in "${HOST_FILES[@]}"; do
     if [[ -d $path ]]; then
       err "$path is a folder, not a file. Docker makes one when a file it should mount is missing. Remove it (rmdir $path) and run this again."
@@ -492,12 +493,11 @@ copy_host_files() {
   done
   for i in "${!HOST_FILES[@]}"; do
     path="${HOST_FILES[$i]}"
-    if cmp -s "${host_tmps[i]}" "$path"; then
-      chmod 0644 "$path" || return 1
+    if [[ -f $path && ! -L $path && $(stat -c %a "$path") == "644" ]] && cmp -s "${host_tmps[i]}" "$path"; then
       continue
     fi
-    if [[ -e $path ]]; then
-      warn "Replacing $path with the copy from $name (it was different)."
+    if [[ -e $path || -L $path ]]; then
+      warn "Replacing $path with the copy from $name (its content, mode or file type was different)."
     else
       log "Adding $path from $name."
     fi

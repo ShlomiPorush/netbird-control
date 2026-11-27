@@ -867,16 +867,21 @@ recorder misses connections (for example while the app restarts), a gap record s
 4. **Put the browser's two host files in place.** Docker reads `remote-browser/seccomp.json` (the
    browser container's seccomp profile) and `remote-browser/resolv.conf` (its DNS server) from the
    folder that holds `docker-compose.yml`, so they can't stay inside the image. The browser image
-   carries both. Copy them out, with the release you run instead of `1.9.2`. Each file is written
-   beside the old one first and replaces it only when the copy succeeded:
+   carries both. Copy them out, with the release you run instead of `1.9.2`. Both files are written
+   beside the old ones first and replace them only when both copies succeeded:
 
    ```bash
-   mkdir -p remote-browser
-   for f in seccomp.json resolv.conf; do
-     docker run --rm --network none --entrypoint cat ghcr.io/shlomiporush/nbcontrol-browser:1.9.2 "/usr/share/netbird-control/host/remote-browser/$f" > "remote-browser/$f.new" &&
-       chmod 0644 "remote-browser/$f.new" && mv -f "remote-browser/$f.new" "remote-browser/$f"
-   done
+   image=ghcr.io/shlomiporush/nbcontrol-browser:1.9.2
+   mkdir -p remote-browser &&
+     docker run --rm --network none --entrypoint cat "$image" /usr/share/netbird-control/host/remote-browser/seccomp.json > remote-browser/seccomp.json.new &&
+     docker run --rm --network none --entrypoint cat "$image" /usr/share/netbird-control/host/remote-browser/resolv.conf > remote-browser/resolv.conf.new &&
+     chmod 0644 remote-browser/seccomp.json.new remote-browser/resolv.conf.new &&
+     mv -fT remote-browser/seccomp.json.new remote-browser/seccomp.json &&
+     mv -fT remote-browser/resolv.conf.new remote-browser/resolv.conf
    ```
+
+   If `mv` says it cannot overwrite a directory, Docker made a folder there because the file was
+   missing: remove it (`rmdir remote-browser/resolv.conf`) and run the commands again.
 
    After that, `update.sh` copies both from each new browser image before it updates the browser
    containers, and says when it replaces a copy that differs. Without `update.sh`, run the commands
