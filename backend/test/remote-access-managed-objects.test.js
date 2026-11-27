@@ -24,6 +24,7 @@ const hold = (id, networkId, address, hours = 1) => ({ resource_id: id, network_
 core.pool.query = async (sql, params) => {
     sqls.push({ sql, params });
     if (/FROM remote_access_targets/.test(sql)) return { rows: holdRows };
+    if (/^\s*SELECT COUNT\(\*\)::int AS total/.test(sql)) return { rows: [{ total: 0, mine: 0 }] };
     const r = rowsFor(sql, params);
     if (r) return { rows: r };
     if (/nextval/.test(sql)) return { rows: [{ id: 701 }] };
@@ -303,8 +304,6 @@ test('a resource write that got no answer holds new sessions back until a later 
     state.resourcesReadable = true;
     await ra._internal.syncTargetGroup();
     assert.equal(ra._internal.settlingForTest(), false);
-    ra.beginStartupSettling();
-    assert.equal(ra._internal.settlingForTest(), true, 'a restart starts in the same state');
     ra._internal.resetSettlingForTest();
 });
 
@@ -503,7 +502,7 @@ test('a snapshot read that started before the targets changed is never used afte
 
 test('a successful sync that started before the deadline leaves one more sync scheduled', async () => {
     reset();
-    ra.beginStartupSettling();
+    await ra.noteUncertainTargetWrite();
     ra._internal.clearSettleTimerForTest(); // as when a retry replaced the deadline timer
     await ra._internal.syncTargetGroup();
     assert.equal(ra._internal.settlingForTest(), true);

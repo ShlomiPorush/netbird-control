@@ -18,6 +18,17 @@ module.exports = async function appScenario(ctx) {
             await new Promise((r) => setTimeout(r, 200));
             return true;
         },
+        async ra({ fn, args = [] }) { return require('../../../lib/remote-access')[fn](...args); },
+        async raInternal({ fn, args = [] }) { return require('../../../lib/remote-access')._internal[fn](...args); },
+        async raLeader({ leader }) { require('../../../lib/remote-access').setRemoteAccessDeps({ isLeader: () => leader }); return true; },
+        async raSession({ viewer, body }) {
+            try {
+                const out = await require('../../../lib/remote-access').createSession(viewer, body, '203.0.113.9');
+                return { ok: true, sessionId: out.sessionId };
+            } catch (e) {
+                return { ok: false, code: e.code || '', message: e.message };
+            }
+        },
         async exit() { setTimeout(() => process.exit(0), 10); return true; },
     };
 };

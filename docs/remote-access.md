@@ -99,6 +99,7 @@ fragile. So a server joins its gateway's target group only when it is needed:
    enabled and open the TCP port to the target group (on a read-only instance too), so a missing,
    disabled or re-pointed one refuses the session before anything is written.
 2. **A session start opens the server.** The session counts toward the session limits from now on.
+   The limits count the open sessions of every instance that runs against the same database.
    The app reads the resource again first: if its network, address or type changed since the
    checks, or it is gone, nothing is written and the session is refused. Then it records a
    **hold** for the resource (its network and its address as NetBird has it, for example
@@ -118,7 +119,7 @@ fragile. So a server joins its gateway's target group only when it is needed:
    and the gateway's standing policy exists, is enabled, and has an enabled accept rule from the
    gateway group to the target group that opens the TCP port. A drop rule to the target group still counts even if the resource left its group
    meanwhile. Only then does the browser get its one-time token. Any failure ends the attempt and
-   frees its place in the session limits. When this instance runs a target sync, saves the Remote
+   frees its place in the session limits. When any instance runs a target sync, saves the Remote
    Access settings, or sends a write of a gateway group, a resource or a network after that read,
    no token is given either; the user tries again.
 5. **While a session is open**, the check every 60 seconds extends its server's hold to now plus
@@ -218,9 +219,10 @@ close when access cannot be verified with NetBird for 2.5 minutes, when the user
 after the idle timeout, and after the maximum session length. A session that went through a
 wildcard domain resource (possible before this rule existed) closes at the next check.
 
-**After a restart, and after a resource change that NetBird did not answer,** new sessions wait:
-for 90 seconds, and then until the app has synced the target groups again (about a minute and a
-half after a restart). The user is told to try again in a minute. A change that NetBird did not
+**After an instance starts, and after a resource change that NetBird did not answer,** new sessions
+wait on every instance: for 90 seconds, and then until the instance that runs the background jobs
+has synced the target groups again. The wait is kept in the database, so a restart keeps it. The user is told to try again in a
+minute. A change that NetBird did not
 answer may still be applied later, and the app can't tell when, so it does not approve sessions
 from what it read before. A change applied more than 90 seconds after it was sent is caught by
 the next check of open sessions or the next sync.
@@ -329,8 +331,12 @@ peers: it uses the copy as it is.
   back with the target group added, like every resource write in the app. NetBird has no
   conditional write, so an edit made in NetBird in the same instant can be overwritten.
 - **Two instances during an update.** While an update without downtime runs two instances side by
-  side, a sync on one can take out a server the other has just opened. Its session closes at the
-  next check, and the user connects again.
+  side, they write the target groups one at a time, share the wait after an unanswered write, and
+  share the session limits. Sessions on the old instance end, and a session or a launch link
+  opened during the update may have to be opened again, because its token and the link live only
+  in the instance that made them. This holds only when both instances run this version or a later
+  one. During the update to this version, a sync on the old instance can still take out a server
+  the new one has just opened. Its session closes at the next check, and the user connects again.
 - **A move and a session at the same moment.** A move creates the copy, deletes the original and
   then renames the copy. A session opened to the copy in the milliseconds before that rename loses
   its target and has to connect again.

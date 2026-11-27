@@ -22,7 +22,7 @@ nb.bustNbCaches = () => { };
 // No Access Profile rows, and no servers added by launch links.
 const core = require('../lib/core');
 const realQuery = core.pool.query.bind(core.pool);
-core.pool.query = (sql, ...rest) => (/access_profiles|ra_created_resources/.test(sql) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
+core.pool.query = (sql, ...rest) => (/access_profiles|ra_created_resources|remote_access_targets|coordination/.test(sql) ? Promise.resolve({ rows: [] }) : realQuery(sql, ...rest));
 const { createPolicy, updatePolicy, _internal } = require('../db');
 const { carryRuleExtras, ruleHasUnmodeled } = _internal;
 

@@ -2356,7 +2356,7 @@ const {
     recheckSessions: recheckRemoteSessions, sweepSessions: sweepRemoteSessions, closeOrphanSessions: closeRemoteOrphans,
     shutdownSessions: shutdownRemoteSessions,
     getRemoteAccessStatusLite, RECHECK_INTERVAL_MS: REMOTE_RECHECK_INTERVAL_MS, WS_MAX_PAYLOAD: REMOTE_WS_MAX_PAYLOAD,
-    beginStartupSettling: beginRemoteTargetSettling,
+    followSharedSettling: followRemoteTargetSettling, beginStartupSettling: beginRemoteTargetSettling,
 } = require('./lib/remote-access');
 app.post('/api/access-requests', async (req, res) => {
     try {
@@ -3463,7 +3463,7 @@ app.get('/api/remote-access/info', async (req, res) => {
             ssoRequired: !AUTH_ENABLED,
             // Remote access is getting ready (after a restart or a change): the page waits with a
             // launch link instead of using it up.
-            settling: remoteAccessViewerOk(v) && remoteAccessAvailable() ? remoteAccessLib.isSettling() : false,
+            settling: remoteAccessViewerOk(v) && remoteAccessAvailable() ? await remoteAccessLib.isSettling() : false,
             clipboard: cfg.clipboard, idleTimeoutMin: cfg.idleTimeoutMin, maxDurationHours: cfg.maxDurationHours,
             ...(AUTH_ENABLED && !currentTenantAccount() && remoteAccessViewerOk(v) && remoteAccessAvailable() && remoteAccessLib.browserWanted()
                 ? { browser: { keepAliveMin: cfg.browser.keepAliveMin } } : {}),
@@ -3683,8 +3683,8 @@ function handleRemoteUpgrade(req, socket, head) {
     const sessionId = takeRemoteToken(token);
     if (sessionId) return remoteWss.handleUpgrade(req, socket, head, (ws) => attachRemoteTunnel(sessionId, ws));
     remoteBrowser.takeToken(token).then((web) => {
-        if (!web) return reject(401, 'Unauthorized');
         remoteWss.handleUpgrade(req, socket, head, (ws) => {
+            if (!web) return attachRemoteTunnel('', ws);
             remoteBrowser.attachWebTunnel(web, ws).catch((e) => {
                 console.error('[remote-browser] attach failed:', e.message);
                 try { ws.close(1011); } catch { }
@@ -5283,12 +5283,11 @@ async function start() {
         };
         setRemoteAccessDeps(remoteAccessDeps);
         remoteBrowser.setRemoteBrowserDeps({ stillPermitted: remoteAccessDeps.stillPermitted, isLeader: leaderReady });
-        // A resource write sent before a restart may still land in NetBird: no session is approved
-        // until a target sync that starts 90 s from now has finished.
-        beginRemoteTargetSettling();
+        beginRemoteTargetSettling().catch(e => console.error('[remote-access] could not record the start-up settling:', e.message));
         // Orphaned sessions are closed by the leader (leaderStartup), not by every instance that starts.
         setInterval(() => tracked('remoteAccessRecheck', recheckRemoteSessions), REMOTE_RECHECK_INTERVAL_MS);
         setInterval(sweepRemoteSessions, 15000);
+        setInterval(leaderOnly(() => followRemoteTargetSettling().catch(e => console.error('[remote-access] settling:', e.message))), 15000);
         setInterval(() => remoteBrowser.watchAttached().catch(e => console.error('[remote-browser] watch:', e.message)), remoteBrowser.WATCH_INTERVAL_MS);
         const browserTick = leaderOnly(() => tracked('remoteBrowser', remoteBrowser.leaderTick));
         setTimeout(browserTick, 5000);

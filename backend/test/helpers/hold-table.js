@@ -1,15 +1,53 @@
-// An in-memory stand-in for the remote_access_targets table (Browser Gateway target holds), for
-// tests that stub pool.query. It understands the statements lib/remote-access.js sends to that
-// table, with Postgres' answers (rows and rowCount); `query` answers anything else with no rows (or
-// what `other` returns). NOW() is the test process's clock.
+function coordinationAnswer(coordination, sql, params) {
+    if (/^\s*SELECT key, value FROM coordination WHERE key = ANY\(\$1\)/.test(sql)) {
+        return { rows: params[0].filter(k => coordination.has(k)).map(key => ({ key, value: coordination.get(key) })) };
+    }
+    if (/^\s*INSERT INTO coordination/.test(sql) && /coordination\.value::bigint \+ 1/.test(sql)) {
+        coordination.set(params[0], String(Number(coordination.get(params[0]) || 0) + 1));
+        return { rows: [], rowCount: 1 };
+    }
+    if (/^\s*INSERT INTO coordination/.test(sql) && /GREATEST\(coordination\.value::bigint, EXCLUDED\.value::bigint\)/.test(sql)) {
+        coordination.set(params[0], String(Math.max(Number(coordination.get(params[0]) || 0), Number(params[1]))));
+        return { rows: [], rowCount: 1 };
+    }
+    if (/^\s*UPDATE coordination SET value = \$2 WHERE key = \$1/.test(sql)) {
+        const had = coordination.has(params[0]);
+        if (had) coordination.set(params[0], String(params[1]));
+        return { rows: [], rowCount: had ? 1 : 0 };
+    }
+    if (/^\s*DELETE FROM coordination WHERE key = ANY\(\$1\)/.test(sql)) {
+        for (const k of params[0]) coordination.delete(k);
+        return { rows: [], rowCount: 0 };
+    }
+    return null;
+}
+
+function sessionsAnswer(sessions, sql, params) {
+    if (/^\s*SELECT COUNT\(\*\)::int AS total, \(COUNT\(\*\) FILTER \(WHERE user_id = \$1\)\)::int AS mine\s+FROM remote_sessions/.test(sql)) {
+        const open = [...sessions.values()];
+        return { rows: [{ total: open.length, mine: open.filter(r => r.user_id === params[0]).length }] };
+    }
+    if (/^\s*INSERT INTO remote_sessions/.test(sql)) {
+        sessions.set(params[0], { id: params[0], user_id: params[1], resource_id: params[8] });
+        return { rows: [], rowCount: 1 };
+    }
+    if (/^\s*DELETE FROM remote_sessions WHERE id = \$1/.test(sql)) {
+        const had = sessions.delete(params[0]);
+        return { rows: [], rowCount: had ? 1 : 0 };
+    }
+    return null;
+}
+
 function holdTable(other = () => ({ rows: [] })) {
     const rows = new Map(); // resource id -> { resource_id, network_id, address, added_at, expires_at, updated_at }
+    const coordination = new Map();
+    const sessions = new Map();
     const log = [];
     let fail = null; // (sql) => Error to throw, for a test that makes the database fail
     const ms = (v) => new Date(v).getTime();
     const out = (r) => ({ resource_id: r.resource_id, network_id: r.network_id, address: r.address, added_at: r.added_at, expires_at: r.expires_at });
     async function query(sql, params = []) {
-        if (!/remote_access_targets/.test(sql)) return other(sql, params);
+        if (!/remote_access_targets/.test(sql)) return coordinationAnswer(coordination, sql, params) || sessionsAnswer(sessions, sql, params) || other(sql, params);
         log.push({ sql, params });
         const err = fail && fail(sql, params);
         if (err) throw err;
@@ -56,13 +94,13 @@ function holdTable(other = () => ({ rows: [] })) {
         throw new Error('hold-table: unexpected statement ' + sql);
     }
     return {
-        query, rows, log,
+        query, rows, coordination, sessions, log,
         // A row as another instance (or an earlier session) left it; updatedAt defaults to long ago.
         set(id, { networkId, address, addedAt = null, expiresAt, updatedAt = Date.now() - 3_600_000 }) {
             rows.set(id, { resource_id: id, network_id: networkId, address, added_at: addedAt ? new Date(addedAt) : null, expires_at: new Date(expiresAt), updated_at: new Date(updatedAt) });
         },
         failWith(fn) { fail = fn; },
-        clear() { rows.clear(); log.length = 0; fail = null; },
+        clear() { rows.clear(); coordination.clear(); sessions.clear(); log.length = 0; fail = null; },
     };
 }
 

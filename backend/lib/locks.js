@@ -14,6 +14,7 @@ const NAMESPACES = {
     tenant: 0x4e424c09,
     targets: 0x4e424c0a,
     settings: 0x4e424c0b,
+    remoteSession: 0x4e424c0c,
 };
 
 const LOCK_BUSY = Symbol('lock busy');
@@ -118,7 +119,8 @@ async function run(kind, parts, fn, wait) {
 
 function withLock(kind, parts, fn) { return run(kind, parts, fn, true); }
 function tryLock(kind, parts, fn) { return run(kind, parts, fn, false); }
+function outsideLocks(fn) { return owners.exit(fn); }
 
 function _setLockBackendForTest(next) { backend = next || postgresBackend; }
 
-module.exports = { withLock, tryLock, LOCK_BUSY, NAMESPACES, _setLockBackendForTest };
+module.exports = { withLock, tryLock, outsideLocks, LOCK_BUSY, NAMESPACES, _setLockBackendForTest };

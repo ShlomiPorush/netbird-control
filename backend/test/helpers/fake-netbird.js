@@ -2,7 +2,7 @@ const http = require('http');
 const crypto = require('crypto');
 
 function startFakeNetbird(names = ['a', 'b']) {
-    const state = { users: [], groups: [], peers: [], policies: [], networks: [], resources: [], setup_keys: [], posture_checks: [], bypassed: new Set() };
+    const state = { users: [], groups: [], peers: [], policies: [], networks: [], resources: [], setup_keys: [], posture_checks: [], routes: [], routers: [], bypassed: new Set() };
     const log = [];
     const holds = [];
     const token = crypto.randomBytes(16).toString('hex');
@@ -10,6 +10,7 @@ function startFakeNetbird(names = ['a', 'b']) {
 
     const collectionOf = (parts) => {
         if (parts[0] === 'networks' && parts[2] === 'resources') return { name: 'resources', id: parts[3], networkId: parts[1] };
+        if (parts[0] === 'networks' && parts[2] === 'routers') return { name: 'routers', id: parts[3], networkId: parts[1] };
         if (parts[0] === 'networks' && parts[1] === 'resources') return { name: 'resources', id: parts[2] };
         return { name: parts[0], id: parts[1] };
     };

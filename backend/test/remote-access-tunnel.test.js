@@ -16,7 +16,7 @@ const queries = [];
 const order = []; // DB writes and event records, in the order they happened
 // The target holds a session start writes live in their own stand-in table.
 const holdTable = require('./helpers/hold-table').holdTable();
-core.pool.query = async (sql, params) => { if (/remote_access_targets/.test(sql)) return holdTable.query(sql, params); queries.push({ sql, params }); order.push(sql.trim().split(/\s+/)[0] + ':' + (/remote_sessions/.test(sql) ? 'remote_sessions' : '')); return { rows: [] }; };
+core.pool.query = async (sql, params) => { if (/remote_access_targets|coordination/.test(sql)) return holdTable.query(sql, params); queries.push({ sql, params }); order.push(sql.trim().split(/\s+/)[0] + ':' + (/remote_sessions/.test(sql) ? 'remote_sessions' : '')); return holdTable.query(sql, params); };
 
 const nb = require('../lib/netbird');
 nb.netbirdApiConfigured = () => true;
@@ -528,21 +528,18 @@ test("the leader's orphan cleanup leaves this process's own sessions, and strict
 
 test('a session closed while its start is being written gets its end record after the start, and no token', async () => {
     ra.closeAllSessions('next test');
-    let seen; const insertSeen = new Promise(r => { seen = r; });
-    let go; const insertGo = new Promise(r => { go = r; });
-    const query = core.pool.query;
-    core.pool.query = async (sql, params) => {
-        if (/^\s*INSERT INTO remote_sessions/.test(sql)) { seen(); await insertGo; }
-        return query(sql, params);
-    };
+    let seen; const startSeen = new Promise(r => { seen = r; });
+    let go; const startGo = new Promise(r => { go = r; });
+    beforeEvent = async (e) => { if (e.Message === 'TYPE_START') { seen(); await startGo; } };
     try {
         const before = recorded.length;
         const orderBefore = order.length;
         const creating = ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' }, '203.0.113.9');
-        await insertSeen;
-        ra.closeAllSessions('Your access to this server ended.'); // as a re-check or turning the feature off does
+        await startSeen;
+        ra.closeAllSessions('Your access to this server ended.');
         await new Promise(r => setTimeout(r, 50));
         assert.ok(!recorded.slice(before).some(e => e.Message === 'TYPE_END'), 'no end record before the start record');
+        beforeEvent = null;
         go();
         await assert.rejects(creating, (e) => e.code === 'SESSION_CLOSED');
         await waitFor(() => recorded.slice(before).some(e => e.Message === 'TYPE_END'));
@@ -550,6 +547,36 @@ test('a session closed while its start is being written gets its end record afte
         await waitFor(() => order.slice(orderBefore).includes('DELETE:remote_sessions'));
         const tail = order.slice(orderBefore);
         assert.ok(tail.lastIndexOf('DELETE:remote_sessions') > tail.indexOf('INSERT:remote_sessions'), 'no live-state row is left behind');
+    } finally {
+        beforeEvent = null;
+    }
+});
+
+test('a session closed while its slot is being reserved leaves no row and no records, and frees the slot', async () => {
+    ra.closeAllSessions('next test');
+    let seen; const insertSeen = new Promise(r => { seen = r; });
+    let go; const insertGo = new Promise(r => { go = r; });
+    const query = core.pool.query;
+    let reservedId = null;
+    core.pool.query = async (sql, params) => {
+        if (/^\s*INSERT INTO remote_sessions/.test(sql)) { reservedId = params[0]; seen(); await insertGo; }
+        return query(sql, params);
+    };
+    try {
+        const before = recorded.length;
+        const orderBefore = order.length;
+        const creating = ra.createSession(viewer, { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' }, '203.0.113.9');
+        await insertSeen;
+        ra.closeAllSessions('Your access to this server ended.');
+        await new Promise(r => setTimeout(r, 50));
+        assert.ok(!order.slice(orderBefore).includes('DELETE:remote_sessions'), 'the row is not deleted before it is written');
+        go();
+        await assert.rejects(creating, (e) => e.code === 'SESSION_CLOSED');
+        await waitFor(() => order.slice(orderBefore).includes('DELETE:remote_sessions'));
+        const tail = order.slice(orderBefore);
+        assert.ok(tail.lastIndexOf('DELETE:remote_sessions') > tail.indexOf('INSERT:remote_sessions'), 'no live-state row is left behind');
+        assert.equal(recorded.length, before, 'neither a start nor an end record');
+        assert.equal(holdTable.sessions.has(reservedId), false, 'the slot is free');
     } finally {
         core.pool.query = query;
     }
@@ -593,14 +620,13 @@ test('a shutdown closes open sessions, waits for their end records, and refuses 
     const target = { protocol: 'ssh', address: '10.0.0.5', port: 22, username: 'alice' };
     // End records take a while, so the shutdown has something to wait for.
     let slowEnd = false;
-    beforeEvent = async (e) => { if (e.Message === 'TYPE_END') { slowEnd = true; await new Promise(r => setTimeout(r, 150)); } };
-    // Request 1 stops while its start is being recorded (the live-state row insert).
     const insertSeen = gate(); const insertGo = gate();
-    const query = core.pool.query;
-    core.pool.query = async (sql, params) => {
-        if (/^\s*INSERT INTO remote_sessions/.test(sql)) { insertSeen.open(); await insertGo.p; }
-        return query(sql, params);
+    let holdStart = true;
+    beforeEvent = async (e) => {
+        if (e.Message === 'TYPE_END') { slowEnd = true; await new Promise(r => setTimeout(r, 150)); }
+        if (e.Message === 'TYPE_START' && holdStart) { holdStart = false; insertSeen.open(); await insertGo.p; }
     };
+    const query = core.pool.query;
     // Request 2 stops between its first checks and the session map (the routers read).
     const routersSeen = gate(); const routersGo = gate();
     let holdRouters = false;

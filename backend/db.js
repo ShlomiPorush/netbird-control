@@ -195,8 +195,8 @@ async function refuseManagedPolicySources(policies) {
 const withTargets = (fn) => (raMain() ? withTargetLock(fn) : fn());
 const targetsFor = (currentAddress, networkId, address, ids) => (raMain() ? withManagedTargets(currentAddress, networkId, address, ids) : ids);
 // No answer is not "not written": a resource write that timed out may still land.
-function noteResourceWrite(resp) {
-    if (raMain() && resp && resp.status === 0) noteUncertainTargetWrite();
+async function noteResourceWrite(resp) {
+    if (raMain() && resp && resp.status === 0) await noteUncertainTargetWrite();
     return resp;
 }
 // The network that holds the servers Remote Access launch links add is changed by
@@ -226,7 +226,7 @@ async function refuseLinkNetworkTargets(targets) {
 // tries again (lib/remote-access.js).
 async function beforeResourceWrite(apiPath, linkWrite) {
     if (!linkWrite) await refuseLinkNetwork(decodeURIComponent(apiPath.split('/')[3] || ''));
-    if (raMain()) noteTargetsChanged();
+    if (raMain()) await noteTargetsChanged();
 }
 async function resourceReq(method, apiPath, body, { linkWrite = false } = {}) {
     await beforeResourceWrite(apiPath, linkWrite);
@@ -7475,7 +7475,7 @@ async function moveResourcesLocked(sourceNetworkId, resourceIds, targetNetworkId
             // at this point - so create under a temporary name and rename back at the end,
             // after the original is gone.
             const tempName = `${r.name} [moving]`;
-            const resp = noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(target)}/resources`, {
+            const resp = await noteResourceWrite(await resourcePost(`/api/networks/${encodeURIComponent(target)}/resources`, {
                 name: tempName, address: r.address, description: r.description || '',
                 enabled: r.enabled !== false, groups,
             }));
@@ -8727,7 +8727,7 @@ async function editResource(networkId, resourceId, { name, address, description,
     });
 }
 async function putEditedResource(networkId, resourceId, body) {
-    const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+    const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
     if (!nbWriteOk(resp)) throw new Error('Failed to update resource: ' + (resp && (resp.raw || resp.error || resp.status)));
     bustNbCaches('policies', 'gref', 'usage');
     return resp.body;
@@ -8740,7 +8740,7 @@ async function setResourceEnabled(networkId, resourceId, enabled) {
         if (!r || !r.id) throw new Error('Resource not found');
         const groups = targetsFor(r.address, networkId, r.address, groupIdsOf(r.groups));
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: !!enabled, groups };
-        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to set resource enabled: ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies');
         return resp.body;
@@ -8757,7 +8757,7 @@ async function renameResource(networkId, resourceId, name, description) {
             name, address: r.address, description: description || r.description || '',
             enabled: r.enabled !== false, groups: targetsFor(r.address, networkId, r.address, groupIdsOf(r.groups)),
         };
-        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to rename resource: ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies');
         return resp.body;
@@ -8794,7 +8794,7 @@ async function addResourceGroups(networkId, resourceId, wantGroupIds) {
         const next = targetsFor(r.address, networkId, r.address, [...current, ...missing]);
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
-        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to assign access-profile group(s): ' + (resp && (resp.raw || resp.error || resp.status)));
         bustNbCaches('policies', 'gref', 'usage');
         return missing.some(g => next.includes(g));
@@ -8819,7 +8819,7 @@ async function removeResourceGroups(networkId, resourceId, dropGroupIds) {
         const next = targetsFor(r.address, networkId, r.address, current.filter(g => !drop.has(g) || (raMain() && isRemoteAccessManagedGroup(g, ''))));
         if (sameIdSet(next, current)) return false;
         const body = { name: r.name, address: r.address, description: r.description || '', enabled: r.enabled !== false, groups: next };
-        const resp = noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
+        const resp = await noteResourceWrite(await resourceReq('PUT', `/api/networks/${encodeURIComponent(networkId)}/resources/${encodeURIComponent(resourceId)}`, body));
         if (!nbWriteOk(resp)) throw new Error('Failed to detach resource group: ' + ((resp && (resp.raw || resp.error || resp.status)) || 'no response'));
         bustNbCaches('policies', 'gref', 'usage');
         return current.some(g => drop.has(g) && !next.includes(g));

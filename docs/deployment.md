@@ -85,14 +85,23 @@ requests. What would otherwise go wrong is coordinated through PostgreSQL:
 | An automatic EDR bypass and its revoke | Recorded before NetBird is asked; a lost answer never makes the app forget a bypass or a revoke. |
 | An access request approval | Recorded as being approved first, so a deny on the other instance cannot decide it too; the leader finishes one that a stopped instance left behind. |
 | Settings | A change on one instance is in effect on the other from its next request. A restore applies all of its settings and tables or none. |
+| Remote Access target groups | Writes to the Browser Gateway target groups and to resources run one at a time across both instances, under one PostgreSQL lock. The writer reads the settings and the server holds again first. |
+| Remote Access session starts | A session start on either instance stops when the target groups or the settings changed on the other one. After a write that NetBird did not answer, both instances wait for the leader's next target sync. |
+| Remote Access session limits | The limits per user and in total count the open sessions of both instances, under one lock, when a session starts. |
 | The sign-in idle timeout | The last activity is kept in the session itself, so both instances see it. |
 | A page that the old release served | It reloads once into the new release when it needs a file only the old release had. |
 
 What users can notice:
 
 - Browser remote access sessions (RDP and SSH) that run on the old container end; users open them again.
-- New remote access sessions wait at least 90 seconds after the new container starts, and then until the app has synced the
-  target groups again (see [Browser Remote Access](remote-access.md)).
+- New remote access sessions wait at least 90 seconds after the new container starts, on both containers, and then until
+  the app has synced the target groups again (see [Browser Remote Access](remote-access.md)).
+- A remote access session or a launch link opened while both containers run may need to be opened again. Its one-time
+  token and the link live only in the container that made them. The page says that the session is no longer available, or
+  that the link has expired, and the user opens it again.
+- Web sessions (the remote browser) answer "Try again in a minute" until the new container leads.
+- The Remote Access rows above hold only when both containers run this version or a later one. During the update to this
+  version, the old container still coordinates only with itself.
 - A tab that was open before the update reloads once when it opens a page whose files only the old release had.
 - Rate limits and recent sign-in activity are counted per container.
 - Signing out clears the session in that browser. A copy of the session cookie made before the sign-out keeps working
