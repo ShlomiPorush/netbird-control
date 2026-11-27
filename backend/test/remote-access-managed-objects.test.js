@@ -222,6 +222,17 @@ test('a writer keeps a target group the resource has while its network is open a
     assert.deepEqual(copy.groups, ['g-own']);
 });
 
+test("a resource write that NetBird answered keeps its answer when its pending row can't be deleted, so a move is not rolled back", async () => {
+    reset();
+    ra._internal.setConfigForTest({ enabled: true, networks: ['n1', 'n2'] });
+    rowsFor = (sql) => { if (/^\s*DELETE FROM coordination WHERE key = \$1/.test(sql)) throw new Error('database down'); return null; };
+    await db.moveResources('n1', ['r1'], 'n2');
+    assert.ok(lastBody('POST', /\/api\/networks\/n2\/resources$/), 'the copy was created');
+    assert.equal(writes('DELETE', /\/api\/networks\/n1\/resources\/r1$/).length, 1, 'the original was deleted');
+    assert.equal(writes('DELETE', /\/api\/networks\/n2\/resources\//).length, 0, 'the copy was kept');
+    rowsFor = () => null;
+});
+
 test('read-modify-write helpers set the target groups by the rule, not from their read', async () => {
     reset();
     await db.setResourceEnabled('n2', 'r2', false); // r2 is in a closed network but still carries the target group

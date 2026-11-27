@@ -26,7 +26,7 @@ const dns = require('dns');
 const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { pool, getSetting, setSetting } = require('./core');
-const { withLock, outsideLocks } = require('./locks');
+const { withLock, tryLock, outsideLocks } = require('./locks');
 const { readSettingsVersion } = require('./settings-version');
 const { netbirdGet, netbirdPost, netbirdReq, bustNbCaches, netbirdApiConfigured, NETBIRD_READONLY, currentTenantAccount, nbDirectGet, getUsageData, _nbApi } = require('./netbird');
 const { addEvent } = require('./events');
@@ -367,7 +367,8 @@ async function sendTargetWrite(send) {
         return answer;
     } finally {
         if (answerUnknown(answer)) await noteUncertainTargetWrite();
-        await pool.query('DELETE FROM coordination WHERE key = $1', [key]);
+        await pool.query('DELETE FROM coordination WHERE key = $1', [key])
+            .catch(e => console.error('[remote-access] could not clear the record of a target write:', e.message));
     }
 }
 async function noteTargetsChanged() {
@@ -404,13 +405,15 @@ async function noteUncertainTargetWrite() {
     scheduleSettleSync();
     await raiseTime(SETTLE_UNTIL_KEY, until);
 }
-async function followSharedSettling() {
+async function settleStoppedWrites() {
     const { pending } = await readTargetsState();
-    for (const p of pending.filter(row => row.at + SETTLE_MS <= Date.now())) {
-        await raiseTime(SETTLE_UNTIL_KEY, p.at + SETTLE_MS);
-        _settleUntil = Math.max(_settleUntil, p.at + SETTLE_MS);
-        await pool.query('DELETE FROM coordination WHERE key = $1 AND value = $2', [p.key, p.value]);
-    }
+    if (!pending.length) return;
+    await raiseTime(SETTLE_UNTIL_KEY, Date.now() + SETTLE_MS);
+    for (const p of pending) await pool.query('DELETE FROM coordination WHERE key = $1 AND value = $2', [p.key, p.value]);
+}
+async function followSharedSettling() {
+    await tryLock('targets', ['remote-access'], settleStoppedWrites);
+    await readTargetsState();
     if (_lastSyncStartOk < _settleUntil && !_settleTimer) scheduleSettleSync();
 }
 const settlingNow = () => readTargetsState().then(() => targetsSettling(), () => true);
@@ -822,15 +825,15 @@ async function setRemoteAccessConfig(input) {
     const { createResources: sent, ...rest } = input || {};
     const wasEnabled = _cfg.enabled;
     try {
-        // A read-only instance never adds or removes servers, so it doesn't decide this section.
         const createResources = sent && typeof sent === 'object' && !NETBIRD_READONLY ? await checkedCreateSection(sent) : _cfg.createResources;
         const browser = { ..._cfg.browser, ...(rest.browser && typeof rest.browser === 'object' ? rest.browser : {}) };
         const next = normConfig({ ..._cfg, ...rest, browser, createResources });
-        // The network launch links use stays open to the gateway.
         if (createResources.networkId) next.networks = [...new Set([...next.networks, createResources.networkId])];
-        await noteTargetsChanged();
-        await setSetting('remote_access_config', JSON.stringify(next));
-        _cfg = next;
+        await withTargetLock(async () => {
+            await noteTargetsChanged();
+            await setSetting('remote_access_config', JSON.stringify(next));
+            _cfg = next;
+        });
     } catch (e) {
         if (e.status) throw e;
         console.error('[remote-access] saving the settings:', e.message);
@@ -1450,12 +1453,13 @@ async function createSession(viewer, body, clientIp, opts = {}) {
         const token = await targetLockForSession(async () => {
             const now = await readTargetsState().catch(() => null);
             if (!now || now.pending.length || targetsSettling() || now.gen !== s.targetsGen) throw httpError(503, 'TARGETS_SETTLING');
-            if (s.closed) throw httpError(409, 'SESSION_CLOSED', 'The session was closed before it finished opening. Connect again.');
+            if (s.closed) throw sessionClosedError();
             const issuedToken = crypto.randomBytes(32).toString('base64url');
             _tokens.set(issuedToken, { sessionId: s.id, expiresAt: Date.now() + TOKEN_TTL_MS });
             s.state = 'pending';
             return issuedToken;
         });
+        if (s.closed) throw sessionClosedError();
         s.tokenTimer = setTimeout(() => {
             _tokens.delete(token);
             if (s.state === 'pending') closeSession(s, 'The session was not opened in time.');
@@ -1507,8 +1511,9 @@ async function targetLockForSession(fn) {
     }
 }
 
+const sessionClosedError = () => httpError(409, 'SESSION_CLOSED', 'The session was closed before it finished opening. Connect again.');
 function closedError() {
-    return _shuttingDown ? httpError(503, 'SERVER_RESTARTING') : httpError(409, 'SESSION_CLOSED', 'The session was closed before it finished opening. Connect again.');
+    return _shuttingDown ? httpError(503, 'SERVER_RESTARTING') : sessionClosedError();
 }
 
 // Open the session's server to its gateway, then approve it again from NetBird as it is now:

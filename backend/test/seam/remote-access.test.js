@@ -105,15 +105,34 @@ test('an instance killed while its target write is on the way leaves the other r
     assert.equal((await b.call('raSession', { viewer: U2, body: RDP })).code, 'TARGETS_SETTLING', 'the check under the targets lock sees the write that never got an answer');
     const pending = () => b.call('sql', { text: `SELECT key FROM coordination WHERE key LIKE 'ra_pending:%'` });
     assert.equal((await pending()).length, 1);
-    await b.call('ra', { fn: 'followSharedSettling' });
-    assert.equal((await pending()).length, 1, 'a row younger than the settling time stays');
-    await b.call('sql', { text: `UPDATE coordination SET value = $1 WHERE key LIKE 'ra_pending:%'`, params: [String(Date.now() - 91_000)] });
+    const before = Date.now();
     await b.call('ra', { fn: 'followSharedSettling' });
     assert.equal((await pending()).length, 0, 'the leader turned the row into a deadline');
+    const [deadline] = await b.call('sql', { text: `SELECT value FROM coordination WHERE key = 'ra_settle_until'` });
+    assert.ok(Number(deadline.value) >= before + 90_000, 'the deadline runs from the conversion');
+    assert.equal(await b.call('ra', { fn: 'isSettling' }), true);
+    await b.call('raInternal', { fn: 'passSettleDeadlineForTest' });
     assert.equal(await b.call('ra', { fn: 'isSettling' }), true, 'the deadline alone does not end it');
     await b.call('raInternal', { fn: 'syncTargetGroup' });
     assert.equal(await b.call('ra', { fn: 'isSettling' }), false);
     assert.equal((await b.call('raSession', { viewer: U2, body: RDP })).ok, true);
+});
+
+test('a Remote Access settings save raises the targets generation and writes the setting only while it holds the targets lock', { skip: seamSkipReason() }, async (t) => {
+    const { a, b } = await setup(t);
+    const gen = async () => ((await b.call('sql', { text: `SELECT value FROM coordination WHERE key = 'ra_targets_gen'` }))[0] || {}).value || '';
+    const saved = async () => JSON.parse((await b.call('sql', { text: `SELECT value FROM app_settings WHERE key = 'remote_access_config'` }))[0].value).maxSessionsPerUser;
+    const genBefore = await gen();
+    await b.call('holdLock', { kind: 'targets', parts: ['remote-access'], name: 'b-targets' });
+    await b.waitFor('held:b-targets');
+    const saving = a.call('ra', { fn: 'setRemoteAccessConfig', args: [{ maxSessionsPerUser: 3 }] }).catch(() => { });
+    await sleep(1000);
+    assert.equal(await gen(), genBefore, 'no raise while another instance holds the lock');
+    assert.notEqual(await saved(), 3, 'no write while another instance holds the lock');
+    b.release('b-targets');
+    await saving;
+    assert.notEqual(await gen(), genBefore);
+    assert.equal(await saved(), 3);
 });
 
 test('a target write on its way on one instance does not refuse the other instance, whose session start waits for it under the targets lock', { skip: seamSkipReason() }, async (t) => {
@@ -124,6 +143,11 @@ test('a target write on its way on one instance does not refuse the other instan
     assert.equal(await b.call('ra', { fn: 'isSettling' }), false);
     const check = await b.call('ra', { fn: 'checkAccess', args: [U2, RDP] });
     assert.deepEqual(check.steps.map((s) => [s.key, s.status]), [['access', 'pass'], ['path', 'pass']]);
+    await b.call('raLeader', { leader: true });
+    await b.call('sql', { text: `UPDATE coordination SET value = $1 WHERE key LIKE 'ra_pending:%'`, params: [String(Date.now() - 120_000)] });
+    await b.call('ra', { fn: 'followSharedSettling' });
+    assert.equal((await b.call('sql', { text: `SELECT key FROM coordination WHERE key LIKE 'ra_pending:%'` })).length, 1, 'the leader leaves the row of a writer that still holds the lock, however old');
+    assert.equal(await b.call('ra', { fn: 'isSettling' }), false);
     let answered = false;
     const second = b.call('raSession', { viewer: U2, body: RDP }).then((out) => { answered = true; return out; });
     await sleep(1500);
